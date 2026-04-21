@@ -16,7 +16,7 @@ import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { Git } from "@/git"
-import { Flag } from "@/flag"
+import { Flag } from "@/flag/flag"
 
 // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
 const MAX_STATUS_CHARS = 2000
@@ -110,7 +110,7 @@ export const layer = Layer.effect(
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
-        const gitContext = yield* getGitContext
+        const gitContext = yield* getGitContext()
         return [
           [
             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
