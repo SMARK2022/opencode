@@ -24,6 +24,11 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Git } from "@/git"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+
+// 只限制状态字段，保留分支和最近提交，避免大型工作树挤占模型上下文。
+const MAX_STATUS_CHARS = 2000
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("muse")) {
@@ -64,10 +69,79 @@ const layer = Layer.effect(
     const skill = yield* Skill.Service
     const mcp = yield* MCP.Service
     const locations = yield* LocationServiceMap.Service
+    const git = yield* Git.Service
+    const flags = yield* RuntimeFlags.Service
+
+    // 沿用源补丁的目录级缓存，工具改变工作树后仍返回首次采集的状态。
+    const gitContextCache = new Map<string, string>()
+
+    const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
+      const ctx = yield* InstanceState.context
+      const cwd = ctx.directory
+      const cached = gitContextCache.get(cwd)
+      if (cached) return cached
+
+      // 禁用分支先于所有 Git 调用，确保关闭选项不会泄露用户名或工作树状态。
+      if (flags.disableGit) {
+        const result = `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
+        gitContextCache.set(cwd, result)
+        return result
+      }
+      // 非仓库无需探测父目录，保持 Instance 已解析的项目归属。
+      if (ctx.project.vcs !== "git") {
+        const result = "Is directory a git repo: no"
+        gitContextCache.set(cwd, result)
+        return result
+      }
+
+      // 五个字段互相独立，保留源补丁并行采集以避免串行进程启动延迟。
+      const [branch, defaultBranch, userName, status, log] = yield* Effect.all([
+        git.branch(cwd),
+        git.defaultBranch(cwd),
+        // 用户配置可能不存在；沿用源补丁的空字段退化，不阻断模型执行。
+        git.run(["config", "user.name"], { cwd }).pipe(
+          Effect.map((r) => r.text().trim()),
+          Effect.orElseSucceed(() => ""),
+        ),
+        git.status(cwd).pipe(
+          // 保留 Git 服务的双列状态码，不能 trim 掉暂存区与工作树的区别。
+          Effect.map((items) => items.map((item) => `${item.code} ${item.file}`).join("\n")),
+          Effect.orElseSucceed(() => ""),
+        ),
+        git.run(["log", "--oneline", "-n", "5"], { cwd }).pipe(
+          // 无提交的仓库仍是仓库；日志为空不应改变 repository yes/no。
+          Effect.map((r) => r.text().trim()),
+          Effect.orElseSucceed(() => ""),
+        ),
+      ], { concurrency: 5 })
+
+      // 截断发生在格式化后，提示模型按需读取完整状态而非假装状态完整。
+      const truncatedStatus =
+        status.length > MAX_STATUS_CHARS
+          ? status.substring(0, MAX_STATUS_CHARS) +
+            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
+          : status
+
+      const lines = [
+        `Is directory a git repo: yes`,
+        `This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
+        `Current branch: ${branch ?? "(detached)"}`,
+        // detached 与未知默认分支是不同事实，保留各自的源补丁标记。
+        `Main branch (you will usually use this for PRs): ${defaultBranch?.name ?? "unknown"}`,
+        // 未配置用户名时省略整行，不把缺失信息伪装成有效 Git 身份。
+        ...(userName ? [`Git user: ${userName}`] : []),
+        `Status:\n${truncatedStatus || "(clean)"}`,
+        `Recent commits:\n${log || "(no commits)"}`,
+      ]
+      const result = lines.join("\n")
+      gitContextCache.set(cwd, result)
+      return result
+    })
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
+        const gitContext = yield* getGitContext()
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
@@ -78,7 +152,8 @@ const layer = Layer.effect(
             `<env>`,
             `  Working directory: ${ctx.directory}`,
             `  Workspace root folder: ${ctx.worktree}`,
-            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
+            // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
+            ...gitContext.split("\n").map((line) => `  ${line}`),
             `  Platform: ${process.platform}`,
             `  Today's date: ${new Date().toDateString()}`,
             `</env>`,
@@ -148,7 +223,8 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  // Git 与开关沿用既有依赖图，不引入会话事件订阅。
+  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
 })
 
 export * as SystemPrompt from "./system"
