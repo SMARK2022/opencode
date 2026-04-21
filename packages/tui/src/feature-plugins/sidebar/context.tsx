@@ -23,12 +23,9 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
     const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) {
-      return {
-        tokens: 0,
-        input: 0,
-        output: 0,
-        percent: null,
-      }
+      // 始终显示零值，sidebar 从 prompt 发送起即可见
+      // sidebar 的面板始终存在，不沿用 footer 的 idle 隐藏分支。
+      return { tokens: 0, input: 0, output: 0, percent: null }
     }
 
     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
@@ -51,11 +48,23 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         }, 0)
       : 0
 
+    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
+    const cumTokens = parts.reduce(
+      (acc, part) => {
+        if (part.type !== "step-finish") return acc
+        return {
+          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+          // 多步思考用量与正文分别计数，不因本步没有正文就丢掉 reasoning。
+          output: acc.output + part.tokens.output + part.tokens.reasoning,
+        }
+      },
+      { input: 0, output: 0 },
+    )
     // 缓存命中仍占上下文输入，不能因为无需重复生成就从流量中扣除。
-    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const inputBase = cumTokens.input
     // percent 与 tokens 共用这一输入值，保持同一快照内口径一致。
     const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputActual = cumTokens.output
     const outputEstimated = Math.round(chars / 4)
     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
