@@ -1,6 +1,11 @@
 export * as ReadTool from "./read"
 
 import { ToolFailure } from "@opencode-ai/llm"
+import path from "path"
+import { FSUtil } from "../fs-util"
+import { Location } from "../location"
+import { SessionStore } from "../session/store"
+import { SessionReadInstructions } from "../session/read-instructions"
 import { Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "../effect/app-node"
 import { FileSystem } from "../filesystem"
@@ -15,6 +20,10 @@ import { Tools } from "./tools"
 
 export const name = "read"
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
+// 提醒属于模型投影，不污染文件正文、分页结构或原生媒体的类型化输出。
+const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
+// 分析恶意代码仍被允许，安全边界是禁止改进其恶意能力。
+const CYBER_REMINDER = "<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>"
 const LocationInput = Schema.Struct({
   path: Schema.String,
   offset: ReadToolFileSystem.PageInput.fields.offset.annotate({
@@ -25,7 +34,11 @@ const LocationInput = Schema.Struct({
   }),
 })
 const Input = LocationInput
-const Output = Schema.Union([FileSystem.Content, ReadToolFileSystem.TextPage, ReadToolFileSystem.ListPage])
+const Output = Schema.Union([
+  Schema.Struct({ ...FileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
+  Schema.Struct({ ...ReadToolFileSystem.TextPage.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
+  ReadToolFileSystem.ListPage,
+])
 
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -34,6 +47,7 @@ const layer = Layer.effectDiscard(
     const mutation = yield* LocationMutation.Service
     const image = yield* Image.Service
     const permission = yield* PermissionV2.Service
+    const nearby = yield* SessionReadInstructions.make
 
     yield* tools
       .register({
@@ -43,11 +57,27 @@ const layer = Layer.effectDiscard(
           input: Input,
           output: Output,
           toModelOutput: ({ input, output }) => {
-            if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime))
-              return []
+            const instructions = "instructions" in output ? output.instructions ?? [] : []
+            const reminders = instructions.length ? [{ type: "text" as const, text: `<system-reminder>\n${instructions.map(file => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")}\n</system-reminder>` }] : []
+            // 仅成功的源码文本触发提醒；目录与原生图片沿用既有投影。
+            if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
+              if (!("content" in output)) return []
+              const risky = HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1))
+              if (!risky && reminders.length === 0)
+                return []
+              // 保留完整结构化结果的模型表示，不能只返回提醒而隐藏正文与 next。
+              // Schema 已完成编码，此处不增加解析器或改变 utf8/TextPage 的输出契约。
+              return [
+                ...(risky ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
+                { type: "text", text: JSON.stringify({ ...output, instructions: undefined }) },
+                ...reminders,
+              ]
+            }
+            // 原生媒体继续绕过文本化 base64；所有文本仍由 registry 统一限幅。
             return [
               { type: "text", text: "Image read successfully" },
               { type: "file", data: output.content, mime: output.mime, name: input.path },
+              ...reminders,
             ]
           },
           execute: (input, context) => {
@@ -83,14 +113,28 @@ const layer = Layer.effectDiscard(
                 offset: input.offset,
                 limit: input.limit,
               })
-              if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
+              const instructions = yield* nearby(absolute, context.sessionID)
+              const attach = (value: FileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
+              // 附加规则只在成功读取后产生；原生图片与分页仍走原有结果类型及统一限幅。
+              if (
+                "encoding" in content &&
+                content.encoding === "base64" &&
+                (SUPPORTED_IMAGE_MIMES.has(content.mime) ||
+                  ["image/bmp", "image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime))
+              ) {
                 return yield* image
-                  .normalize(resource, { ...content, encoding: "base64" })
-                  .pipe(Effect.catchTag("Image.ResizerUnavailableError", () => Effect.succeed(content)))
+                  // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
+                  .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
+                  .pipe(
+                    Effect.catchTag("Image.ResizerUnavailableError", (error) =>
+                      SUPPORTED_IMAGE_MIMES.has(content.mime) ? Effect.succeed(content) : Effect.fail(error),
+                    ),
+                    Effect.map(attach),
+                  )
               }
               if ("encoding" in content && content.encoding === "base64")
                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
-              return content
+              return attach(content)
             }).pipe(
               Effect.mapError((error) => {
                 const message =
@@ -113,5 +157,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/read",
   layer,
-  deps: [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node],
+  deps: [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node, FSUtil.node, Location.node, SessionStore.node],
 })

@@ -139,6 +139,39 @@ const imageMime = (bytes: Uint8Array) => {
   if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif"
   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50]))
     return "image/webp"
+  // BMP 需有结构化文件头，不能把以 BM 开头的纯文本当图片。
+  if (bytes.length >= 26 && startsWith(bytes, [0x42, 0x4d])) {
+    const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const size = header.getUint32(14, true)
+    if (
+      [12, 16, 40, 52, 56, 64, 108, 124].includes(size) &&
+      bytes.length >= 14 + size &&
+      header.getUint32(10, true) >= 14 + size &&
+      header.getUint16(size === 12 ? 22 : 26, true) === 1
+    )
+      return "image/bmp"
+  }
+  // Require the complete TIFF signature, not just the printable byte-order marker.
+  if (
+    (bytes.length >= 8 &&
+      (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a]))) ||
+    (bytes.length >= 16 &&
+      (startsWith(bytes, [0x49, 0x49, 0x2b, 0x00, 0x08, 0x00, 0x00, 0x00]) ||
+        startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2b, 0x00, 0x08, 0x00, 0x00])))
+  )
+    return "image/tiff"
+  if (bytes.length >= 16 && startsWith(bytes.subarray(4), [0x66, 0x74, 0x79, 0x70])) {
+    const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0)
+    if (size >= 16 && size <= bytes.length && size % 4 === 0) {
+      // Check both the major and compatible brands, excluding the minor version.
+      const brands = [8, ...Array.from({ length: (size - 16) / 4 }, (_, index) => 16 + index * 4)].map((offset) =>
+        Buffer.from(bytes.subarray(offset, offset + 4)).toString("ascii"),
+      )
+      if (brands.some((brand) => ["avif", "avis"].includes(brand))) return "image/avif"
+      if (brands.some((brand) => ["heic", "heix", "hevc", "hevx"].includes(brand))) return "image/heic"
+      if (brands.some((brand) => ["mif1", "msf1"].includes(brand))) return "image/heif"
+    }
+  }
 }
 const binary = (resource: string, bytes: Uint8Array) => {
   if (extensions.has(path.extname(resource).toLowerCase())) return true

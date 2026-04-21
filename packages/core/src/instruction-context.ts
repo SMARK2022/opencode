@@ -1,6 +1,7 @@
 export * as InstructionContext from "./instruction-context"
 
 import { Array, Effect, Layer, Schema } from "effect"
+import { truthy } from "./flag/flag"
 import { isAbsolute, join, relative, sep } from "path"
 import { FSUtil } from "./fs-util"
 import { Flag } from "./flag/flag"
@@ -11,7 +12,7 @@ import { SystemContext } from "./system-context/index"
 import { SystemContextRegistry } from "./system-context/registry"
 import { makeLocationNode } from "./effect/app-node"
 
-class File extends Schema.Class<File>("InstructionContext.File")({
+export class File extends Schema.Class<File>("InstructionContext.File")({
   path: AbsolutePath,
   content: Schema.String,
 }) {}
@@ -98,4 +99,9 @@ export const node = makeLocationNode({
 
 function render(files: ReadonlyArray<File>) {
   return files.map((file) => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")
+}
+
+export function names() {
+  const claude = !truthy("OPENCODE_DISABLE_CLAUDE_CODE") && !truthy("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT")
+  return ["AGENTS.md", ...(claude ? ["CLAUDE.md"] : []), "CONTEXT.md"]
 }

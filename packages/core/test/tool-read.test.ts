@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect } from "bun:test"
 import path from "path"
-import { Effect, Exit, Layer, PlatformError } from "effect"
+import { Effect, Exit, Layer, PlatformError, Schema } from "effect"
+import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { Config } from "@opencode-ai/core/config"
 import { ConfigAttachments } from "@opencode-ai/core/config/attachments"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -129,9 +131,9 @@ const unavailableImage = Layer.succeed(
   Image.Service,
   Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
 )
-const readLayer = (imageLayer: Layer.Layer<Image.Service>) =>
+const readLayer = (imageLayer: Layer.Layer<Image.Service>, readerLayer: Layer.Layer<ReadToolFileSystem.Service> = reader, replacements: LayerNode.Replacements = []) =>
   AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, ReadTool.node]), [
-    [ReadToolFileSystem.node, reader],
+    [ReadToolFileSystem.node, readerLayer],
     [PermissionV2.node, permission],
     [Config.node, config],
     [Image.node, imageLayer],
@@ -140,9 +142,13 @@ const readLayer = (imageLayer: Layer.Layer<Image.Service>) =>
     [Location.node, locationLayer],
     [Global.node, Global.layerWith({ data: Global.Path.data })],
     [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+    ...replacements,
   ])
 const it = testEffect(readLayer(imageLayer))
 const itWithoutResizer = testEffect(readLayer(unavailableImage))
+const itFiles = testEffect(
+  Layer.mergeAll(readLayer(imageLayer, LayerNode.compile(ReadToolFileSystem.node)), LayerNode.compile(FSUtil.node)),
+)
 const sessionID = SessionV2.ID.make("ses_read_tool_test")
 
 describe("ReadTool", () => {
@@ -196,6 +202,95 @@ describe("ReadTool", () => {
     }),
   )
 
+  itFiles.live("attaches nearby rules using actual visible results without hiding file contents", () => Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
+    const directory = yield* fs.makeTempDirectoryScoped()
+    const nested = path.join(directory, "nested")
+    const target = path.join(nested, "notes.txt")
+    const rules = path.join(nested, "AGENTS.md")
+    yield* fs.makeDirectory(nested, { recursive: true })
+    yield* fs.writeFileString(path.join(directory, "AGENTS.md"), "Ambient root rule")
+    yield* fs.writeFileString(rules, "Nearby rule body")
+    yield* fs.writeFileString(path.join(nested, "CLAUDE.md"), "Shadowed rule")
+    yield* fs.writeFileString(target, "Actual file body")
+    let visible: SessionMessage.Message[] = []
+    let lookups = 0
+    yield* Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const read = (id = sessionID) => settleTool(registry, {
+        sessionID: id, ...toolIdentity,
+        call: { type: "tool-call", id: "nearby-read", name: "read", input: { path: target } },
+      })
+      const first = yield* read()
+      if (!first.output) throw new Error("expected actual read output")
+      expect(first.output.structured).toMatchObject({ content: "Actual file body", instructions: [{ path: rules, content: "Nearby rule body" }] })
+      const text = first.output.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n")
+      expect(text).toContain("Actual file body")
+      expect(text).toContain(`Instructions from: ${rules}\nNearby rule body`)
+      expect(text).not.toContain("Ambient root rule")
+      expect(text).not.toContain("Shadowed rule")
+      // 使用真实settlement构造持久结果；路径列表本身不能证明正文已经进入模型上下文。
+      const history = (pruned?: number, bounded = false) => Schema.decodeUnknownSync(SessionMessage.Message)({
+        id: "msg_nearby", type: "assistant", agent: "build", model: { id: "test", providerID: "test" }, time: { created: 0 },
+        content: [{ type: "tool", id: "nearby-read", name: "read", time: { created: 0, ...(pruned === undefined ? {} : { pruned }) },
+          state: { status: "completed", input: { path: target }, structured: first.output?.structured,
+            content: bounded ? [{ type: "text", text: "[truncated]" }] : first.output?.content } }],
+      })
+      visible = [history()]
+      expect((yield* read()).output?.structured).not.toHaveProperty("instructions")
+      // 时间为零仍表示pruned；已截断正文、压缩后历史和另一Session均须重新发送规则。
+      visible = [history(0)]
+      expect((yield* read()).output?.structured).toHaveProperty("instructions")
+      visible = [history(undefined, true)]
+      expect((yield* read()).output?.structured).toHaveProperty("instructions")
+      visible = []
+      expect((yield* read()).output?.structured).toHaveProperty("instructions")
+      visible = [history()]
+      expect((yield* read(SessionV2.ID.make("ses_nearby_other"))).output?.structured).toHaveProperty("instructions")
+      const before = lookups
+      allow = false
+      expect((yield* read()).result.type).toBe("error")
+      expect(lookups).toBe(before)
+    }).pipe(Effect.provide(readLayer(imageLayer, LayerNode.compile(ReadToolFileSystem.node), [
+      [Location.node, Layer.succeed(Location.Service, location({ directory: AbsolutePath.make(directory) }))],
+      [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.sync(() => { lookups++; return id === sessionID ? visible : [] }) })],
+      // 与生产Location构建一致隔离layer memo，不能复用外层fixture已捕获的cwd工具实例。
+    ]).pipe(Layer.fresh)))
+  }))
+
+  it.effect("projects malware reminders without changing typed text or permission ordering", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      // 完整文件与分页都须保留结构化正文，提醒不能取代真实读取结果。
+      for (const output of [readResult, new ReadToolFileSystem.TextPage({
+        type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
+      })]) {
+        readResult = output
+        const settled = yield* settleTool(registry, {
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-cyber", name: "read", input: { path: "sample.TS" } },
+        })
+        expect(settled.output?.structured).toEqual(output)
+        // 提醒先于正文，普通泛型限幅不能因正文过长先丢掉安全语义。
+        expect(settled.output?.content[0]).toMatchObject({ type: "text" })
+        const reminder = settled.output?.content[0]
+        if (reminder?.type === "text") expect(reminder.text).toContain("MUST refuse to improve")
+        // 通过真实 registry 观察模型投影，同时验证 next 与 offset 没有消失。
+        expect(settled.output?.content[1]).toEqual({ type: "text", text: JSON.stringify(output) })
+      }
+      // 权限拒绝时不执行读取，也不生成成功结果的安全提醒。
+      allow = false
+      readCalls.length = 0
+      expect(yield* executeTool(registry, {
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "call-cyber-denied", name: "read", input: { path: "sample.ts" } },
+      })).toEqual({ type: "error", value: "Unable to read sample.ts" })
+      expect(readCalls).toEqual([])
+    }),
+  )
+
   it.effect("asks for external_directory approval before reading an external absolute path", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
@@ -220,53 +315,75 @@ describe("ReadTool", () => {
     }),
   )
 
-  it.effect("returns a small PNG as native media instead of durable base64 text", () =>
+  itFiles.live("returns small PNG, BMP, TIFF and AVIF files as native model-supported media", () =>
     Effect.gen(function* () {
-      const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-      readResult = {
-        uri: "file:///pixel.png",
-        name: "pixel.png",
-        content: png,
-        encoding: "base64",
-        mime: "image/png",
-      }
+      const bmp = Buffer.alloc(58)
+      bmp.set([0x42, 0x4d])
+      bmp.writeUInt32LE(bmp.length, 2)
+      bmp.writeUInt32LE(54, 10)
+      bmp.writeUInt32LE(40, 14)
+      bmp.writeInt32LE(1, 18)
+      bmp.writeInt32LE(1, 22)
+      bmp.writeUInt16LE(1, 26)
+      bmp.writeUInt16LE(24, 28)
+      bmp.writeUInt32LE(4, 34)
+      bmp.set([0, 0, 255, 0], 54)
+      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+      const source = new photon.PhotonImage(new Uint8Array([255, 0, 0, 255]), 1, 1)
+      const png = Buffer.from(source.get_bytes())
+      source.free()
+      const fs = yield* FSUtil.Service
+      const directory = yield* fs.makeTempDirectoryScoped()
       const registry = yield* ToolRegistry.Service
-
-      expect(
-        yield* executeTool(registry, {
+      const { default: sharp } = yield* Effect.promise(() => import("sharp"))
+      const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
+      const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
+      for (const [name, data] of [
+        ["pixel.png", png],
+        ["pixel.bmp", bmp],
+        ["pixel.tiff", tiff],
+        ["pixel.avif", avif],
+      ] as const) {
+        const file = path.join(directory, name)
+        yield* fs.writeFile(file, data)
+        const settled = yield* settleTool(registry, {
           sessionID,
           ...toolIdentity,
-          call: { type: "tool-call", id: "call-image", name: "read", input: { path: "pixel.png" } },
-        }),
-      ).toEqual({
-        type: "content",
-        value: [
+          call: { type: "tool-call", id: `call-image-${name}`, name: "read", input: { path: file } },
+        })
+        expect(settled.result.type).toBe("content")
+        if (settled.result.type !== "content") throw new Error("expected native image output")
+        expect(settled.result.value).toHaveLength(2)
+        expect(settled.result.value[0]).toEqual({ type: "text", text: "Image read successfully" })
+        const attachment = settled.result.value[1]
+        if (attachment.type !== "file" || !attachment.uri) throw new Error("expected image attachment")
+        expect(attachment.name).toBe(file)
+        expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(attachment.mime)
+        expect(attachment.mime).toBe("image/png")
+        expect(attachment.uri.startsWith(`data:${attachment.mime};base64,`)).toBe(true)
+        expect(Buffer.byteLength(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "utf-8")).toBeLessThanOrEqual(1600 * 750)
+        const bytes = Buffer.from(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "base64")
+        expect(Array.from(bytes.subarray(0, 8)))
+          .toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        const decoded = photon.PhotonImage.new_from_byteslice(bytes)
+        expect(decoded.get_width()).toBe(1)
+        expect(decoded.get_height()).toBe(1)
+        decoded.free()
+        expect(settled.output?.structured).toMatchObject({
+          name,
+          mime: attachment.mime,
+          encoding: "base64",
+        })
+        expect(settled.output?.content).toMatchObject([
           { type: "text", text: "Image read successfully" },
-          { type: "file", uri: `data:image/png;base64,${png}`, mime: "image/png", name: "pixel.png" },
-        ],
-      })
-      expect(readCalls).toEqual([
-        {
-          input: AbsolutePath.make(path.join(process.cwd(), "pixel.png")),
-          page: { offset: undefined, limit: undefined },
-        },
-      ])
-
-      const settled = yield* settleTool(registry, {
-        sessionID,
-        ...toolIdentity,
-        call: { type: "tool-call", id: "call-image-settle", name: "read", input: { path: "pixel.png" } },
-      })
-      expect(settled.output?.structured).toMatchObject({
-        uri: "file:///pixel.png",
-        name: "pixel.png",
-        mime: "image/png",
-        encoding: "base64",
-      })
-      expect(settled.output?.content).toMatchObject([
-        { type: "text", text: "Image read successfully" },
-        { type: "file", mime: "image/png", uri: `data:image/png;base64,${png}` },
-      ])
+          { type: "file", mime: attachment.mime, uri: attachment.uri },
+        ])
+        if (name === "pixel.png") {
+          expect(attachment.mime).toBe("image/png")
+          expect(attachment.uri).toBe(`data:image/png;base64,${png.toString("base64")}`)
+        }
+      }
+      expect(readCalls).toEqual([])
     }),
   )
 
@@ -307,6 +424,32 @@ describe("ReadTool", () => {
           { type: "file", uri: `data:image/png;base64,${png}`, mime: "image/png", name: "large.png" },
         ],
       })
+
+      const oversized = Buffer.from(yield* Effect.promise(() =>
+        Bun.file(path.join(import.meta.dir, "../../opencode/test/image/fixtures/picture-5mb-base64.png")).arrayBuffer(),
+      )).toString("base64")
+      expect(oversized.length).toBe(5 * 1024 * 1024)
+      readResult = { ...readResult, uri: "file:///budget.png", name: "budget.png", content: oversized }
+      const bounded = yield* settleTool(registry, {
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "call-image-budget", name: "read", input: { path: "budget.png" } },
+      })
+      expect(bounded.outputPaths).toBeUndefined()
+      expect(bounded.result.type).toBe("content")
+      if (bounded.result.type !== "content") throw new Error("expected bounded native image output")
+      expect(bounded.result.value[0]).toEqual({ type: "text", text: "Image read successfully" })
+      const attachment = bounded.result.value[1]
+      if (attachment.type !== "file" || !attachment.uri) throw new Error("expected bounded image attachment")
+      expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(attachment.mime)
+      expect(attachment.uri.startsWith(`data:${attachment.mime};base64,`)).toBe(true)
+      const base64 = attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8)
+      expect(Buffer.byteLength(base64, "utf-8")).toBeLessThanOrEqual(1600 * 750)
+      expect(base64).not.toBe(oversized)
+      const decoded = photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64"))
+      expect(decoded.get_width()).toBeLessThanOrEqual(2_000)
+      expect(decoded.get_height()).toBeLessThanOrEqual(2_000)
+      decoded.free()
     }),
   )
 

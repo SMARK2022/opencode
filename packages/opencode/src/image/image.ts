@@ -1,3 +1,4 @@
+import { Image } from "@opencode-ai/core/image"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Config } from "@/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -50,7 +51,8 @@ export class SizeError extends Schema.TaggedErrorClass<SizeError>()("ImageSizeEr
 export type Error = ResizerUnavailableError | InvalidDataUrlError | DecodeError | SizeError
 
 export interface Interface {
-  readonly normalize: (input: SessionV1.FilePart) => Effect.Effect<SessionV1.FilePart, Error>
+  // 预算由 Read 调用传入，用户上传与其他工具仍只受既有配置约束。
+  readonly normalize: (input: SessionV1.FilePart, maxBase64Bytes?: number) => Effect.Effect<SessionV1.FilePart, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
@@ -59,6 +61,12 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
+    const loadSharp = yield* Effect.cached(
+      Effect.tryPromise({
+        try: () => import("@opencode-ai/core/image/sharp"),
+        catch: () => new Image.ResizerUnavailableError(),
+      }).pipe(Effect.flatMap((adapter) => adapter.make)),
+    )
     const loadPhoton = yield* Effect.cached(
       Effect.sync(() => {
         // Patched photon-node reads this during module init so Bun compiled binaries use the embedded wasm path.
@@ -71,19 +79,53 @@ const layer = Layer.effect(
       ),
     )
 
-    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart) {
+    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart, maxBase64Bytes = Infinity) {
       const image = (yield* config.get()).attachment?.image
       const info = {
         autoResize: image?.auto_resize ?? AUTO_RESIZE,
         maxWidth: image?.max_width ?? MAX_WIDTH,
         maxHeight: image?.max_height ?? MAX_HEIGHT,
-        maxBase64Bytes: image?.max_base64_bytes ?? MAX_BASE64_BYTES,
+        // 无调用预算时保持 5 MiB/配置原义；Read 的预算与更严格配置取交集。
+        maxBase64Bytes: Math.min(image?.max_base64_bytes ?? MAX_BASE64_BYTES, maxBase64Bytes),
       }
       if (!input.url.startsWith("data:") || !input.url.includes(";base64,"))
         return yield* new InvalidDataUrlError({ url: input.url })
 
       const base64 = input.url.slice(input.url.indexOf(";base64,") + ";base64,".length)
       const bytes = Buffer.byteLength(base64, "utf8")
+
+      const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(input.mime)
+      if (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(input.mime)) {
+        const content = yield* loadSharp.pipe(
+          Effect.flatMap((normalize) =>
+            normalize(
+              input.filename ?? input.id,
+              { uri: input.url, content: base64, encoding: "base64", mime: input.mime },
+              info,
+            ),
+          ),
+          // 保留加载、解码和尺寸三类错误，既有调用方仍决定 resizer 不可用时的回退。
+          Effect.mapError((error) =>
+            error instanceof Image.SizeError
+              ? new SizeError({
+                  bytes: error.bytes,
+                  max: error.maxBytes,
+                  width: error.width,
+                  height: error.height,
+                  max_width: error.maxWidth,
+                  max_height: error.maxHeight,
+                })
+              : error instanceof Image.ResizerUnavailableError
+                ? new ResizerUnavailableError()
+                : new DecodeError(),
+          ),
+        )
+        return {
+          ...input,
+          mime: content.mime,
+          url: `data:${content.mime};base64,${content.content}`,
+        }
+      }
 
       const photon = yield* loadPhoton
 
@@ -95,9 +137,11 @@ const layer = Layer.effect(
       try {
         const originalWidth = decoded.get_width()
         const originalHeight = decoded.get_height()
-        if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes)
-          return input
-        if (!info.autoResize)
+        const withinLimits =
+          originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes
+        // BMP 即使未超限也须转成 PNG/JPEG；禁用缩放不禁止等尺寸转码。
+        if (withinLimits && supported) return input
+        if (!info.autoResize && !withinLimits)
           return yield* new SizeError({
             bytes,
             max: info.maxBase64Bytes,
@@ -108,7 +152,7 @@ const layer = Layer.effect(
           })
 
         const scale = Math.min(1, info.maxWidth / originalWidth, info.maxHeight / originalHeight)
-        for (const size of Array.from({ length: 32 }).reduce<Array<{ width: number; height: number }>>((acc) => {
+        for (const size of Array.from({ length: info.autoResize ? 32 : 1 }).reduce<Array<{ width: number; height: number }>>((acc) => {
           const previous = acc.at(-1) ?? {
             width: Math.max(1, Math.round(originalWidth * scale)),
             height: Math.max(1, Math.round(originalHeight * scale)),

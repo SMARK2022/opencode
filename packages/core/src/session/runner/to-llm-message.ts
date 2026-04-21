@@ -167,5 +167,40 @@ ${message.recent}
 }
 
 /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
-  messages.flatMap((message) => toLLMMessage(message, model))
+export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
+  // 证明仅存在于本次选出的历史；下一 Session/compaction 投影重新开始，不持久缓存。
+  const reads = new Set<string>()
+  return messages.flatMap((message) => {
+    if (message.type === "compaction") reads.clear()
+    if (message.type !== "assistant") return toLLMMessage(message, model)
+    const content = message.content.map((item): SessionMessage.AssistantContent => {
+      // provider 托管、被裁剪或带媒体的结果不具备本地完整文本 Read 的证明。
+      if (item.type !== "tool" || item.name !== "read" || item.provider?.executed === true ||
+          item.state.status !== "completed" || item.time.pruned !== undefined) return item
+      const output = item.state.structured
+      if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
+          (output.encoding !== "utf8" && output.type !== "text-page")) return item
+      // 分页截断与行内截断都丢失正文，两个相同前缀不能证明完整版本。
+      if (output.type === "text-page" && (output.truncated !== false || output.next !== undefined ||
+          output.content.includes("... (line truncated to 2000 chars)"))) return item
+      if (item.state.outputPaths?.length || item.state.attachments?.length ||
+          item.state.content.some((part) => part.type !== "text")) return item
+      // generic 限幅后的模型正文可能少于 structured；只接受实际可见的完整编码结果。
+      if (item.state.content.length > 0 && !item.state.content.some((part) =>
+          part.type === "text" && part.text === JSON.stringify(output))) return item
+      // 默认化同一路径/范围，并比较新鲜 durable 结果及提醒；call ID 不代表版本。
+      const key = JSON.stringify([item.state.input.path, item.state.input.offset ?? 1,
+        item.state.input.limit ?? 2000, output, item.state.content])
+      if (!reads.has(key)) {
+        reads.add(key)
+        return item
+      }
+      // 只复制模型投影，保留首个完整结果与所有原始持久化内容、工具调用和权限事实。
+      return { ...item, state: { ...item.state, content: [{
+        type: "text",
+        text: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.",
+      }] } }
+    })
+    return toLLMMessage({ ...message, content }, model)
+  })
+}
