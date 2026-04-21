@@ -1,20 +1,23 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { afterEach, describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Cause, Effect, Exit, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { Config } from "@/config/config"
+import { Image } from "@/image/image"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { LSP } from "@/lsp/lsp"
 import { Permission } from "../../src/permission"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { Instruction } from "../../src/session/instruction"
 import { ReadTool } from "../../src/tool/read"
+import { FILE_UNCHANGED_STUB } from "../../src/tool/read"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { Filesystem } from "@/util/filesystem"
@@ -51,6 +54,7 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       FSUtil.node,
       CrossSpawnSpawner.node,
       Instruction.node,
+      Image.node,
       LSP.node,
       Ripgrep.node,
       Truncate.node,
@@ -192,8 +196,8 @@ describe("tool.read external_directory permission", () => {
 
         const { items, next } = asks()
         const target = path.join(dir, "test.txt")
+        // 保留 fixture 盘符；根相对路径归当前进程盘，跨盘临时目录不能假定同盘。
         const alt = target
-          .replace(/^[A-Za-z]:/, "")
           .replaceAll("\\", "/")
           .toLowerCase()
 
@@ -313,6 +317,70 @@ describe("tool.read env file permissions", () => {
 })
 
 describe("tool.read truncation", () => {
+  it.live("deduplicates only the current session's visible complete version", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const target = path.join(dir, "version.txt")
+      if (process.platform === "linux") {
+        const fs = yield* FSUtil.Service
+        const device = path.join(dir, "device")
+        // 使用真实设备软链接证明实际 stat guard，不能只测试 /dev/zero 的字面黑名单。
+        yield* fs.symlink("/dev/zero", device)
+        const denied = yield* fail(dir, { filePath: device }).pipe(Effect.timeout("1 second"))
+        expect(denied.message).toContain("Cannot read non-regular file")
+      }
+      const history = (result: Tool.ExecuteResult, sessionID = ctx.sessionID): Tool.Context["messages"] => {
+        // 使用真实持久化 Schema 构造历史，不以 any 伪造工具结果的身份字段。
+        const decoded = Schema.decodeUnknownSync(SessionV1.WithParts)({
+          info: {
+            id: "msg_prior", sessionID, role: "assistant", parentID: "msg_parent",
+            time: { created: 1 }, modelID: "test", providerID: "test", mode: "build", agent: "build",
+            path: { cwd: dir, root: dir }, cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          },
+          parts: [{
+            id: "prt_prior", sessionID, messageID: "msg_prior", type: "tool", tool: "read", callID: "prior",
+            state: { status: "completed", input: { filePath: target }, ...result, time: { start: 1, end: 2 } },
+          }],
+        })
+        return [decoded as SessionV1.WithParts]
+      }
+      yield* put(target, "v1")
+      const first = yield* exec(dir, { filePath: target })
+      const visible = history(first)
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
+      // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
+      yield* put(target, "v2")
+      const second = yield* exec(dir, { filePath: target }, { ...ctx, sessionID: SessionID.make("ses_b") })
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toContain("v2")
+      // 外会话即使包含当前版本，也不构成本会话的可见证明。
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(second, SessionID.make("ses_b")) })).output).toContain("v2")
+      const current = history(second)
+      const part = current[0].parts[0]
+      if (part.type !== "tool" || part.state.status !== "completed") throw new Error("invalid fixture")
+      // 压缩时间为零仍是压缩；stub 不能作为新的正文证明。
+      part.state.time.compacted = 0
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
+      delete part.state.time.compacted
+      part.state.output = FILE_UNCHANGED_STUB
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
+      part.state.output = second.output
+      // 范围变化必须返回正文；权限也必须先于成功的 stub 判定执行。
+      part.state.input.limit = 1
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
+      delete part.state.input.limit
+      const denied = yield* fail(dir, { filePath: target }, {
+        ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
+      })
+      expect(denied.message).toBe("read denied")
+      // 相同截断前缀不是完整版本证明，长行必须继续返回实际可见内容。
+      yield* put(target, "x".repeat(3000))
+      const partial = yield* exec(dir, { filePath: target })
+      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(partial) })).output)
+        .not.toBe(FILE_UNCHANGED_STUB)
+    }),
+  )
+
   it.instance("truncates large file by bytes and sets truncated metadata", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -482,22 +550,65 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  it.live("image files set truncated to false", () =>
+  it.live("PNG, BMP, TIFF and AVIF files attach without truncation and normalize for the processor", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
-      const png = Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
-        "base64",
-      )
-      yield* put(path.join(dir, "image.png"), png)
+      const bmp = Buffer.alloc(58)
+      bmp.set([0x42, 0x4d])
+      bmp.writeUInt32LE(bmp.length, 2)
+      bmp.writeUInt32LE(54, 10)
+      bmp.writeUInt32LE(40, 14)
+      bmp.writeInt32LE(1, 18)
+      bmp.writeInt32LE(1, 22)
+      bmp.writeUInt16LE(1, 26)
+      bmp.writeUInt16LE(24, 28)
+      bmp.writeUInt32LE(4, 34)
+      bmp.set([0, 0, 255, 0], 54)
+      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+      const source = new photon.PhotonImage(new Uint8Array([255, 0, 0, 255]), 1, 1)
+      const png = Buffer.from(source.get_bytes())
+      source.free()
+      const image = yield* Image.Service
+      const { default: sharp } = yield* Effect.promise(() => import("sharp"))
+      const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
+      const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
+      for (const [name, mime, data] of [
+        ["image.png", "image/png", png],
+        ["image.bmp", "image/bmp", bmp],
+        ["image.tiff", "image/tiff", tiff],
+        ["image.avif", "image/avif", avif],
+      ] as const) {
+        yield* put(path.join(dir, name), data)
 
-      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
-      expect(result.metadata.truncated).toBe(false)
-      expect(result.attachments).toBeDefined()
-      expect(result.attachments?.length).toBe(1)
-      expect(result.attachments?.[0]).not.toHaveProperty("id")
-      expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
-      expect(result.attachments?.[0]).not.toHaveProperty("messageID")
+        const result = yield* exec(dir, { filePath: path.join(dir, name) })
+        expect(result.output).toBe("Image read successfully")
+        expect(result.metadata.truncated).toBe(false)
+        expect(result.attachments).toBeDefined()
+        expect(result.attachments?.length).toBe(1)
+        const attachment = result.attachments?.[0]
+        if (!attachment) throw new Error("expected image attachment")
+        expect(attachment.mime).toBe(mime)
+        expect(attachment).not.toHaveProperty("id")
+        expect(attachment).not.toHaveProperty("sessionID")
+        expect(attachment).not.toHaveProperty("messageID")
+        const normalized = yield* provideInstance(dir)(
+          image.normalize(
+            { ...attachment, id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.messageID },
+            1600 * 750,
+          ),
+        )
+        expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(normalized.mime)
+        expect(normalized.mime).toBe("image/png")
+        expect(normalized.url.startsWith(`data:${normalized.mime};base64,`)).toBe(true)
+        expect(Buffer.byteLength(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "utf-8")).toBeLessThanOrEqual(1600 * 750)
+        const bytes = Buffer.from(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "base64")
+        expect(Array.from(bytes.subarray(0, 8)))
+          .toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        const decoded = photon.PhotonImage.new_from_byteslice(bytes)
+        expect(decoded.get_width()).toBe(1)
+        expect(decoded.get_height()).toBe(1)
+        decoded.free()
+      }
     }),
   )
 

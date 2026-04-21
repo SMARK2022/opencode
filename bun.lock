@@ -381,6 +381,9 @@
         "@types/which": "3.0.4",
         "drizzle-kit": "catalog:",
       },
+      "optionalDependencies": {
+        "sharp": "0.33.5",
+      },
     },
     "packages/desktop": {
       "name": "@opencode-ai/desktop",
@@ -685,6 +688,7 @@
         "@typescript/native-preview": "catalog:",
         "drizzle-orm": "catalog:",
         "prettier": "3.6.2",
+        "sharp": "0.33.5",
         "typescript": "catalog:",
         "vscode-languageserver-types": "3.17.5",
         "why-is-node-running": "3.2.2",

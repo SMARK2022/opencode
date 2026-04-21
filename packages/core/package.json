@@ -127,6 +127,9 @@
     "xdg-basedir": "5.1.0",
     "zod": "catalog:"
   },
+  "optionalDependencies": {
+    "sharp": "0.33.5"
+  },
   "overrides": {
     "drizzle-orm": "catalog:"
   }

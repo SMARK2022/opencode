@@ -36,8 +36,10 @@ export const make = Effect.gen(function* () {
       const width = decoded.get_width()
       const height = decoded.get_height()
       const bytes = Buffer.byteLength(content.content, "utf-8")
-      if (width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes) return content
-      if (!limits.autoResize)
+      const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
+      // BMP 即使未超限也须转码；禁用缩放时只尝试原尺寸编码。
+      if (withinLimits && content.mime !== "image/bmp") return content
+      if (!limits.autoResize && !withinLimits)
         return yield* new SizeError({
           resource,
           width,
@@ -62,7 +64,7 @@ export const make = Effect.gen(function* () {
               }
         return acc.some((item) => item.width === next.width && item.height === next.height) ? acc : [...acc, next]
       }, [])
-      for (const size of sizes) {
+      for (const size of limits.autoResize ? sizes : sizes.slice(0, 1)) {
         const resized = photon.resize(decoded, size.width, size.height, photon.SamplingFilter.Lanczos3)
         try {
           const encoders: Array<readonly [mime: string, encode: () => Uint8Array]> = [

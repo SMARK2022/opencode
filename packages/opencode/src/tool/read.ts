@@ -18,6 +18,107 @@ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 
+const MAX_CONTENT_TOKENS = 16000
+
+// 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
+const BLOCKED_DEVICE_PATHS = new Set([
+  "/dev/zero",
+  "/dev/random",
+  "/dev/urandom",
+  "/dev/full",
+  "/dev/stdin",
+  "/dev/tty",
+  "/dev/console",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/fd/0",
+  "/dev/fd/1",
+  "/dev/fd/2",
+])
+
+// 高风险扩展名 - 用于恶意代码安全提醒，读取这些类型文件时注入安全提示
+const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
+
+// 不同文件类型的 token/byte 估算比率（基于经验值，代码文件约 0.27，文本约 0.22）
+const TOKEN_BYTE_RATIOS: Record<string, number> = {
+  ts: 0.28,
+  js: 0.28,
+  py: 0.26,
+  rs: 0.27,
+  go: 0.27,
+  java: 0.26,
+  c: 0.27,
+  cpp: 0.27,
+  h: 0.27,
+  hpp: 0.27,
+  md: 0.24,
+  txt: 0.22,
+  json: 0.22,
+  xml: 0.2,
+  html: 0.2,
+  css: 0.22,
+  default: 0.25,
+}
+
+// Stub 文案 - 当文件未修改且上下文中已有未压缩的读取结果时返回此文案
+export const FILE_UNCHANGED_STUB =
+  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
+
+// 恶意代码提醒 - 对高风险扩展名注入安全提示，防止模型改进恶意代码
+const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
+
+// 黑名单在打开流之前检查，避免设备别名绕过普通文件的有界读取。
+function isBlockedDevicePath(filePath: string): boolean {
+  if (BLOCKED_DEVICE_PATHS.has(filePath)) return true
+  // Linux /proc/self/fd/0-2 别名
+  if (
+    filePath.startsWith("/proc/") &&
+    (filePath.endsWith("/fd/0") || filePath.endsWith("/fd/1") || filePath.endsWith("/fd/2"))
+  )
+    return true
+  return false
+}
+
+// 只提醒源码风险，不把提醒当作 MIME 检测或可执行文件的读取授权。
+function shouldInjectCyberReminder(ext: string): boolean {
+  return HIGH_RISK_EXTENSIONS.has(ext)
+}
+
+// 估算内容 token 数量，按文件类型使用不同的 byte/token 比率
+function estimateTokensForContent(content: string, ext: string): number {
+  const ratio = TOKEN_BYTE_RATIOS[ext] ?? TOKEN_BYTE_RATIOS.default
+  return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
+}
+
+function findUnexpandedFileInContext(
+  ctx: Tool.Context,
+  params: Schema.Schema.Type<typeof Parameters>,
+  output: string,
+): boolean {
+  // 只在本次调用收到的可见历史中查找，不重新加载已被压缩或移出上下文的历史。
+  for (let i = ctx.messages.length - 1; i >= 0; i--) {
+    const msg = ctx.messages[i]
+    if (msg.info.role !== "assistant") continue
+    // 会话身份来自实际工具上下文，不能由共享缓存或传入路径推断。
+    if (msg.info.sessionID !== ctx.sessionID) continue
+    for (const part of msg.parts) {
+      if (part.type !== "tool") continue
+      if (part.tool !== "read") continue
+      if (part.state.status !== "completed") continue
+      const input = part.state.input
+      // 请求范围与默认范围等价；路径和行号另由完整渲染结果的精确相等证明。
+      if ((input.offset || 1) !== (params.offset || 1)) continue
+      if ((input.limit ?? DEFAULT_READ_LIMIT) !== (params.limit ?? DEFAULT_READ_LIMIT)) continue
+      // compacted=0 也代表被压缩；stub 自身没有正文，不能延长证明的生命周期。
+      if (part.state.time.compacted !== undefined || part.state.output === FILE_UNCHANGED_STUB) continue
+      // 新读取的完整输出连同路径、EOF 行数、指令与安全提醒构成版本证明；全局 mtime 或另一会话的旧结果不能证明内容相同。
+      if (part.state.output !== output) continue
+      return true
+    }
+  }
+  return false
+}
+
 class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
 
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
@@ -238,6 +339,14 @@ export const ReadTool = Tool.define<
       if (process.platform === "win32") {
         filepath = FSUtil.normalizePath(filepath)
       }
+
+      // 拒绝无限输出或等待输入的设备路径及 /proc/self/fd/0-2 别名，避免读取挂起。
+      if (isBlockedDevicePath(filepath)) {
+        return yield* Effect.fail(
+          new Error(`Cannot read '${filepath}': this device file would block or produce infinite output.`),
+        )
+      }
+
       const title = path.relative(instance.worktree, filepath)
 
       const stat = yield* fs.stat(filepath).pipe(
@@ -297,11 +406,28 @@ export const ReadTool = Tool.define<
         }
       }
 
+      // stat 跟随软链接；只准普通文件，避免设备别名绕过字符串黑名单。
+      // splitLines 在字节上限之前等待换行，不能靠后面的限幅阻止 /dev/zero。
+      if (stat.type !== "File") return yield* Effect.fail(new Error(`Cannot read non-regular file: ${filepath}`))
+
       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
 
       const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
-      const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
+      // BMP 需具备完整文件头和 DIB 头，避免把 BM 开头的纯文本当图片。
+      const header = new DataView(sample.buffer, sample.byteOffset, sample.byteLength)
+      const isImage =
+        SUPPORTED_IMAGE_MIMES.has(mime) ||
+        (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(mime) &&
+          sniffAttachmentMime(sample, "") === mime) ||
+        (mime === "image/bmp" &&
+          sample.length >= 26 &&
+          sample[0] === 0x42 &&
+          sample[1] === 0x4d &&
+          header.getUint32(14, true) >= 12 &&
+          14 + header.getUint32(14, true) <= sample.length &&
+          header.getUint32(10, true) >= 14 + header.getUint32(14, true) &&
+          header.getUint32(10, true) < Number(stat.size))
 
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
@@ -335,6 +461,22 @@ export const ReadTool = Tool.define<
         )
       }
 
+      // Token 预算验证 - 根据文件类型估算 token 数
+      const content = file.raw.join("\n")
+      const ext = path.extname(filepath).toLowerCase().slice(1)
+      const estimatedTokens = estimateTokensForContent(content, ext)
+      if (estimatedTokens > MAX_CONTENT_TOKENS) {
+        const lineCount = file.count
+        // 按比例计算建议 limit，帮助用户分批读取大文件
+        const suggestedLimit = Math.floor(lineCount * (MAX_CONTENT_TOKENS / estimatedTokens))
+        return yield* Effect.fail(
+          new Error(
+            `File content (~${estimatedTokens} tokens) exceeds maximum (${MAX_CONTENT_TOKENS} tokens). ` +
+              `Use offset and limit parameters. Suggested: limit=${suggestedLimit}`,
+          ),
+        )
+      }
+
       let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
       output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
 
@@ -354,6 +496,25 @@ export const ReadTool = Tool.define<
 
       if (loaded.length > 0) {
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+      }
+
+      // 恶意代码安全提醒 - 仅对高风险扩展名注入
+      if (shouldInjectCyberReminder(ext)) {
+        output += CYBER_REMINDER
+      }
+
+      // 权限与本次有界读取均已完成；只省模型上下文，不让缓存替代内容版本证明。
+      // 行内截断同样丢失正文，不能把两个不同文件的相同截断前缀当作完整文件。
+      if (
+        !truncated &&
+        file.raw.every((line) => !line.endsWith(MAX_LINE_SUFFIX)) &&
+        findUnexpandedFileInContext(ctx, params, output)
+      ) {
+        return {
+          title,
+          output: FILE_UNCHANGED_STUB,
+          metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
+        }
       }
 
       return {

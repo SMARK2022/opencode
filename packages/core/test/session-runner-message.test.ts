@@ -14,6 +14,55 @@ const id = (value: string) => SessionMessage.ID.make(`msg_${value}`)
 const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.route })
 
 describe("toLLMMessages", () => {
+  test("deduplicates complete Read versions only within the supplied visible history", () => {
+    const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1" }
+    const read = (value: string, structured: Record<string, unknown> = output,
+      input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
+      content: SessionMessage.ToolStateCompleted["content"] = []) => SessionMessage.Assistant.make({
+      id: id(value), type: "assistant", agent: "build",
+      model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+      content: [SessionMessage.AssistantTool.make({
+        type: "tool", id: value, name: "read", time: { created, completed: created },
+        state: SessionMessage.ToolStateCompleted.make({ status: "completed", input, structured, content }),
+      })],
+      time: { created, completed: created },
+    })
+    const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
+      .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
+    const first = read("first")
+    const second = read("second", output, { path: "note.txt", offset: 1, limit: 2000 })
+    // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
+    expect(results(first, second)[0]).toEqual({ type: "json", value: output })
+    expect(results(first, second)[1]).toMatchObject({ type: "text" })
+    expect(JSON.stringify(results(first, second)[1])).toContain("File unchanged since last read")
+    expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
+    // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
+    expect(results(first, read("v2", { ...output, content: "v2" }))[1]).toMatchObject({ type: "json" })
+    expect(results(first, read("range", output, { path: "note.txt", limit: 1 }))[1]).toMatchObject({ type: "json" })
+    expect(results(first, read("path", output, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
+    // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
+    expect(results(second)).toEqual([{ type: "json", value: output }])
+    const checkpoint = SessionMessage.Compaction.make({
+      id: id("checkpoint"), type: "compaction", reason: "auto", summary: "summary", recent: "recent", time: { created },
+    })
+    expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
+    // 部分页、行内截断与媒体即使两个结果完全一样，也不能用纯文本 stub 取代。
+    for (const partial of [
+      { type: "text-page", content: "prefix", offset: 1, truncated: true, next: 2 },
+      { type: "text-page", content: "prefix... (line truncated to 2000 chars)", offset: 1, truncated: false },
+      { ...output, encoding: "base64", mime: "image/png" },
+    ]) expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
+    // structured 仍完整不代表模型看到了全文：generic 限幅后的 content 不能预热去重。
+    const bounded = [{ type: "text" as const, text: "... output truncated ..." }]
+    expect(results(read("b1", output, undefined, bounded), read("b2", output, undefined, bounded))[1])
+      .toEqual({ type: "text", value: bounded[0].text })
+    // 完整安全提醒投影可以去重；提醒变化本身也会改变相等性证明。
+    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: JSON.stringify(output) }]
+    expect(JSON.stringify(results(read("r1", output, undefined, visible), read("r2", output, undefined, visible))[1]))
+      .toContain("File unchanged since last read")
+    expect(results(read("r3", output, undefined, visible), read("r4", output))[1]).toMatchObject({ type: "json" })
+  })
+
   test("omits empty assistant turns", () => {
     const assistant = (value: string, content: SessionMessage.Assistant["content"]) =>
       SessionMessage.Assistant.make({
