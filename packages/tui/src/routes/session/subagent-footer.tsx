@@ -32,12 +32,24 @@ export function SubagentFooter() {
 
   const usage = createMemo(() => {
     const msg = messages()
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
+    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) return
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
-    if (tokens <= 0) return
+    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
+    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+      if (part.type === "text" && !part.ignored) return sum + part.text.length
+      // 子代理可能先流出思考而无正文；reasoning 字符也必须驱动实时输出显示。
+      if (part.type === "reasoning") return sum + part.text.length
+      return sum
+    }, 0)
+    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputEstimated = Math.round(chars / 4)
+    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
+    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+    const tokens = input + output
+    if (tokens <= 0 && input <= 0 && output <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
@@ -49,6 +61,8 @@ export function SubagentFooter() {
     })
 
     return {
+      // 添加输入/输出流量显示，用于 footer 展示
+      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -88,7 +102,7 @@ export function SubagentFooter() {
             <Show when={usage()}>
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
-                  {[item().context, item().cost].filter(Boolean).join(" · ")}
+                  {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
                 </text>
               )}
             </Show>
