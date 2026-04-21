@@ -33,12 +33,20 @@ export function SubagentFooter() {
 
   const usage = createMemo(() => {
     const msg = messages()
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) return
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
-    if (tokens <= 0) return
+    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+      if (part.type === "text" && !part.ignored) return sum + part.text.length
+      if (part.type === "reasoning") return sum + part.text.length
+      return sum
+    }, 0)
+    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputEstimated = Math.round(chars / 4)
+    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+    const tokens = input + output
+    if (tokens <= 0 && input <= 0 && output <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
@@ -50,6 +58,7 @@ export function SubagentFooter() {
     })
 
     return {
+      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -87,7 +96,7 @@ export function SubagentFooter() {
             <Show when={usage()}>
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
-                  {[item().context, item().cost].filter(Boolean).join(" · ")}
+                  {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
                 </text>
               )}
             </Show>

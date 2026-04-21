@@ -15,19 +15,31 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const cost = createMemo(() => msg().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0))
 
   const state = createMemo(() => {
-    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) {
       return {
         tokens: 0,
+        input: 0,
+        output: 0,
         percent: null,
       }
     }
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    const chars = props.api.state.part(last.id).reduce((sum, part) => {
+      if (part.type === "text" && !part.ignored) return sum + part.text.length
+      if (part.type === "reasoning") return sum + part.text.length
+      return sum
+    }, 0)
+    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputEstimated = Math.round(chars / 4)
+    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+    const tokens = input + output
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     return {
       tokens,
+      input,
+      output,
       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
     }
   })
@@ -37,6 +49,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       <text fg={theme().text}>
         <b>Context</b>
       </text>
+      <text fg={theme().textMuted}>↑ {state().input.toLocaleString()} · ↓ {state().output.toLocaleString()}</text>
       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
       <text fg={theme().textMuted}>{money.format(cost())} spent</text>
