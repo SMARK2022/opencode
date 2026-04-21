@@ -17,19 +17,36 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const cost = createMemo(() => session()?.cost ?? 0)
 
   const state = createMemo(() => {
-    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
+    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) {
       return {
         tokens: 0,
+        input: 0,
+        output: 0,
         percent: null,
       }
     }
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
+    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
+    const chars = props.api.state.part(last.id).reduce((sum, part) => {
+      if (part.type === "text" && !part.ignored) return sum + part.text.length
+      if (part.type === "reasoning") return sum + part.text.length
+      return sum
+    }, 0)
+    // 缓存命中仍占上下文输入，不能因为无需重复生成就从流量中扣除。
+    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputEstimated = Math.round(chars / 4)
+    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
+    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+    const tokens = input + output
+    // 缺少模型 context limit 时保留 token 实数，不能捏造百分比上限。
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     return {
       tokens,
+      input,
+      output,
       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
     }
   })
@@ -39,6 +56,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       <text fg={theme().text}>
         <b>Context</b>
       </text>
+      {/* 添加输入/输出流量显示 */}
+      <text fg={theme().textMuted}>↑ {state().input.toLocaleString()} · ↓ {state().output.toLocaleString()}</text>
       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
       <text fg={theme().textMuted}>{money.format(cost())} spent</text>

@@ -265,17 +265,35 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) return
     const session = sync.session.get(props.sessionID)
     const msg = sync.data.message[props.sessionID] ?? []
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
+    // 尚未回传 usage 的助手也承载流式正文；按 output 筛选会错误选中上一轮回复。
+    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) return
 
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
-    if (tokens <= 0) return
+    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
+    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+      // ignored 文本不进入模型输出，计入字符估算会把隐藏的合成内容收费化。
+      if (part.type === "text" && !part.ignored) return sum + part.text.length
+      if (part.type === "reasoning") return sum + part.text.length
+      return sum
+    }, 0)
+    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    // reasoning 与正文由 API 分开回传，输出流量必须包含两者才能覆盖思考阶段。
+    const outputActual = last.tokens.output + last.tokens.reasoning
+    // 四字符仅是等待 API usage 时的显示近似，不写回消息或参与计费。
+    const outputEstimated = Math.round(chars / 4)
+    // 流式阶段取实际值与估算值的较大值，完成后回到 API 实值，避免临时峰值变成永久用量。
+    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+    const tokens = input + output
+    // 仅流量全零才隐藏；缓存输入或 reasoning-only 回复仍有有效用量。
+    if (tokens <= 0 && input <= 0 && output <= 0) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = session?.cost ?? 0
     return {
+      // 添加输入/输出流量显示，用于 footer 展示
+      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -1665,7 +1683,7 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().context, item().cost].filter(Boolean).join(" · ")}
+                          {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
                         </text>
                       )}
                     </Match>
