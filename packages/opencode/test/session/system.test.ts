@@ -8,6 +8,9 @@ import { Permission } from "../../src/permission"
 import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
+import { Git } from "../../src/git"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { InstanceState } from "../../src/effect/instance-state"
 import { testEffect } from "../lib/effect"
 
 const skills: Skill.Info[] = [
@@ -44,7 +47,8 @@ const build: Agent.Info = {
 }
 
 const it = testEffect(
-  LayerNode.compile(SystemPrompt.node, [
+  LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node]), [
+    [RuntimeFlags.node, RuntimeFlags.layer({ disableGit: false })],
     [
       MCP.node,
       Layer.mock(MCP.Service, {
@@ -84,6 +88,25 @@ const it = testEffect(
 )
 
 describe("session.system", () => {
+  it.instance("retains the directory Git snapshot after the worktree changes", () => Effect.gen(function* () {
+    const prompt = yield* SystemPrompt.Service
+    const git = yield* Git.Service
+    const ctx = yield* InstanceState.context
+    const model = { providerID: "test", api: { id: "test" } } as Provider.Model
+    const initial = yield* prompt.environment(model)
+    const changed = yield* git.run(["checkout", "-b", "snapshot-next"], { cwd: ctx.directory })
+    expect(changed.exitCode).toBe(0)
+    // 使用真实 Git 改变工作树，再验证源补丁的目录缓存而非新的 Session 生命周期。
+    expect((yield* git.branch(ctx.directory))).toBe("snapshot-next")
+    expect(yield* prompt.environment(model)).toEqual(initial)
+  }), { git: true })
+  it.instance("does not inject private Git fields into non-repository environments", () => Effect.gen(function* () {
+    const prompt = yield* SystemPrompt.Service
+    const text = (yield* prompt.environment({ providerID: "test", api: { id: "test" } } as Provider.Model)).join("\n")
+    expect(text).toContain("Is directory a git repo: no")
+    expect(text).not.toContain("Git user:")
+    expect(text).not.toContain("Recent commits:")
+  }))
   test("selects the Meta prompt for Muse Spark model IDs", () => {
     for (const id of ["meta/muse-spark-preview", "muse-spark-1.1", "muse-spark-1.2"]) {
       const prompt = SystemPrompt.provider({ api: { id } } as Provider.Model)[0]
