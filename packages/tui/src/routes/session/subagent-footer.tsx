@@ -31,13 +31,24 @@ export function SubagentFooter() {
     return { label, index: index + 1, total: siblings.length }
   })
 
-  type UsageInfo = { flow: string; context: string; cost: string | undefined }
+  // 获取会话状态，用于判断是否正在运行
+  // 子代理有独立 sessionID，必须读取其自身状态而非父请求的运行状态。
+  const status = createMemo(() => sync.data.session_status?.[route.sessionID])
+
+  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
+    // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
+    const isRunning = (status()?.type ?? "idle") !== "idle"
     const msg = messages()
     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
-    if (!last) return
+
+    if (!last) {
+      if (!isRunning) return
+      // 已发送 prompt 但尚无助手回复时立即显示零值
+      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+    }
 
     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
     const parts = sync.data.part[last.id] ?? []
@@ -60,14 +71,30 @@ export function SubagentFooter() {
         }, 0)
       : 0
 
-    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
+    const cumTokens = parts.reduce(
+      (acc, part) => {
+        if (part.type !== "step-finish") return acc
+        return {
+          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+          output: acc.output + part.tokens.output + part.tokens.reasoning,
+        }
+      },
+      // 首步尚无 step-finish 时累计从零开始，不回退到可能已被覆盖的 last.tokens。
+      { input: 0, output: 0 },
+    )
+    const inputBase = cumTokens.input
     const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputActual = cumTokens.output
     const outputEstimated = Math.round(chars / 4)
     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
     const tokens = input + output
-    if (tokens <= 0 && input <= 0 && output <= 0) return
+    if (tokens <= 0 && input <= 0 && output <= 0) {
+      // 运行中但 token 尚未到达时显示零值，避免 footer 闪烁
+      if (!isRunning) return
+      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+    }
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
