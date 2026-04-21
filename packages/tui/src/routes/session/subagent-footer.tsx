@@ -1,10 +1,11 @@
-import { createMemo, createSignal, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { useRouteData } from "../../context/route"
 import { useSync } from "../../context/sync"
 import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
+import { createThrottledSignal } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 
@@ -30,20 +31,37 @@ export function SubagentFooter() {
     return { label, index: index + 1, total: siblings.length }
   })
 
-  const usage = createMemo(() => {
+  type UsageInfo = { flow: string; context: string; cost: string | undefined }
+
+  const usageRaw = createMemo((): UsageInfo | undefined => {
     const msg = messages()
     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) return
 
     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
-    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+    const parts = sync.data.part[last.id] ?? []
+    const chars = parts.reduce((sum, part) => {
       if (part.type === "text" && !part.ignored) return sum + part.text.length
       // 子代理可能先流出思考而无正文；reasoning 字符也必须驱动实时输出显示。
       if (part.type === "reasoning") return sum + part.text.length
       return sum
     }, 0)
-    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+
+    // 子代理 footer 只读取当前路由消息的 parts，不把父会话的工具输出混入本轮估算。
+    // 仅 completed 工具有稳定 output；pending/running 的部分结果不满足这个估算契约。
+    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+    // 消息完成后撤销工具字符补量，避免离开流式阶段后仍显示临时估算输入。
+    const toolOutputChars = !last.time.completed
+      ? parts.reduce((sum, part, i) => {
+          if (i <= lastStepFinishIdx) return sum
+          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+          return sum
+        }, 0)
+      : 0
+
+    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const input = inputBase + Math.round(toolOutputChars / 4)
     const outputActual = last.tokens.output + last.tokens.reasoning
     const outputEstimated = Math.round(chars / 4)
     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
@@ -67,6 +85,11 @@ export function SubagentFooter() {
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
+
+  // footer 的 Show 以 usage 是否存在决定可见性，空结果必须参与节流而不能被过滤。
+  // 此处在组件 owner 下创建计时器；切换导致卸载时，旧 footer 的待发快照由 helper 取消。
+  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
+  createEffect(() => setUsageThrottled(usageRaw()))
 
   const { theme } = useTheme()
   const keymap = useOpencodeKeymap()
