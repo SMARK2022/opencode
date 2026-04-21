@@ -47,7 +47,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn } from "../../util/signal"
+import { createFadeIn, createThrottledSignal } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
@@ -261,7 +261,9 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
-  const usage = createMemo(() => {
+  type UsageInfo = { flow: string; context: string; cost: string | undefined }
+
+  const usageRaw = createMemo((): UsageInfo | undefined => {
     if (!props.sessionID) return
     const session = sync.session.get(props.sessionID)
     const msg = sync.data.message[props.sessionID] ?? []
@@ -271,13 +273,28 @@ export function Prompt(props: PromptProps) {
     if (!last) return
 
     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
-    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+    const parts = sync.data.part[last.id] ?? []
+    const chars = parts.reduce((sum, part) => {
       // ignored 文本不进入模型输出，计入字符估算会把隐藏的合成内容收费化。
       if (part.type === "text" && !part.ignored) return sum + part.text.length
       if (part.type === "reasoning") return sum + part.text.length
       return sum
     }, 0)
-    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+
+    // 以最后一个 step-finish 排除已结算历史；缺失时索引为 -1，首轮工具结果也进入未确认区段。
+    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+    // 完成标记关闭临时估算，让静态显示回到 API 计数，避免估算长期叠加。
+    const toolOutputChars = !last.time.completed
+      ? parts.reduce((sum, part, i) => {
+          if (i <= lastStepFinishIdx) return sum
+          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+          return sum
+        }, 0)
+      : 0
+
+    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    // 四字符换算仅用于实时提示，不能替代 input/cache 的服务端计数或作为计费依据。
+    const input = inputBase + Math.round(toolOutputChars / 4)
     // reasoning 与正文由 API 分开回传，输出流量必须包含两者才能覆盖思考阶段。
     const outputActual = last.tokens.output + last.tokens.reasoning
     // 四字符仅是等待 API usage 时的显示近似，不写回消息或参与计费。
@@ -298,6 +315,11 @@ export function Prompt(props: PromptProps) {
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
+
+  // 只合并发布给视图的快照，usageRaw 仍跟踪每次变更，不能据此认为统计计算也被节流。
+  // 无会话或无助手时的 undefined 必须进入尾值，使 Match 最终撤下旧用量而非保留旧快照。
+  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
+  createEffect(() => setUsageThrottled(usageRaw()))
 
   const [store, setStore] = createStore<{
     prompt: PromptInfo
