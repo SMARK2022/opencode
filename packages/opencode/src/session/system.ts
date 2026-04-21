@@ -141,6 +141,7 @@ const layer = Layer.effect(
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
+        // Effect.fn 返回函数，必须调用后再 yield*，不能直接执行函数值。
         const gitContext = yield* getGitContext()
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
