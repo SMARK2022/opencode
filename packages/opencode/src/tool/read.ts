@@ -10,7 +10,8 @@ import DESCRIPTION from "./read.txt"
 import { Instance } from "../project/instance"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
-import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
+import type { MessageV2 } from "../session/message-v2"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -18,6 +19,109 @@ const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
+const MAX_CONTENT_TOKENS = 16000
+
+// 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
+const BLOCKED_DEVICE_PATHS = new Set([
+  "/dev/zero",
+  "/dev/random",
+  "/dev/urandom",
+  "/dev/full",
+  "/dev/stdin",
+  "/dev/tty",
+  "/dev/console",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/fd/0",
+  "/dev/fd/1",
+  "/dev/fd/2",
+])
+
+// 高风险扩展名 - 用于恶意代码安全提醒
+const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
+
+// 不同文件类型的 token/byte 估算比率
+const TOKEN_BYTE_RATIOS: Record<string, number> = {
+  ts: 0.28,
+  js: 0.28,
+  py: 0.26,
+  rs: 0.27,
+  go: 0.27,
+  java: 0.26,
+  c: 0.27,
+  cpp: 0.27,
+  h: 0.27,
+  hpp: 0.27,
+  md: 0.24,
+  txt: 0.22,
+  json: 0.22,
+  xml: 0.2,
+  html: 0.2,
+  css: 0.22,
+  default: 0.25,
+}
+
+// 文件去重缓存 - per-session
+type ReadCacheEntry = {
+  content: string
+  timestamp: number
+  offset: number
+  limit: number | undefined
+  isPartialView: boolean
+}
+const readFileState = new Map<string, ReadCacheEntry>()
+
+// Stub 文案
+export const FILE_UNCHANGED_STUB =
+  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
+
+// 恶意代码提醒
+const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
+
+// 判断是否为设备文件路径
+function isBlockedDevicePath(filePath: string): boolean {
+  if (BLOCKED_DEVICE_PATHS.has(filePath)) return true
+  // Linux /proc/self/fd/0-2 别名
+  if (
+    filePath.startsWith("/proc/") &&
+    (filePath.endsWith("/fd/0") || filePath.endsWith("/fd/1") || filePath.endsWith("/fd/2"))
+  )
+    return true
+  return false
+}
+
+// 判断是否应该注入恶意代码提醒
+function shouldInjectCyberReminder(ext: string): boolean {
+  return HIGH_RISK_EXTENSIONS.has(ext)
+}
+
+// 估算内容 token 数量
+function estimateTokensForContent(content: string, ext: string): number {
+  const ratio = TOKEN_BYTE_RATIOS[ext] ?? TOKEN_BYTE_RATIOS.default
+  return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
+}
+
+// 检查当前上下文中是否有该文件的未被压缩的读取结果
+function findUnexpandedFileInContext(
+  messages: MessageV2.WithParts[],
+  filepath: string,
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.info.role !== "assistant") continue
+    for (const part of msg.parts) {
+      if (part.type !== "tool") continue
+      if (part.tool !== "read") continue
+      if (part.state.status !== "completed") continue
+      const input = part.state.input as { filePath?: string }
+      if (input.filePath !== filepath) continue
+      // 检查是否被压缩（compacted）
+      if (part.state.time.compacted) continue
+      return true
+    }
+  }
+  return false
+}
 
 const parameters = z.object({
   filePath: z.string().describe("The absolute path to the file or directory to read"),
@@ -152,6 +256,14 @@ export const ReadTool = Tool.define(
       if (process.platform === "win32") {
         filepath = AppFileSystem.normalizePath(filepath)
       }
+
+      // 设备文件保护 - 阻止可能导致进程挂起的设备文件
+      if (isBlockedDevicePath(filepath)) {
+        return yield* Effect.fail(
+          new Error(`Cannot read '${filepath}': this device file would block or produce infinite output.`),
+        )
+      }
+
       const title = path.relative(Instance.worktree, filepath)
 
       const stat = yield* fs.stat(filepath).pipe(
@@ -174,6 +286,25 @@ export const ReadTool = Tool.define(
       })
 
       if (!stat) return yield* miss(filepath)
+
+      // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
+      const existingState = readFileState.get(filepath)
+      if (existingState && !existingState.isPartialView) {
+        if (existingState.offset === (params.offset ?? 1) && existingState.limit === params.limit) {
+          const mtimeMs = Math.floor(Number(stat.mtime))
+          if (mtimeMs === existingState.timestamp) {
+            // 额外检查：当前上下文中是否有该文件的未被压缩的读取结果
+            const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath)
+            if (hasUnexpandedContent) {
+              return {
+                title,
+                output: FILE_UNCHANGED_STUB,
+                metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] },
+              }
+            }
+          }
+        }
+      }
 
       if (stat.type === "Directory") {
         const items = yield* list(filepath)
@@ -209,6 +340,30 @@ export const ReadTool = Tool.define(
       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
       if (isImageAttachment(mime) || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
+
+        // 图片使用三级压缩策略
+        if (isImageAttachment(mime)) {
+          const processed = yield* Effect.promise(() => processImageWithTokenBudget(bytes, mime))
+          const msg = `Image read successfully (${formatSize(processed.originalSize)} → compressed for model)`
+          return {
+            title,
+            output: msg,
+            metadata: {
+              preview: msg,
+              truncated: false,
+              loaded: loaded.map((item) => item.filepath),
+            },
+            attachments: [
+              {
+                type: "file" as const,
+                mime: processed.mime,
+                url: `data:${processed.mime};base64,${processed.data}`,
+              },
+            ],
+          }
+        }
+
+        // PDF 保持原样
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
         return {
           title,
@@ -241,6 +396,30 @@ export const ReadTool = Tool.define(
         )
       }
 
+      // Token 预算验证 - 根据文件类型估算 token 数
+      const content = file.raw.join("\n")
+      const ext = path.extname(filepath).toLowerCase().slice(1)
+      const estimatedTokens = estimateTokensForContent(content, ext)
+      if (estimatedTokens > MAX_CONTENT_TOKENS) {
+        const lineCount = file.count
+        const suggestedLimit = Math.floor(lineCount * (MAX_CONTENT_TOKENS / estimatedTokens))
+        return yield* Effect.fail(
+          new Error(
+            `File content (~${estimatedTokens} tokens) exceeds maximum (${MAX_CONTENT_TOKENS} tokens). ` +
+              `Use offset and limit parameters. Suggested: limit=${suggestedLimit}`,
+          ),
+        )
+      }
+
+      // 写入去重缓存
+      readFileState.set(filepath, {
+        content,
+        timestamp: Math.floor(Number(stat.mtime)),
+        offset: params.offset ?? 1,
+        limit: params.limit,
+        isPartialView: file.more || file.cut,
+      })
+
       let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
       output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
 
@@ -260,6 +439,11 @@ export const ReadTool = Tool.define(
 
       if (loaded.length > 0) {
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+      }
+
+      // 恶意代码安全提醒 - 仅对高风险扩展名注入
+      if (shouldInjectCyberReminder(ext)) {
+        output += CYBER_REMINDER
       }
 
       return {
