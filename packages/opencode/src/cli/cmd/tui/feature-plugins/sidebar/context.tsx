@@ -20,12 +20,9 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const stateRaw = createMemo((): StateValue => {
     const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) {
-      return {
-        tokens: 0,
-        input: 0,
-        output: 0,
-        percent: null,
-      }
+      // Always show zeros so the display is visible from the moment a prompt is sent.
+      // The sidebar always renders something; there is no hidden/fallback state.
+      return { tokens: 0, input: 0, output: 0, percent: null }
     }
 
     const parts = props.api.state.part(last.id)
@@ -45,9 +42,20 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         }, 0)
       : 0
 
-    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
+    const cumTokens = parts.reduce(
+      (acc, part) => {
+        if (part.type !== "step-finish") return acc
+        return {
+          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+          output: acc.output + part.tokens.output + part.tokens.reasoning,
+        }
+      },
+      { input: 0, output: 0 },
+    )
+    const inputBase = cumTokens.input
     const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputActual = cumTokens.output
     const outputEstimated = Math.round(chars / 4)
     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
     const tokens = input + output

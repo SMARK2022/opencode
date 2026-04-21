@@ -32,12 +32,20 @@ export function SubagentFooter() {
     return { label, index: index + 1, total: siblings.length }
   })
 
-  type UsageInfo = { flow: string; context: string; cost: string | undefined }
+  const status = createMemo(() => sync.data.session_status?.[route.sessionID])
+
+  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
+    const isRunning = (status()?.type ?? "idle") !== "idle"
     const msg = messages()
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
-    if (!last) return
+
+    if (!last) {
+      if (!isRunning) return
+      // Show zeroed display immediately when the prompt was sent but no reply yet
+      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+    }
 
     const parts = sync.data.part[last.id] ?? []
     const chars = parts.reduce((sum, part) => {
@@ -56,13 +64,28 @@ export function SubagentFooter() {
         }, 0)
       : 0
 
-    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
+    const cumTokens = parts.reduce(
+      (acc, part) => {
+        if (part.type !== "step-finish") return acc
+        return {
+          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+          output: acc.output + part.tokens.output + part.tokens.reasoning,
+        }
+      },
+      { input: 0, output: 0 },
+    )
+    const inputBase = cumTokens.input
     const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = last.tokens.output + last.tokens.reasoning
+    const outputActual = cumTokens.output
     const outputEstimated = Math.round(chars / 4)
     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
     const tokens = input + output
-    if (tokens <= 0 && input <= 0 && output <= 0) return
+
+    if (tokens <= 0 && input <= 0 && output <= 0) {
+      if (!isRunning) return
+      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+    }
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
