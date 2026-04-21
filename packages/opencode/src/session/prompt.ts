@@ -1472,7 +1472,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
-              Effect.sync(() => sys.environment(model)),
+              // environment 改为异步：需要在此处拉取 git 上下文。
+              sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
