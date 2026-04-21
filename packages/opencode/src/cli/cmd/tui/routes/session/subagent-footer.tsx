@@ -1,4 +1,4 @@
-import { createMemo, createSignal, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util"
+import { createThrottledSignal } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 
 export function SubagentFooter() {
@@ -31,17 +32,32 @@ export function SubagentFooter() {
     return { label, index: index + 1, total: siblings.length }
   })
 
-  const usage = createMemo(() => {
+  type UsageInfo = { flow: string; context: string; cost: string | undefined }
+
+  const usageRaw = createMemo((): UsageInfo | undefined => {
     const msg = messages()
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) return
 
-    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+    const parts = sync.data.part[last.id] ?? []
+    const chars = parts.reduce((sum, part) => {
       if (part.type === "text" && !part.ignored) return sum + part.text.length
       if (part.type === "reasoning") return sum + part.text.length
       return sum
     }, 0)
-    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+
+    // Estimate tokens from tool outputs that arrived after the last step-finish.
+    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+    const toolOutputChars = !last.time.completed
+      ? parts.reduce((sum, part, i) => {
+          if (i <= lastStepFinishIdx) return sum
+          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+          return sum
+        }, 0)
+      : 0
+
+    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const input = inputBase + Math.round(toolOutputChars / 4)
     const outputActual = last.tokens.output + last.tokens.reasoning
     const outputEstimated = Math.round(chars / 4)
     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
@@ -63,6 +79,9 @@ export function SubagentFooter() {
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
+
+  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
+  createEffect(() => setUsageThrottled(usageRaw()))
 
   const { theme } = useTheme()
   const keybind = useKeybind()

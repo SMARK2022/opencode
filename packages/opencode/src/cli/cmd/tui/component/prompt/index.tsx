@@ -36,7 +36,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn } from "../../util/signal"
+import { createFadeIn, createThrottledSignal } from "../../util/signal"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceCreate, restoreWorkspaceSession } from "../dialog-workspace-create"
@@ -156,18 +156,36 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
-  const usage = createMemo(() => {
+  type UsageInfo = { flow: string; context: string; cost: string | undefined }
+
+  const usageRaw = createMemo((): UsageInfo | undefined => {
     if (!props.sessionID) return
     const msg = sync.data.message[props.sessionID] ?? []
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
     if (!last) return
 
-    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
+    const parts = sync.data.part[last.id] ?? []
+    const chars = parts.reduce((sum, part) => {
       if (part.type === "text" && !part.ignored) return sum + part.text.length
       if (part.type === "reasoning") return sum + part.text.length
       return sum
     }, 0)
-    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+
+    // Estimate tokens from tool outputs that arrived after the last step-finish
+    // (i.e. results gathered but not yet sent to the API in a new step).
+    // Once the message is complete the API's input_tokens already includes them,
+    // so we only do this during streaming to give live feedback on large writes.
+    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+    const toolOutputChars = !last.time.completed
+      ? parts.reduce((sum, part, i) => {
+          if (i <= lastStepFinishIdx) return sum
+          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+          return sum
+        }, 0)
+      : 0
+
+    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
+    const input = inputBase + Math.round(toolOutputChars / 4)
     const outputActual = last.tokens.output + last.tokens.reasoning
     const outputEstimated = Math.round(chars / 4)
     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
@@ -183,6 +201,9 @@ export function Prompt(props: PromptProps) {
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
+
+  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
+  createEffect(() => setUsageThrottled(usageRaw()))
 
   const [store, setStore] = createStore<{
     prompt: PromptInfo
