@@ -6,6 +6,7 @@ import { GlobalBus } from "@/bus/global"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
+import { selection } from "@opencode-ai/core/session/info"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { eq } from "drizzle-orm"
@@ -55,12 +56,23 @@ const layer = Layer.effect(
             Schema.decodeUnknownSync(SessionV1.Event.PartUpdated.data)(event.data).part.type === "step-finish") ||
           event.type === SessionV1.Event.PartRemoved.type ||
           event.type === SessionV1.Event.MessageRemoved.type ||
+          // 用户更新能引入新请求；助手更新能改变请求费用或最后一步身份。
+          // 不把用户被显示窗口淘汰解释成新请求尚无回复。
+          event.type === SessionV1.Event.MessageUpdated.type ||
           // native 结算和 revert 提交都通知同一存储行，不转交 V1 执行器或建立另一份累计。
+          // admission 先到也必须刷新，确保尚未回复的新请求与旧助手断开。
+          event.type === SessionEvent.PromptAdmitted.type ||
+          event.type === SessionEvent.Prompted.type ||
+          event.type === SessionEvent.Step.Started.type ||
           event.type === SessionEvent.Step.Ended.type ||
           event.type === SessionEvent.RevertEvent.Committed.type
         ) {
+          // 无兼容事件消费者时不扫描请求历史；Core提交与实时流已由原事件链完成。
+          if (GlobalBus.listenerCount("event") === 0) return
           const data = Schema.decodeUnknownSync(Schema.Struct({ sessionID: SessionV1.SessionInfo.fields.id }))(event.data)
-          const row = yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
+          // 发布与 HTTP 相同的持久化读投影，仍然只发非 durable 的兼容快照。
+          // SQL 失败沿用 listener 错误路径，不从消息窗口构造替代累计。
+          const row = yield* database.db.select(selection).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
           // 会话删除后不制造幽灵快照；原始 part/message 事件仍照常转发。
           if (row) {
             // 只依赖 Core 的纯兼容映射；导入 Session service 会让 Layer 推断形成反向闭环。

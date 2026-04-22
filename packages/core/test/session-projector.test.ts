@@ -57,6 +57,12 @@ describe("SessionProjector", () => {
       yield* database.db.insert(SessionTable).values({
         id: sessionID, project_id: Project.ID.global, slug: "usage", directory: "/project", title: "usage", version: "test",
       }).run()
+      // 请求由真实 Prompted 事件归属，不能在测试中给 native 助手伪造 parentID。
+      yield* events.publish(SessionEvent.Prompted, {
+        sessionID, messageID: SessionMessage.ID.make("msg_native_request"), timestamp: created,
+        prompt: Prompt.make({ text: "request" }), delivery: "steer",
+      })
+      // admission 与 promotion 的边界由现有 projector 持久化，测试不另建 SQL 归属算法。
       // 每轮给五项不同的非零计数，能发现只累加最后一轮、遗漏 reasoning 或合并 cache 的错误。
       const records = yield* Effect.forEach([1, 2], (factor) => Effect.gen(function* () {
         const assistantMessageID = SessionMessage.ID.make(`msg_native_usage_${factor}`)
@@ -79,6 +85,12 @@ describe("SessionProjector", () => {
       // 验证公开 get/list，而非只读 message.tokens；本次缺陷恰好发生在消息和会话行之间。
       expect(yield* sessions.get(sessionID)).toMatchObject(expected)
       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(expected)
+      // native 两轮请求必须累计五项，V1 parts 表为空也不能得到零。
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({
+        messageID: "msg_native_request", input: 42, output: 12, cost: 0.75,
+        assistantID: "msg_native_usage_2", model: { providerID: "provider", modelID: "model" },
+      })
+      // 这里检查公开 get 的投影，不在断言里重复实现事件到请求的归属计算。
       // 重放已经落盘的两次结算，保留现有 sequencer 的去重边界，不在投影中另建标记。
       for (const record of records) yield* events.replay(record)
       expect(yield* sessions.get(sessionID)).toMatchObject(expected)
@@ -115,6 +127,31 @@ describe("SessionProjector", () => {
       yield* sessions.revert.commit(sessionID)
       expect(yield* sessions.get(sessionID)).toMatchObject(reverted)
       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(reverted)
+      // revert 删除第二轮后请求费用只取保留助手，会话已花费用仍不退款。
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, cost: 1 })
+      yield* events.publish(SessionEvent.PromptAdmitted, {
+        sessionID, messageID: SessionMessage.ID.make("msg_waiting_request"), timestamp: DateTime.makeUnsafe(6),
+        prompt: Prompt.make({ text: "waiting" }), delivery: "queue",
+      })
+      // 尚未 promoted 的最新 admission 是独立零值请求，不能消费旧助手。
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({
+        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
+      })
+      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).cost).toBe(1.5)
+      // 旧助手迟到结算不改变请求身份；只比较 admission/promotion，不比较 Ended 序号。
+      yield* events.publish(SessionEvent.Step.Ended, {
+        sessionID, assistantMessageID: SessionMessage.ID.make("msg_native_usage_1"),
+        timestamp: DateTime.makeUnsafe(7), finish: "stop", cost: 1,
+        tokens: { input: 6, output: 9, reasoning: 3, cache: { read: 15, write: 21 } },
+      })
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({
+        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
+      })
+      // get/list 同用一个 SQL owner，等待请求没有模型，也没有可借用的助手。
+      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
     }).pipe(Effect.provide(sessionsLayer)),
   )
 

@@ -239,6 +239,14 @@ export type SessionsListOutput = {
     readonly agent?: string
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     readonly cost: number
+    readonly request?: {
+      readonly messageID: string
+      readonly input: number
+      readonly output: number
+      readonly cost: number
+      readonly assistantID?: string
+      readonly model?: { readonly providerID: string; readonly modelID: string }
+    }
     readonly tokens: {
       readonly input: number
       readonly output: number
@@ -301,6 +309,14 @@ export type SessionsCreateOutput = {
     readonly agent?: string
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     readonly cost: number
+    readonly request?: {
+      readonly messageID: string
+      readonly input: number
+      readonly output: number
+      readonly cost: number
+      readonly assistantID?: string
+      readonly model?: { readonly providerID: string; readonly modelID: string }
+    }
     readonly tokens: {
       readonly input: number
       readonly output: number
@@ -339,6 +355,14 @@ export type SessionsGetOutput = {
     readonly agent?: string
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     readonly cost: number
+    readonly request?: {
+      readonly messageID: string
+      readonly input: number
+      readonly output: number
+      readonly cost: number
+      readonly assistantID?: string
+      readonly model?: { readonly providerID: string; readonly modelID: string }
+    }
     readonly tokens: {
       readonly input: number
       readonly output: number

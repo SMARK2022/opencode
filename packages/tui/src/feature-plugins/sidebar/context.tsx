@@ -17,7 +17,9 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const session = createMemo(() => props.api.state.session.get(props.session_id))
   const cost = createMemo(() => session()?.cost ?? 0)
 
-  type StateValue = { tokens: number; input: number; output: number; percent: number | null }
+  // sidebar 保持直接可读对象，新增括号累计也随同一节流快照发布。
+  // 主值属于请求，total 字段属于全局，不能复用一个变量伪装两种范围。
+  type StateValue = { tokens: number; totalTokens: number; input: number; output: number; totalInput: number; totalOutput: number; percent: number | null }
 
   const stateRaw = createMemo((): StateValue => {
     const messages = msg()
@@ -25,11 +27,15 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     // plugin 的 session.get 直通 sync，复用同一服务端投影，不另建 sidebar 私有累计。
     const confirmed = session()?.tokens
     if (!confirmed) {
-      return { tokens: 0, input: 0, output: 0, percent: null }
+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
     }
 
-    // 本项仍是会话 all-assistant 总量，不能提前引入 parentID 请求筛选。
-    const last = assistants.at(-1)
+    // plugin 的 session.get 已直通同步 Session，不能另建 sidebar 私有请求账本。
+    const request = session()?.request
+    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+    const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+    const last = requestAssistants.at(-1)
+    // 已确认全局累计仍取原有五项 tokens；显示窗口只提供当前流式尾部。
     const agg = {
       input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
       output: confirmed.output + confirmed.reasoning,
@@ -62,19 +68,27 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     // 缺少模型 context limit 时保留 token 实数，不能捏造百分比上限。
     const totalInput = agg.input + Math.round(pendingIn / 4)
     const totalOutput = agg.output + Math.round(streamingOut / 4)
-    const tokens = totalInput + totalOutput
-    const model = last ? props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
+    // 两个累计共享同一尾部估算，不把历史结算从缓存再次求和。
+    const input = requestConfirmed.input + Math.round(pendingIn / 4)
+    const output = requestConfirmed.output + Math.round(streamingOut / 4)
+    const tokens = input + output
+    const totalTokens = totalInput + totalOutput
+    const model = request?.model ? props.api.state.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
     return {
       tokens,
-      input: totalInput,
-      output: totalOutput,
+      totalTokens,
+      input,
+      output,
+      totalInput,
+      totalOutput,
       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
     }
   })
 
   // 插件视图始终需要可读对象，用零值而非 undefined 支撑 state().tokens 等直接读取。
   // tokens、input、output、percent 整体发布，避免侧栏在同一帧显示不同版本的统计字段。
-  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null }, 50)
+  // 初始值补齐 total 字段，保留 50ms 发布节奏与原来的箭头脉冲 API。
+  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }, 50)
   createEffect(() => setStateThrottled(stateRaw()))
 
   // sidebar 总有零值 state，零值到正值可触发增长；tokens/percent 的单独变化不会续期。
@@ -86,8 +100,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <b>Context</b>
       </text>
       {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
-      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()} · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}</text>
-      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
+      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})</text>
+      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens</text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
       <text fg={theme().textMuted}>{money.format(cost())} spent</text>
     </box>

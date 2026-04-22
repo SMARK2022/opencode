@@ -182,6 +182,7 @@ export type Session = {
     diffs?: Array<SnapshotFileDiff>
   }
   cost?: number
+  request?: SessionRequestUsage
   tokens?: {
     input: number
     output: number
@@ -2236,6 +2237,7 @@ export type GlobalSession = {
       write: number
     }
   }
+  request?: SessionRequestUsage
   share?: {
     url: string
   }
@@ -3053,6 +3055,18 @@ export type SkillV2Source = SkillV2DirectorySource | SkillV2UrlSource | SkillV2E
 
 export type MoveSessionDestination = {
   directory: string
+}
+
+export type SessionRequestUsage = {
+  messageID: string
+  input: number
+  output: number
+  cost: number
+  assistantID?: string
+  model?: {
+    providerID: string
+    modelID: string
+  }
 }
 
 export type ModelRef = {
@@ -3929,6 +3943,7 @@ export type SessionV2Info = {
   agent?: string
   model?: ModelRef
   cost: number
+  request?: SessionRequestUsage
   tokens: {
     input: number
     output: number
