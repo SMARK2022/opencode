@@ -263,7 +263,9 @@ export function Prompt(props: PromptProps) {
 
   // 首次等待没有 API 用量，context 可缺省以免把零流量解释成已测得的上下文。
   // 保留原始计数供增长比较，避免 Locale 的缩写或分隔符掩盖数值变化。
-  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
+  // 主值是请求累计，括号是全局累计；数值字段仍供节流后的增长脉冲比较。
+  // context 与 cost 继续是文本，不混入 token 信号的比较口径。
+  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     if (!props.sessionID) return
@@ -278,11 +280,16 @@ export function Prompt(props: PromptProps) {
     if (!confirmed) {
       // 会话快照尚未到达时保留 index 6 的运行中零值占位，不从窗口推算历史总量。
       if (!isRunning) return
-      return { input: 0, output: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
     }
 
-    // 无缓存助手不代表会话无历史用量；总量仍显示，只有流式尾部按空处理。
-    const last = assistants.at(-1)
+    // 身份和已确认请求累计来自完整投影；缓存中用户缺失不等于请求缺失。
+    // 这里只读取最后助手的流式尾部，不从 100 条显示页计算已确认总量。
+    const request = session?.request
+    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+    const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+    const last = requestAssistants.at(-1)
+    // #12 保留请求/全局两种累计，当前 step 的主值演进只属于 #14。
     const agg = {
       input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
       output: confirmed.output + confirmed.reasoning,
@@ -313,21 +320,27 @@ export function Prompt(props: PromptProps) {
 
     const totalInput = agg.input + Math.round(pendingIn / 4)
     const totalOutput = agg.output + Math.round(streamingOut / 4)
-    const tokens = totalInput + totalOutput
-    if (tokens <= 0) {
+    // 流式估算只属于已证实的当前请求助手，同一尾部各加入一次。
+    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
+    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
+    const requestTokens = currentInput + currentOutput
+    const totalTokens = totalInput + totalOutput
+    if (requestTokens <= 0 && totalTokens <= 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
     }
 
-    // 模型仅能由仍可见的助手证实；缺失时显示总量而不捏造 context 上限。
-    const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+    // 模型随完整请求投影提供，窗口淘汰助手后仍不丢真实上下文上限。
+    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
+    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
     const cost = session?.cost ?? 0
     return {
-      input: totalInput,
-      output: totalOutput,
+      input: currentInput,
+      output: currentOutput,
+      totalInput,
+      totalOutput,
       // context 与 cost 仍是展示文本，不参与流量判断，费用变化不应点亮 token 箭头。
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
@@ -1725,8 +1738,8 @@ export function Prompt(props: PromptProps) {
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
                           {/* 只改变箭头前景色，数值与可选后缀仍从同一 item 快照读取，保持文本布局稳定。 */}
-                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
-                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
                           {item().context ? ` · ${item().context}` : ""}
                           {item().cost ? ` · ${item().cost}` : ""}
                         </text>

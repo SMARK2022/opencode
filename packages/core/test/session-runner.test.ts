@@ -23,6 +23,7 @@ import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { QuestionV2 } from "@opencode-ai/core/question"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { ContextSnapshotDecodeError } from "@opencode-ai/core/session/error"
 import { SessionEvent } from "@opencode-ai/core/session/event"
@@ -2152,7 +2153,9 @@ describe("SessionRunnerLLM", () => {
         ],
         [
           LLMEvent.stepStart({ index: 0 }),
-          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          // 最后 queue 的非零结算与前面的零用量 steer 区分，不能只检查模型请求顺序。
+          LLMEvent.stepFinish({ index: 0, reason: "stop",
+            usage: { inputTokens: 10, nonCachedInputTokens: 8, outputTokens: 4, reasoningTokens: 1, cacheReadInputTokens: 2 } }),
           LLMEvent.finish({ reason: "stop" }),
         ],
       ]
@@ -2163,12 +2166,17 @@ describe("SessionRunnerLLM", () => {
       const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
       while (requests.length < 1) yield* Effect.yieldNow
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue first" }), delivery: "queue" })
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
+      const queued = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
       streamGate = secondGate
       yield* Deferred.succeed(firstGate, undefined)
       while (requests.length < 2) yield* Effect.yieldNow
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Steer before next queued input" }) })
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
+      const steer = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
+      // gate 内的新 admission 尚未提升，必须有独立零请求，不能显示 Queue first 的回复。
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: steer.id, input: 0, output: 0, cost: 0 })
+      expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
+      expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
+      // 放开边界后先提升 steers，再提升早接纳的 Queue second；最终身份按可见顺序。
       yield* Deferred.succeed(secondGate, undefined)
       yield* Fiber.join(first)
       streamGate = undefined
@@ -2189,6 +2197,54 @@ describe("SessionRunnerLLM", () => {
         "Also steer before next queued input",
         "Queue second",
       ])
+      const messages = yield* session.messages({ sessionID, order: "asc" })
+      const lastAssistant = messages.findLast((message) => message.type === "assistant")
+      // 上方第四轮 provider request 证明 queue 最后执行；消息只检查存在性，助手按 durable 序列取最后一步。
+      expect(messages.some((message) => message.type === "user" && message.id === queued.id)).toBe(true)
+      expect(lastAssistant).toBeDefined()
+      expect((yield* session.get(sessionID)).request).toMatchObject({
+        messageID: queued.id, assistantID: lastAssistant?.id, input: 10, output: 4, cost: 0,
+      })
+    }),
+  )
+
+  it.effect("selects mixed entry requests by durable visibility and admission", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      requests.length = 0
+      const queued = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed native queue" }), delivery: "queue", resume: false })
+      // V1 noReply 保存用户后返回；直接使用它真实的 MessageUpdated 持久边界，不模拟第二个时钟。
+      const legacy = { id: SessionV1.MessageID.ascending(), sessionID, role: "user" as const, time: { created: DateTime.toEpochMillis(queued.timeCreated) + 1 },
+        agent: "build", model: { providerID: ProviderV2.ID.make("fake"), modelID: ModelV2.ID.make("fake-model") } }
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: legacy })
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: legacy.id, input: 0, output: 0, cost: 0 })
+      response = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop",
+          usage: { inputTokens: 10, nonCachedInputTokens: 8, outputTokens: 4, reasoningTokens: 1, cacheReadInputTokens: 2 } }),
+        LLMEvent.finish({ reason: "stop" }),
+      ]
+      // 真实 resume 提升早接纳的 queue；V1 创建时间刻意晚于 admission，旧 UNION 时间排序会误选零值。
+      yield* session.resume(sessionID)
+      expect(userTexts(requests.at(-1)!)).toEqual(["mixed native queue"])
+      const messages = yield* session.messages({ sessionID, order: "asc" })
+      expect(messages.some((message) => message.type === "user" && message.id === queued.id)).toBe(true)
+      expect((yield* session.get(sessionID)).request).toMatchObject({
+        messageID: queued.id, assistantID: messages.findLast((message) => message.type === "assistant")?.id, input: 10, output: 4, cost: 0,
+      })
+      // 旧 V1 用户再次更新不是新请求，不能用最后 MessageUpdated 序号压过 native promotion。
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...legacy, agent: "edited" } })
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
+      const nextLegacyID = SessionV1.MessageID.ascending()
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...legacy, id: nextLegacyID, time: { created: legacy.time.created + 1 } } })
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: nextLegacyID, input: 0, output: 0, cost: 0 })
+      // 混合入口之后的新 admission 仍是独立零值，不能固定 native 优先或永远保留 V1 候选。
+      const waiting = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed waiting" }), delivery: "queue", resume: false })
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: waiting.id, input: 0, output: 0, cost: 0 })
+      expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
+      expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
     }),
   )
 

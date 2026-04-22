@@ -11,7 +11,10 @@ import { createClient } from "@hey-api/openapi-ts"
 
 const opencode = path.resolve(dir, "../../opencode")
 
-await $`bun dev generate > ${dir}/openapi.json`.cwd(opencode)
+// 只在构建脚本中导入既有生成 owner，避免 CLI argv/bootstrap 副作用，不增加 SDK runtime 依赖。
+// 继续写同一 OpenAPI 输入文件，后续官方插件与修补流程完整保留，生成失败直接阻止构建。
+const { generateOpenApiJson } = await import(path.join(opencode, "src/cli/cmd/generate.ts"))
+await Bun.write(path.join(dir, "openapi.json"), await generateOpenApiJson())
 
 const document = (await Bun.file("./openapi.json").json()) as {
   components?: { schemas?: Record<string, unknown> }

@@ -23,7 +23,7 @@ import { InstallationVersion } from "./installation/version"
 import { Slug } from "./util/slug"
 import { ProjectTable } from "./project/sql"
 import path from "path"
-import { fromRow } from "./session/info"
+import { fromRow, selection } from "./session/info"
 import { SessionRunner } from "./session/runner/index"
 import { SessionStore } from "./session/store"
 import { SessionExecution } from "./session/execution"
@@ -289,7 +289,9 @@ const layer = Layer.effect(
           )
         }
         const query = db
-          .select()
+          // 列表和 get 返回同一请求口径，列表刷新不能擦掉已加载的请求身份。
+          // 继续使用既有分页与 placement 条件，投影不改变成员或排序。
+          .select(selection)
           .from(SessionTable)
           .where(conditions.length > 0 ? and(...conditions) : undefined)
           .orderBy(

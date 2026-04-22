@@ -2,6 +2,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { selection } from "@opencode-ai/core/session/info"
+import { RequestUsage } from "@opencode-ai/schema/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
 import { BackgroundJob } from "@/background/job"
@@ -54,7 +56,7 @@ export function isDefaultTitle(title: string) {
   ).test(title)
 }
 
-type SessionRow = typeof SessionTable.$inferSelect
+type SessionRow = typeof SessionTable.$inferSelect & { request?: RequestUsage }
 
 export function fromRow(row: SessionRow): Info {
   return SessionV1.fromRow(row)
@@ -175,6 +177,8 @@ export const Info = Schema.Struct({
   summary: optional(Summary),
   cost: optional(Schema.Finite),
   tokens: optional(Tokens),
+  // 旧 HTTP 返回请求投影；全量 tokens 不改变语义，也不缩到请求范围。
+  request: optional(RequestUsage),
   share: optional(Share),
   title: Schema.String,
   agent: optional(Schema.String),
@@ -481,7 +485,7 @@ const layer: Layer.Layer<
     })
 
     const get = Effect.fn("Session.get")(function* (id: SessionID) {
-      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+      const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
     })
@@ -507,10 +511,12 @@ const layer: Layer.Layer<
       const query =
         conditions.length > 0
           ? db
-              .select()
+              // 条件列表也使用共享投影，不能只有无筛选列表带请求数据。
+              .select(selection)
               .from(SessionTable)
               .where(and(...conditions))
-          : db.select().from(SessionTable)
+          // 不另扫描 parts；当前请求计算已经封装在 Core 的同一 SELECT 内。
+          : db.select(selection).from(SessionTable)
       const rows = yield* query
         .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
         .limit(input?.limit ?? 100)
@@ -538,7 +544,8 @@ const layer: Layer.Layer<
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
       const rows = yield* db
-        .select()
+        // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
+        .select(selection)
         .from(SessionTable)
         .where(and(eq(SessionTable.parent_id, parentID)))
         .all()
@@ -938,7 +945,8 @@ function listByProject(
   const limit = input.limit ?? 100
 
   return db
-    .select()
+    // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
+    .select(selection)
     .from(SessionTable)
     .where(and(...conditions))
     .orderBy(desc(SessionTable.time_updated))

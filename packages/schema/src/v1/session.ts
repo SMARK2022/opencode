@@ -11,6 +11,7 @@ import { ascending } from "../identifier"
 import { SessionID } from "../session-id"
 import { WorkspaceID } from "../workspace-id"
 import { PermissionV1 } from "./permission"
+import { Session } from "../session"
 
 const Timestamp = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -550,6 +551,9 @@ export const SessionInfo = Schema.Struct({
   parentID: optional(SessionID),
   summary: optional(SessionSummary),
   cost: optional(Schema.Finite),
+  // 兼容 HTTP 与 session.updated 共用当前请求契约，不能各自定义累计口径。
+  // 请求费用和会话费用并列，不能因都由服务端提供就视为同一范围。
+  request: optional(Session.RequestUsage),
   tokens: optional(SessionTokens),
   share: optional(SessionShare),
   title: Schema.String,

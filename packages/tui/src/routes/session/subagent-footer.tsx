@@ -39,7 +39,9 @@ export function SubagentFooter() {
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
   // 子代理用数值分开两方向，使仅有工具输入增长时不会同时点亮输出箭头。
-  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
+  // 子代理主值与括号使用自己的请求/全局范围，不能读父会话请求投影。
+  // 保留数值输入输出字段，节流和箭头脉冲仍消费原来契约。
+  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
@@ -52,10 +54,15 @@ export function SubagentFooter() {
     if (!confirmed) {
       if (!isRunning) return
       // 零值仍是有效运行快照，随后增长能与零基线比较。
-      return { input: 0, output: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
     }
 
-    const last = assistants.at(-1)
+    // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
+    const request = session()?.request
+    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+    const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+    const last = requestAssistants.at(-1)
+    // requestConfirmed 与 confirmed 分属两个范围，不重新累计显示页的 parts。
     const agg = {
       input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
       output: confirmed.output + confirmed.reasoning,
@@ -87,20 +94,27 @@ export function SubagentFooter() {
 
     const totalInput = agg.input + Math.round(pendingIn / 4)
     const totalOutput = agg.output + Math.round(streamingOut / 4)
-    const tokens = totalInput + totalOutput
+    // 只把当前请求尾部加入请求累计；全局累计仍来自服务端 tokens。
+    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
+    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
+    const requestTokens = currentInput + currentOutput
+    const totalTokens = totalInput + totalOutput
 
-    if (tokens <= 0) {
+    if (requestTokens <= 0 && totalTokens <= 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
     }
 
-    const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+    // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
+    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
+    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
     const cost = session()?.cost ?? 0
     return {
-      input: totalInput,
-      output: totalOutput,
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+      input: currentInput,
+      output: currentOutput,
+      totalInput,
+      totalOutput,
+      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
@@ -148,8 +162,8 @@ export function SubagentFooter() {
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>
