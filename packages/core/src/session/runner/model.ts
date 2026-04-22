@@ -84,7 +84,8 @@ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
   // ClaudeCode 的配置、环境、已保存 API key 顺序来自源 loader，不能继承通用 credential-first。
   if (model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic") {
     const configured = model.request.body.apiKey ?? model.api.settings?.apiKey
-    const value = (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
+    // ANTHROPIC_AUTH_TOKEN 必须在模型覆盖和保存凭据之前，不能只在 Catalog 启动时投影一次。
+    const value = process.env.ANTHROPIC_AUTH_TOKEN || (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
       (credential?.type === "key" ? credential.key : undefined)
     // OAuth access 不是源补丁支持的 API key，不在这里偷偷增加另一种认证来源。
     return value ? Auth.value(value) : undefined
@@ -177,7 +178,8 @@ export const fromCatalogModel = (
           // 源服务使用 Bearer；清除另一个认证头避免同一请求携带两份凭据。
           auth: key === undefined ? Auth.none : claudecode ? Auth.remove("x-api-key").andThen(Auth.bearer(key)) : Auth.header("x-api-key", key),
           // Endpoint 已拥有 /messages 路径，base URL 只补一次 /v1，不拼接完整消息地址。
-          ...(claudecode ? { endpoint: { baseURL: `${(resolved.api.url || process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com").replace(/\/+$/, "").replace(/\/v1$/, "")}/v1` } } : {}),
+          // URL 环境覆盖与 token 环境覆盖独立；不改变 model API ID 或显式 package。
+          ...(claudecode ? { endpoint: { baseURL: `${(process.env.ANTHROPIC_BASE_URL || resolved.api.url || process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com").replace(/\/+$/, "").replace(/\/v1$/, "")}/v1` } } : {}),
         })
         .model({ id: resolved.api.id }),
     )
