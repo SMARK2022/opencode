@@ -70,6 +70,8 @@ const layer = Layer.effect(
 
     const available = (provider: ProviderV2.Info, integration: Integration.Info | undefined) => {
       if (provider.disabled) return false
+      // 环境只决定可用性，不写入配置 body；解析密钥时显式 api.settings 仍先于环境。
+      if (provider.id === "claudecode" && process.env.CLAUDECODE_API_KEY) return true
       if (typeof provider.request.body.apiKey === "string") return true
       if (integration?.connections.length) return true
       return provider.integrationID === undefined && !integration

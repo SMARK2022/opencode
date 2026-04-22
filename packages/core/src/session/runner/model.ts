@@ -81,6 +81,14 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 export const layerWith = (resolve: Interface["resolve"]) => Layer.succeed(Service, Service.of({ resolve }))
 
 const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
+  // ClaudeCode 的配置、环境、已保存 API key 顺序来自源 loader，不能继承通用 credential-first。
+  if (model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic") {
+    const configured = model.request.body.apiKey ?? model.api.settings?.apiKey
+    const value = (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
+      (credential?.type === "key" ? credential.key : undefined)
+    // OAuth access 不是源补丁支持的 API key，不在这里偷偷增加另一种认证来源。
+    return value ? Auth.value(value) : undefined
+  }
   if (credential?.type === "key") return Auth.value(credential.key)
   if (credential?.type === "oauth") return Auth.value(credential.access)
   const value = model.request.body.apiKey ?? model.api.settings?.apiKey
@@ -89,14 +97,27 @@ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
 
 const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
   const body = model.request.body
+  // 只有专用 Anthropic 路由消费这些字段；其他协议的 body 投影不扩大本补丁范围。
+  const claudecode = model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic"
   const httpBody = Object.hasOwn(body, "apiKey")
     ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey"))
     : body
   return route.with({
     provider: model.providerID,
     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
-    headers: model.request.headers,
-    http: { body: httpBody },
+    // protocol-owned 字段在 typed lowering 中处理，不能从 http.body 绕过校验覆盖 system/thinking。
+    headers: claudecode ? Object.fromEntries(Object.entries(model.request.headers).filter(([key]) =>
+      !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) : model.request.headers,
+    http: { body: claudecode ? Object.fromEntries(Object.entries(httpBody).filter(([key]) =>
+      !["thinking", "metadata", "output_config"].includes(key))) : httpBody },
+    // metadata 不再出现在后置 overlay，保证最终 user_id 由专用 adapter 决定。
+    ...(claudecode ? { providerOptions: { anthropic: {
+      // 配置 beta 转入既有协议选项，HTTP 后置 overlay 不再覆盖专用 beta 或身份头。
+      betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
+      thinking: body.thinking,
+      metadata: body.metadata,
+      output_config: body.output_config,
+    } } } : {}),
     limits: { context: model.limit.context, output: model.limit.output },
   })
 }
@@ -138,7 +159,8 @@ export const fromCatalogModel = (
       : produce(model, (draft) => {
           Object.assign(draft.request.body, credential.metadata)
         })
-  const key = apiKey(resolved, credential)
+  // credential metadata 可补充请求参数，但不能反过来抢占 ClaudeCode 的显式配置密钥。
+  const key = apiKey(model.providerID === "claudecode" ? model : resolved, credential)
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
     return Effect.succeed(
       withDefaults(resolved, OpenAIResponses.route)
@@ -147,9 +169,16 @@ export const fromCatalogModel = (
     )
   }
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
+    // 仅在已经确认的 Anthropic API 分支配置 ClaudeCode，不按名称强改其他显式协议。
+    const claudecode = resolved.providerID === "claudecode"
     return Effect.succeed(
       withDefaults(resolved, AnthropicMessages.route)
-        .with({ auth: key === undefined ? Auth.none : Auth.header("x-api-key", key) })
+        .with({
+          // 源服务使用 Bearer；清除另一个认证头避免同一请求携带两份凭据。
+          auth: key === undefined ? Auth.none : claudecode ? Auth.remove("x-api-key").andThen(Auth.bearer(key)) : Auth.header("x-api-key", key),
+          // Endpoint 已拥有 /messages 路径，base URL 只补一次 /v1，不拼接完整消息地址。
+          ...(claudecode ? { endpoint: { baseURL: `${(resolved.api.url || process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com").replace(/\/+$/, "").replace(/\/v1$/, "")}/v1` } } : {}),
+        })
         .model({ id: resolved.api.id }),
     )
   }

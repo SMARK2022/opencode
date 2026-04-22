@@ -1,4 +1,6 @@
 import { Effect, Schema } from "effect"
+import { createHash, randomUUID } from "node:crypto"
+import { HttpTransport } from "../route/transport"
 import { Route } from "../route/client"
 import { Auth } from "../route/auth"
 import { Endpoint } from "../route/endpoint"
@@ -28,6 +30,10 @@ import { ToolStream } from "./utils/tool-stream"
 const ADAPTER = "anthropic-messages"
 export const DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
 export const PATH = "/messages"
+// 与源 adapter 相同的进程身份生命周期；普通 Anthropic 请求不会发出这些标识。
+const claudeCodeSession = { sessionId: randomUUID(), deviceId: randomUUID() }
+// metadata 是 provider 原生 JSON，Schema 保留已有字段，不把它伪装成 Session 持久状态。
+const encodeMetadata = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))
 
 // =============================================================================
 // Request Body Schema
@@ -153,9 +159,16 @@ const AnthropicThinking = Schema.Struct({
   budget_tokens: Schema.Number,
 })
 
+// 13 的 nullish 默认不能吞掉显式 disabled/adaptive；型号默认策略仍由15引入。
+const ClaudeCodeThinking = Schema.Union([AnthropicThinking,
+  // display 只属于 adaptive；typed 编码保留合法摘要选择，不向 disabled 混入预算或显示属性。
+  Schema.Struct({ type: Schema.Literal("adaptive"), display: Schema.optional(Schema.Literals(["omitted", "summarized"])) }),
+  Schema.Struct({ type: Schema.Literal("disabled") }),
+])
 const AnthropicBodyFields = {
-  model: Schema.String,
+  // billing 固定位于首字段首块，最终字节修补无需搜索用户文字或再编码 model ID。
   system: optionalArray(AnthropicTextBlock),
+  model: Schema.String,
   messages: Schema.Array(AnthropicMessage),
   tools: optionalArray(AnthropicTool),
   tool_choice: Schema.optional(AnthropicToolChoice),
@@ -165,7 +178,8 @@ const AnthropicBodyFields = {
   top_p: Schema.optional(Schema.Number),
   top_k: Schema.optional(Schema.Number),
   stop_sequences: optionalArray(Schema.String),
-  thinking: Schema.optional(AnthropicThinking),
+  metadata: Schema.optional(JsonObject),
+  thinking: Schema.optional(ClaudeCodeThinking),
 }
 const AnthropicMessagesBody = Schema.Struct(AnthropicBodyFields)
 export type AnthropicMessagesBody = Schema.Schema.Type<typeof AnthropicMessagesBody>
@@ -492,6 +506,18 @@ const anthropicOptions = (request: LLMRequest) => request.providerOptions?.anthr
 
 const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
   const thinking = anthropicOptions(request)?.thinking
+  // 只在 ClaudeCode 保留源13显式值，普通 Anthropic 的 enabled-only lowering 完整保持。
+  if (request.model.provider === "claudecode" && thinking !== undefined && thinking !== null) {
+    if (!ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
+    if (thinking.type === "disabled") return { type: "disabled" as const }
+    if (thinking.type === "adaptive") return {
+      type: "adaptive" as const,
+      // 已验证枚举值用 const 对象保留字面量，避免返回类型再次拓宽为 string。
+      ...(thinking.display === "omitted" || thinking.display === "summarized" ? { display: thinking.display } as const : {}),
+    }
+    // 非 nullish 的无效配置必须走 typed 错误，不能被 fromRequest 的缺省 enabled 掩盖。
+    if (thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
+  }
   if (!ProviderShared.isRecord(thinking) || thinking.type !== "enabled") return undefined
   const budget =
     typeof thinking.budgetTokens === "number"
@@ -536,9 +562,32 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
       `Anthropic Messages: dropped ${breakpoints.dropped} cache breakpoint(s); the API allows at most ${ANTHROPIC_BREAKPOINT_CAP} per request.`,
     )
   }
+  // 原生 lowering 保持媒体、工具和 chronological system update 的上游处理，不经过 V1 fetch。
+  const claudecode = request.model.provider === "claudecode"
+  const metadata = anthropicOptions(request)?.metadata
+  // 先保留已有 metadata，再替换 adapter 拥有的 user_id；不覆盖其他字段。
+  const claudeCodeMetadata = {
+    ...(ProviderShared.isRecord(metadata) ? metadata : {}),
+    user_id: encodeMetadata({ device_id: claudeCodeSession.deviceId, account_uuid: "", session_id: claudeCodeSession.sessionId }),
+  }
+  // 使用真正 lowered 的首个 user 文本；13 拼接全部 text，15 才改成首块，不能提前改变阶段。
+  const firstUserText = messages.find((message) => message.role === "user")?.content
+    .filter((block) => block.type === "text").map((block) => block.text).join("") ?? ""
+  const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
+  const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
+  // 三位版本后缀与五位零占位是源 wire 契约；CCH 只在完整 overlay 编码后计算。
+  const billing = `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;`
   return {
+    // 13 的身份注入在 20 明确撤销；保留用户的原始 system，顺序始终是身份在前。
+    system: claudecode ? [
+      { type: "text" as const, text: billing },
+      // 上游 tools/system/history 已先领取预算；身份只消费剩余名额，不能挤掉有效工具标记。
+      { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude.", cache_control: breakpoints.remaining > 0 ? cacheControl(breakpoints, { type: "ephemeral" }) : undefined },
+      { type: "text" as const, text: "You are an interactive agent that helps users with software engineering tasks.\nUse the instructions below and the tools available to you to assist the user.\n\n# System\n - All text you output outside of tool use is displayed to the user.\n - Tool results and user messages may include <system-reminder> tags.\n - The conversation has unlimited context through automatic summarization.", cache_control: breakpoints.remaining > 0 ? cacheControl(breakpoints, { type: "ephemeral" }) : undefined },
+      ...(system ?? []),
+    ] : system,
     model: request.model.id,
-    system,
+    ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
     messages,
     tools,
     tool_choice: toolChoice,
@@ -548,7 +597,8 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     top_p: generation?.topP,
     top_k: generation?.topK,
     stop_sequences: generation?.stop,
-    thinking: yield* lowerThinking(request),
+    // 默认预算严格小于当前输出上限，不能照搬源固定 31999 导致小窗口请求被拒。
+    thinking: (yield* lowerThinking(request)) ?? (claudecode ? { type: "enabled" as const, budget_tokens: Math.min(31999, Math.max(1, (generation?.maxTokens ?? outputLimit) - 1)) } : undefined),
   }
 })
 
@@ -842,14 +892,48 @@ export const protocol = Protocol.make({
   },
 })
 
+// 复用现有 HTTP frames/executor，专用 prepare 只在唯一最终编码点修补自己的五位字段。
+const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
 export const route = Route.make({
   id: ADAPTER,
   provider: "anthropic",
   protocol,
   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,
-  framing: Framing.sse,
-  headers: () => ({ "anthropic-version": "2023-06-01" }),
+  transport: {
+    ...transport,
+    prepare: (input) => Effect.gen(function* () {
+      if (input.request.model.provider !== "claudecode")
+        return yield* transport.prepare(input)
+      const parts = yield* HttpTransport.jsonRequestParts(input)
+      // Schema/return 将 system 排首；首块纯 ASCII，offset 不受 model ID 或用户 UTF-8 长度影响。
+      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
+      if (!parts.bodyText.startsWith(`${prefix}00000;`))
+        return yield* invalid("ClaudeCode billing layout changed before transport")
+      // 包含全部工具、metadata、thinking 与允许的 HTTP overlay，只编码一次最终 JSON。
+      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
+      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
+      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
+    }),
+  },
+  // 请求头在 protocol route 的既有构造点产生，运输层仍拥有取消和 stream 生命周期。
+  headers: ({ request }) => {
+    // 使用已合并的配置/variant beta；仅在协议 owner 去重，不生成另一条 HTTP 覆盖路径。
+    const betas = anthropicOptions(request)?.betas
+    return {
+      "anthropic-version": "2023-06-01",
+      ...(request.model.provider === "claudecode" ? {
+        "anthropic-beta": [...new Set([
+          "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+          ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
+        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter(Boolean))].join(","),
+        "x-app": "cli",
+        "user-agent": "claude-cli/2.1.117 (external, cli)",
+        // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。
+        "x-claude-code-session-id": claudeCodeSession.sessionId,
+      } : {}),
+    }
+  },
 })
 
 export * as AnthropicMessages from "./anthropic-messages"
