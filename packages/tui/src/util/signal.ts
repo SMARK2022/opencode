@@ -86,3 +86,47 @@ export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>
 
   return alpha
 }
+
+// 比较相邻已发布快照的数值增长，不以对象身份或格式化文本变化判断流量。
+// ms 是最后一次增长后的保持时长；它与上游 50ms 快照节流窗口独立。
+export function createTokenFlowPulse<T extends { input: number; output: number } | undefined>(
+  value: Accessor<T>,
+  ms = 900,
+) {
+  const [flow, setFlow] = createSignal({ input: false, output: false })
+  let inputTimer: ReturnType<typeof setTimeout> | undefined
+  let outputTimer: ReturnType<typeof setTimeout> | undefined
+
+  createEffect(
+    on(value, (next, prev) => {
+      // undefined 表示消费者已无可显示用量，立即熄灭两侧而非等旧脉冲自然到期。
+      if (!next) {
+        setFlow({ input: false, output: false })
+        return
+      }
+      // 首个有效值只建立基线；载入已有历史计数不应伪装成刚发生的流量。
+      if (!prev) return
+      // 同方向增长撤销旧到期回调，避免旧回调提前熄灭刚续期的脉冲。
+      if (next.input > prev.input) {
+        if (inputTimer) clearTimeout(inputTimer)
+        setFlow((x) => ({ ...x, input: true }))
+        inputTimer = setTimeout(() => setFlow((x) => ({ ...x, input: false })), ms)
+      }
+      // 输出用独立计时器，输入增长不能延长输出脉冲，反之亦然。
+      // 相等或下降不触发续期，估算被修正时不会被显示成新增输出。
+      if (next.output > prev.output) {
+        if (outputTimer) clearTimeout(outputTimer)
+        setFlow((x) => ({ ...x, output: true }))
+        outputTimer = setTimeout(() => setFlow((x) => ({ ...x, output: false })), ms)
+      }
+    }),
+  )
+
+  // helper 随创建它的视图 owner 清理，两方向的到期回调都不能越过卸载边界。
+  onCleanup(() => {
+    if (inputTimer) clearTimeout(inputTimer)
+    if (outputTimer) clearTimeout(outputTimer)
+  })
+
+  return flow
+}
