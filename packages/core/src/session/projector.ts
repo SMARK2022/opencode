@@ -377,7 +377,29 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.Step.Ended, (event) =>
+      Effect.gen(function* () {
+        // 只读取此结算拥有的助手；缺失消息仍沿用 updater 的无操作语义，不制造孤立用量。
+        const row = yield* db
+          .select()
+          .from(SessionMessageTable)
+          .where(and(
+            eq(SessionMessageTable.id, event.data.assistantMessageID),
+            eq(SessionMessageTable.session_id, event.data.sessionID),
+            eq(SessionMessageTable.type, "assistant"),
+          ))
+          .get()
+          .pipe(Effect.orDie)
+        yield* run(db, event)
+        if (!row) return
+        const previous = decodeMessage({ ...row.data, id: row.id, type: row.type })
+        // updater 覆盖同一助手的结算，和 V1 part 修订一样减旧加新，不能把修订再算一轮。
+        if (previous.type === "assistant" && previous.cost !== undefined && previous.tokens)
+          yield* applyUsage(db, event.data.sessionID, { cost: previous.cost, tokens: previous.tokens }, -1)
+        // 复用五项累计与费用写入；与消息同属现有事件事务，重复 replay 在 sequencer 前置去重。
+        yield* applyUsage(db, event.data.sessionID, event.data)
+      }),
+    )
     yield* events.project(SessionEvent.Step.Failed, (event) => run(db, event))
     yield* events.project(SessionEvent.Text.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Text.Ended, (event) => run(db, event))
@@ -424,13 +446,22 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!boundary) return yield* Effect.die(`Revert boundary message not found: ${event.data.messageID}`)
-        yield* db
+        const removed = yield* db
           .delete(SessionMessageTable)
           .where(
             and(eq(SessionMessageTable.session_id, event.data.sessionID), gt(SessionMessageTable.seq, boundary.seq)),
           )
-          .run()
+          .returning()
+          .all()
           .pipe(Effect.orDie)
+        // DELETE 返回实际移除的行，扣数与删消息同事务，不另扫历史或猜测边界用量。
+        for (const row of removed) {
+          if (row.type !== "assistant") continue
+          const message = decodeMessage({ ...row.data, id: row.id, type: row.type })
+          // token 表示当前保留消息的用量；已经花掉的费用不因 revert 退款。
+          if (message.type === "assistant" && message.tokens)
+            yield* applyUsage(db, event.data.sessionID, { cost: 0, tokens: message.tokens }, -1)
+        }
         yield* db
           .delete(SessionInputTable)
           .where(

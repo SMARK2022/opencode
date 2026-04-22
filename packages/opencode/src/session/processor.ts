@@ -320,7 +320,21 @@ const layer = Layer.effect(
             return
 
           case "tool-input-delta":
+            // delta 可先于 start 到达，保留上游 ensureToolCall 才不会丢失首片参数。
             yield* ensureToolCall(value)
+            yield* updateToolCall(value.id, (match) => {
+              // 已解析的 input 属于 running/completed；迟到片段不能覆盖这种状态。
+              if (match.state.status !== "pending") return match
+              return {
+                // 增量只更新参数缓存，保留原 part 的工具身份和 provider metadata 供执行协调。
+                ...match,
+                state: {
+                  ...match.state,
+                  // ToolInputDelta 的文本字段是 value.text；累积到 raw 供实时输出 token 估算。
+                  raw: match.state.raw + value.text,
+                },
+              }
+            })
             return
 
           case "tool-input-end": {

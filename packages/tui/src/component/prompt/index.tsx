@@ -271,72 +271,59 @@ export function Prompt(props: PromptProps) {
     const isRunning = status().type !== "idle"
     const session = sync.session.get(props.sessionID)
     const msg = sync.data.message[props.sessionID] ?? []
-    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
-    // 尚未回传 usage 的助手也承载流式正文；按 output 筛选会错误选中上一轮回复。
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
-
-    if (!last) {
-      // 新会话在 idle 时仍隐藏 footer，零值只用于已经开始的请求。
+    // transcript 只保留 100 条，已确认总量不能由这个显示窗口重新累计。
+    const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+    const confirmed = session?.tokens
+    if (!confirmed) {
+      // 会话快照尚未到达时保留 index 6 的运行中零值占位，不从窗口推算历史总量。
       if (!isRunning) return
-      // 已发送 prompt 但尚无助手回复时立即显示零值
       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
     }
 
-    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
-    const parts = sync.data.part[last.id] ?? []
-    const chars = parts.reduce((sum, part) => {
-      // ignored 文本不进入模型输出，计入字符估算会把隐藏的合成内容收费化。
-      if (part.type === "text" && !part.ignored) return sum + part.text.length
-      if (part.type === "reasoning") return sum + part.text.length
-      return sum
-    }, 0)
+    // 无缓存助手不代表会话无历史用量；总量仍显示，只有流式尾部按空处理。
+    const last = assistants.at(-1)
+    const agg = {
+      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
+      output: confirmed.output + confirmed.reasoning,
+    }
 
-    // 以最后一个 step-finish 排除已结算历史；缺失时索引为 -1，首轮工具结果也进入未确认区段。
-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
-    // 完成标记关闭临时估算，让静态显示回到 API 计数，避免估算长期叠加。
-    const toolOutputChars = !last.time.completed
-      ? parts.reduce((sum, part, i) => {
-          if (i <= lastStepFinishIdx) return sum
-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+    // 已确认边界之前的内容已进入服务端投影，不能再次进入字符近似。
+    const lastParts = last ? (sync.data.part[last.id] ?? []) : []
+    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+    const streamingOut = !last || last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "text" && !p.ignored) return sum + p.text.length
+          if (p.type === "reasoning") return sum + p.text.length
+          // pending 尚无解析后的 input；必须读取 processor 累积的 raw 参数片段。
+          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
           return sum
         }, 0)
-      : 0
+    // 工具输出属于下一轮输入；仍只近似未确认尾部，不新增历史文本估算器。
+    const pendingIn = !last || last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+          return sum
+        }, 0)
 
-    // processor 覆盖消息 tokens，累计必须取保留各步 usage 的全部 step-finish parts。
-    const cumTokens = parts.reduce(
-      (acc, part) => {
-        // 工具结果和正文不是 API usage，confirmed 累计只能取已确认的步骤边界。
-        if (part.type !== "step-finish") return acc
-        return {
-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-          output: acc.output + part.tokens.output + part.tokens.reasoning,
-        }
-      },
-      { input: 0, output: 0 },
-    )
-    const inputBase = cumTokens.input
-    // 四字符换算仅用于实时提示，不能替代 input/cache 的服务端计数或作为计费依据。
-    const input = inputBase + Math.round(toolOutputChars / 4)
-    // reasoning 与正文由 API 分开回传，输出流量必须包含两者才能覆盖思考阶段。
-    const outputActual = cumTokens.output
-    // 四字符仅是等待 API usage 时的显示近似，不写回消息或参与计费。
-    const outputEstimated = Math.round(chars / 4)
-    // 流式阶段取实际值与估算值的较大值，完成后回到 API 实值，避免临时峰值变成永久用量。
-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-    const tokens = input + output
-    // 仅流量全零才隐藏；缓存输入或 reasoning-only 回复仍有有效用量。
-    if (tokens <= 0 && input <= 0 && output <= 0) {
-      // 运行中但 token 尚未到达时显示零值，避免 footer 闪烁
+    const totalInput = agg.input + Math.round(pendingIn / 4)
+    const totalOutput = agg.output + Math.round(streamingOut / 4)
+    const tokens = totalInput + totalOutput
+    if (tokens <= 0) {
       if (!isRunning) return
       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
     }
 
-    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    // 模型仅能由仍可见的助手证实；缺失时显示总量而不捏造 context 上限。
+    const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = session?.cost ?? 0
     return {
-      // 添加输入/输出流量显示，用于 footer 展示
-      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
+      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }

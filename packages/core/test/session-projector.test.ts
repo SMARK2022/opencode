@@ -2,6 +2,8 @@ import { describe, expect } from "bun:test"
 import { DateTime, Effect, Schema } from "effect"
 import { asc, eq, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
+import { DatabaseMigration } from "@opencode-ai/core/database/migration"
+import stepUsageMigration from "@opencode-ai/core/database/migration/20260623000000_session_step_usage"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -45,6 +47,77 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  it.effect("projects native settlements into public Session totals exactly once", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const events = yield* EventV2.Service
+      const sessions = yield* SessionV2.Service
+      // 只建立会话容器，助手必须由真实 Started 事件产生，避免手工行掩盖 projector 缺口。
+      yield* database.db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* database.db.insert(SessionTable).values({
+        id: sessionID, project_id: Project.ID.global, slug: "usage", directory: "/project", title: "usage", version: "test",
+      }).run()
+      // 每轮给五项不同的非零计数，能发现只累加最后一轮、遗漏 reasoning 或合并 cache 的错误。
+      const records = yield* Effect.forEach([1, 2], (factor) => Effect.gen(function* () {
+        const assistantMessageID = SessionMessage.ID.make(`msg_native_usage_${factor}`)
+        yield* events.publish(SessionEvent.Step.Started, {
+          sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
+        })
+        const ended = yield* events.publish(SessionEvent.Step.Ended, {
+          sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor + 1), finish: "stop", cost: factor / 4,
+          tokens: { input: factor * 2, output: factor * 3, reasoning: factor, cache: { read: factor * 5, write: factor * 7 } },
+        })
+        // replay 使用原 durable ID/seq/version，重新 publish 一个新事件不属于重复重放测试。
+        if (!ended.durable) return yield* Effect.die("Native settlement must be durable")
+        return {
+          id: ended.id, aggregateID: ended.durable.aggregateID, seq: ended.durable.seq,
+          type: EventV2.versionedType(ended.type, ended.durable.version),
+          data: Schema.encodeSync(SessionEvent.Step.Ended.data)(ended.data),
+        }
+      }))
+      const expected = { cost: 0.75, tokens: { input: 6, output: 9, reasoning: 3, cache: { read: 15, write: 21 } } }
+      // 验证公开 get/list，而非只读 message.tokens；本次缺陷恰好发生在消息和会话行之间。
+      expect(yield* sessions.get(sessionID)).toMatchObject(expected)
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(expected)
+      // 重放已经落盘的两次结算，保留现有 sequencer 的去重边界，不在投影中另建标记。
+      for (const record of records) yield* events.replay(record)
+      expect(yield* sessions.get(sessionID)).toMatchObject(expected)
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(expected)
+      // updater 可覆盖旧助手的结算；修订应该替换第一轮，不能在两轮总量上再叠加完整用量。
+      yield* events.publish(SessionEvent.Step.Ended, {
+        sessionID, assistantMessageID: SessionMessage.ID.make("msg_native_usage_1"),
+        timestamp: DateTime.makeUnsafe(4), finish: "stop", cost: 1,
+        tokens: { input: 6, output: 9, reasoning: 3, cache: { read: 15, write: 21 } },
+      })
+      const corrected = { cost: 1.5, tokens: { input: 10, output: 15, reasoning: 5, cache: { read: 25, write: 35 } } }
+      expect(yield* sessions.get(sessionID)).toMatchObject(corrected)
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(corrected)
+      // 此会话没有 V1 part，用旧的仅 part 回填会得到零；模拟未安装修正的旧 native 数据库。
+      yield* database.db.run(sql`DELETE FROM migration WHERE id = ${stepUsageMigration.id}`)
+      yield* database.db.update(SessionTable).set({
+        tokens_input: 0, tokens_output: 0, tokens_reasoning: 0, tokens_cache_read: 0, tokens_cache_write: 0,
+      }).where(eq(SessionTable.id, sessionID)).run()
+      yield* DatabaseMigration.applyOnly(database.db, [stepUsageMigration])
+      // 同一回填仅恢复五项 token，不能以修复旧 native 计数为由重写已有费用。
+      expect(yield* sessions.get(sessionID)).toMatchObject(corrected)
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(corrected)
+      // stage 仅设边界，公开 commit 才删第二轮；保留修订后的第一轮并保持已花费用。
+      yield* events.publish(SessionEvent.RevertEvent.Staged, {
+        sessionID, timestamp: DateTime.makeUnsafe(5),
+        revert: { messageID: SessionMessage.ID.make("msg_native_usage_1"), diff: "", files: [] },
+      })
+      yield* sessions.revert.commit(sessionID)
+      const reverted = { cost: 1.5, tokens: { input: 6, output: 9, reasoning: 3, cache: { read: 15, write: 21 } } }
+      expect(yield* sessions.get(sessionID)).toMatchObject(reverted)
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(reverted)
+      // 删除后重放旧结算仍由 sequencer 去重，不能复活已删消息或重新加回 token。
+      for (const record of records) yield* events.replay(record)
+      yield* sessions.revert.commit(sessionID)
+      expect(yield* sessions.get(sessionID)).toMatchObject(reverted)
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(reverted)
+    }).pipe(Effect.provide(sessionsLayer)),
+  )
+
   it.effect("projects moved sessions without the transitional context epoch table", () =>
     Effect.gen(function* () {
       const { db } = yield* Database.Service

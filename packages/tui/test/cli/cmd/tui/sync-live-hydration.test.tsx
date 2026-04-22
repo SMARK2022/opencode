@@ -199,6 +199,265 @@ test("hydration does not clear text streamed before it starts", async () => {
   }
 })
 
+test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deletion survive stale %s lists", async (mode) => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const old = {
+    ...session, slug: "race", projectID: "proj_test", path: "packages/tui", cost: 1,
+    tokens: { input: 20, output: 30, reasoning: 10, cache: { read: 50, write: 70 } },
+  }
+  // revert 可以降低全部五项，且 usage 不推进 time.updated；max 或时间戳合并都会漏掉它。
+  const current = { ...old, tokens: { input: 2, output: 3, reasoning: 1, cache: { read: 5, write: 7 } } }
+  const deleted = { ...old, id: "ses_deleted" }
+  const excluded = { ...old, id: "ses_excluded" }
+  const marker = { ...old, id: "ses_list_accepted" }
+  // 新行不在旧 HTTP 列表里，仍需保留已到达的完整用量；子目录也属于当前筛选。
+  const added = { ...current, id: "ses_live_new", path: "packages/tui/new", time: { created: Date.now(), updated: Date.now() } }
+  const outside = { ...added, id: "ses_live_outside" }
+  const foreign = { ...added, id: "ses_live_foreign", projectID: "proj_other" }
+  // 旧 pathless 行依靠请求目录匹配，不能仅靠相对 path 判定遗漏这类合法成员。
+  const pathless = { ...added, id: "ses_live_pathless", path: undefined, directory: "/tmp/opencode/packages/tui" }
+  let resolveList!: (response: Response) => void
+  const response = new Promise<Response>((resolve) => { resolveList = resolve })
+  let delayed = false
+  let requested = false
+  const { app, emit, sync, kv } = await mount((url) => {
+    if (url.pathname !== "/session") return undefined
+    // 初次 mount 正常完成；仅把被测 refresh/bootstrap 的列表 HTTP 延迟。
+    if (!delayed) return json([old, deleted, excluded])
+    requested = true
+    expect(url.searchParams.get("scope")).toBe(mode === "directory" ? null : "project")
+    expect(url.searchParams.get("path")).toBe(mode === "directory" ? "packages/tui" : null)
+    return response
+  }, tmp.path)
+  try {
+    kv.set("session_directory_filter_enabled", mode === "directory")
+    delayed = true
+    const request = mode === "bootstrap" ? sync.bootstrap({ fatal: false }) : sync.session.refresh()
+    await wait(() => requested)
+    emit(global({ id: `evt_${mode}_usage`, type: "session.updated", properties: { sessionID, info: current } }))
+    emit(global({ id: `evt_${mode}_deleted`, type: "session.deleted", properties: { sessionID: deleted.id, info: deleted } }))
+    for (const info of [added, outside, foreign, pathless])
+      emit(global({ id: `evt_${mode}_${info.id}`, type: "session.updated", properties: { sessionID: info.id, info } }))
+    // 移出子树的 placement delta 改变成员资格；project scope 仍应保留同项目行。
+    emit(global({ id: `evt_${mode}_move_out`, type: "session.next.moved", properties: {
+      sessionID: outside.id, timestamp: Date.now(), location: { directory: outside.directory }, subdirectory: "packages/other",
+    } }))
+    // 确认事件已落入 store 后才完成旧快照，避免把事件晚到误当成竞态修复。
+    await wait(() => sync.session.get(sessionID)?.tokens?.input === 2 && !sync.session.get(deleted.id) &&
+      sync.session.get(outside.id)?.path === "packages/other" && !!sync.session.get(foreign.id))
+    // 接收时切换偏好不改变已发出请求的筛选；否则迟到结果会按另一个查询解释。
+    kv.set("session_directory_filter_enabled", mode !== "directory")
+    resolveList(json([old, deleted, marker]))
+    await request
+    // 非 continue 的 bootstrap 返回早于非阻塞列表，marker 证明列表已实际接收。
+    await wait(() => !!sync.session.get(marker.id))
+    expect(sync.session.get(sessionID)?.tokens).toEqual(current.tokens)
+    expect(sync.session.get(sessionID)?.cost).toBe(1)
+    expect(sync.session.get(deleted.id)).toBeUndefined()
+    // 只补本次触碰的行，服务器排除的未触碰旧成员仍消失。
+    expect(sync.session.get(excluded.id)).toBeUndefined()
+    expect(sync.session.get(added.id)?.tokens).toEqual(current.tokens)
+    expect(sync.session.get(added.id)?.cost).toBe(1)
+    expect(sync.session.get(pathless.id)?.tokens).toEqual(current.tokens)
+    // 全局事件不会替列表做 project/path 筛选，跨项目和移出的行必须在接收处排除。
+    expect(sync.session.get(foreign.id)).toBeUndefined()
+    expect(!!sync.session.get(outside.id)).toBe(mode !== "directory")
+    delayed = false
+    kv.set("session_directory_filter_enabled", false)
+    emit(global({ id: `evt_${mode}_after`, type: "session.updated", properties: {
+      sessionID, info: { ...current, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } },
+    } }))
+    await wait(() => sync.session.get(sessionID)?.tokens?.input === 0)
+    // 已完成请求的 touched 集必须释放；新请求没有并发事件时仍接收服务器快照。
+    await sync.session.refresh()
+    expect(sync.session.get(sessionID)?.tokens).toEqual(old.tokens)
+  } finally {
+    resolveList(json([]))
+    app.renderer.destroy()
+  }
+})
+
+test.each(["get", "project", "directory"] as const)("moved before %s initialization preserves the full row", async (mode) => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const full = {
+    ...session, slug: "race", projectID: "proj_test", path: "packages/old", workspaceID: "ws_old", cost: 1,
+    tokens: { input: 2, output: 3, reasoning: 1, cache: { read: 5, write: 7 } },
+  }
+  let resolveSnapshot!: (response: Response) => void
+  const response = new Promise<Response>((resolve) => { resolveSnapshot = resolve })
+  let delayed = false
+  let requested = false
+  const { app, emit, sync, kv } = await mount((url) => {
+    // 列表先让 mount 完成；GET 和列表共用同一缺失本地行的部分更新场景。
+    if (url.pathname === "/session" && (mode === "get" || !delayed)) return json([])
+    if ((mode !== "get" && url.pathname === "/session") || url.pathname === `/session/${sessionID}`) {
+      requested = true
+      return response
+    }
+    if (url.pathname.startsWith(`/session/${sessionID}/`)) return json([])
+    return undefined
+  }, tmp.path)
+  try {
+    kv.set("session_directory_filter_enabled", mode === "directory")
+    delayed = true
+    const request = mode === "get" ? sync.session.sync(sessionID) : sync.session.refresh()
+    await wait(() => requested)
+    // 两个 delta 验证最后 placement 胜出；第一条不能被当作完整会话或删除。
+    emit(global({ id: `evt_${mode}_first_move`, type: "session.next.moved", properties: {
+      sessionID, timestamp: 11, location: { directory: "/tmp/old", workspaceID: "ws_move" }, subdirectory: "packages/stale",
+    } }))
+    emit(global({ id: `evt_${mode}_last_move`, type: "session.next.moved", properties: {
+      sessionID, timestamp: 12, location: { directory: session.directory },
+      subdirectory: mode === "directory" ? "packages/tui/moved" : undefined,
+    } }))
+    // FIFO 后续事件证明 moved 已处理；无需等一个此时不应存在的 Session 行。
+    emit(global({ id: `evt_${mode}_move_ready`, type: "todo.updated", properties: { sessionID, todos: [] } }))
+    await wait(() => sync.data.todo[sessionID] !== undefined)
+    expect(sync.session.get(sessionID)).toBeUndefined()
+    resolveSnapshot(json(mode === "get" ? full : [full]))
+    await request
+    // title/created/usage 来自 HTTP，placement 来自最后 delta；不能把半行标成 fullSynced。
+    expect(sync.session.get(sessionID)).toMatchObject({
+      title: full.title, cost: 1, tokens: full.tokens, time: { created: 0, updated: 12 },
+      directory: session.directory, path: mode === "directory" ? "packages/tui/moved" : undefined, workspaceID: undefined,
+    })
+  } finally {
+    resolveSnapshot(json([]))
+    app.renderer.destroy()
+  }
+})
+
+test("overlapping filtered lists do not erase full event snapshots from pending requests", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const old = {
+    ...session, slug: "overlap", projectID: "proj_test", path: "packages/other", cost: 1,
+    tokens: { input: 20, output: 30, reasoning: 10, cache: { read: 50, write: 70 } },
+    time: { created: Date.now(), updated: Date.now() },
+  }
+  // 新旧 snapshot 的 updated 完全相等，事件证据必须独立于时间戳或 token 大小。
+  const current = { ...old, cost: 2, tokens: { input: 2, output: 3, reasoning: 1, cache: { read: 5, write: 7 } } }
+  const getID = "ses_overlap_get"
+  const added = { ...current, id: "ses_overlap_new" }
+  const hydrated = { ...current, id: getID }
+  const deleted = { ...old, id: "ses_overlap_deleted" }
+  const excluded = { ...old, id: "ses_overlap_excluded" }
+  let resolveWide!: (response: Response) => void
+  const wideResponse = new Promise<Response>((resolve) => { resolveWide = resolve })
+  let resolveNarrow!: (response: Response) => void
+  const narrowResponse = new Promise<Response>((resolve) => { resolveNarrow = resolve })
+  let resolveGet!: (response: Response) => void
+  const getResponse = new Promise<Response>((resolve) => { resolveGet = resolve })
+  let delayed = false
+  const requested = new Set<string>()
+  const { app, emit, sync, kv } = await mount((url) => {
+    if (url.pathname === "/session") {
+      // mount 正常完成后才挂起请求，三个响应各用独立 Promise，不能串行伪造重叠。
+      if (!delayed) return json([old, deleted, excluded])
+      const key = url.searchParams.get("scope") === "project" ? "wide" : "narrow"
+      requested.add(key)
+      return key === "wide" ? wideResponse : narrowResponse
+    }
+    if (url.pathname === `/session/${getID}`) {
+      requested.add("get")
+      return getResponse
+    }
+    if (url.pathname.startsWith(`/session/${getID}/`)) return json([])
+    return undefined
+  }, tmp.path)
+  try {
+    delayed = true
+    kv.set("session_directory_filter_enabled", false)
+    const wide = sync.session.refresh()
+    // 宽请求仍在途时切换筛选并发起窄请求，随后 GET 也覆盖同一事件窗口。
+    kv.set("session_directory_filter_enabled", true)
+    const narrow = sync.session.refresh()
+    const get = sync.session.sync(getID)
+    await wait(() => requested.size === 3)
+    // 后到的 full 必须清除先前 moved 的 placement，否则窄列表会误把它保留在子树中。
+    emit(global({ id: "evt_overlap_move", type: "session.next.moved", properties: {
+      sessionID, timestamp: old.time.updated, location: { directory: old.directory }, subdirectory: "packages/tui/stale",
+    } }))
+    for (const info of [current, added, hydrated])
+      emit(global({ id: `evt_overlap_${info.id}`, type: "session.updated", properties: { sessionID: info.id, info } }))
+    emit(global({ id: "evt_overlap_deleted", type: "session.deleted", properties: { sessionID: deleted.id, info: deleted } }))
+    // 等事件处理完成再让窄列表覆盖共享 store，确保宽请求和 GET 确实已知完整更新。
+    await wait(() => sync.session.get(sessionID)?.tokens?.input === 2 && !!sync.session.get(added.id) &&
+      !!sync.session.get(getID) && !sync.session.get(deleted.id))
+    resolveNarrow(json([]))
+    await narrow
+    expect(sync.session.get(sessionID)).toBeUndefined()
+    expect(sync.session.get(added.id)).toBeUndefined()
+    expect(sync.session.get(getID)).toBeUndefined()
+    resolveGet(json({ ...old, id: getID }))
+    await get
+    // GET 只能恢复自己的最新 full；另两行仍缺失，宽请求不能借它们的共享 store 状态取证。
+    expect(sync.session.get(getID)).toMatchObject({ tokens: current.tokens, cost: 2, time: current.time })
+    expect(sync.session.get(sessionID)).toBeUndefined()
+    resolveWide(json([old, deleted]))
+    await wide
+    // 同时覆盖旧返回成员与不在响应里的新成员，二者均从各自请求的事件快照恢复。
+    expect(sync.session.get(sessionID)).toMatchObject({ tokens: current.tokens, cost: 2, time: current.time })
+    expect(sync.session.get(added.id)).toMatchObject({ tokens: current.tokens, cost: 2, time: current.time })
+    expect(sync.session.get(sessionID)?.path).toBe("packages/other")
+    // 筛选移除和真实删除保持区分；宽响应仍含 deleted 旧行也不能将它复活。
+    expect(sync.session.get(deleted.id)).toBeUndefined()
+    expect(sync.session.get(excluded.id)).toBeUndefined()
+  } finally {
+    resolveWide(json([]))
+    resolveNarrow(json([]))
+    resolveGet(json([]))
+    app.renderer.destroy()
+  }
+})
+
+test("live full usage survives stale hydration and transcript eviction", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  let resolveSession!: (response: Response) => void
+  const response = new Promise<Response>((resolve) => { resolveSession = resolve })
+  let requested = false
+  const current = {
+    ...session, slug: "race", projectID: "proj_test", cost: 1,
+    tokens: { input: 204, output: 306, reasoning: 102, cache: { read: 510, write: 714 } },
+  }
+  const { app, emit, sync } = await mount((url) => {
+    if (url.pathname === `/session/${sessionID}`) { requested = true; return response }
+    if (url.pathname === `/session/${sessionID}/message`) return json([])
+    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) return json([])
+    return undefined
+  }, tmp.path)
+  try {
+    const hydrate = sync.session.sync(sessionID)
+    // 等 HTTP 已发出再推进实时事件，避免测试只是比较两个顺序读取的快照。
+    await wait(() => requested)
+    emit(global({ id: "evt_usage", type: "session.updated", properties: { sessionID, info: current } }))
+    // 保持上游 100 条上限；本测试不靠取消 eviction 来让全量 usage 看似正确。
+    for (let index = 0; index < 101; index++) {
+      const info = { ...assistant, id: `msg_usage_${index}`, time: { created: index, completed: index + 1 } }
+      emit(global({ id: `evt_usage_${index}`, type: "message.updated", properties: { sessionID, info } }))
+      emit(global({ id: `evt_usage_part_${index}`, type: "message.part.updated", properties: {
+        sessionID, time: index, part: { id: `prt_usage_${index}`, sessionID, messageID: info.id, type: "text", text: "visible" },
+      } }))
+    }
+    // 窗口已满时 length 不再增长，需等待第 101 条才能证明 eviction 真正发生。
+    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_100") ?? false)
+    // GET 保留旧零值；若 hydration 覆盖了较新事件，本断言会观察到倒退。
+    resolveSession(json({ ...current, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }))
+    await hydrate
+    expect(sync.session.get(sessionID)?.tokens).toEqual(current.tokens)
+    expect(sync.session.get(sessionID)?.cost).toBe(1)
+    expect(sync.data.message[sessionID]).toHaveLength(100)
+    // 连 parts 也必须随最老消息回收，不能把完整 transcript 偷藏在 part store。
+    expect(sync.data.part.msg_usage_0).toBeUndefined()
+    expect(sync.data.message[sessionID].some((item) => item.id === "msg_usage_0")).toBe(false)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("live messages merged during hydration retain the 100 message window", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
