@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+// 在其他 import 求值前加载 version-env，确保它们读取到 OPENCODE_VERSION。
+import "./version-env"
+
 import { $ } from "bun"
 import path from "path"
 import { fileURLToPath } from "url"
