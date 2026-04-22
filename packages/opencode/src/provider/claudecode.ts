@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "crypto"
-import { xxh64 } from "@node-rs/xxhash"
 
 // ============================================================================
 // 常量与基础配置
@@ -138,9 +137,102 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
 /**
  * 计算 cch 值：对完整的 Body 字节串做 xxHash64，取低 20 位，转 5 位小写十六进制
  */
+const MASK_64 = 0xffff_ffff_ffff_ffffn
+const PRIME64_1 = 0x9e37_79b1_85eb_ca87n
+const PRIME64_2 = 0xc2b2_ae3d_27d4_eb4fn
+const PRIME64_3 = 0x1656_67b1_9e37_79f9n
+const PRIME64_4 = 0x85eb_ca77_c2b2_ae63n
+const PRIME64_5 = 0x27d4_eb2f_1656_67c5n
+
+const add64 = (a: bigint, b: bigint) => (a + b) & MASK_64
+const mul64 = (a: bigint, b: bigint) => (a * b) & MASK_64
+const rotl64 = (x: bigint, bits: number) => {
+  const r = BigInt(bits)
+  return ((x << r) | (x >> (64n - r))) & MASK_64
+}
+
+const readU32LE = (bytes: Uint8Array, offset: number) => {
+  const b0 = bytes[offset] ?? 0
+  const b1 = bytes[offset + 1] ?? 0
+  const b2 = bytes[offset + 2] ?? 0
+  const b3 = bytes[offset + 3] ?? 0
+  return BigInt((b0 + b1 * 0x100 + b2 * 0x10000 + b3 * 0x1000000) >>> 0)
+}
+
+const readU64LE = (bytes: Uint8Array, offset: number) => readU32LE(bytes, offset) | (readU32LE(bytes, offset + 4) << 32n)
+
+const round64 = (acc: bigint, lane: bigint) => mul64(rotl64(add64(acc, mul64(lane, PRIME64_2)), 31), PRIME64_1)
+
+const mergeRound64 = (acc: bigint, lane: bigint) => {
+  const merged = (acc ^ round64(0n, lane)) & MASK_64
+  return add64(mul64(merged, PRIME64_1), PRIME64_4)
+}
+
+const avalanche64 = (value: bigint) => {
+  let hash = value
+  hash = (hash ^ (hash >> 33n)) & MASK_64
+  hash = mul64(hash, PRIME64_2)
+  hash = (hash ^ (hash >> 29n)) & MASK_64
+  hash = mul64(hash, PRIME64_3)
+  hash = (hash ^ (hash >> 32n)) & MASK_64
+  return hash
+}
+
+export function xxh64(bodyBytes: Uint8Array, seed = 0n) {
+  let offset = 0
+  const len = bodyBytes.length
+  let hash: bigint
+
+  if (len >= 32) {
+    let v1 = add64(add64(seed, PRIME64_1), PRIME64_2)
+    let v2 = add64(seed, PRIME64_2)
+    let v3 = seed & MASK_64
+    let v4 = add64(seed, -PRIME64_1)
+
+    const limit = len - 32
+    while (offset <= limit) {
+      v1 = round64(v1, readU64LE(bodyBytes, offset))
+      v2 = round64(v2, readU64LE(bodyBytes, offset + 8))
+      v3 = round64(v3, readU64LE(bodyBytes, offset + 16))
+      v4 = round64(v4, readU64LE(bodyBytes, offset + 24))
+      offset += 32
+    }
+
+    hash = add64(add64(rotl64(v1, 1), rotl64(v2, 7)), add64(rotl64(v3, 12), rotl64(v4, 18)))
+    hash = mergeRound64(hash, v1)
+    hash = mergeRound64(hash, v2)
+    hash = mergeRound64(hash, v3)
+    hash = mergeRound64(hash, v4)
+  } else {
+    hash = add64(seed, PRIME64_5)
+  }
+
+  hash = add64(hash, BigInt(len))
+
+  while (offset + 8 <= len) {
+    const lane = readU64LE(bodyBytes, offset)
+    hash = (hash ^ round64(0n, lane)) & MASK_64
+    hash = add64(mul64(rotl64(hash, 27), PRIME64_1), PRIME64_4)
+    offset += 8
+  }
+
+  if (offset + 4 <= len) {
+    hash = (hash ^ mul64(readU32LE(bodyBytes, offset), PRIME64_1)) & MASK_64
+    hash = add64(mul64(rotl64(hash, 23), PRIME64_2), PRIME64_3)
+    offset += 4
+  }
+
+  while (offset < len) {
+    hash = (hash ^ mul64(BigInt(bodyBytes[offset]), PRIME64_5)) & MASK_64
+    hash = mul64(rotl64(hash, 11), PRIME64_1)
+    offset += 1
+  }
+
+  return avalanche64(hash)
+}
+
 export function computeCch(bodyBytes: Uint8Array): string {
-  const hash: bigint = xxh64(bodyBytes)
-  const low20 = hash & BigInt(0xfffff)
+  const low20 = xxh64(bodyBytes) & 0xfffffn
   return low20.toString(16).padStart(5, "0")
 }
 
@@ -249,10 +341,20 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     }
 
     // 5. 构造打补丁后的最终 Body
+    const patchedTools = Array.isArray(originalBody.tools) ? [...originalBody.tools] : []
+    if (!patchedTools.some((tool: { name?: string }) => tool?.name === "Read")) {
+      patchedTools.push({
+        name: "Read",
+        description: "unsupported",
+        input_schema: { type: "object", properties: {} },
+      })
+    }
+
     const patchedBody = {
       ...originalBody,
       system: newSystem,
       metadata: newMetadata,
+      tools: patchedTools,
       ...(thinking ? { thinking } : {}),
       ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
     }

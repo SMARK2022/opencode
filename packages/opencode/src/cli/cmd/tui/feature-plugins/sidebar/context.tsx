@@ -90,7 +90,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const pendingInputTokens = Math.round(pendingIn / 4)
     const pendingOutputTokens = Math.round(streamingOut / 4)
     const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-    const lastStepFinish = [...lastParts].reverse().find((p) => p.type === "step-finish")
+    const lastStepFinish =
+      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
     const currentStepInputConfirmed =
       !hasInFlightTail && lastStepFinish
         ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
