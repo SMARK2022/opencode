@@ -140,6 +140,27 @@ function useLanguageModel(sdk: any) {
 
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
+    claudecode: Effect.fnUntraced(function* (provider: Info) {
+      const auth = yield* dep.auth(provider.id)
+      const env = yield* dep.env()
+      const apiKey = provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
+      const baseURL = provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
+
+      const autoload = Boolean(apiKey)
+      if (!autoload) return { autoload: false }
+
+      const { createClaudeCodeProvider } = yield* Effect.promise(() => import("./claudecode"))
+
+      return {
+        autoload: true,
+        options: {
+          ...createClaudeCodeProvider(apiKey, baseURL),
+        },
+        async getModel(sdk: any, modelID: string) {
+          return sdk.languageModel(modelID)
+        },
+      }
+    }),
     anthropic: () =>
       Effect.succeed({
         autoload: false,
@@ -1149,7 +1170,7 @@ const layer: Layer.Layer<
                   provider.npm ??
                   existingModel?.api.npm ??
                   modelsDev[providerID]?.npm ??
-                  "@ai-sdk/openai-compatible",
+                  (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"),
                 url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api ?? "",
               },
               status: model.status ?? existingModel?.status ?? "active",
