@@ -149,7 +149,34 @@ export const {
 
     const fullSyncedSessions = new Set<string>()
     const syncingSessions = new Map<string, Promise<void>>()
-    const hydratingSessions = new Map<string, { messages: Set<string>; parts: Set<string> }>()
+    type SessionTrace = {
+      session?: Session | null
+      moved?: Pick<Session, "directory" | "path" | "workspaceID"> & { time: { updated: number } }
+    }
+    const hydratingSessions = new Map<string, SessionTrace & { messages: Set<string>; parts: Set<string> }>()
+    const listingSessions = new Set<Map<string, SessionTrace>>()
+    // 完整更新/删除可替代 HTTP；moved 只有 placement，不能阻止缺失会话的完整初始化。
+    const touchSession = (sessionID: string, session?: Session | null, moved?: SessionTrace["moved"]) => {
+      // 入 trace 前复制原始事件；随后 store 的 reconcile 可以原地改写它的嵌套 tokens/time。
+      const tracker = hydratingSessions.get(sessionID)
+      if (tracker) {
+        if (session !== undefined) tracker.session = structuredClone(session)
+        tracker.moved = moved
+      }
+      for (const listing of listingSessions) {
+        const tracker: SessionTrace = listing.get(sessionID) ?? {}
+        if (session !== undefined) tracker.session = structuredClone(session)
+        tracker.moved = moved
+        listing.set(sessionID, tracker)
+      }
+    }
+    // 后到完整事件清除旧 placement；否则将最后一次 moved 叠到 HTTP 行上并保留 created。
+    const acceptSession = (info: Session, tracker?: SessionTrace) => {
+      // 只有明确 null 才是删除；复制事件快照再入 store，避免另一列表或 reconcile 改写请求证据。
+      const current = tracker?.session === undefined ? info : structuredClone(tracker.session)
+      if (!current || !tracker?.moved) return current
+      return { ...current, ...tracker.moved, time: { ...current.time, ...tracker.moved.time } }
+    }
     const touchMessage = (sessionID: string, messageID: string) => {
       hydratingSessions.get(sessionID)?.messages.add(messageID)
     }
@@ -168,9 +195,43 @@ export const {
     }
 
     function listSessions() {
+      const tracker = new Map<string, SessionTrace>()
+      listingSessions.add(tracker)
+      const query = { start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() }
+      // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
+      const projectID = project.project()
+      const directory = project.instance.directory()
+      // 对齐 listByProject：空 path 是整个项目，非空 path 含子目录及同目录的旧 pathless 行。
+      const matches = (info: Session) =>
+        info.projectID === projectID &&
+        (!query.path || info.path === query.path || info.path?.startsWith(`${query.path}/`) ||
+          (info.path === undefined && info.directory === directory))
       return sdk.client.session
-        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
-        .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+        .list(query)
+        .then((x) => {
+          // 未触碰行保留服务端结果；触碰行先完成部分初始化，再按最新 placement 判断成员。
+          const infos = (x.data ?? []).flatMap((info) => {
+            if (!tracker.has(info.id)) return [info]
+            const current = acceptSession(info, tracker.get(info.id))
+            return current && matches(current) ? [current] : []
+          })
+          // 只补本请求收到事件的行，保住新会话；不保留未触碰的旧排除成员或删除墓碑。
+          infos.push(
+            ...Array.from(tracker).flatMap(([id, trace]) => {
+              // 已知 full/null 只取本请求的事件证据；仅部分 move 可借用仍可见的基础行。
+              const base = trace.session === undefined ? store.session.find((item) => item.id === id) : trace.session
+              const info = base && acceptSession(base, trace)
+              // start 仅筛补入的成员；usage 不推进 updated，不能用它仲裁快照先后。
+              return info && !infos.some((item) => item.id === id) && matches(info) && info.time.updated >= query.start
+                ? [info]
+                : []
+            }),
+          )
+          setStore("session", reconcile(infos.toSorted((a, b) => a.id.localeCompare(b.id))))
+          return infos
+        })
+        // tracker 只存活到快照真正接收完毕；HTTP 失败同样释放，不能积累常驻版本表。
+        .finally(() => listingSessions.delete(tracker))
     }
 
     event.subscribe((event, { directory, workspace }) => {
@@ -271,6 +332,7 @@ export const {
           break
 
         case "session.deleted": {
+          touchSession(event.properties.info.id, null)
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore(
@@ -283,6 +345,7 @@ export const {
           break
         }
         case "session.updated": {
+          touchSession(event.properties.info.id, event.properties.info)
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
             setStore("session", result.index, reconcile(event.properties.info))
@@ -298,6 +361,13 @@ export const {
         }
 
         case "session.next.moved": {
+          // 保存显式 undefined，移动回本地/根目录也要清掉旧 workspace/path。
+          touchSession(event.properties.sessionID, undefined, {
+            directory: event.properties.location.directory,
+            path: event.properties.subdirectory,
+            workspaceID: event.properties.location.workspaceID,
+            time: { updated: event.properties.timestamp },
+          })
           const result = search(store.session, event.properties.sessionID, (s) => s.id)
           if (!result.found) break
           setStore(
@@ -500,7 +570,6 @@ export const {
             const consoleState = responses[3]
             const agents = responses[4]
             const config = responses[5]
-            const sessions = responses[6]
 
             batch(() => {
               setStore("provider", reconcile(providers.providers))
@@ -510,7 +579,6 @@ export const {
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
-              if (sessions !== undefined) setStore("session", reconcile(sessions))
             })
           })
         })
@@ -518,7 +586,7 @@ export const {
           if (store.status !== "complete") setStore("status", "partial")
           // non-blocking
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+            ...(args.continue ? [] : [sessionListPromise]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
@@ -578,8 +646,7 @@ export const {
           return sessionListQuery()
         },
         async refresh() {
-          const list = await listSessions()
-          setStore("session", reconcile(list))
+          await listSessions()
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
@@ -595,7 +662,7 @@ export const {
           if (fullSyncedSessions.has(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing
-          const tracker = { messages: new Set<string>(), parts: new Set<string>() }
+          const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
           hydratingSessions.set(sessionID, tracker)
           const task = (async () => {
             const [session, messages, todo, diff] = await Promise.all([
@@ -607,8 +674,12 @@ export const {
             setStore(
               produce((draft) => {
                 const match = search(draft.session, sessionID, (s) => s.id)
-                if (match.found) draft.session[match.index] = session.data!
-                if (!match.found) draft.session.splice(match.index, 0, session.data!)
+                // 全量事件优先；只有 moved 时仍接收 HTTP 必需字段，再叠加最新 placement。
+                const info = acceptSession(session.data!, tracker)
+                if (info) {
+                  if (match.found) draft.session[match.index] = info
+                  if (!match.found) draft.session.splice(match.index, 0, info)
+                }
                 draft.todo[sessionID] = todo.data ?? []
                 const currentMessages = draft.message[sessionID] ?? []
                 const infos = (messages.data ?? []).flatMap((message) => {

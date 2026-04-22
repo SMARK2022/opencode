@@ -20,61 +20,54 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   type StateValue = { tokens: number; input: number; output: number; percent: number | null }
 
   const stateRaw = createMemo((): StateValue => {
-    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
-    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
-    if (!last) {
-      // 始终显示零值，sidebar 从 prompt 发送起即可见
-      // sidebar 的面板始终存在，不沿用 footer 的 idle 隐藏分支。
+    const messages = msg()
+    const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
+    // plugin 的 session.get 直通 sync，复用同一服务端投影，不另建 sidebar 私有累计。
+    const confirmed = session()?.tokens
+    if (!confirmed) {
       return { tokens: 0, input: 0, output: 0, percent: null }
     }
 
-    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
-    const parts = props.api.state.part(last.id)
-    const chars = parts.reduce((sum, part) => {
-      if (part.type === "text" && !part.ignored) return sum + part.text.length
-      if (part.type === "reasoning") return sum + part.text.length
-      return sum
-    }, 0)
+    // 本项仍是会话 all-assistant 总量，不能提前引入 parentID 请求筛选。
+    const last = assistants.at(-1)
+    const agg = {
+      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
+      output: confirmed.output + confirmed.reasoning,
+    }
 
-    // sidebar 的 part 来源是插件 API；step-finish 分界只在同一条助手消息的 parts 中解释。
-    // 分界之前的工具结果不再加估算，否则上下文百分比会把历史工具文本重复放大。
-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
-    // 完成消息不补工具字符，避免临时估算进入静态用量。
-    const toolOutputChars = !last.time.completed
-      ? parts.reduce((sum, part, i) => {
-          if (i <= lastStepFinishIdx) return sum
-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+    // 从最后一条消息添加流式估算
+    const lastParts = last ? props.api.state.part(last.id) : []
+    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
+    const streamingOut = !last || last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "text" && !p.ignored) return sum + p.text.length
+          if (p.type === "reasoning") return sum + p.text.length
+          // pending 工具的 state.raw 由 processor.ts 累积流式 delta。
+          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
           return sum
         }, 0)
-      : 0
+    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
+    const pendingIn = !last || last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+          return sum
+        }, 0)
 
-    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
-    const cumTokens = parts.reduce(
-      (acc, part) => {
-        if (part.type !== "step-finish") return acc
-        return {
-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-          // 多步思考用量与正文分别计数，不因本步没有正文就丢掉 reasoning。
-          output: acc.output + part.tokens.output + part.tokens.reasoning,
-        }
-      },
-      { input: 0, output: 0 },
-    )
-    // 缓存命中仍占上下文输入，不能因为无需重复生成就从流量中扣除。
-    const inputBase = cumTokens.input
-    // percent 与 tokens 共用这一输入值，保持同一快照内口径一致。
-    const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = cumTokens.output
-    const outputEstimated = Math.round(chars / 4)
-    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-    const tokens = input + output
     // 缺少模型 context limit 时保留 token 实数，不能捏造百分比上限。
-    const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    const totalInput = agg.input + Math.round(pendingIn / 4)
+    const totalOutput = agg.output + Math.round(streamingOut / 4)
+    const tokens = totalInput + totalOutput
+    const model = last ? props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
     return {
       tokens,
-      input,
-      output,
+      input: totalInput,
+      output: totalOutput,
       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
     }
   })

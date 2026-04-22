@@ -35,79 +35,68 @@ export function SubagentFooter() {
   // 子代理有独立 sessionID，必须读取其自身状态而非父请求的运行状态。
   const status = createMemo(() => sync.data.session_status?.[route.sessionID])
 
+  // 将 money 提升到组件作用域，避免每次 memo 求值时重建
+  const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
+
   type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
     const isRunning = (status()?.type ?? "idle") !== "idle"
     const msg = messages()
-    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
+    const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+    // 子代理使用自己的全量投影，不能把父会话的工具轮次并入子代理流量。
+    const confirmed = session()?.tokens
 
-    if (!last) {
+    if (!confirmed) {
       if (!isRunning) return
-      // 已发送 prompt 但尚无助手回复时立即显示零值
       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
     }
 
-    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
-    const parts = sync.data.part[last.id] ?? []
-    const chars = parts.reduce((sum, part) => {
-      if (part.type === "text" && !part.ignored) return sum + part.text.length
-      // 子代理可能先流出思考而无正文；reasoning 字符也必须驱动实时输出显示。
-      if (part.type === "reasoning") return sum + part.text.length
-      return sum
-    }, 0)
+    const last = assistants.at(-1)
+    const agg = {
+      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
+      output: confirmed.output + confirmed.reasoning,
+    }
 
-    // 子代理 footer 只读取当前路由消息的 parts，不把父会话的工具输出混入本轮估算。
-    // 仅 completed 工具有稳定 output；pending/running 的部分结果不满足这个估算契约。
-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
-    // 消息完成后撤销工具字符补量，避免离开流式阶段后仍显示临时估算输入。
-    const toolOutputChars = !last.time.completed
-      ? parts.reduce((sum, part, i) => {
-          if (i <= lastStepFinishIdx) return sum
-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+    // 从最后一条消息添加流式估算
+    const lastParts = last ? (sync.data.part[last.id] ?? []) : []
+    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
+    const streamingOut = !last || last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "text" && !p.ignored) return sum + p.text.length
+          if (p.type === "reasoning") return sum + p.text.length
+          // pending 工具的 state.raw 由 processor.ts 累积流式 delta。
+          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
           return sum
         }, 0)
-      : 0
+    // 最后一个 step-finish 后的 completed 工具输出将在下一轮 API 调用中计入输入，当前仅作流式估算。
+    const pendingIn = !last || last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+          return sum
+        }, 0)
 
-    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
-    const cumTokens = parts.reduce(
-      (acc, part) => {
-        if (part.type !== "step-finish") return acc
-        return {
-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-          output: acc.output + part.tokens.output + part.tokens.reasoning,
-        }
-      },
-      // 首步尚无 step-finish 时累计从零开始，不回退到可能已被覆盖的 last.tokens。
-      { input: 0, output: 0 },
-    )
-    const inputBase = cumTokens.input
-    const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = cumTokens.output
-    const outputEstimated = Math.round(chars / 4)
-    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-    const tokens = input + output
-    if (tokens <= 0 && input <= 0 && output <= 0) {
-      // 运行中但 token 尚未到达时显示零值，避免 footer 闪烁
+    const totalInput = agg.input + Math.round(pendingIn / 4)
+    const totalOutput = agg.output + Math.round(streamingOut / 4)
+    const tokens = totalInput + totalOutput
+
+    if (tokens <= 0) {
       if (!isRunning) return
       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
     }
 
-    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = session()?.cost ?? 0
-
-    const money = new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    })
-
     return {
-      // 添加输入/输出流量显示，用于 footer 展示
-      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
+      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
