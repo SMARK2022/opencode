@@ -3,7 +3,7 @@ import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util"
@@ -36,40 +36,56 @@ export function SubagentFooter() {
 
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
-  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
+  type UsageInfo = {
+    input: number
+    output: number
+    totalInput: number
+    totalOutput: number
+    context: string | undefined
+    cost: string | undefined
+  }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     const isRunning = (status()?.type ?? "idle") !== "idle"
     const msg = messages()
     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+    const users = msg.filter((item): item is UserMessage => item.role === "user")
 
     // If no assistant messages yet, show zeros when running
     if (assistants.length === 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
     }
 
-    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
-    const last = assistants.at(-1)!
-    const agg = assistants.reduce(
-      (acc, a) => {
-        const parts = sync.data.part[a.id] ?? []
-        const { input, output } = parts.reduce(
-          (t, p) => {
-            if (p.type !== "step-finish") return t
-            return {
-              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-              output: t.output + p.tokens.output + p.tokens.reasoning,
-            }
-          },
-          { input: 0, output: 0 },
-        )
-        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
-      },
-      { input: 0, output: 0, providerID: "", modelID: "" },
-    )
+    const sumConfirmed = (items: AssistantMessage[]) =>
+      items.reduce(
+        (acc, a) => {
+          const parts = sync.data.part[a.id] ?? []
+          const { input, output } = parts.reduce(
+            (t, p) => {
+              if (p.type !== "step-finish") return t
+              return {
+                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+                output: t.output + p.tokens.output + p.tokens.reasoning,
+              }
+            },
+            { input: 0, output: 0 },
+          )
+          return { input: acc.input + input, output: acc.output + output }
+        },
+        { input: 0, output: 0 },
+      )
 
-    // Add streaming estimates from the last (potentially in-flight) message
+    const lastUser = users.at(-1)
+    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+
+    // 中文说明：input/output 展示“本次请求”；括号为会话累计总量。
+    const requestConfirmed = sumConfirmed(requestAssistants)
+    const globalConfirmed = sumConfirmed(assistants)
+
+    // Add streaming estimates from the last (potentially in-flight) message of current request
+    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
+    const last = activeAssistants.at(-1)!
     const lastParts = sync.data.part[last.id] ?? []
     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
     const streamingOut = last.time.completed
@@ -90,22 +106,36 @@ export function SubagentFooter() {
           return sum
         }, 0)
 
-    const totalInput = agg.input + Math.round(pendingIn / 4)
-    const totalOutput = agg.output + Math.round(streamingOut / 4)
-    const tokens = totalInput + totalOutput
+    const pendingInputTokens = Math.round(pendingIn / 4)
+    const pendingOutputTokens = Math.round(streamingOut / 4)
+    const currentInput = requestConfirmed.input + pendingInputTokens
+    const currentOutput = requestConfirmed.output + pendingOutputTokens
+    const totalInput = globalConfirmed.input + pendingInputTokens
+    const totalOutput = globalConfirmed.output + pendingOutputTokens
+    const requestTokens = currentInput + currentOutput
+    const totalTokens = totalInput + totalOutput
 
-    if (tokens <= 0) {
+    if (requestTokens <= 0 && totalTokens <= 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, context: undefined, cost: undefined }
+      return {
+        input: 0,
+        output: 0,
+        totalInput,
+        totalOutput,
+        context: undefined,
+        cost: undefined,
+      }
     }
 
-    const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
     return {
-      input: totalInput,
-      output: totalOutput,
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+      input: currentInput,
+      output: currentOutput,
+      totalInput,
+      totalOutput,
+      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
@@ -146,8 +176,8 @@ export function SubagentFooter() {
             <Show when={usage()}>
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>

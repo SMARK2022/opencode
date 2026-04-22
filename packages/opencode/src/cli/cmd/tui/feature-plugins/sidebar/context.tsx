@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
@@ -16,38 +16,55 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   const cost = createMemo(() => msg().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0))
 
-  type StateValue = { tokens: number; input: number; output: number; percent: number | null }
+  type StateValue = {
+    tokens: number
+    totalTokens: number
+    input: number
+    output: number
+    totalInput: number
+    totalOutput: number
+    percent: number | null
+  }
 
   const stateRaw = createMemo((): StateValue => {
     const messages = msg()
     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
+    const users = messages.filter((item): item is UserMessage => item.role === "user")
 
     // If no assistant messages yet, show zeros
     if (assistants.length === 0) {
-      return { tokens: 0, input: 0, output: 0, percent: null }
+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
     }
 
-    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
-    const last = assistants.at(-1)!
-    const agg = assistants.reduce(
-      (acc, a) => {
-        const parts = props.api.state.part(a.id)
-        const { input, output } = parts.reduce(
-          (t, p) => {
-            if (p.type !== "step-finish") return t
-            return {
-              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-              output: t.output + p.tokens.output + p.tokens.reasoning,
-            }
-          },
-          { input: 0, output: 0 },
-        )
-        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
-      },
-      { input: 0, output: 0, providerID: "", modelID: "" },
-    )
+    const sumConfirmed = (items: AssistantMessage[]) =>
+      items.reduce(
+        (acc, a) => {
+          const parts = props.api.state.part(a.id)
+          const { input, output } = parts.reduce(
+            (t, p) => {
+              if (p.type !== "step-finish") return t
+              return {
+                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+                output: t.output + p.tokens.output + p.tokens.reasoning,
+              }
+            },
+            { input: 0, output: 0 },
+          )
+          return { input: acc.input + input, output: acc.output + output }
+        },
+        { input: 0, output: 0 },
+      )
 
-    // Add streaming estimates from the last (potentially in-flight) message
+    const lastUser = users.at(-1)
+    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+
+    // 中文说明：侧边栏主值显示“本次请求”，括号里显示会话总累计。
+    const requestConfirmed = sumConfirmed(requestAssistants)
+    const globalConfirmed = sumConfirmed(assistants)
+
+    // Add streaming estimates from the last (potentially in-flight) message of current request
+    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
+    const last = activeAssistants.at(-1)!
     const lastParts = props.api.state.part(last.id)
     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
     const streamingOut = last.time.completed
@@ -68,19 +85,35 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
           return sum
         }, 0)
 
-    const totalInput = agg.input + Math.round(pendingIn / 4)
-    const totalOutput = agg.output + Math.round(streamingOut / 4)
-    const tokens = totalInput + totalOutput
-    const model = props.api.state.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+    const pendingInputTokens = Math.round(pendingIn / 4)
+    const pendingOutputTokens = Math.round(streamingOut / 4)
+    const input = requestConfirmed.input + pendingInputTokens
+    const output = requestConfirmed.output + pendingOutputTokens
+    const totalInput = globalConfirmed.input + pendingInputTokens
+    const totalOutput = globalConfirmed.output + pendingOutputTokens
+    const tokens = input + output
+    const totalTokens = totalInput + totalOutput
+    const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     return {
       tokens,
-      input: totalInput,
-      output: totalOutput,
+      totalTokens,
+      input,
+      output,
+      totalInput,
+      totalOutput,
       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
     }
   })
 
-  const [state, setStateThrottled] = createSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null })
+  const [state, setStateThrottled] = createSignal<StateValue>({
+    tokens: 0,
+    totalTokens: 0,
+    input: 0,
+    output: 0,
+    totalInput: 0,
+    totalOutput: 0,
+    percent: null,
+  })
   const triggerStateUpdate = leadingAndTrailing(throttle, (v: StateValue) => setStateThrottled(() => v), 50)
   createEffect(() => triggerStateUpdate(stateRaw()))
   const flow = createTokenFlowPulse(state)
@@ -91,10 +124,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <b>Context</b>
       </text>
       <text fg={theme().textMuted}>
-        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()} ·{" "}
-        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}
+        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) ·{" "}
+        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})
       </text>
-      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
+      <text fg={theme().textMuted}>
+        {state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens
+      </text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
       <text fg={theme().textMuted}>{money.format(cost())} spent</text>
     </box>
