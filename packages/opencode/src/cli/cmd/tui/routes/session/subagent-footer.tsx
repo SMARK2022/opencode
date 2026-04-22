@@ -7,7 +7,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util"
-import { createThrottledSignal } from "../../util/signal"
+import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 
 export function SubagentFooter() {
@@ -36,7 +36,7 @@ export function SubagentFooter() {
 
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
-  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
+  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     const isRunning = (status()?.type ?? "idle") !== "idle"
@@ -46,7 +46,7 @@ export function SubagentFooter() {
     // If no assistant messages yet, show zeros when running
     if (assistants.length === 0) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
@@ -96,14 +96,15 @@ export function SubagentFooter() {
 
     if (tokens <= 0) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
     return {
-      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
+      input: totalInput,
+      output: totalOutput,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -111,6 +112,7 @@ export function SubagentFooter() {
 
   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
   createEffect(() => setUsageThrottled(usageRaw()))
+  const usageFlow = createTokenFlowPulse(usage)
 
   const { theme } = useTheme()
   const keybind = useKeybind()
@@ -144,7 +146,10 @@ export function SubagentFooter() {
             <Show when={usage()}>
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
-                  {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                  {item().context ? ` · ${item().context}` : ""}
+                  {item().cost ? ` · ${item().cost}` : ""}
                 </text>
               )}
             </Show>

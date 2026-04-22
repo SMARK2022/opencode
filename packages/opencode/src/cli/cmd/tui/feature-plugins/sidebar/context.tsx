@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
+import { createTokenFlowPulse } from "../../util/signal"
 
 const id = "internal:sidebar-context"
 
@@ -82,13 +83,17 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const [state, setStateThrottled] = createSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null })
   const triggerStateUpdate = leadingAndTrailing(throttle, (v: StateValue) => setStateThrottled(() => v), 50)
   createEffect(() => triggerStateUpdate(stateRaw()))
+  const flow = createTokenFlowPulse(state)
 
   return (
     <box>
       <text fg={theme().text}>
         <b>Context</b>
       </text>
-      <text fg={theme().textMuted}>↑ {state().input.toLocaleString()} · ↓ {state().output.toLocaleString()}</text>
+      <text fg={theme().textMuted}>
+        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()} ·{" "}
+        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}
+      </text>
       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
       <text fg={theme().textMuted}>{money.format(cost())} spent</text>

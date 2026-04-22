@@ -36,7 +36,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn, createThrottledSignal } from "../../util/signal"
+import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceCreate, restoreWorkspaceSession } from "../dialog-workspace-create"
@@ -156,7 +156,7 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
-  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
+  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     if (!props.sessionID) return
@@ -167,7 +167,7 @@ export function Prompt(props: PromptProps) {
     // If no assistant messages yet, show zeros when running
     if (assistants.length === 0) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
@@ -217,14 +217,15 @@ export function Prompt(props: PromptProps) {
 
     if (tokens <= 0) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
     return {
-      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
+      input: totalInput,
+      output: totalOutput,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -232,6 +233,7 @@ export function Prompt(props: PromptProps) {
 
   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
   createEffect(() => setUsageThrottled(usageRaw()))
+  const usageFlow = createTokenFlowPulse(usage)
 
   const [store, setStore] = createStore<{
     prompt: PromptInfo
@@ -1396,7 +1398,10 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
+                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
+                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                          {item().context ? ` · ${item().context}` : ""}
+                          {item().cost ? ` · ${item().cost}` : ""}
                         </text>
                       )}
                     </Match>

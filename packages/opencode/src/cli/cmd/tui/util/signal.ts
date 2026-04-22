@@ -50,3 +50,39 @@ export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>
 
   return alpha
 }
+
+export function createTokenFlowPulse<T extends { input: number; output: number } | undefined>(
+  value: Accessor<T>,
+  ms = 900,
+) {
+  const [flow, setFlow] = createSignal({ input: false, output: false })
+  let inputTimer: ReturnType<typeof setTimeout> | undefined
+  let outputTimer: ReturnType<typeof setTimeout> | undefined
+
+  createEffect(
+    on(value, (next, prev) => {
+      if (!next) {
+        setFlow({ input: false, output: false })
+        return
+      }
+      if (!prev) return
+      if (next.input > prev.input) {
+        if (inputTimer) clearTimeout(inputTimer)
+        setFlow((x) => ({ ...x, input: true }))
+        inputTimer = setTimeout(() => setFlow((x) => ({ ...x, input: false })), ms)
+      }
+      if (next.output > prev.output) {
+        if (outputTimer) clearTimeout(outputTimer)
+        setFlow((x) => ({ ...x, output: true }))
+        outputTimer = setTimeout(() => setFlow((x) => ({ ...x, output: false })), ms)
+      }
+    }),
+  )
+
+  onCleanup(() => {
+    if (inputTimer) clearTimeout(inputTimer)
+    if (outputTimer) clearTimeout(outputTimer)
+  })
+
+  return flow
+}
