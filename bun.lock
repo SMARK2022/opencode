@@ -563,9 +563,10 @@
         "@typescript/native-preview": "catalog:",
       },
     },
+    // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
     "packages/opencode": {
       "name": "opencode",
-      "version": "1.19.5",
+      "version": "1.19.5-smark",
       "bin": {
         "opencode": "./bin/opencode",
       },
