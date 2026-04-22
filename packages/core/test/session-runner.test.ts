@@ -2233,6 +2233,8 @@ describe("SessionRunnerLLM", () => {
       expect(messages.some((message) => message.type === "user" && message.id === queued.id)).toBe(true)
       expect((yield* session.get(sessionID)).request).toMatchObject({
         messageID: queued.id, assistantID: messages.findLast((message) => message.type === "assistant")?.id, input: 10, output: 4, cost: 0,
+        // 混合入口最后提升的 queue 同时拥有 step 和请求累计，V1 noReply 不能使 step 归零。
+        stepInput: 10, stepOutput: 4,
       })
       // 旧 V1 用户再次更新不是新请求，不能用最后 MessageUpdated 序号压过 native promotion。
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...legacy, agent: "edited" } })
@@ -2243,6 +2245,8 @@ describe("SessionRunnerLLM", () => {
       // 混合入口之后的新 admission 仍是独立零值，不能固定 native 优先或永远保留 V1 候选。
       const waiting = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed waiting" }), delivery: "queue", resume: false })
       expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: waiting.id, input: 0, output: 0, cost: 0 })
+      // 再接纳等待请求后 step 也清零，不能借用刚完成的 native step。
+      expect((yield* session.get(sessionID)).request).toMatchObject({ stepInput: 0, stepOutput: 0 })
       expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
       expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
     }),
