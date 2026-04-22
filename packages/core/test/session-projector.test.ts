@@ -89,6 +89,9 @@ describe("SessionProjector", () => {
       expect((yield* sessions.get(sessionID)).request).toMatchObject({
         messageID: "msg_native_request", input: 42, output: 12, cost: 0.75,
         assistantID: "msg_native_usage_2", model: { providerID: "provider", modelID: "model" },
+        // 最后 native step 与两轮请求累计不同，验证 #14 没把请求总量显示成 step。
+        stepInput: 28, stepOutput: 8,
+        // 此确认值不依赖任何 V1 step-finish，也不依赖 TUI 消息窗口。
       })
       // 这里检查公开 get 的投影，不在断言里重复实现事件到请求的归属计算。
       // 重放已经落盘的两次结算，保留现有 sequencer 的去重边界，不在投影中另建标记。
@@ -136,6 +139,9 @@ describe("SessionProjector", () => {
       // 尚未 promoted 的最新 admission 是独立零值请求，不能消费旧助手。
       expect((yield* sessions.get(sessionID)).request).toMatchObject({
         messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
+        // 新 admission 没有回复时 step 也必须为零，不能沿用最后一次旧结算。
+        stepInput: 0, stepOutput: 0,
+        // 保留 assistantID 缺省，避免把“无回复”与“已有未结算回复”混为一类。
       })
       expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
       expect((yield* sessions.get(sessionID)).cost).toBe(1.5)

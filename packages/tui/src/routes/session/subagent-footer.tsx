@@ -59,14 +59,15 @@ export function SubagentFooter() {
 
     // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
     const request = session()?.request
+    // 子代理也按自己的持久化回复身份判空，不能用父请求或有限缓存补偿。
+    if (!request?.assistantID) {
+      if (!isRunning) return
+      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
+    }
     const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
     const last = requestAssistants.at(-1)
-    // requestConfirmed 与 confirmed 分属两个范围，不重新累计显示页的 parts。
-    const agg = {
-      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
-      output: confirmed.output + confirmed.reasoning,
-    }
+    // 主值属于当前 step；括号与费用都属于该子代理的完整当前请求。
 
     // 从最后一条消息添加流式估算
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
@@ -92,11 +93,13 @@ export function SubagentFooter() {
           return sum
         }, 0)
 
-    const totalInput = agg.input + Math.round(pendingIn / 4)
-    const totalOutput = agg.output + Math.round(streamingOut / 4)
-    // 只把当前请求尾部加入请求累计；全局累计仍来自服务端 tokens。
-    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
-    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
+    // native 每步确认值也在投影中，不能因没有 V1 parts 而退回零历史累计。
+    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+    const currentInput = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
+    const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
+    // 请求累计与 step 确认值独立，流式尾部在各自范围只计一次。
+    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
+    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 
@@ -108,7 +111,9 @@ export function SubagentFooter() {
     // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
     const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
     const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
-    const cost = session()?.cost ?? 0
+    // 恢复 footer 的请求费用 hunk，不把子代理 Session.cost 当作请求费用。
+    // 仍使用共享费用生产策略和现有 money 格式化，费用不参与箭头增长判断。
+    const cost = request.cost
     return {
       input: currentInput,
       output: currentOutput,

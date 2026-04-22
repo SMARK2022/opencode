@@ -191,6 +191,9 @@ describe("step-finish token propagation via event", () => {
       // 源语义取助手 cost；fixture 的第二个 part 有额外费用，能区分请求与全局费用。
       expect((yield* session.get(created.id)).request?.cost).toBeCloseTo(1.01)
       expect(snapshots.at(-1)?.request?.input).toBe(1428)
+      // 请求跨窗口累计 102 步，主值却只显示最后助手的一步，而非整个请求。
+      expect((yield* session.get(created.id)).request).toMatchObject({ stepInput: 14, stepOutput: 4 })
+      // 费用仍属于请求所有助手，新增 step 字段不能缩窄原有请求费用口径。
       expect((yield* session.get(created.id)).tokens).toEqual({
         input: 204, output: 306, reasoning: 102, cache: { read: 510, write: 714 },
       })

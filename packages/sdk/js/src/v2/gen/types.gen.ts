@@ -3063,6 +3063,8 @@ export type SessionRequestUsage = {
   output: number
   cost: number
   assistantID?: string
+  stepInput: number
+  stepOutput: number
   model?: {
     providerID: string
     modelID: string

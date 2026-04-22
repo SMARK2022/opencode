@@ -67,6 +67,19 @@ export const selection = {
     ), last_assistant AS (
       -- 最后助手与模型随请求读出，用户被窗口淘汰后仍能锁定同一请求尾部。
       SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
+    ), last_step AS (
+      -- V1 parts 按 ID 排序，最后 step-finish 不等于最后一个任意 part。
+      SELECT p.id, p.data FROM part p JOIN last_assistant a ON a.kind = 'v1' AND a.id = p.message_id
+      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
+      ORDER BY p.id DESC LIMIT 1
+    ), step AS (
+      -- native 每个助手就是一轮；V1 未完成且还有尾部时不能沿用旧 step 确认值。
+      SELECT CASE WHEN a.kind = 'native' THEN a.data
+        WHEN json_extract(a.data, '$.time.completed') IS NULL AND EXISTS (
+          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = "session"."id"
+            AND p.id > coalesce((SELECT id FROM last_step), '')
+        ) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
+      FROM last_assistant a
     )
     SELECT json_object(
       'messageID', r.id,
@@ -75,9 +88,15 @@ export const selection = {
         + coalesce(json_extract(data, '$.tokens.cache.write'), 0)) FROM settled), 0),
       'output', coalesce((SELECT sum(coalesce(json_extract(data, '$.tokens.output'), 0)
         + coalesce(json_extract(data, '$.tokens.reasoning'), 0)) FROM settled), 0),
-      -- 请求费用忠实取助手 cost，不拿全局 cost 或 token 价格反推替代。
+      -- 费用仍取完整请求的助手 cost，当前 step 的展示变化不缩窄费用范围或反推价格。
       'cost', coalesce((SELECT sum(json_extract(data, '$.cost')) FROM assistants), 0),
       'assistantID', (SELECT id FROM last_assistant),
+      'stepInput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.input'), 0)
+        + coalesce(json_extract(data, '$.tokens.cache.read'), 0)
+        + coalesce(json_extract(data, '$.tokens.cache.write'), 0) FROM step), 0),
+      'stepOutput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.output'), 0)
+        + coalesce(json_extract(data, '$.tokens.reasoning'), 0) FROM step), 0),
+      -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
       'model', json((SELECT json_object(
         'providerID', coalesce(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')),
         'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id'))
@@ -91,6 +110,7 @@ export const selection = {
     const fields = Schema.decodeUnknownSync(Schema.Struct({
       messageID: Schema.String, input: Schema.Finite, output: Schema.Finite, cost: Schema.Finite,
       assistantID: Schema.NullOr(Schema.String),
+      stepInput: Schema.Finite, stepOutput: Schema.Finite,
       model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
     }))(parsed)
     return Session.RequestUsage.make({

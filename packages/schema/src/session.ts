@@ -24,6 +24,10 @@ export const RequestUsage = Schema.Struct({
   output: Schema.Finite,
   cost: Schema.Finite,
   assistantID: Schema.String.pipe(optional),
+  // #14 才引入当前 step；请求累计 input/output 的范围保持不变。
+  // 这两项来自最后一步确认值，不是从请求累计或会话累计反推。
+  stepInput: Schema.Finite,
+  stepOutput: Schema.Finite,
   model: Schema.Struct({
     providerID: Schema.String,
     modelID: Schema.String,
