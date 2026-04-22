@@ -25,6 +25,7 @@ const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
 const plugin = createSolidTransformPlugin()
 const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+const osFilter = process.argv.find((a) => a.startsWith("--os="))?.replace("--os=", "")
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)
@@ -135,6 +136,9 @@ const targets = singleFlag
 
       return true
     })
+  : osFilter
+  // 定向构建供原生环境快速验证，兼容变体留给完整矩阵，避免本机验证重复编译。
+  ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false)
   : allTargets
 
 await $`rm -rf dist`
