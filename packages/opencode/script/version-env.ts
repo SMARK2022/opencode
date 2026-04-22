@@ -1,7 +1,14 @@
 // 必须在所有其他 import 之前加载（尤其是 @opencode-ai/script），
 // 确保 OPENCODE_VERSION 在模块求值时已设置。
 // 用法: bun run build.ts --version=1.18.32-smark
-const versionArg = process.argv[2]
-if (versionArg?.startsWith("--version=")) {
-  process.env.OPENCODE_VERSION = versionArg.replace("--version=", "")
+// 构建选项可能先于版本参数，扫描全部 argv 才能让 --os 等选项不挤占版本位置。
+const versionFromEquals = process.argv.find((arg) => arg.startsWith("--version="))?.replace("--version=", "")
+if (versionFromEquals) {
+  process.env.OPENCODE_VERSION = versionFromEquals
+}
+
+const versionIndex = process.argv.findIndex((arg) => arg === "--version")
+// 缺少分隔值时保留已有版本；两种形式同时出现时沿源补丁由分隔形式最后赋值。
+if (versionIndex >= 0 && process.argv[versionIndex + 1]) {
+  process.env.OPENCODE_VERSION = process.argv[versionIndex + 1]
 }
