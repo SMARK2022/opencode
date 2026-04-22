@@ -143,18 +143,22 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
     claudecode: Effect.fnUntraced(function* (provider: Info) {
       const auth = yield* dep.auth(provider.id)
       const env = yield* dep.env()
-      const apiKey = provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
-      const baseURL = provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
+      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
+      const baseURL = env["ANTHROPIC_BASE_URL"] || provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
 
       const autoload = Boolean(apiKey)
       if (!autoload) return { autoload: false }
 
       const { createClaudeCodeProvider } = yield* Effect.promise(() => import("./claudecode"))
 
+      // Determine authMode based on token source
+      // In real Claude Code, ANTHROPIC_AUTH_TOKEN/apiKeyHelper imply Bearer.
+      const authMode: "bearer" | "x-api-key" = "bearer"
+
       return {
         autoload: true,
         options: {
-          ...createClaudeCodeProvider(apiKey, baseURL),
+          ...createClaudeCodeProvider(apiKey, baseURL, authMode),
         },
         async getModel(sdk: any, modelID: string) {
           return sdk.languageModel(modelID)
