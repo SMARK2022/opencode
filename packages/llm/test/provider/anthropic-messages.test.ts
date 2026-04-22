@@ -848,8 +848,7 @@ describe("Anthropic Messages route", () => {
   it.effect("spends breakpoint budget on tools before system before messages", () =>
     Effect.gen(function* () {
       const hint = new CacheHint({ type: "ephemeral" })
-      const prepared = yield* LLMClient.prepare(
-        LLM.request({
+      const input = LLM.request({
           model,
           tools: [
             {
@@ -879,8 +878,8 @@ describe("Anthropic Messages route", () => {
           ],
           system: [{ type: "text", text: "system-tail", cache: hint }],
           messages: [Message.user([{ type: "text", text: "message-tail", cache: hint }])],
-        }),
-      )
+        })
+      const prepared = yield* LLMClient.prepare(input)
 
       const body = prepared.body as {
         tools: Array<{ cache_control?: unknown }>
@@ -890,6 +889,40 @@ describe("Anthropic Messages route", () => {
       expect(body.tools.every((t) => t.cache_control !== undefined)).toBe(true)
       expect(body.system[0]?.cache_control).toBeUndefined()
       expect(body.messages[0]?.content[0]?.cache_control).toBeUndefined()
+
+      // 复用同一真实请求，仅替换 provider；不能重造缓存输入或绕过原生 prepare owner。
+      const claude = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(
+        LLM.updateRequest(input, { model: model.route.with({ provider: "claudecode" }).model({ id: model.id }) }),
+      )
+      // 独立列出四个工具名，确保身份预算不会让最后两个上游标记悄然丢失。
+      expect(claude.body.tools?.filter((tool) => tool.cache_control !== undefined).map((tool) => tool.name)).toEqual(["t1", "t2", "t3", "t4"])
+      // 四名额已由工具用完；system 与 history 保持原有裁剪，身份不额外发出第五个标记。
+      expect(claude.body.system?.filter((block) => block.cache_control !== undefined)).toEqual([])
+      expect(claude.body.messages.every((message) => message.content.every((block) => !("cache_control" in block) || block.cache_control === undefined))).toBe(true)
+      // 不给身份缓存不等于撤销身份：13–19 仍须保留计费首块、两段身份和原 system。
+      expect(claude.body.system?.map((block) => block.text)).toEqual([
+        expect.stringMatching(/^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/),
+        "You are Claude Code, Anthropic's official CLI for Claude.",
+        expect.stringContaining("You are an interactive agent that helps users with software engineering tasks."),
+        "system-tail",
+      ])
+
+      // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
+      expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })
+      expect(prepared.body).toHaveProperty("thinking", undefined)
+      for (const thinking of [
+        { type: "disabled" },
+        { type: "adaptive" },
+        { type: "adaptive", display: "summarized" },
+        { type: "adaptive", display: "omitted" },
+        { type: "enabled", budget_tokens: 1024 },
+      ] as const) {
+        // 同一真实 prepare/Schema 路径比较独立输入，不能靠后续15或只检查原始 options 自证。
+        const explicit = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(
+          LLM.updateRequest(input, { model: claude.model, providerOptions: { anthropic: { thinking } } }),
+        )
+        expect(explicit.body.thinking).toEqual(thinking)
+      }
     }),
   )
 })

@@ -208,6 +208,28 @@ function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: string) {
 
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
+    // claudecode 提供者：包装 Anthropic API，注入 Claude Code 风格的计费头和系统块
+    claudecode: Effect.fnUntraced(function* (provider: Info) {
+      const auth = yield* dep.auth(provider.id)
+      const env = yield* dep.env()
+      const apiKey = provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
+      const baseURL = provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
+
+      const autoload = Boolean(apiKey)
+      if (!autoload) return { autoload: false }
+
+      const { createClaudeCodeProvider } = yield* Effect.promise(() => import("./claudecode"))
+
+      return {
+        autoload: true,
+        options: {
+          ...createClaudeCodeProvider(apiKey, baseURL),
+        },
+        async getModel(sdk: any, modelID: string) {
+          return sdk.languageModel(modelID)
+        },
+      }
+    }),
     anthropic: () =>
       Effect.succeed({
         autoload: false,
@@ -1552,7 +1574,8 @@ const layer = Layer.effect(
               // native passthrough npm here before falling back to the catalog default.
               cloudflareGatewayNpm(providerID, apiID) ??
               modelsDev[providerID]?.npm ??
-              "@ai-sdk/openai-compatible"
+              // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
+              (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
             const name = iife(() => {
               if (model.name) return model.name
               if (model.id && model.id !== modelID) return modelID
@@ -1704,7 +1727,10 @@ const layer = Layer.effect(
           const partial: Partial<Info> = { source: "config" }
           if (provider.env) partial.env = provider.env
           if (provider.name) partial.name = provider.name
-          if (provider.options) partial.options = provider.options
+          // loader 已读取配置并选择凭据/地址；重合并不能把环境优先级或规范后的 URL 覆盖回去。
+          if (provider.options) partial.options = id === "claudecode"
+            ? Object.fromEntries(Object.entries(provider.options).filter(([key]) => !["apiKey", "baseURL"].includes(key)))
+            : provider.options
           mergeProvider(providerID, partial)
         }
 

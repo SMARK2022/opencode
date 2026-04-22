@@ -52,6 +52,9 @@ export const Plugin = define({
             const providerID = id
             catalog.provider.update(providerID, (provider) => {
               if (item.name !== undefined) provider.name = item.name
+              // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
+              if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
+                provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
               if (item.api !== undefined) provider.api = { ...item.api }
               if (item.request !== undefined) {
                 Object.assign(provider.request.headers, item.request.headers)
@@ -63,6 +66,10 @@ export const Plugin = define({
                 if (config.family !== undefined) model.family = config.family
                 if (config.name !== undefined) model.name = config.name
                 if (config.api !== undefined) model.api = { ...model.api, ...config.api }
+                // 仅有模型 ID/URL 的配置仍需继承 ClaudeCode 默认协议；显式 type/package 完整保留。
+                if (providerID === "claudecode" && item.api === undefined &&
+                  (config.api === undefined || !("type" in config.api)) && model.api.type === "native")
+                  model.api = { type: "aisdk", package: "@ai-sdk/anthropic", id: model.api.id, url: model.api.url, settings: model.api.settings }
                 if (config.capabilities !== undefined) {
                   model.capabilities = {
                     tools: config.capabilities.tools,
