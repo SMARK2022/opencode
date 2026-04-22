@@ -79,13 +79,23 @@ export function SubagentFooter() {
     const lastUser = users.at(-1)
     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
 
-    // 中文说明：input/output 展示“本次请求”；括号为会话累计总量。
+    if (requestAssistants.length === 0) {
+      if (!isRunning) return
+      return {
+        input: 0,
+        output: 0,
+        totalInput: 0,
+        totalOutput: 0,
+        context: undefined,
+        cost: undefined,
+      }
+    }
+
+    // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
     const requestConfirmed = sumConfirmed(requestAssistants)
-    const globalConfirmed = sumConfirmed(assistants)
 
     // Add streaming estimates from the last (potentially in-flight) message of current request
-    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
-    const last = activeAssistants.at(-1)!
+    const last = requestAssistants.at(-1)!
     const lastParts = sync.data.part[last.id] ?? []
     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
     const streamingOut = last.time.completed
@@ -108,10 +118,20 @@ export function SubagentFooter() {
 
     const pendingInputTokens = Math.round(pendingIn / 4)
     const pendingOutputTokens = Math.round(streamingOut / 4)
-    const currentInput = requestConfirmed.input + pendingInputTokens
-    const currentOutput = requestConfirmed.output + pendingOutputTokens
-    const totalInput = globalConfirmed.input + pendingInputTokens
-    const totalOutput = globalConfirmed.output + pendingOutputTokens
+    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+    const lastStepFinish = [...lastParts].reverse().find((p) => p.type === "step-finish")
+    const currentStepInputConfirmed =
+      !hasInFlightTail && lastStepFinish
+        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+        : 0
+    const currentStepOutputConfirmed =
+      !hasInFlightTail && lastStepFinish
+        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+        : 0
+    const currentInput = currentStepInputConfirmed + pendingInputTokens
+    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
+    const totalInput = requestConfirmed.input + pendingInputTokens
+    const totalOutput = requestConfirmed.output + pendingOutputTokens
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 
@@ -129,7 +149,7 @@ export function SubagentFooter() {
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
-    const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+    const cost = requestAssistants.reduce((sum, item) => sum + (item.cost || 0), 0)
     return {
       input: currentInput,
       output: currentOutput,

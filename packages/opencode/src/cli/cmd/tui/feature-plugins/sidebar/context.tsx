@@ -14,7 +14,6 @@ const money = new Intl.NumberFormat("en-US", {
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
-  const cost = createMemo(() => msg().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0))
 
   type StateValue = {
     tokens: number
@@ -24,6 +23,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     totalInput: number
     totalOutput: number
     percent: number | null
+    cost: number
   }
 
   const stateRaw = createMemo((): StateValue => {
@@ -33,7 +33,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
     // If no assistant messages yet, show zeros
     if (assistants.length === 0) {
-      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
     }
 
     const sumConfirmed = (items: AssistantMessage[]) =>
@@ -58,13 +58,15 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const lastUser = users.at(-1)
     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
 
-    // 中文说明：侧边栏主值显示“本次请求”，括号里显示会话总累计。
+    if (requestAssistants.length === 0) {
+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+    }
+
+    // 显示规则：外面是最后一个 step 的累计（真实上下文大小）；括号里是当前 user request / agent loop 的累计。
     const requestConfirmed = sumConfirmed(requestAssistants)
-    const globalConfirmed = sumConfirmed(assistants)
 
     // Add streaming estimates from the last (potentially in-flight) message of current request
-    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
-    const last = activeAssistants.at(-1)!
+    const last = requestAssistants.at(-1)!
     const lastParts = props.api.state.part(last.id)
     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
     const streamingOut = last.time.completed
@@ -87,13 +89,25 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
     const pendingInputTokens = Math.round(pendingIn / 4)
     const pendingOutputTokens = Math.round(streamingOut / 4)
-    const input = requestConfirmed.input + pendingInputTokens
-    const output = requestConfirmed.output + pendingOutputTokens
-    const totalInput = globalConfirmed.input + pendingInputTokens
-    const totalOutput = globalConfirmed.output + pendingOutputTokens
+    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+    const lastStepFinish = [...lastParts].reverse().find((p) => p.type === "step-finish")
+    const currentStepInputConfirmed =
+      !hasInFlightTail && lastStepFinish
+        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+        : 0
+    const currentStepOutputConfirmed =
+      !hasInFlightTail && lastStepFinish
+        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+        : 0
+    const input = currentStepInputConfirmed + pendingInputTokens
+    const output = currentStepOutputConfirmed + pendingOutputTokens
+    const totalInput = requestConfirmed.input + pendingInputTokens
+    const totalOutput = requestConfirmed.output + pendingOutputTokens
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+
+    const cost = requestAssistants.reduce((sum, item) => sum + (item.cost || 0), 0)
     return {
       tokens,
       totalTokens,
@@ -101,7 +115,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       output,
       totalInput,
       totalOutput,
-      percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
+      percent: tokens > 0 && model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
+      cost,
     }
   })
 
@@ -113,6 +128,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     totalInput: 0,
     totalOutput: 0,
     percent: null,
+    cost: 0,
   })
   const triggerStateUpdate = leadingAndTrailing(throttle, (v: StateValue) => setStateThrottled(() => v), 50)
   createEffect(() => triggerStateUpdate(stateRaw()))
@@ -130,8 +146,10 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       <text fg={theme().textMuted}>
         {state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens
       </text>
-      <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
-      <text fg={theme().textMuted}>{money.format(cost())} spent</text>
+      <text fg={theme().textMuted}>
+        {state().percent != null ? `${state().percent}% of ctx limit` : "—"}
+      </text>
+      <text fg={theme().textMuted}>{money.format(state().cost)} spent</text>
     </box>
   )
 }
