@@ -279,6 +279,16 @@ export const layer: Layer.Layer<
             return
 
           case "tool-input-delta":
+            yield* updateToolCall(value.id, (match) => {
+              if (match.state.status !== "pending") return match
+              return {
+                ...match,
+                state: {
+                  ...match.state,
+                  raw: match.state.raw + value.delta,
+                },
+              }
+            })
             return
 
           case "tool-input-end":

@@ -162,62 +162,69 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) return
     const isRunning = status().type !== "idle"
     const msg = sync.data.message[props.sessionID] ?? []
-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
+    const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
 
-    if (!last) {
+    // If no assistant messages yet, show zeros when running
+    if (assistants.length === 0) {
       if (!isRunning) return
-      // Show zeroed display immediately when the prompt was sent but no reply yet
       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
     }
 
-    const parts = sync.data.part[last.id] ?? []
-    const chars = parts.reduce((sum, part) => {
-      if (part.type === "text" && !part.ignored) return sum + part.text.length
-      if (part.type === "reasoning") return sum + part.text.length
-      return sum
-    }, 0)
+    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
+    const last = assistants.at(-1)!
+    const agg = assistants.reduce(
+      (acc, a) => {
+        const parts = sync.data.part[a.id] ?? []
+        const { input, output } = parts.reduce(
+          (t, p) => {
+            if (p.type !== "step-finish") return t
+            return {
+              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+              output: t.output + p.tokens.output + p.tokens.reasoning,
+            }
+          },
+          { input: 0, output: 0 },
+        )
+        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
+      },
+      { input: 0, output: 0, providerID: "", modelID: "" },
+    )
 
-    // Estimate tokens from tool outputs that arrived after the last step-finish
-    // (i.e. results gathered but not yet sent to the API in a new step).
-    // Once the message is complete the API's input_tokens already includes them,
-    // so we only do this during streaming to give live feedback on large writes.
-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
-    const toolOutputChars = !last.time.completed
-      ? parts.reduce((sum, part, i) => {
-          if (i <= lastStepFinishIdx) return sum
-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+    // Add streaming estimates from the last (potentially in-flight) message
+    const lastParts = sync.data.part[last.id] ?? []
+    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+    const streamingOut = last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "text" && !p.ignored) return sum + p.text.length
+          if (p.type === "reasoning") return sum + p.text.length
+          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
           return sum
         }, 0)
-      : 0
+    const pendingIn = last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+          return sum
+        }, 0)
 
-    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
-    const cumTokens = parts.reduce(
-      (acc, part) => {
-        if (part.type !== "step-finish") return acc
-        return {
-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-          output: acc.output + part.tokens.output + part.tokens.reasoning,
-        }
-      },
-      { input: 0, output: 0 },
-    )
-    const inputBase = cumTokens.input
-    const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = cumTokens.output
-    const outputEstimated = Math.round(chars / 4)
-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-    const tokens = input + output
+    const totalInput = agg.input + Math.round(pendingIn / 4)
+    const totalOutput = agg.output + Math.round(streamingOut / 4)
+    const tokens = totalInput + totalOutput
 
-    if (tokens <= 0 && input <= 0 && output <= 0) {
+    if (tokens <= 0) {
       if (!isRunning) return
       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
     }
 
-    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
     return {
-      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
+      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }

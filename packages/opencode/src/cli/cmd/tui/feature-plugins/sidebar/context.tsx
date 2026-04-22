@@ -18,52 +18,63 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   type StateValue = { tokens: number; input: number; output: number; percent: number | null }
 
   const stateRaw = createMemo((): StateValue => {
-    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
-    if (!last) {
-      // Always show zeros so the display is visible from the moment a prompt is sent.
-      // The sidebar always renders something; there is no hidden/fallback state.
+    const messages = msg()
+    const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
+
+    // If no assistant messages yet, show zeros
+    if (assistants.length === 0) {
       return { tokens: 0, input: 0, output: 0, percent: null }
     }
 
-    const parts = props.api.state.part(last.id)
-    const chars = parts.reduce((sum, part) => {
-      if (part.type === "text" && !part.ignored) return sum + part.text.length
-      if (part.type === "reasoning") return sum + part.text.length
-      return sum
-    }, 0)
+    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
+    const last = assistants.at(-1)!
+    const agg = assistants.reduce(
+      (acc, a) => {
+        const parts = props.api.state.part(a.id)
+        const { input, output } = parts.reduce(
+          (t, p) => {
+            if (p.type !== "step-finish") return t
+            return {
+              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+              output: t.output + p.tokens.output + p.tokens.reasoning,
+            }
+          },
+          { input: 0, output: 0 },
+        )
+        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
+      },
+      { input: 0, output: 0, providerID: "", modelID: "" },
+    )
 
-    // Estimate tokens from tool outputs that arrived after the last step-finish.
-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
-    const toolOutputChars = !last.time.completed
-      ? parts.reduce((sum, part, i) => {
-          if (i <= lastStepFinishIdx) return sum
-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+    // Add streaming estimates from the last (potentially in-flight) message
+    const lastParts = props.api.state.part(last.id)
+    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+    const streamingOut = last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "text" && !p.ignored) return sum + p.text.length
+          if (p.type === "reasoning") return sum + p.text.length
+          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
           return sum
         }, 0)
-      : 0
+    const pendingIn = last.time.completed
+      ? 0
+      : lastParts.reduce((sum, p, i) => {
+          if (i <= lastSFIdx) return sum
+          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+          return sum
+        }, 0)
 
-    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
-    const cumTokens = parts.reduce(
-      (acc, part) => {
-        if (part.type !== "step-finish") return acc
-        return {
-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-          output: acc.output + part.tokens.output + part.tokens.reasoning,
-        }
-      },
-      { input: 0, output: 0 },
-    )
-    const inputBase = cumTokens.input
-    const input = inputBase + Math.round(toolOutputChars / 4)
-    const outputActual = cumTokens.output
-    const outputEstimated = Math.round(chars / 4)
-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-    const tokens = input + output
-    const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    const totalInput = agg.input + Math.round(pendingIn / 4)
+    const totalOutput = agg.output + Math.round(streamingOut / 4)
+    const tokens = totalInput + totalOutput
+    const model = props.api.state.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
     return {
       tokens,
-      input,
-      output,
+      input: totalInput,
+      output: totalOutput,
       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
     }
   })
