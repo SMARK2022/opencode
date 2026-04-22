@@ -605,7 +605,11 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
     ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
     messages,
-    tools,
+    // ClaudeCode 的同一 wire 占位也适用于 native lowering；普通 Anthropic 与 none 保持上游语义。
+    // unsupported 调用沿用 registry 的 Unknown tool 错误结果，不注册假执行器或提升为 hosted tool。
+    tools: claudecode && request.toolChoice?.type !== "none" && !tools?.some((tool) => tool.name === "Read")
+      ? [...(tools ?? []), { name: "Read", description: "unsupported", input_schema: { type: "object", properties: {} } }]
+      : tools,
     tool_choice: toolChoice,
     stream: true as const,
     max_tokens: generation?.maxTokens ?? outputLimit,
