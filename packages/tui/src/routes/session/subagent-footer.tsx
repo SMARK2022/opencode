@@ -5,7 +5,7 @@ import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
-import { createThrottledSignal } from "../../util/signal"
+import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 
@@ -38,7 +38,8 @@ export function SubagentFooter() {
   // 将 money 提升到组件作用域，避免每次 memo 求值时重建
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
-  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
+  // 子代理用数值分开两方向，使仅有工具输入增长时不会同时点亮输出箭头。
+  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
@@ -50,7 +51,8 @@ export function SubagentFooter() {
 
     if (!confirmed) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      // 零值仍是有效运行快照，随后增长能与零基线比较。
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     const last = assistants.at(-1)
@@ -89,14 +91,15 @@ export function SubagentFooter() {
 
     if (tokens <= 0) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = session()?.cost ?? 0
     return {
-      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
+      input: totalInput,
+      output: totalOutput,
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -106,6 +109,9 @@ export function SubagentFooter() {
   // 此处在组件 owner 下创建计时器；切换导致卸载时，旧 footer 的待发快照由 helper 取消。
   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
   createEffect(() => setUsageThrottled(usageRaw()))
+
+  // 在 footer owner 内观察完整 usage 生命周期，Show 暂时隐藏不会另外创建一套脉冲计时器。
+  const usageFlow = createTokenFlowPulse(usage)
 
   const { theme } = useTheme()
   const keymap = useOpencodeKeymap()
@@ -141,7 +147,11 @@ export function SubagentFooter() {
             <Show when={usage()}>
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
-                  {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
+                  {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                  {item().context ? ` · ${item().context}` : ""}
+                  {item().cost ? ` · ${item().cost}` : ""}
                 </text>
               )}
             </Show>

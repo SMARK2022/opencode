@@ -47,7 +47,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn, createThrottledSignal } from "../../util/signal"
+import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
@@ -262,7 +262,8 @@ export function Prompt(props: PromptProps) {
   })
 
   // 首次等待没有 API 用量，context 可缺省以免把零流量解释成已测得的上下文。
-  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
+  // 保留原始计数供增长比较，避免 Locale 的缩写或分隔符掩盖数值变化。
+  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     if (!props.sessionID) return
@@ -277,7 +278,7 @@ export function Prompt(props: PromptProps) {
     if (!confirmed) {
       // 会话快照尚未到达时保留 index 6 的运行中零值占位，不从窗口推算历史总量。
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     // 无缓存助手不代表会话无历史用量；总量仍显示，只有流式尾部按空处理。
@@ -315,7 +316,7 @@ export function Prompt(props: PromptProps) {
     const tokens = totalInput + totalOutput
     if (tokens <= 0) {
       if (!isRunning) return
-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     // 模型仅能由仍可见的助手证实；缺失时显示总量而不捏造 context 上限。
@@ -323,7 +324,9 @@ export function Prompt(props: PromptProps) {
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
     const cost = session?.cost ?? 0
     return {
-      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
+      input: totalInput,
+      output: totalOutput,
+      // context 与 cost 仍是展示文本，不参与流量判断，费用变化不应点亮 token 箭头。
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -333,6 +336,9 @@ export function Prompt(props: PromptProps) {
   // 无会话或无助手时的 undefined 必须进入尾值，使 Match 最终撤下旧用量而非保留旧快照。
   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
   createEffect(() => setUsageThrottled(usageRaw()))
+
+  // 观察 usage 而非 usageRaw，使箭头增长与 prompt 实际显示的节流计数对齐。
+  const usageFlow = createTokenFlowPulse(usage)
 
   const [store, setStore] = createStore<{
     prompt: PromptInfo
@@ -1718,7 +1724,11 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
+                          {/* 只改变箭头前景色，数值与可选后缀仍从同一 item 快照读取，保持文本布局稳定。 */}
+                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
+                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                          {item().context ? ` · ${item().context}` : ""}
+                          {item().cost ? ` · ${item().cost}` : ""}
                         </text>
                       )}
                     </Match>

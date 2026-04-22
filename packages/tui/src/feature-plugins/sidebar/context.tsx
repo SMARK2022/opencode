@@ -2,7 +2,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal } from "solid-js"
-import { createThrottledSignal } from "../../util/signal"
+import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 
 const id = "internal:sidebar-context"
 
@@ -77,13 +77,16 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null }, 50)
   createEffect(() => setStateThrottled(stateRaw()))
 
+  // sidebar 总有零值 state，零值到正值可触发增长；tokens/percent 的单独变化不会续期。
+  const flow = createTokenFlowPulse(state)
+
   return (
     <box>
       <text fg={theme().text}>
         <b>Context</b>
       </text>
-      {/* 添加输入/输出流量显示 */}
-      <text fg={theme().textMuted}>↑ {state().input.toLocaleString()} · ↓ {state().output.toLocaleString()}</text>
+      {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
+      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()} · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}</text>
       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
       <text fg={theme().textMuted}>{money.format(cost())} spent</text>
