@@ -180,6 +180,7 @@ const AnthropicBodyFields = {
   stop_sequences: optionalArray(Schema.String),
   metadata: Schema.optional(JsonObject),
   thinking: Schema.optional(ClaudeCodeThinking),
+  output_config: Schema.optional(JsonObject),
 }
 const AnthropicMessagesBody = Schema.Struct(AnthropicBodyFields)
 export type AnthropicMessagesBody = Schema.Schema.Type<typeof AnthropicMessagesBody>
@@ -506,17 +507,29 @@ const anthropicOptions = (request: LLMRequest) => request.providerOptions?.anthr
 
 const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
   const thinking = anthropicOptions(request)?.thinking
-  // 只在 ClaudeCode 保留源13显式值，普通 Anthropic 的 enabled-only lowering 完整保持。
-  if (request.model.provider === "claudecode" && thinking !== undefined && thinking !== null) {
-    if (!ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
-    if (thinking.type === "disabled") return { type: "disabled" as const }
-    if (thinking.type === "adaptive") return {
-      type: "adaptive" as const,
-      // 已验证枚举值用 const 对象保留字面量，避免返回类型再次拓宽为 string。
-      ...(thinking.display === "omitted" || thinking.display === "summarized" ? { display: thinking.display } as const : {}),
+  // 专用策略由 provider 身份限定，普通 Anthropic 的预算验证仍沿用上游。
+  if (request.model.provider === "claudecode") {
+    if (thinking !== undefined && thinking !== null && !ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
+    // disabled 优先于模型默认，不能把用户关闭思考的选择改成 adaptive。
+    if (ProviderShared.isRecord(thinking) && thinking.type === "disabled") return { type: "disabled" as const }
+    const id = String(request.model.id)
+    // 只保留 SDK 支持的 display 值，typed Schema 编码时也不能再次剥离摘要选择。
+    const adaptive = { type: "adaptive" as const,
+      ...(ProviderShared.isRecord(thinking) && (thinking.display === "omitted" || thinking.display === "summarized")
+        ? { display: thinking.display } as const : {}),
     }
+    // 只匹配源 15 明确支持的三种型号，不向新型号猜测或扩大默认策略。
+    if (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((model) => id.includes(model)))
+      return adaptive
+    // Haiku 与未指定 thinking 的旧型号使用预算；显式旧型号配置继续由原验证处理。
+    if (id.includes("haiku") || !thinking) {
+      const max = request.generation?.maxTokens ?? request.model.defaults?.limits?.output ?? request.model.route.defaults.limits?.output ?? 4096
+      return { type: "enabled" as const, budget_tokens: Math.min(32000, Math.max(1, max - 1)) }
+    }
+    // 其他旧型号保留调用方显式 adaptive，不因通用 enabled-only lowering 而静默丢弃。
+    if (ProviderShared.isRecord(thinking) && thinking.type === "adaptive") return adaptive
     // 非 nullish 的无效配置必须走 typed 错误，不能被 fromRequest 的缺省 enabled 掩盖。
-    if (thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
+    if (ProviderShared.isRecord(thinking) && thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
   }
   if (!ProviderShared.isRecord(thinking) || thinking.type !== "enabled") return undefined
   const budget =
@@ -570,13 +583,14 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     ...(ProviderShared.isRecord(metadata) ? metadata : {}),
     user_id: encodeMetadata({ device_id: claudeCodeSession.deviceId, account_uuid: "", session_id: claudeCodeSession.sessionId }),
   }
-  // 使用真正 lowered 的首个 user 文本；13 拼接全部 text，15 才改成首块，不能提前改变阶段。
+  // 源15只取首user的首text block，附件后续文本不能移动指纹采样位置。
   const firstUserText = messages.find((message) => message.role === "user")?.content
-    .filter((block) => block.type === "text").map((block) => block.text).join("") ?? ""
+    .find((block) => block.type === "text")?.text ?? ""
   const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
   const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
   // 三位版本后缀与五位零占位是源 wire 契约；CCH 只在完整 overlay 编码后计算。
   const billing = `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;`
+  const outputConfig = anthropicOptions(request)?.output_config
   return {
     // 13 的身份注入在 20 明确撤销；保留用户的原始 system，顺序始终是身份在前。
     system: claudecode ? [
@@ -588,6 +602,8 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     ] : system,
     model: request.model.id,
     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
+    // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
+    ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
     messages,
     tools,
     tool_choice: toolChoice,
@@ -597,8 +613,7 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     top_p: generation?.topP,
     top_k: generation?.topK,
     stop_sequences: generation?.stop,
-    // 默认预算严格小于当前输出上限，不能照搬源固定 31999 导致小窗口请求被拒。
-    thinking: (yield* lowerThinking(request)) ?? (claudecode ? { type: "enabled" as const, budget_tokens: Math.min(31999, Math.max(1, (generation?.maxTokens ?? outputLimit) - 1)) } : undefined),
+    thinking: yield* lowerThinking(request),
   }
 })
 
@@ -924,9 +939,11 @@ export const route = Route.make({
       "anthropic-version": "2023-06-01",
       ...(request.model.provider === "claudecode" ? {
         "anthropic-beta": [...new Set([
-          "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+          // 1M 只随源三型号添加；配置 beta 同样排除 interleaved/redact，其余功能需求保留。
+          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27" +
+            (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((id) => String(request.model.id).includes(id)) ? ",context-1m-2025-08-07" : ""),
           ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
-        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter(Boolean))].join(","),
+        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(","),
         "x-app": "cli",
         "user-agent": "claude-cli/2.1.117 (external, cli)",
         // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。

@@ -4,15 +4,6 @@ import { createHash, randomUUID } from "crypto"
 export const VERSION = "2.1.117"
 // 指纹盐值与 Claude Code 官方二进制一致，修改会导致计费头校验失败。
 const SALT = "59cf53e54c78"
-// 这些 beta 是 ClaudeCode 请求契约，普通 Anthropic provider 不共享这份列表。
-const ANTHROPIC_BETAS = [
-  "claude-code-20250219",
-  "interleaved-thinking-2025-05-14",
-  "redact-thinking-2026-02-12",
-  "context-management-2025-06-27",
-  "prompt-caching-scope-2026-01-05",
-].join(",")
-
 // 身份块放在主提示之前；20 会撤销该注入，不能提前删去补丁序列中的行为阶段。
 export const CLI_IDENTITY_BLOCK = {
   type: "text" as const,
@@ -95,17 +86,31 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
   })
 }
 
-// 构建请求头，包含 Anthropic 版本、beta 特性和 Bearer 认证
-export function buildRequestHeaders(opts: { token: string; sessionId: string }): Record<string, string> {
+// 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
+export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
+  // 15 撤销 redact-thinking，按当前要求排除已弃用 interleaved；功能 beta 由后面的 SDK 合并保留。
+  const betas = [
+    "claude-code-20250219",
+    "prompt-caching-scope-2026-01-05",
+    "context-management-2025-06-27"
+  ]
+
+  // 检查服务端实际 modelId 而非配置显示名，别名不应决定可用 context beta。
+  if (
+    opts.modelId.includes("opus-4-7") ||
+    opts.modelId.includes("opus-4-6") ||
+    opts.modelId.includes("sonnet-4-6")
+  ) {
+    betas.push("context-1m-2025-08-07")
+  }
+
   return {
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
-    "anthropic-beta": ANTHROPIC_BETAS,
+    "anthropic-beta": betas.join(","),
     "x-app": "cli",
     "user-agent": `claude-cli/${VERSION} (external, cli)`,
     "x-claude-code-session-id": opts.sessionId,
-    // Bearer token 来自 provider 捕获的选中凭据，覆盖 SDK 同名认证头。
-    authorization: `Bearer ${opts.token}`,
   }
 }
 
@@ -135,14 +140,14 @@ export function patchCch(bodyStr: string): string {
   return bodyStr.slice(0, idx) + cch + bodyStr.slice(idx + 5)
 }
 
-// --- Fetch Wrapper ---
-export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; baseUrl: string }) {
-  const { session, token, baseUrl } = opts
+// --- Fetch 拦截与重写包装器 ---
+export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
+  const { session, token, authMode } = opts
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString()
 
-    // 透传分支保留原始 input/init，避免把健康检查的 method、body 或 signal 丢弃。
+    // 只拦截向 /v1/messages 发送的请求
     if (!url.includes("/v1/messages")) {
       return fetch(input, init)
     }
@@ -151,18 +156,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       ? JSON.parse(typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body as ArrayBuffer))
       : {}
 
+    // 指纹只使用首个 text block；拼接附件后的文本会偏离源客户端的字符位置。
     const firstUserMessage = (originalBody.messages ?? []).find((m: { role: string }) => m.role === "user")
-
-    // 跳过 assistant/tool 消息后读取首个 user，指纹不能由最近一次模型回答决定。
     const firstUserText = (() => {
       if (!firstUserMessage) return ""
       const content = firstUserMessage.content
       if (typeof content === "string") return content
       if (Array.isArray(content)) {
-        return content
-          .filter((b: { type: string }) => b.type === "text")
-          .map((b: { text: string }) => b.text)
-          .join("")
+        const firstText = content.find((b: { type: string }) => b.type === "text")
+        return firstText ? firstText.text : ""
       }
       return ""
     })()
@@ -182,54 +184,94 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     const newSystem = buildSystemBlocks(fp).map((block, index) =>
       index > 0 && cached + index > 4 ? { type: block.type, text: block.text } : block).concat(system)
 
+    // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
+    const newMetadata = {
+      ...originalBody.metadata,
+      user_id: buildMetadataUserId({
+        deviceId: session.deviceId,
+        sessionId: session.sessionId,
+        accountUuid: session.accountUuid,
+      }),
+    }
+
+    // disabled 先于型号默认；只有源支持的新型号改为 adaptive，其余保留显式配置。
+    const modelId = originalBody.model || ""
+    const maxTokens = originalBody.max_tokens || 32000
+    const originalThinking = originalBody.thinking
+
+    let thinking = originalThinking
+
+    if (originalThinking?.type === "disabled") {
+      // 显式关闭思考同样是一份有效配置，不能用 truthy 判断重新启用默认预算。
+      thinking = originalThinking
+    } else if (
+      modelId.includes("opus-4-7") ||
+      modelId.includes("opus-4-6") ||
+      modelId.includes("sonnet-4-6")
+    ) {
+      // SDK 已验证 adaptive 属性；保留 display/block_binding，避免 Opus4.7 默认为 omitted。
+      thinking = { ...(originalThinking?.type === "adaptive" ? originalThinking : {}), type: "adaptive" }
+    } else if (modelId.includes("haiku")) {
+      const defaultBudget = 32000
+      // Haiku 的预算必须小于 max_tokens，输出上限变化后不能继续使用固定 32000。
+      const budgetTokens = Math.min(defaultBudget, Math.max(1, maxTokens - 1))
+      thinking = { type: "enabled", budget_tokens: budgetTokens }
+    } else {
+      if (!thinking) {
+        // 旧型号只有缺少配置时补默认，已有 enabled/budget_tokens 不被无条件替换。
+        const defaultBudget = 32000
+        const budgetTokens = Math.min(defaultBudget, Math.max(1, maxTokens - 1))
+        thinking = { type: "enabled", budget_tokens: budgetTokens }
+      }
+    }
+
+    // 5. 构造打补丁后的最终 Body，保留 output_config
     const patchedBody = {
       // system 首字段使 billing 定位独立于 SDK 的 MCP/container 字段；其余原字段逐项保留。
       system: newSystem,
       ...Object.fromEntries(Object.entries(originalBody).filter(([key]) => key !== "system")),
-      metadata: {
-        user_id: buildMetadataUserId({
-          deviceId: session.deviceId,
-          sessionId: session.sessionId,
-          accountUuid: session.accountUuid,
-        }),
-      },
-      // 仅夹紧缺省预算，显式 enabled/adaptive/disabled 配置继续交给原有 SDK 语义。
-      thinking: originalBody.thinking ?? {
-        type: "enabled",
-        budget_tokens: Math.min(31999, Math.max(1, (originalBody.max_tokens ?? 32000) - 1)),
-      },
+      metadata: newMetadata,
+      ...(thinking ? { thinking } : {}),
+      ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
     }
 
+    // 在合并全部字段之后计算校验值，metadata、thinking 与工具字段都属于签名字节。
     const bodyWithPlaceholder = JSON.stringify(patchedBody)
     const finalBodyStr = patchCch(bodyWithPlaceholder)
 
-    const headers = buildRequestHeaders({
-      token,
-      sessionId: session.sessionId,
-    })
-
+    // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
+    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
     const requestHeaders = new Headers(init?.headers)
-    for (const [key, value] of Object.entries(headers)) {
+
+    for (const [key, value] of Object.entries(customHeaders)) {
       // SDK 的 MCP/task-budget/thinking-binding beta 与实际 body 配套，必须同源 beta 一起发送。
+      // 仅撤销源明确移除和当前弃用的 beta，其余去重保留，不能丢掉对应 body 的功能开关。
       requestHeaders.set(key, key === "anthropic-beta"
-        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter(Boolean))].join(",")
+        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(",")
         : value)
     }
-    
-    
-    return fetch(`${baseUrl}/v1/messages`, {
-      // 先保留 signal/keepalive 等控制项，再由适配器覆盖 POST、headers 和已签名 body。
+
+    // 两种认证头互斥；删除 SDK 遗留头，避免 Bearer 与 x-api-key 指向不同账号。
+    if (authMode === "x-api-key") {
+      requestHeaders.set("x-api-key", token)
+      requestHeaders.delete("authorization")
+    } else {
+      requestHeaders.set("authorization", `Bearer ${token}`)
+      requestHeaders.delete("x-api-key")
+    }
+
+    // 8. 透传所有 init 参数，只覆盖 body 和 headers，避免丢弃 signal/keepalive
+    return fetch(input, {
       ...init,
-      method: "POST",
       headers: requestHeaders,
       body: finalBodyStr,
     })
   }
 }
 
-// --- Provider registration ---
+// --- Provider 暴露点 ---
 // SDK 的 URL 构造与 fetch 的消息改写属于同一个 provider，不能把 wrapper 全局安装。
-export function createClaudeCodeProvider(token: string, baseUrl: string) {
+export function createClaudeCodeProvider(token: string, baseUrl: string, authMode: "bearer" | "x-api-key") {
   const session = getSession()
   // 根地址统一去除已有 /v1；SDK 的 /v1 和 wrapper 的 /v1/messages 共享此 root，避免重复拼接完整消息路径。
   const root = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
@@ -241,9 +283,8 @@ export function createClaudeCodeProvider(token: string, baseUrl: string) {
     fetch: createClaudeCodeFetch({
       session,
       token,
-      baseUrl: root,
+      authMode,
     }),
-    // headers 留空：Bearer 认证在消息 wrapper 合并，避免 SDK 配置缓存另一份静态 token。
     headers: {},
   }
 }
