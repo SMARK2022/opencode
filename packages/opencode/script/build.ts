@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+// CRITICAL: Load version-env first to set OPENCODE_VERSION before any other imports
+import "./version-env"
+
 import { $ } from "bun"
 import fs from "fs"
 import path from "path"
