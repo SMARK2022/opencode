@@ -2,11 +2,38 @@ import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { Session } from "../../session"
 import { bootstrap } from "../bootstrap"
-import { Database } from "../../storage"
+import { Database, eq } from "../../storage"
 import { SessionTable } from "../../session/session.sql"
 import { Project } from "../../project"
 import { Instance } from "../../project/instance"
 import { AppRuntime } from "@/effect/app-runtime"
+import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
+
+const MICROS = 1_000_000
+
+export type ModelUsageEntry = {
+  messages: number
+  tokens: { input: number; output: number; cache: { read: number; write: number } }
+  cost: number
+}
+
+function upsertModelUsage(
+  acc: Record<string, ModelUsageEntry>,
+  key: string,
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheWrite: number,
+  cost: number,
+): void {
+  if (!acc[key]) acc[key] = { messages: 0, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } }, cost: 0 }
+  acc[key].messages++
+  acc[key].tokens.input += input
+  acc[key].tokens.output += output
+  acc[key].tokens.cache.read += cacheRead
+  acc[key].tokens.cache.write += cacheWrite
+  acc[key].cost += cost
+}
 
 interface SessionStats {
   totalSessions: number
@@ -16,31 +43,11 @@ interface SessionStats {
     input: number
     output: number
     reasoning: number
-    cache: {
-      read: number
-      write: number
-    }
+    cache: { read: number; write: number }
   }
   toolUsage: Record<string, number>
-  modelUsage: Record<
-    string,
-    {
-      messages: number
-      tokens: {
-        input: number
-        output: number
-        cache: {
-          read: number
-          write: number
-        }
-      }
-      cost: number
-    }
-  >
-  dateRange: {
-    earliest: number
-    latest: number
-  }
+  modelUsage: Record<string, ModelUsageEntry>
+  dateRange: { earliest: number; latest: number }
   days: number
   costPerDay: number
   tokensPerSession: number
@@ -128,21 +135,10 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
     totalSessions: filteredSessions.length,
     totalMessages: 0,
     totalCost: 0,
-    totalTokens: {
-      input: 0,
-      output: 0,
-      reasoning: 0,
-      cache: {
-        read: 0,
-        write: 0,
-      },
-    },
+    totalTokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     toolUsage: {},
     modelUsage: {},
-    dateRange: {
-      earliest: Date.now(),
-      latest: Date.now(),
-    },
+    dateRange: { earliest: Date.now(), latest: Date.now() },
     days: 0,
     costPerDay: 0,
     tokensPerSession: 0,
@@ -168,59 +164,73 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
     const batch = filteredSessions.slice(i, i + BATCH_SIZE)
 
     const batchPromises = batch.map(async (session) => {
-      const messages = await AppRuntime.runPromise(
-        Session.Service.use((svc) => svc.messages({ sessionID: session.id })),
-      )
+      const [messages, requestUsageRows, assistantUsageRows] = await Promise.all([
+        AppRuntime.runPromise(Session.Service.use((svc) => svc.messages({ sessionID: session.id }))),
+        Database.use((db) =>
+          db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
+        ),
+        Database.use((db) =>
+          db
+            .select()
+            .from(RequestUsageAssistantTable)
+            .where(eq(RequestUsageAssistantTable.session_id, session.id))
+            .all(),
+        ),
+      ])
 
       let sessionCost = 0
       let sessionTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
-      let sessionToolUsage: Record<string, number> = {}
-      let sessionModelUsage: Record<
-        string,
-        {
-          messages: number
-          tokens: {
-            input: number
-            output: number
-            cache: {
-              read: number
-              write: number
-            }
-          }
-          cost: number
-        }
-      > = {}
+      const sessionToolUsage: Record<string, number> = {}
+      const sessionModelUsage: Record<string, ModelUsageEntry> = {}
 
-      for (const message of messages) {
-        if (message.info.role === "assistant") {
+      if (requestUsageRows.length > 0) {
+        // Sessions with DB tracking: use request_usage for cost/tokens, assistant table for per-model breakdown.
+        for (const row of requestUsageRows) {
+          sessionCost += row.cost_micros / MICROS
+          sessionTokens.input += row.tokens_input
+          sessionTokens.output += row.tokens_output
+          sessionTokens.reasoning += row.tokens_reasoning
+          sessionTokens.cache.read += row.tokens_cache_read
+          sessionTokens.cache.write += row.tokens_cache_write
+        }
+        for (const row of assistantUsageRows) {
+          upsertModelUsage(
+            sessionModelUsage,
+            `${row.provider_id}/${row.model_id}`,
+            row.tokens_input,
+            row.tokens_output + row.tokens_reasoning,
+            row.tokens_cache_read,
+            row.tokens_cache_write,
+            row.cost_micros / MICROS,
+          )
+        }
+      } else {
+        // Legacy sessions (pre-migration): derive cost/tokens from message metadata.
+        for (const message of messages) {
+          if (message.info.role !== "assistant") continue
           sessionCost += message.info.cost || 0
-
-          const modelKey = `${message.info.providerID}/${message.info.modelID}`
-          if (!sessionModelUsage[modelKey]) {
-            sessionModelUsage[modelKey] = {
-              messages: 0,
-              tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-              cost: 0,
-            }
-          }
-          sessionModelUsage[modelKey].messages++
-          sessionModelUsage[modelKey].cost += message.info.cost || 0
-
-          if (message.info.tokens) {
-            sessionTokens.input += message.info.tokens.input || 0
-            sessionTokens.output += message.info.tokens.output || 0
-            sessionTokens.reasoning += message.info.tokens.reasoning || 0
-            sessionTokens.cache.read += message.info.tokens.cache?.read || 0
-            sessionTokens.cache.write += message.info.tokens.cache?.write || 0
-
-            sessionModelUsage[modelKey].tokens.input += message.info.tokens.input || 0
-            sessionModelUsage[modelKey].tokens.output +=
-              (message.info.tokens.output || 0) + (message.info.tokens.reasoning || 0)
-            sessionModelUsage[modelKey].tokens.cache.read += message.info.tokens.cache?.read || 0
-            sessionModelUsage[modelKey].tokens.cache.write += message.info.tokens.cache?.write || 0
+          const t = message.info.tokens
+          if (t) {
+            sessionTokens.input += t.input || 0
+            sessionTokens.output += t.output || 0
+            sessionTokens.reasoning += t.reasoning || 0
+            sessionTokens.cache.read += t.cache?.read || 0
+            sessionTokens.cache.write += t.cache?.write || 0
+            upsertModelUsage(
+              sessionModelUsage,
+              `${message.info.providerID}/${message.info.modelID}`,
+              t.input || 0,
+              (t.output || 0) + (t.reasoning || 0),
+              t.cache?.read || 0,
+              t.cache?.write || 0,
+              message.info.cost || 0,
+            )
           }
         }
+      }
 
+      // Tool usage always comes from message parts.
+      for (const message of messages) {
         for (const part of message.parts) {
           if (part.type === "tool" && part.tool) {
             sessionToolUsage[part.tool] = (sessionToolUsage[part.tool] || 0) + 1
@@ -265,13 +275,8 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
       }
 
       for (const [model, usage] of Object.entries(result.sessionModelUsage)) {
-        if (!stats.modelUsage[model]) {
-          stats.modelUsage[model] = {
-            messages: 0,
-            tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-            cost: 0,
-          }
-        }
+        if (!stats.modelUsage[model])
+          stats.modelUsage[model] = { messages: 0, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } }, cost: 0 }
         stats.modelUsage[model].messages += usage.messages
         stats.modelUsage[model].tokens.input += usage.tokens.input
         stats.modelUsage[model].tokens.output += usage.tokens.output
@@ -284,10 +289,7 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
 
   const rangeDays = Math.max(1, Math.ceil((latestTime - earliestTime) / MS_IN_DAY))
   const effectiveDays = windowDays ?? rangeDays
-  stats.dateRange = {
-    earliest: earliestTime,
-    latest: latestTime,
-  }
+  stats.dateRange = { earliest: earliestTime, latest: latestTime }
   stats.days = effectiveDays
   stats.costPerDay = stats.totalCost / effectiveDays
   const totalTokens =
@@ -309,7 +311,7 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
   return stats
 }
 
-export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit?: number) {
+export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit?: number): void {
   const width = 56
 
   function renderRow(label: string, value: string): string {
@@ -319,7 +321,6 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
     return `│${label}${" ".repeat(padding)}${value} │`
   }
 
-  // Overview section
   console.log("┌────────────────────────────────────────────────────────┐")
   console.log("│                       OVERVIEW                         │")
   console.log("├────────────────────────────────────────────────────────┤")
@@ -329,7 +330,6 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
   console.log("└────────────────────────────────────────────────────────┘")
   console.log()
 
-  // Cost & Tokens section
   console.log("┌────────────────────────────────────────────────────────┐")
   console.log("│                    COST & TOKENS                       │")
   console.log("├────────────────────────────────────────────────────────┤")
@@ -348,7 +348,6 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
   console.log("└────────────────────────────────────────────────────────┘")
   console.log()
 
-  // Model Usage section
   if (modelLimit !== undefined && Object.keys(stats.modelUsage).length > 0) {
     const sortedModels = Object.entries(stats.modelUsage).sort(([, a], [, b]) => b.messages - a.messages)
     const modelsToDisplay = modelLimit === Infinity ? sortedModels : sortedModels.slice(0, modelLimit)
@@ -367,13 +366,11 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
       console.log(renderRow("  Cost", `$${usage.cost.toFixed(4)}`))
       console.log("├────────────────────────────────────────────────────────┤")
     }
-    // Remove last separator and add bottom border
-    process.stdout.write("\x1B[1A") // Move up one line
+    process.stdout.write("\x1B[1A")
     console.log("└────────────────────────────────────────────────────────┘")
   }
   console.log()
 
-  // Tool Usage section
   if (Object.keys(stats.toolUsage).length > 0) {
     const sortedTools = Object.entries(stats.toolUsage).sort(([, a], [, b]) => b - a)
     const toolsToDisplay = toolLimit ? sortedTools.slice(0, toolLimit) : sortedTools
@@ -403,7 +400,7 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
   console.log()
 }
 
-function formatNumber(num: number): string {
+export function formatNumber(num: number): string {
   if (num >= 1000000) {
     return (num / 1000000).toFixed(1) + "M"
   } else if (num >= 1000) {

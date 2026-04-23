@@ -13,6 +13,7 @@ import { SessionShare } from "@/share"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
+import { SessionRequestUsage } from "@/session/request-usage"
 import { Effect } from "effect"
 import { Agent } from "@/agent/agent"
 import { Snapshot } from "@/snapshot"
@@ -25,6 +26,7 @@ import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
 import { Bus } from "@/bus"
 import { NamedError } from "@opencode-ai/shared/util/error"
+import { NotFoundError } from "@/storage"
 import { jsonRequest, runRequest } from "./trace"
 
 const log = Log.create({ service: "server" })
@@ -195,6 +197,122 @@ export const SessionRoutes = lazy(() =>
         return jsonRequest("SessionRoutes.todo", c, function* () {
           const todo = yield* Todo.Service
           return yield* todo.get(sessionID)
+        })
+      },
+    )
+    .get(
+      "/:sessionID/request_usage",
+      describeRoute({
+        summary: "List request usage",
+        description: "List per-request token usage and cost for a session.",
+        operationId: "session.request_usage.list",
+        responses: {
+          200: {
+            description: "Request usage list",
+            content: {
+              "application/json": {
+                schema: resolver(SessionRequestUsage.Request.array()),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: SessionID.zod,
+        }),
+      ),
+      validator(
+        "query",
+        z.object({
+          limit: z.coerce.number().optional(),
+          before: z.coerce.number().optional(),
+          rootRequestID: MessageID.zod.optional(),
+          source: SessionRequestUsage.Source.optional(),
+        }),
+      ),
+      async (c) => {
+        const { sessionID } = c.req.valid("param")
+        const query = c.req.valid("query")
+        return jsonRequest("SessionRoutes.request_usage.list", c, function* () {
+          const usage = yield* SessionRequestUsage.Service
+          return yield* usage.list({
+            sessionID,
+            limit: query.limit,
+            before: query.before,
+            rootRequestID: query.rootRequestID,
+            source: query.source,
+          })
+        })
+      },
+    )
+    .get(
+      "/:sessionID/request_usage/:requestID",
+      describeRoute({
+        summary: "Get request usage",
+        description: "Get token usage and cost for a specific request.",
+        operationId: "session.request_usage.get",
+        responses: {
+          200: {
+            description: "Request usage detail",
+            content: {
+              "application/json": {
+                schema: resolver(SessionRequestUsage.Request),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: SessionID.zod,
+          requestID: MessageID.zod,
+        }),
+      ),
+      async (c) => {
+        const { sessionID, requestID } = c.req.valid("param")
+        return jsonRequest("SessionRoutes.request_usage.get", c, function* () {
+          const usage = yield* SessionRequestUsage.Service
+          const result = yield* usage.get({ sessionID, requestID })
+          if (result) return result
+          throw new NotFoundError({ message: `Request usage not found: ${requestID}` })
+        })
+      },
+    )
+    .get(
+      "/:sessionID/request_usage/:requestID/assistant",
+      describeRoute({
+        summary: "List request assistant usage",
+        description: "List assistant-round usage for a specific request.",
+        operationId: "session.request_usage.assistants",
+        responses: {
+          200: {
+            description: "Assistant usage list",
+            content: {
+              "application/json": {
+                schema: resolver(SessionRequestUsage.Assistant.array()),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: SessionID.zod,
+          requestID: MessageID.zod,
+        }),
+      ),
+      async (c) => {
+        const { sessionID, requestID } = c.req.valid("param")
+        return jsonRequest("SessionRoutes.request_usage.assistants", c, function* () {
+          const usage = yield* SessionRequestUsage.Service
+          return yield* usage.assistants({ sessionID, requestID })
         })
       },
     )
@@ -872,7 +990,7 @@ export const SessionRoutes = lazy(() =>
           sessionID: SessionID.zod,
         }),
       ),
-      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
+      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true, source: true, rootRequestID: true })),
       async (c) => {
         c.status(200)
         c.header("Content-Type", "application/json")
@@ -908,7 +1026,7 @@ export const SessionRoutes = lazy(() =>
           sessionID: SessionID.zod,
         }),
       ),
-      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
+      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true, source: true, rootRequestID: true })),
       async (c) => {
         const sessionID = c.req.valid("param").sessionID
         const body = c.req.valid("json")

@@ -32,6 +32,7 @@ import { Command } from "../command"
 import { pathToFileURL, fileURLToPath } from "url"
 import { ConfigMarkdown } from "../config"
 import { SessionSummary } from "./summary"
+import { SessionRequestUsage } from "./request-usage"
 import { NamedError } from "@opencode-ai/shared/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool"
@@ -740,6 +741,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         model: { providerID: model.providerID, modelID: model.modelID },
       }
       yield* sessions.updateMessage(userMsg)
+      const requestUsageShellBegin = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (requestUsageShellBegin)
+        yield* requestUsageShellBegin.begin({
+          sessionID: input.sessionID,
+          requestID: userMsg.id,
+          rootRequestID: userMsg.id,
+          source: "shell",
+          agent: userMsg.agent,
+          providerID: userMsg.model.providerID,
+          modelID: userMsg.model.modelID,
+          timeCreated: userMsg.time.created,
+        })
       const userPart: MessageV2.Part = {
         type: "text",
         id: PartID.ascending(),
@@ -858,6 +871,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
             yield* sessions.updatePart(part)
           }
+          const requestUsageShellComplete = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (requestUsageShellComplete)
+            yield* requestUsageShellComplete.complete({
+              sessionID: input.sessionID,
+              requestID: userMsg.id,
+              status: aborted ? "aborted" : "completed",
+              timeCompleted: Date.now(),
+            })
         }),
       )
 
@@ -1269,6 +1290,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       yield* sessions.updateMessage(info)
       for (const part of parts) yield* sessions.updatePart(part)
+      // 每次用户回车生成一个 request 记录，后续 assistant 多轮（tool-calls）按 parentID 聚合到该 request。
+      const requestUsagePromptBegin = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (requestUsagePromptBegin)
+        yield* requestUsagePromptBegin.begin({
+          sessionID: info.sessionID,
+          requestID: info.id,
+          rootRequestID: input.rootRequestID ?? info.id,
+          source: input.source ?? "prompt",
+          agent: info.agent,
+          providerID: info.model.providerID,
+          modelID: info.model.modelID,
+          variant: info.model.variant,
+          timeCreated: info.time.created,
+        })
 
       return { info, parts }
     }, Effect.scoped)
@@ -1289,7 +1324,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
         }
 
-        if (input.noReply === true) return message
+        if (input.noReply === true) {
+          const requestUsageNoReply = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (requestUsageNoReply)
+            yield* requestUsageNoReply.complete({
+              sessionID: input.sessionID,
+              requestID: message.info.id,
+              status: "completed",
+              timeCompleted: Date.now(),
+            })
+          return message
+        }
         return yield* loop({ sessionID: input.sessionID })
       },
     )
@@ -1386,7 +1431,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
           ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+            yield* compaction.create({
+              sessionID,
+              agent: lastUser.agent,
+              model: lastUser.model,
+              auto: true,
+            })
             continue
           }
 
@@ -1647,6 +1697,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const result = yield* prompt({
         sessionID: input.sessionID,
         messageID: input.messageID,
+        source: "command",
         model: userModel,
         agent: userAgent,
         parts,
@@ -1705,6 +1756,8 @@ export const defaultLayer = Layer.suspend(() =>
 export const PromptInput = z.object({
   sessionID: SessionID.zod,
   messageID: MessageID.zod.optional(),
+  rootRequestID: MessageID.zod.optional(),
+  source: SessionRequestUsage.Source.optional(),
   model: z
     .object({
       providerID: ProviderID.zod,

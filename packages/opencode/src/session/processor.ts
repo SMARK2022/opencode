@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
+import { Cause, Deferred, Effect, Layer, Context, Scope, Option } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
@@ -15,6 +15,7 @@ import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
+import { SessionRequestUsage } from "./request-usage"
 import type { Provider } from "@/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
@@ -384,6 +385,13 @@ export const layer: Layer.Layer<
               cost: usage.cost,
             })
             yield* session.updateMessage(ctx.assistantMessage)
+            const reqUsage1 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+            if (reqUsage1)
+              yield* reqUsage1.recordAssistant({
+                sessionID: ctx.sessionID,
+                requestID: ctx.assistantMessage.parentID,
+                assistant: ctx.assistantMessage,
+              })
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
@@ -528,6 +536,13 @@ export const layer: Layer.Layer<
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
+        const reqUsage2 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+        if (reqUsage2)
+          yield* reqUsage2.recordAssistant({
+            sessionID: ctx.sessionID,
+            requestID: ctx.assistantMessage.parentID,
+            assistant: ctx.assistantMessage,
+          })
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {

@@ -13,11 +13,12 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config"
 import { NotFoundError } from "@/storage"
 import { ModelID, ProviderID } from "@/provider/schema"
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Option } from "effect"
 import { InstanceState } from "@/effect"
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
+import { SessionRequestUsage } from "./request-usage"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -261,6 +262,18 @@ export const layer: Layer.Layer<
       const model = agent.model
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+      const requestUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (requestUsage)
+        yield* requestUsage.begin({
+          sessionID: input.sessionID,
+          requestID: input.parentID,
+          rootRequestID: input.parentID,
+          source: "system_compaction",
+          agent: "compaction",
+          providerID: model.providerID,
+          modelID: model.id,
+          variant: userMessage.model.variant,
+        })
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const selected = yield* select({

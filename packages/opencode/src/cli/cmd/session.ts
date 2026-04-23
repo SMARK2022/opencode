@@ -12,6 +12,11 @@ import { EOL } from "os"
 import path from "path"
 import { which } from "../../util/which"
 import { AppRuntime } from "@/effect/app-runtime"
+import { Database, eq, sql } from "@/storage"
+import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
+import { formatNumber } from "./stats"
+
+const MICROS = 1_000_000
 
 function pagerCmd(): string[] {
   const lessOptions = ["-R", "-S"]
@@ -19,7 +24,6 @@ function pagerCmd(): string[] {
     return ["less", ...lessOptions]
   }
 
-  // user could have less installed via other options
   const lessOnPath = which("less")
   if (lessOnPath) {
     if (Filesystem.stat(lessOnPath)?.size) return [lessOnPath, ...lessOptions]
@@ -36,14 +40,14 @@ function pagerCmd(): string[] {
     if (Filesystem.stat(less)?.size) return [less, ...lessOptions]
   }
 
-  // Fall back to Windows built-in more (via cmd.exe)
   return ["cmd", "/c", "more"]
 }
 
 export const SessionCommand = cmd({
   command: "session",
   describe: "manage sessions",
-  builder: (yargs: Argv) => yargs.command(SessionListCommand).command(SessionDeleteCommand).demandCommand(),
+  builder: (yargs: Argv) =>
+    yargs.command(SessionListCommand).command(SessionInfoCommand).command(SessionDeleteCommand).demandCommand(),
   async handler() {},
 })
 
@@ -88,20 +92,41 @@ export const SessionListCommand = cmd({
         choices: ["table", "json"],
         default: "table",
       })
+      .option("cost", {
+        alias: "c",
+        describe: "show token and cost summary per session",
+        type: "boolean",
+        default: false,
+      })
   },
   handler: async (args) => {
     await bootstrap(process.cwd(), async () => {
       const sessions = [...Session.list({ roots: true, limit: args.maxCount })]
 
-      if (sessions.length === 0) {
-        return
+      if (sessions.length === 0) return
+
+      // Batch-load cost/token totals if requested.
+      let costBySession: Map<string, { costMicros: number; tokensTotal: number }> | undefined
+      if (args.cost && args.format !== "json") {
+        const rows = Database.use((db) =>
+          db
+            .select({
+              sessionId: RequestUsageTable.session_id,
+              costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`,
+              tokensTotal: sql<number>`sum(${RequestUsageTable.tokens_total})`,
+            })
+            .from(RequestUsageTable)
+            .groupBy(RequestUsageTable.session_id)
+            .all(),
+        )
+        costBySession = new Map(rows.map((r) => [r.sessionId, { costMicros: r.costMicros, tokensTotal: r.tokensTotal }]))
       }
 
       let output: string
       if (args.format === "json") {
         output = formatSessionJSON(sessions)
       } else {
-        output = formatSessionTable(sessions)
+        output = formatSessionTable(sessions, costBySession)
       }
 
       const shouldPaginate = process.stdout.isTTY && !args.maxCount && args.format === "table"
@@ -128,20 +153,87 @@ export const SessionListCommand = cmd({
   },
 })
 
-function formatSessionTable(sessions: Session.Info[]): string {
+export const SessionInfoCommand = cmd({
+  command: "info",
+  describe: "show detailed session info with token usage by model",
+  builder: (yargs: Argv) => {
+    return yargs.option("session", {
+      alias: "s",
+      describe: "session ID",
+      type: "string",
+      demandOption: true,
+    })
+  },
+  handler: async (args) => {
+    await bootstrap(process.cwd(), async () => {
+      const sessionID = SessionID.make(args.session)
+
+      let session: Session.Info
+      try {
+        session = await AppRuntime.runPromise(Session.Service.use((svc) => svc.get(sessionID)))
+      } catch {
+        UI.error(`Session not found: ${args.session}`)
+        process.exit(1)
+        return
+      }
+
+      // Per-model breakdown from request_usage_assistant.
+      const rows = Database.use((db) =>
+        db
+          .select({
+            providerId: RequestUsageAssistantTable.provider_id,
+            modelId: RequestUsageAssistantTable.model_id,
+            calls: sql<number>`count(*)`,
+            tokensInput: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
+            tokensOutput: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
+            tokensReasoning: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
+            tokensCacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
+            tokensCacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
+            costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
+          })
+          .from(RequestUsageAssistantTable)
+          .where(eq(RequestUsageAssistantTable.session_id, sessionID))
+          .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
+          .all(),
+      )
+
+      displaySessionInfo(session, rows)
+    })
+  },
+})
+
+function formatSessionTable(
+  sessions: Session.Info[],
+  costBySession?: Map<string, { costMicros: number; tokensTotal: number }>,
+): string {
   const lines: string[] = []
 
   const maxIdWidth = Math.max(20, ...sessions.map((s) => s.id.length))
   const maxTitleWidth = Math.max(25, ...sessions.map((s) => s.title.length))
 
-  const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
-  lines.push(header)
-  lines.push("─".repeat(header.length))
-  for (const session of sessions) {
-    const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
-    const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
-    const line = `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr}`
-    lines.push(line)
+  if (costBySession) {
+    const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated              Cost      Tokens`
+    lines.push(header)
+    lines.push("─".repeat(header.length))
+    for (const session of sessions) {
+      const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
+      const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
+      const usage = costBySession.get(session.id)
+      const costStr = usage ? `$${(usage.costMicros / MICROS).toFixed(3)}` : "—"
+      const tokensStr = usage ? formatNumber(usage.tokensTotal) : "—"
+      lines.push(
+        `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(20)} ${costStr.padStart(8)}  ${tokensStr.padStart(7)}`,
+      )
+    }
+  } else {
+    const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
+    lines.push(header)
+    lines.push("─".repeat(header.length))
+    for (const session of sessions) {
+      const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
+      const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
+      lines.push(`${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr}`)
+    }
   }
 
   return lines.join(EOL)
@@ -157,4 +249,81 @@ function formatSessionJSON(sessions: Session.Info[]): string {
     directory: session.directory,
   }))
   return JSON.stringify(jsonData, null, 2)
+}
+
+type ModelRow = {
+  providerId: string
+  modelId: string
+  calls: number
+  tokensInput: number
+  tokensOutput: number
+  tokensReasoning: number
+  tokensCacheRead: number
+  tokensCacheWrite: number
+  costMicros: number
+}
+
+function displaySessionInfo(session: Session.Info, rows: ModelRow[]) {
+  const width = 56
+
+  function renderRow(label: string, value: string): string {
+    const paddingNeeded = width - 1 - label.length - value.length
+    return `│${label}${" ".repeat(Math.max(0, paddingNeeded))}${value} │`
+  }
+
+  console.log(`Session: ${session.id}`)
+  console.log(`Title:   ${session.title}`)
+  console.log(`Created: ${new Date(session.time.created).toLocaleString()}`)
+  console.log(`Updated: ${new Date(session.time.updated).toLocaleString()}`)
+  console.log()
+
+  if (rows.length === 0) {
+    console.log("No token usage data (session predates tracking or has no completions).")
+    return
+  }
+
+  let totalCalls = 0
+  let totalInput = 0
+  let totalOutput = 0
+  let totalCacheRead = 0
+  let totalCacheWrite = 0
+  let totalCost = 0
+
+  console.log("┌────────────────────────────────────────────────────────┐")
+  console.log("│                   TOKEN USAGE BY MODEL                 │")
+  console.log("├────────────────────────────────────────────────────────┤")
+
+  for (const row of rows) {
+    const output = row.tokensOutput + row.tokensReasoning
+    const cost = row.costMicros / MICROS
+    const modelKey = `${row.providerId}/${row.modelId}`
+    console.log(`│ ${modelKey.slice(0, 54).padEnd(54)} │`)
+    console.log(renderRow("  Calls", String(row.calls)))
+    console.log(renderRow("  Input", formatNumber(row.tokensInput)))
+    console.log(renderRow("  Cache Write", formatNumber(row.tokensCacheWrite)))
+    console.log(renderRow("  Cache Read", formatNumber(row.tokensCacheRead)))
+    console.log(renderRow("  Output", formatNumber(output)))
+    console.log(renderRow("  Cost", `$${cost.toFixed(4)}`))
+    console.log("├────────────────────────────────────────────────────────┤")
+
+    totalCalls += row.calls
+    totalInput += row.tokensInput
+    totalOutput += output
+    totalCacheRead += row.tokensCacheRead
+    totalCacheWrite += row.tokensCacheWrite
+    totalCost += cost
+  }
+
+  if (rows.length > 1) {
+    console.log(renderRow("Total Calls", String(totalCalls)))
+    console.log(renderRow("Total Input", formatNumber(totalInput)))
+    console.log(renderRow("Total Cache Write", formatNumber(totalCacheWrite)))
+    console.log(renderRow("Total Cache Read", formatNumber(totalCacheRead)))
+    console.log(renderRow("Total Output", formatNumber(totalOutput)))
+    console.log(renderRow("Total Cost", `$${totalCost.toFixed(4)}`))
+    console.log("├────────────────────────────────────────────────────────┤")
+  }
+
+  process.stdout.write("\x1B[1A")
+  console.log("└────────────────────────────────────────────────────────┘")
 }
