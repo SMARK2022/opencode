@@ -101,6 +101,9 @@ export const Info = Schema.Struct({
   env: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
   id: Schema.optional(Schema.String),
   npm: Schema.optional(Schema.String),
+  extends: Schema.optional(Schema.String).annotate({
+    description: "Inherit models and defaults from an existing provider type",
+  }),
   whitelist: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
   blacklist: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
   options: Schema.optional(

@@ -2,7 +2,11 @@ export * as ConfigProviderPlugin from "./provider"
 
 import { define } from "../../plugin/internal"
 import { Effect } from "effect"
+import { mergeJsonRecords } from "@opencode-ai/llm"
 import { Config } from "../../config"
+import { ConfigProvider } from "../provider"
+import { Integration } from "../../integration"
+import { ConfigProviderOptionsV1 } from "../../v1/config/provider-options"
 import { ModelV2 } from "../../model"
 import { ProviderV2 } from "../../provider"
 
@@ -10,8 +14,11 @@ export const Plugin = define({
   id: "config-provider",
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
+    const registry = yield* Integration.Service
     yield* ctx.integration.transform(
       Effect.fn(function* (integrations) {
+        // 上游 owner 的记录不可删除，保存凭据另由 registry 查询，不复制基础账号。
+        const initial = new Set(integrations.list().map((integration) => integration.id))
         const files = (yield* config.entries()).filter((entry): entry is Config.Document => entry.type === "document")
         const configuredIntegrations = new Set(
           files.flatMap((file) =>
@@ -20,17 +27,35 @@ export const Plugin = define({
             ),
           ),
         )
+        // 环境和名称保留先前显式层，切换基础只替换没有显式覆盖的默认值。
+        const configured = new Map<string, ConfigProvider.Info>()
         for (const file of files) {
           for (const [id, item] of Object.entries(file.info.providers ?? {})) {
             const integrationID = id
-            if (!configuredIntegrations.has(id) && !integrations.get(integrationID)) continue
+            const previous = configured.get(id)
+            const provider = { ...item, extends: item.extends ?? previous?.extends, env: item.env ?? previous?.env, name: item.name ?? previous?.name }
+            configured.set(id, provider)
+            // 只继承环境方法，不能借用基础账号的已保存连接或 OAuth 身份。
+            const env = provider.env ?? (provider.extends === undefined ? undefined :
+              integrations.method.list(provider.extends).find((method) => method.type === "env")?.names ?? [])
+            if (env === undefined && !configuredIntegrations.has(id) && !integrations.get(integrationID)) continue
+            // 无鉴权基础不制造空 Integration；只清除本 owner 自动创建且无自有认证的记录。
+            if (provider.env === undefined && env?.length === 0) {
+              const method = integrations.method.list(integrationID).find((method) => method.type === "env")
+              if (method) integrations.method.remove(integrationID, method)
+              if (!initial.has(id) && integrations.method.list(id).length === 0 &&
+                (yield* registry.connection.active(Integration.ID.make(id)))?.type !== "credential") integrations.remove(id)
+              continue
+            }
             integrations.update(integrationID, (integration) => {
-              integration.name = item.name ?? integration.name
+              // 派生名称默认取新 ID，不能泄露基础提供者的显示名。
+              integration.name = provider.name ?? (provider.extends === undefined ? integration.name : id)
             })
-            if (item.env !== undefined) {
+            if (env !== undefined) {
               integrations.method.update({
                 integrationID,
-                method: { type: "env", names: [...item.env] },
+                // 空数组也是显式覆盖，不能通过 truthy 判断恢复基础环境变量。
+                method: { type: "env", names: [...env] },
               })
             }
           }
@@ -47,28 +72,110 @@ export const Plugin = define({
           const model = ModelV2.parse(configuredDefault)
           catalog.model.default.set(model.providerID, model.modelID)
         }
+        // 累积原始配置层而非继承结果，每次都从当前直接基础重建再重放显式覆盖。
+        const configured = new Map<string, ConfigProvider.Info[]>()
         for (const file of files) {
           for (const [id, item] of Object.entries(file.info.providers ?? {})) {
             const providerID = id
-            catalog.provider.update(providerID, (provider) => {
-              if (item.name !== undefined) provider.name = item.name
-              // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
-              if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
-                provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
-              if (item.api !== undefined) provider.api = { ...item.api }
-              if (item.request !== undefined) {
-                Object.assign(provider.request.headers, item.request.headers)
-                Object.assign(provider.request.body, item.request.body)
+            const overrides = [...(configured.get(id) ?? []), item]
+            configured.set(id, overrides)
+            const baseType = overrides.findLast((layer) => layer.extends !== undefined)?.extends
+            const base = baseType === undefined ? undefined : catalog.provider.get(baseType)
+            // 删除派生记录前复制基础以支持 self extends；Draft.get 不投影，空 native 占位接纳基础 API，request 保持模型原值。
+            const copy = base && baseType !== undefined ? { provider: structuredClone(base.provider), models: [...base.models.values()].map((model) => ({
+              ...structuredClone(model), api: structuredClone(model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 ? { ...base.provider.api, id: model.api.id } : model.api),
+            })) } : undefined
+            if (baseType !== undefined) catalog.provider.remove(providerID)
+            if (copy) {
+              // 删除旧模型集合后只克隆当前基础；A 独有模型不会在切到 B 后继续暴露。
+              catalog.provider.update(providerID, (provider) => {
+                Object.assign(provider, copy.provider, { id: providerID, name: item.name ?? id, integrationID: copy.provider.integrationID === undefined ? undefined : id })
+              })
+              for (const model of copy.models) {
+                // Catalog.update 统一重绑 ID；api.id 仍是基础的实际服务端模型名。
+                catalog.model.update(providerID, model.id, (draft) => Object.assign(draft, model))
               }
-            })
-            for (const [id, config] of Object.entries(item.models ?? {})) {
+            }
+            const layers = baseType === undefined ? [item] : overrides
+            // 先应用所有 provider 层，再重放模型层，模型 URL/npm 始终高于 provider。
+            for (const item of layers) {
+              catalog.provider.update(providerID, (provider) => {
+                if (item.name !== undefined) provider.name = item.name
+                // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
+                if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
+                  provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
+                // 继承与部分 API 覆盖保留基础 settings；完整非继承配置仍保持上游替换语义。
+                if (item.api !== undefined) {
+                  const api = item.api.type === undefined ? provider.api : item.api
+                  provider.api = baseType !== undefined || item.api.type === undefined
+                    ? { ...api, url: item.api.url ?? provider.api.url, settings: mergeJsonRecords(provider.api.settings, item.api.settings) ?? {} }
+                    : { ...api }
+                }
+              })
+              if (baseType !== undefined && item.api !== undefined) {
+                // provider npm/URL 覆盖也必须到达继承模型，不能被旧模型 API 抢回。
+                for (const model of catalog.provider.get(providerID)?.models.values() ?? []) {
+                  catalog.model.update(providerID, model.id, (draft) => {
+                    // 显式协议替换整份表示，不把旧 native/SDK 的判别字段混入新 API。
+                    const api = item.api?.type === undefined ? draft.api : { ...item.api, id: draft.api.id }
+                    draft.api = { ...api, url: item.api?.url ?? draft.api.url, settings: mergeJsonRecords(draft.api.settings, item.api?.settings) ?? {} }
+                  })
+                }
+              }
+            }
+            // API 先完整定型，再按 host 层顺序转换 provider 输入，避免早期 package 烘焙进请求。
+            for (const item of layers) {
+              catalog.provider.update(providerID, (provider) => {
+                const legacy = item.v1 && ConfigProviderOptionsV1.get(provider.api.type === "aisdk" ? provider.api.package : undefined).provider({
+                  ...item.v1.options,
+                  // 同层显式 api URL 高于 options.baseURL，raw 域也沿现有 normalizeApi 处理。
+                  ...(item.api?.url === undefined ? {} : { baseURL: item.api.url }),
+                })
+                const url = item.api?.url ?? legacy?.url ?? (typeof legacy?.body?.baseURL === "string" ? legacy.body.baseURL : undefined)
+                if (url !== undefined) provider.api.url = url
+                if (legacy?.settings !== undefined || item.api?.settings !== undefined)
+                  provider.api.settings = mergeJsonRecords(provider.api.settings, legacy?.settings, item.api?.settings) ?? {}
+                // 既有 Catalog/resolver 以 body.apiKey 识别配置凭据，withDefaults 会在发送前剔除。
+                if (typeof item.v1?.options.apiKey === "string")
+                  provider.request.body.apiKey = item.v1.options.apiKey
+                Object.assign(provider.request.headers, legacy?.headers, item.request?.headers)
+                // 只有继承合并基础默认值；普通配置继续按上游规则浅覆盖嵌套对象。
+                Object.assign(provider.request.body, baseType === undefined ? { ...legacy?.body, ...item.request?.body } : mergeJsonRecords(provider.request.body, legacy?.body, item.request?.body))
+                if (baseType !== undefined && (legacy !== undefined || item.api !== undefined)) {
+                  for (const model of catalog.provider.get(providerID)?.models.values() ?? []) {
+                    catalog.model.update(providerID, model.id, (draft) => {
+                      if (url !== undefined) draft.api.url = url
+                      if (legacy?.settings !== undefined || item.api?.settings !== undefined)
+                        draft.api.settings = mergeJsonRecords(draft.api.settings, legacy?.settings, item.api?.settings) ?? {}
+                    })
+                  }
+                }
+              })
+            }
+            // 模型层保留原顺序；未决转换读取最后显式 model API，否则使用已经定型的默认 API。
+            const models = layers.flatMap((layer) => Object.entries(layer.models ?? {}))
+            for (const [id, config] of models) {
+              // 新别名从指定 api.id 的基础模型接纳默认值，再执行上游逐字段覆盖。
+              const existing = baseType !== undefined && config.api?.id !== undefined
+                ? catalog.model.get(providerID, config.api.id) : undefined
+              if (existing && !catalog.model.get(providerID, id)) {
+                // 独立副本保留 variant/cost/capabilities，不共享基础模型的可变数组。
+                catalog.model.update(providerID, id, (model) => Object.assign(model, structuredClone(existing)))
+              }
               catalog.model.update(providerID, id, (model) => {
                 if (config.family !== undefined) model.family = config.family
                 if (config.name !== undefined) model.name = config.name
-                if (config.api !== undefined) model.api = { ...model.api, ...config.api }
+                if (config.api !== undefined) {
+                  // 新模型的空 native 是占位；部分 URL 先接纳真实 provider API，再保留其 id/settings。
+                  const providerApi = catalog.provider.get(providerID)?.provider.api
+                  const api = model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 && providerApi ? { ...providerApi, id: model.api.id } : model.api
+                  model.api = config.api.type === undefined
+                    ? { ...api, id: config.api.id ?? api.id, url: config.api.url ?? api.url, settings: mergeJsonRecords(api.settings, config.api.settings) ?? {} }
+                    : { ...model.api, ...config.api }
+                }
                 // 仅有模型 ID/URL 的配置仍需继承 ClaudeCode 默认协议；显式 type/package 完整保留。
                 if (providerID === "claudecode" && item.api === undefined &&
-                  (config.api === undefined || !("type" in config.api)) && model.api.type === "native")
+                  (config.api === undefined || config.api.type === undefined) && model.api.type === "native")
                   model.api = { type: "aisdk", package: "@ai-sdk/anthropic", id: model.api.id, url: model.api.url, settings: model.api.settings }
                 if (config.capabilities !== undefined) {
                   model.capabilities = {
@@ -77,13 +184,31 @@ export const Plugin = define({
                     output: [...config.capabilities.output],
                   }
                 }
+                const v1 = config.v1
+                // 仅复用纯 SDK lowerer；不猜 provider 名称，也不调用 V1 provider/session 执行器。
+                const legacy = v1 === undefined ? undefined : (() => {
+                  const providerApi = catalog.provider.get(providerID)?.provider.api
+                  const configuredApi = models.findLast(([modelID, model]) => modelID === id && model.api?.type !== undefined)?.[1].api
+                  const api = configuredApi ?? (model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 ? providerApi : model.api)
+                  // native 与未注册 SDK 的 raw 行为属于既有契约，执行支持性仍由 resolver 判断。
+                  const lowerer = ConfigProviderOptionsV1.get(api?.type === "aisdk" ? api.package : undefined)
+                  return {
+                    body: v1.options && lowerer.request(v1.options),
+                    variants: Object.entries(v1.variants ?? {}).map(([id, options]) => ({ id: ModelV2.VariantID.make(id), headers: undefined, body: lowerer.request(options) })),
+                  }
+                })()
+                // 默认值先于迁移输入，随后原生 request 覆盖；兼容标记不进入 Catalog.Info。
+                if (legacy?.body !== undefined) Object.assign(model.request.body, baseType === undefined ? legacy.body : mergeJsonRecords(model.request.body, legacy.body))
                 if (config.request !== undefined) {
                   Object.assign(model.request.headers, config.request.headers)
-                  Object.assign(model.request.body, config.request.body)
+                  // 非继承模型保持上游浅覆盖；继承模型才合并基础 options，variant 仍独立。
+                  Object.assign(model.request.body, baseType === undefined ? config.request.body : mergeJsonRecords(model.request.body, config.request.body))
                   if (config.request.variant !== undefined) model.request.variant = config.request.variant
                 }
-                if (config.variants !== undefined) {
-                  for (const variant of config.variants) {
+                // 两种配置沿同一 variant 更新循环合并，保持原生显式变体的后层优先。
+                const variants = [...(legacy?.variants ?? []), ...(config.variants ?? [])]
+                if (variants.length > 0) {
+                  for (const variant of variants) {
                     let existing = model.variants.find((item) => item.id === variant.id)
                     if (!existing) {
                       existing = {

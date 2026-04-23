@@ -904,6 +904,10 @@ describe("Anthropic Messages route", () => {
 
       // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
       expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })
+      // 原生请求头也必须真正发出 redact；保持同一 prepare 输入和 disabled/adaptive 验证。
+      const wire = yield* AnthropicMessages.route.prepareTransport(claude.body, LLM.updateRequest(input, { model: claude.model }))
+      const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+      expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
       expect(prepared.body).toHaveProperty("thinking", undefined)
       for (const thinking of [
         { type: "disabled" },

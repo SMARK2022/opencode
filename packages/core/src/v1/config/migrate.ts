@@ -168,10 +168,15 @@ function providers(info?: Readonly<Record<string, ConfigProviderV1.Info>>) {
 }
 
 function migrateProvider(info: ConfigProviderV1.Info) {
+  // 只有显式 npm 才立即转换；缺省时不按 provider 名或文档内 extends 猜 SDK。
   const lowerer = ConfigProviderOptionsV1.get(info.npm)
-  const options = lowerer.provider(info.options ?? {})
-  const url = info.api ?? options.url
+  const options = info.npm === undefined ? undefined : lowerer.provider(info.options ?? {})
+  const url = info.api ?? options?.url
   return {
+    // 迁移必须保留继承键，不能让 V2 schema 收到一个无基础模型的空提供者。
+    extends: info.extends,
+    // 与 model.v1 同一输入所有权：跨文档继承的 package 只在 catalog 内确定。
+    v1: info.npm === undefined && info.options !== undefined ? { options: info.options } : undefined,
     name: info.name,
     env: info.env,
     api: info.npm
@@ -179,10 +184,17 @@ function migrateProvider(info: ConfigProviderV1.Info) {
           type: "aisdk" as const,
           package: info.npm,
           ...(url === undefined ? {} : { url }),
-          settings: options.settings ?? {},
+          settings: options?.settings ?? {},
         }
-      : undefined,
-    request: info.options && { headers: options.headers, body: options.body },
+      // api/baseURL 与 SDK settings 可独立覆盖，基础协议在 catalog 中确定。
+      : info.extends || url !== undefined
+        ? { ...(url === undefined ? {} : { url }), settings: options?.settings ?? {} }
+        : undefined,
+    request: info.options && options && {
+      headers: options.headers,
+      // 显式 SDK 同样保留可用性信号；resolver 在编码 provider 请求前移除内部 apiKey。
+      body: typeof info.options.apiKey === "string" ? { apiKey: info.options.apiKey, ...options.body } : options.body,
+    },
     models:
       info.models &&
       Object.fromEntries(Object.entries(info.models).map(([name, model]) => [name, migrateModel(model, info.npm)])),
@@ -192,7 +204,9 @@ function migrateProvider(info: ConfigProviderV1.Info) {
 function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: string) {
   const packageID = info.provider?.npm ?? packageName
   const lowerer = ConfigProviderOptionsV1.get(packageID)
-  const request = info.options && lowerer.request(info.options)
+  // 每条 npm 未决输入都等待有效 API；native/未知 SDK 的 raw 契约由同一 lowerer 保留。
+  const deferred = packageID === undefined && (info.options !== undefined || info.variants !== undefined)
+  const request = deferred ? undefined : info.options && lowerer.request(info.options)
   const costs = info.cost && [
     {
       input: info.cost.input,
@@ -215,6 +229,8 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: st
       ? { tools: info.tool_call ?? false, input: info.modalities?.input ?? [], output: info.modalities?.output ?? [] }
       : undefined
   return {
+    // 迁移标记只包含尚未 lowering 的输入，显式 npm 的原路径保持不变。
+    v1: deferred ? { options: info.options, variants: info.variants } : undefined,
     family: info.family,
     name: info.name,
     api: info.provider?.npm
@@ -225,16 +241,20 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: st
           ...(info.provider.api === undefined ? {} : { url: info.provider.api }),
           settings: {},
         }
-      : info.id === undefined
-        ? undefined
-        : { id: info.id },
+      // 原始 model.provider.api 独立于 npm；迁移不得吞掉仅 URL 的模型覆盖。
+      : info.id !== undefined || info.provider?.api !== undefined
+        ? {
+            ...(info.id === undefined ? {} : { id: info.id }),
+            ...(info.provider?.api === undefined ? {} : { url: info.provider.api }),
+          }
+        : undefined,
     capabilities,
     request: (info.headers || request) && {
       headers: info.headers,
       body: request,
     },
     variants:
-      info.variants &&
+      deferred ? undefined : info.variants &&
       Object.entries(info.variants).map(([id, options]) => ({
         id,
         body: lowerer.request(options),
