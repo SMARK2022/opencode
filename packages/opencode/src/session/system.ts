@@ -26,6 +26,10 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Git } from "@/git"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import os from "node:os"
+import { Shell } from "@opencode-ai/core/shell"
+import { Config } from "@/config/config"
+import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
 
 // 只限制状态字段，保留分支和最近提交，避免大型工作树挤占模型上下文。
 const MAX_STATUS_CHARS = 2000
@@ -71,6 +75,7 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const git = yield* Git.Service
     const flags = yield* RuntimeFlags.Service
+    const config = yield* Config.Service
 
     // 沿用源补丁的目录级缓存，工具改变工作树后仍返回首次采集的状态。
     const gitContextCache = new Map<string, string>()
@@ -143,6 +148,9 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         // Effect.fn 返回函数，必须调用后再 yield*，不能直接执行函数值。
         const gitContext = yield* getGitContext()
+        // 与 ShellTool 使用同一个实际选择器，Windows 的 pwsh/cmd 不能被 SHELL 猜测替代。
+        const shell = Shell.acceptable((yield* config.get()).shell)
+        const cutoff = SystemContextBuiltIns.knowledgeCutoff(model.api.id)
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
@@ -156,7 +164,13 @@ const layer = Layer.effect(
             // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
             ...gitContext.split("\n").map((line) => `  ${line}`),
             `  Platform: ${process.platform}`,
+            // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
+            `  Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
+            `  OS Version: ${os.type()} ${os.release()}`,
+            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
             `  Today's date: ${new Date().toDateString()}`,
+            // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
+            ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
             `</env>`,
           ].join("\n"),
           references.length === 0
@@ -177,6 +191,8 @@ const layer = Layer.effect(
                   ]),
                 "</available_references>",
               ].join("\n"),
+          SystemContextBuiltIns.ACTION_GUIDANCE,
+          SystemContextBuiltIns.OUTPUT_GUIDANCE,
         ].filter((part): part is string => part !== undefined)
       }),
 
@@ -225,7 +241,7 @@ export const node = LayerNode.make({
   service: Service,
   layer: layer,
   // Git 与开关沿用既有依赖图，不引入会话事件订阅。
-  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
+  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node],
 })
 
 export * as SystemPrompt from "./system"

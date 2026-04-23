@@ -899,13 +899,8 @@ describe("Anthropic Messages route", () => {
       // 四名额已由工具用完；system 与 history 保持原有裁剪，身份不额外发出第五个标记。
       expect(claude.body.system?.filter((block) => block.cache_control !== undefined)).toEqual([])
       expect(claude.body.messages.every((message) => message.content.every((block) => !("cache_control" in block) || block.cache_control === undefined))).toBe(true)
-      // 不给身份缓存不等于撤销身份：13–19 仍须保留计费首块、两段身份和原 system。
-      expect(claude.body.system?.map((block) => block.text)).toEqual([
-        expect.stringMatching(/^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/),
-        "You are Claude Code, Anthropic's official CLI for Claude.",
-        expect.stringContaining("You are an interactive agent that helps users with software engineering tasks."),
-        "system-tail",
-      ])
+      // 20 撤销的只是自有身份阶段，四个工具缓存和真正 system/history 仍由上游 owner 保留。
+      expect(claude.body.system?.map((block) => block.text)).toEqual(["system-tail"])
 
       // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
       expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })

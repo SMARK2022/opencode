@@ -4,28 +4,7 @@ import { createHash, randomUUID } from "crypto"
 export const VERSION = "2.1.117"
 // 指纹盐值与 Claude Code 官方二进制一致，修改会导致计费头校验失败。
 const SALT = "59cf53e54c78"
-// 身份块放在主提示之前；20 会撤销该注入，不能提前删去补丁序列中的行为阶段。
-export const CLI_IDENTITY_BLOCK = {
-  type: "text" as const,
-  text: "You are Claude Code, Anthropic's official CLI for Claude.",
-  // 身份块仅使用临时缓存，不能在网关侧声明跨账号共享的持久缓存身份。
-  cache_control: { type: "ephemeral" as const },
-}
 
-// 主提示与计费身份分别建块，避免修改一段用户指令时连带改写身份声明。
-export const MAIN_SYSTEM_BLOCK = {
-  type: "text" as const,
-  text: [
-    "You are an interactive agent that helps users with software engineering tasks.",
-    "Use the instructions below and the tools available to you to assist the user.",
-    "",
-    "# System",
-    " - All text you output outside of tool use is displayed to the user.",
-    " - Tool results and user messages may include <system-reminder> tags.",
-    " - The conversation has unlimited context through automatic summarization.",
-  ].join("\n"),
-  cache_control: { type: "ephemeral" as const },
-}
 
 // --- 会话状态管理 ---
 // 随机设备与会话身份属于进程，不可按请求重建，否则同一次对话的 metadata 与 headers 会漂移。
@@ -72,10 +51,6 @@ export function buildBillingHeaderBlock(fp: string) {
   }
 }
 
-// 组装完整的系统块列表：计费头 + CLI 身份 + 主系统提示
-export function buildSystemBlocks(fp: string) {
-  return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
-}
 
 // user_id 是紧凑 JSON 字符串而非对象；空 account_uuid 仍需保留以符合网关格式。
 export function buildMetadataUserId(opts: { deviceId: string; sessionId: string; accountUuid?: string }) {
@@ -268,33 +243,6 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       ? JSON.parse(typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body as ArrayBuffer))
       : {}
 
-    // 指纹只使用首个 text block；拼接附件后的文本会偏离源客户端的字符位置。
-    const firstUserMessage = (originalBody.messages ?? []).find((m: { role: string }) => m.role === "user")
-    const firstUserText = (() => {
-      if (!firstUserMessage) return ""
-      const content = firstUserMessage.content
-      if (typeof content === "string") return content
-      if (Array.isArray(content)) {
-        const firstText = content.find((b: { type: string }) => b.type === "text")
-        return firstText ? firstText.text : ""
-      }
-      return ""
-    })()
-
-    // 计算消息指纹，用于计费头和 CCH 签名
-    const fp = computeFingerprint(firstUserText, VERSION)
-
-    // 接续 SDK 已 lowering 的 agent/user/project system，保留每个块的文字及协议属性。
-    const system = Array.isArray(originalBody.system) ? originalBody.system : originalBody.system ? [{ type: "text" as const, text: originalBody.system }] : []
-    // SDK 已共享四断点预算；原工具/system/history 标记优先，身份块只领取剩余名额。
-    const cached = [
-      ...(originalBody.tools ?? []),
-      ...system,
-      ...(originalBody.messages ?? []).flatMap((message: { content?: unknown }) => Array.isArray(message.content) ? message.content : []),
-    ].filter((block: { cache_control?: unknown }) => block.cache_control).length
-    // 只省略无剩余预算的自有缓存属性，不能删除上游已有 cache_control 或禁用全部缓存。
-    const newSystem = buildSystemBlocks(fp).map((block, index) =>
-      index > 0 && cached + index > 4 ? { type: block.type, text: block.text } : block).concat(system)
 
     // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
     const newMetadata = {
@@ -349,18 +297,16 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     }
 
     const patchedBody = {
-      // system 首字段使 billing 定位独立于 SDK 的 MCP/container 字段；其余原字段逐项保留。
-      system: newSystem,
-      ...Object.fromEntries(Object.entries(originalBody).filter(([key]) => key !== "system")),
+      // 撤销适配器身份及计费注入，完整保留 Session owner 组装的原始 system。
+      ...originalBody,
       metadata: newMetadata,
       tools: patchedTools,
       ...(thinking ? { thinking } : {}),
       ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
     }
 
-    // 在合并全部字段之后计算校验值，metadata、thinking 与工具字段都属于签名字节。
-    const bodyWithPlaceholder = JSON.stringify(patchedBody)
-    const finalBodyStr = patchCch(bodyWithPlaceholder)
+    // billing block 已停止注入，没有 adapter 占位符可修补；用户的同名文本必须保持原样。
+    const finalBodyStr = JSON.stringify(patchedBody)
 
     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
     const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })

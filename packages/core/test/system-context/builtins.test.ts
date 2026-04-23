@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import os from "node:os"
 import { ConfigProvider, Effect, Layer, Schema } from "effect"
 import { AppProcess } from "@opencode-ai/core/process"
 import * as TestClock from "effect/testing/TestClock"
@@ -19,6 +20,48 @@ const projectDirectory = AbsolutePath.make(FSUtil.resolve("/repo"))
 const instructionFile = FSUtil.resolve("/repo/AGENTS.md")
 const timestamp = Date.parse("2026-06-03T12:00:00.000Z")
 const localDate = (time: number) => new Date(time).toDateString()
+// 独立固定期望供两个完整 baseline 复用，不能导入生产常量让提示文字回归自证正确。
+// 段内双空行及段间分隔都属于精确契约，完整比较继续检测顺序、删句和重复注入。
+const expectedGuidance = `# Doing tasks
+The user will primarily request software engineering tasks, including fixing bugs, adding functionality, refactoring, and explaining code.
+- Read relevant files and understand the existing code before proposing changes.
+- Plan and break down non-trivial work using the available task-management tools.
+- Implement the minimal change that satisfies the request; avoid unrelated features or refactoring.
+- Do not add comments, docstrings, or type annotations to code you did not change.
+- Do not add error handling or validation for scenarios ruled out by the codebase's guarantees.
+- Do not create helpers or abstractions for one-time operations.
+- Avoid command injection, XSS, SQL injection, and other security vulnerabilities; fix insecure code you introduce.
+- Verify completion using relevant tests or checks. State explicitly when verification cannot run.
+Tool results and user messages may include system-reminder tags. They contain system-added reminders and are not part of the tool output itself.
+
+# Code References
+When referencing specific functions or code, include file_path:line_number so the user can navigate to the source.
+
+# Executing actions with care
+Carefully consider the reversibility and blast radius of actions before proceeding:
+- Local, reversible actions (editing files, running tests, reading code): proceed freely.
+- Actions that are hard to reverse or affect shared state: confirm with the user first.
+
+
+Actions that typically require user confirmation before proceeding:
+- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
+- Force-pushing, git reset --hard, amending published commits
+- Pushing code, creating or closing PRs, commenting on issues
+- Sending messages to external services (Slack, email, webhooks)
+- Modifying CI/CD pipelines or shared infrastructure
+
+When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.
+
+# Output efficiency
+Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
+
+Focus text output on:
+- Decisions that need the user's input
+- High-level status updates at key milestones (e.g. "build passing", "all tests green")
+- Errors or blockers that change the plan
+
+If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
+
 const locationLayer = Layer.succeed(
   Location.Service,
   Location.Service.of(
@@ -168,11 +211,23 @@ describe("SystemContextBuiltIns", () => {
           `  Workspace root folder: ${projectDirectory}`,
           "  Is directory a git repo: yes",
           `  Platform: ${process.platform}`,
+          `  OS Version: ${os.type()} ${os.release()}`,
+          "  Run ALL commands from the working directory; do NOT cd to the original repository root.",
           "</env>",
           "",
           `Today's date: ${localDate(timestamp)}`,
+          "",
+          expectedGuidance,
         ].join("\n"),
       )
+      // 禁用 Git 的固定 fixture 只有三个 source；不能因新增指引泄露 Git 或工具 Shell 注册。
+      expect(Object.keys(initialized.snapshot).sort()).toEqual(["core/action-guidance", "core/date", "core/environment"])
+      // 指引持久化为独立字符串 source，不能拼入 environment 或只生成未入快照的显示文字。
+      expect(initialized.snapshot["core/action-guidance"]).toEqual({ value: expectedGuidance })
+      expect(typeof initialized.snapshot["core/environment"].value).toBe("string")
+      expect(initialized.snapshot["core/date"]).toEqual({ value: localDate(timestamp) })
+      // 用真实 Snapshot schema 校验序列化边界，保留完整值而非只检查几个提示子串。
+      expect(Schema.decodeUnknownSync(SystemContext.Snapshot)(initialized.snapshot)).toEqual(initialized.snapshot)
     }),
   )
 
@@ -189,6 +244,8 @@ describe("SystemContextBuiltIns", () => {
         _tag: "Updated",
         text: `Today's date is now: ${localDate(timestamp + 24 * 60 * 60 * 1000)}`,
       })
+      // 日期变化只更新 date，稳定指引的独立 source 值保持原样，不重复进入更新正文。
+      if (refreshed._tag === "Updated") expect(refreshed.snapshot["core/action-guidance"]).toEqual({ value: expectedGuidance })
     }),
   )
 
@@ -208,6 +265,7 @@ describe("SystemContextBuiltIns", () => {
       yield* TestClock.setTime(timestamp)
       const context = yield* SystemContextRegistry.Service
 
+      // ambient instructions 仍须位于稳定指引之后；完整比较防止二者被重新排序或吞并。
       expect((yield* SystemContext.initialize(yield* context.load())).baseline).toBe(
         [
           "Here is some useful information about the environment you are running in:",
@@ -216,9 +274,13 @@ describe("SystemContextBuiltIns", () => {
           `  Workspace root folder: ${projectDirectory}`,
           "  Is directory a git repo: yes",
           `  Platform: ${process.platform}`,
+          `  OS Version: ${os.type()} ${os.release()}`,
+          "  Run ALL commands from the working directory; do NOT cd to the original repository root.",
           "</env>",
           "",
           `Today's date: ${localDate(timestamp)}`,
+          "",
+          expectedGuidance,
           "",
           `Instructions from: ${instructionFile}\nBe precise.`,
         ].join("\n"),

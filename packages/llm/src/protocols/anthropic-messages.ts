@@ -1,6 +1,5 @@
 import { Effect, Schema } from "effect"
-import { createHash, randomUUID } from "node:crypto"
-import { HttpTransport } from "../route/transport"
+import { randomUUID } from "node:crypto"
 import { Route } from "../route/client"
 import { Auth } from "../route/auth"
 import { Endpoint } from "../route/endpoint"
@@ -166,9 +165,8 @@ const ClaudeCodeThinking = Schema.Union([AnthropicThinking,
   Schema.Struct({ type: Schema.Literal("disabled") }),
 ])
 const AnthropicBodyFields = {
-  // billing 固定位于首字段首块，最终字节修补无需搜索用户文字或再编码 model ID。
-  system: optionalArray(AnthropicTextBlock),
   model: Schema.String,
+  system: optionalArray(AnthropicTextBlock),
   messages: Schema.Array(AnthropicMessage),
   tools: optionalArray(AnthropicTool),
   tool_choice: Schema.optional(AnthropicToolChoice),
@@ -583,24 +581,11 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     ...(ProviderShared.isRecord(metadata) ? metadata : {}),
     user_id: encodeMetadata({ device_id: claudeCodeSession.deviceId, account_uuid: "", session_id: claudeCodeSession.sessionId }),
   }
-  // 源15只取首user的首text block，附件后续文本不能移动指纹采样位置。
-  const firstUserText = messages.find((message) => message.role === "user")?.content
-    .find((block) => block.type === "text")?.text ?? ""
-  const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
-  const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
-  // 三位版本后缀与五位零占位是源 wire 契约；CCH 只在完整 overlay 编码后计算。
-  const billing = `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;`
   const outputConfig = anthropicOptions(request)?.output_config
   return {
-    // 13 的身份注入在 20 明确撤销；保留用户的原始 system，顺序始终是身份在前。
-    system: claudecode ? [
-      { type: "text" as const, text: billing },
-      // 上游 tools/system/history 已先领取预算；身份只消费剩余名额，不能挤掉有效工具标记。
-      { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude.", cache_control: breakpoints.remaining > 0 ? cacheControl(breakpoints, { type: "ephemeral" }) : undefined },
-      { type: "text" as const, text: "You are an interactive agent that helps users with software engineering tasks.\nUse the instructions below and the tools available to you to assist the user.\n\n# System\n - All text you output outside of tool use is displayed to the user.\n - Tool results and user messages may include <system-reminder> tags.\n - The conversation has unlimited context through automatic summarization.", cache_control: breakpoints.remaining > 0 ? cacheControl(breakpoints, { type: "ephemeral" }) : undefined },
-      ...(system ?? []),
-    ] : system,
     model: request.model.id,
+    // 与 V1 的 20 同步撤销身份注入，保留真实 typed system lowering 的所有上游能力。
+    system,
     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
     // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
     ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
@@ -911,30 +896,14 @@ export const protocol = Protocol.make({
   },
 })
 
-// 复用现有 HTTP frames/executor，专用 prepare 只在唯一最终编码点修补自己的五位字段。
-const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
 export const route = Route.make({
   id: ADAPTER,
   provider: "anthropic",
   protocol,
   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,
-  transport: {
-    ...transport,
-    prepare: (input) => Effect.gen(function* () {
-      if (input.request.model.provider !== "claudecode")
-        return yield* transport.prepare(input)
-      const parts = yield* HttpTransport.jsonRequestParts(input)
-      // Schema/return 将 system 排首；首块纯 ASCII，offset 不受 model ID 或用户 UTF-8 长度影响。
-      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
-      if (!parts.bodyText.startsWith(`${prefix}00000;`))
-        return yield* invalid("ClaudeCode billing layout changed before transport")
-      // 包含全部工具、metadata、thinking 与允许的 HTTP overlay，只编码一次最终 JSON。
-      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
-      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
-      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
-    }),
-  },
+  // billing 阶段结束后复用标准 transport；用户的 cch 同名内容不再进入修补逻辑。
+  framing: Framing.sse,
   // 请求头在 protocol route 的既有构造点产生，运输层仍拥有取消和 stream 生命周期。
   headers: ({ request }) => {
     // 使用已合并的配置/variant beta；仅在协议 owner 去重，不生成另一条 HTTP 覆盖路径。
