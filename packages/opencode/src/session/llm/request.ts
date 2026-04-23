@@ -8,6 +8,7 @@ import type { Agent } from "@/agent/agent"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
+import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
@@ -54,10 +55,15 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
+  // 复用最终权限/user.tools 过滤；同一工具对象随后用于 SDK/native 请求，不读取 registry 全集。
+  const tools = resolveTools(input)
+  // 指引在 prompt transform 和 OAuth instructions 构造之前进入 system，避免漏掉其中一种运行时。
+  const toolGuidance = SystemContextBuiltIns.toolUsage(Object.keys(tools))
   const system = [
     [
       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
       ...input.system,
+      ...(toolGuidance ? [toolGuidance] : []),
       ...(input.user.system ? [input.user.system] : []),
     ]
       .filter((x) => x)
@@ -144,7 +150,6 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     },
   )
 
-  const tools = resolveTools(input)
   // Codex parity: OpenAI Responses-family providers hardcode `strict: false`
   // on every function tool so MCP-sourced and dynamic schemas that don't
   // satisfy OpenAI's structured-outputs constraints still register.

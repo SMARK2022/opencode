@@ -111,6 +111,16 @@ const recoveryModel = Model.make({
   provider: "fake",
   route: OpenAIChat.route.with({ limits: { context: 20_000, output: 1_000 } }),
 })
+// echo/defect 只产生通用指引；独立全文期望防止生产 formatter 自证或虚构专用工具能力。
+const expectedToolGuidance = `# Using your tools
+Do NOT use the bash tool when a dedicated tool is available.
+Using dedicated tools lets the user review and track your work:
+ - Reserve bash for system commands and terminal operations requiring shell execution
+You can call multiple tools in a single response. When there are no dependencies between calls, make them IN PARALLEL. Maximize parallel tool calls to increase efficiency. Only call sequentially when one result is needed to inform the next.`
+// 身份固定到 fixture 的真实 provider/id；未知型号没有 cutoff，不能从持久 baseline 或显示名拼造。
+const expectedModelIdentity = "You are powered by the model named fake-model. The exact model ID is fake/fake-model"
+const expectedReplacementIdentity = "You are powered by the model named replacement. The exact model ID is fake/replacement"
+
 const authorizations: Tool.Context[] = []
 const executions: string[] = []
 const permission = Layer.succeed(
@@ -856,8 +866,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context"],
-        ["Initial context"],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
       ])
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
@@ -893,7 +903,7 @@ describe("SessionRunnerLLM", () => {
       response = fragmentFixture("text", "text-build", ["Done"]).completeEvents
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context"])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
     }),
   )
 
@@ -919,7 +929,7 @@ describe("SessionRunnerLLM", () => {
       response = fragmentFixture("text", "text-reviewer", ["Done"]).completeEvents
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context"])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
     }),
   )
@@ -948,7 +958,7 @@ describe("SessionRunnerLLM", () => {
       response = fragmentFixture("text", "text-selected", ["Done"]).completeEvents
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context"])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
     }),
   )
@@ -975,8 +985,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context\n\nBuild skills"],
-        ["Initial context\n\nBuild skills"],
+        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
       ])
       expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
     }),
@@ -1009,7 +1019,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context\n\nBuild skills"],
+        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
       ])
     }),
   )
@@ -1126,7 +1136,8 @@ describe("SessionRunnerLLM", () => {
       response = []
       yield* session.resume(sessionID)
       expect(requests.map((request) => request.model)).toEqual([model])
-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context"]])
+      // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
+      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context", expectedToolGuidance, expectedModelIdentity]])
     }),
   )
 
@@ -1174,10 +1185,11 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
       yield* session.resume(sessionID)
 
+      // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context"],
-        ["Initial context"],
-        ["Initial context"],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
       ])
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
@@ -1221,9 +1233,9 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context"],
-        ["Initial context"],
-        ["Initial context"],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
       ])
     }),
   )
@@ -1257,9 +1269,10 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
       yield* session.resume(sessionID)
 
+      // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context"],
-        ["Replacement context"],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        ["Replacement context", expectedToolGuidance, expectedModelIdentity],
       ])
       yield* replaySessionProjection(sessionID)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
@@ -1675,7 +1688,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context"])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context", expectedToolGuidance, expectedModelIdentity])
       expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
     }),
   )
@@ -1874,8 +1887,8 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context"],
-        ["Initial context"],
+        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
       ])
       expect(systemTexts(requests[1]!)).toContain("Replacement context")
     }),

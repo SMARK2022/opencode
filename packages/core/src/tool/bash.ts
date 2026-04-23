@@ -14,6 +14,9 @@ import { PositiveInt } from "../schema"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
+import { SystemContext } from "../system-context/index"
+import { SystemContextRegistry } from "../system-context/registry"
+import { Shell } from "../shell"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -46,7 +49,9 @@ const Output = Schema.Struct({
 
 type Output = typeof Output.Type
 
-const defaultShell = () => (process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh")
+// 两代共用实际shell选择器；执行与环境指引不能分别回退cmd和PowerShell。
+const selectedShell = (entries: readonly Config.Entry[]) =>
+  Shell.acceptable(Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info] : [])).shell)
 
 const modelOutput = (output: Output) => {
   const warnings = output.warnings?.length
@@ -102,6 +107,19 @@ const layer = Layer.effectDiscard(
     const appProcess = yield* AppProcess.Service
     const config = yield* Config.Service
     const permission = yield* PermissionV2.Service
+    const registry = yield* SystemContextRegistry.Service
+    // Shell source 随实际执行配置刷新；持久快照比较和更新仍由 Session Context Epoch 处理。
+    const shellContext = SystemContext.make({
+      key: SystemContext.Key.make("core/shell"),
+      codec: Schema.toCodecJson(Schema.String),
+      load: config.entries().pipe(Effect.map(selectedShell)),
+      baseline: (shell) => `Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
+      // 更新正文同样点名实际 shell，模型不能在换 shell 后继续使用旧的语法假设。
+      update: (_previous, shell) => `The execution shell is now: ${shell}`,
+    })
+    // 注册只提供上下文，不调用 tools.materialize，因此不创建另一个权限或执行 owner。
+    // 注册身份独立于 core/builtins，重建或释放工具 Location 不会创建第二个环境 owner。
+    yield* registry.register({ key: SystemContext.Key.make("core/shell"), load: Effect.succeed(shellContext) })
 
     yield* tools
       .register({
@@ -152,9 +170,7 @@ const layer = Layer.effectDiscard(
                 return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
 
               const entries = yield* config.entries()
-              const shell =
-                Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
-                  .shell ?? defaultShell()
+              const shell = selectedShell(entries)
               const command = ChildProcess.make(input.command, [], {
                 cwd: target.canonical,
                 shell,
@@ -203,5 +219,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/bash",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node, SystemContextRegistry.node],
 })

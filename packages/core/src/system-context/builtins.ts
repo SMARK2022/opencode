@@ -10,6 +10,80 @@ import { InstructionContext } from "../instruction-context"
 import { SystemContextRegistry } from "./registry"
 import { FSUtil } from "../fs-util"
 import { Global } from "../global"
+import os from "node:os"
+
+// 截止日期是源提示的型号映射，未知型号省略，不能用发布日期猜测训练数据截止时间。
+export const knowledgeCutoff = (id: string) => {
+  if (id.includes("claude-sonnet-4-6")) return "August 2025"
+  if (id.includes("claude-opus-4-6")) return "May 2025"
+  if (id.includes("claude-haiku-4")) return "February 2025"
+  if (id.includes("claude-opus-4") || id.includes("claude-sonnet-4")) return "January 2025"
+  if (id.includes("gpt-4o")) return "October 2024"
+  if (id.includes("gemini-2")) return "January 2025"
+}
+
+// 输入必须是当前 turn 真正广告的工具名；不能读取 registry.ids 或固定默认 agent。
+export const toolUsage = (ids: readonly string[]) => {
+  if (ids.length === 0) return undefined
+  return [
+    "# Using your tools",
+    "Do NOT use the bash tool when a dedicated tool is available.",
+    "Using dedicated tools lets the user review and track your work:",
+    // 每条替代指引独立受能力控制，gpt patch-only 请求不会宣称拥有 edit/write。
+    ...(ids.includes("read") ? [" - To read files use the read tool instead of cat, head, tail, or sed"] : []),
+    ...(ids.includes("edit") ? [" - To edit files use the edit tool instead of sed or awk"] : []),
+    ...(ids.includes("write") ? [" - To create files use the write tool instead of echo redirection or heredoc"] : []),
+    ...(ids.includes("apply_patch") ? [" - To edit files use the apply_patch tool instead of shell text replacement"] : []),
+    ...(ids.includes("grep") ? [" - To search file content use the grep tool instead of grep/rg"] : []),
+    ...(ids.includes("glob") ? [" - To find files use the glob tool instead of find or ls"] : []),
+    // Todo 工具也受当前 turn 权限约束，不能从静态提示推断其存在。
+    ...(ids.includes("todowrite") ? ["# Task Management", "Use the TodoWrite tool to plan non-trivial tasks and track progress. Mark todos as completed as soon as each task is done; do not batch completion updates."] : []),
+    " - Reserve bash for system commands and terminal operations requiring shell execution",
+    "You can call multiple tools in a single response. When there are no dependencies between calls, make them IN PARALLEL. Maximize parallel tool calls to increase efficiency. Only call sequentially when one result is needed to inform the next.",
+  ].join("\n")
+}
+
+// 稳定行为指引可进入 Context Epoch；工具能力与模型身份必须在当前 turn 重新生成。
+export const ACTION_GUIDANCE = `# Doing tasks
+The user will primarily request software engineering tasks, including fixing bugs, adding functionality, refactoring, and explaining code.
+- Read relevant files and understand the existing code before proposing changes.
+- Plan and break down non-trivial work using the available task-management tools.
+- Implement the minimal change that satisfies the request; avoid unrelated features or refactoring.
+- Do not add comments, docstrings, or type annotations to code you did not change.
+- Do not add error handling or validation for scenarios ruled out by the codebase's guarantees.
+- Do not create helpers or abstractions for one-time operations.
+- Avoid command injection, XSS, SQL injection, and other security vulnerabilities; fix insecure code you introduce.
+- Verify completion using relevant tests or checks. State explicitly when verification cannot run.
+Tool results and user messages may include system-reminder tags. They contain system-added reminders and are not part of the tool output itself.
+
+# Code References
+When referencing specific functions or code, include file_path:line_number so the user can navigate to the source.
+
+# Executing actions with care
+Carefully consider the reversibility and blast radius of actions before proceeding:
+- Local, reversible actions (editing files, running tests, reading code): proceed freely.
+- Actions that are hard to reverse or affect shared state: confirm with the user first.
+
+
+Actions that typically require user confirmation before proceeding:
+- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
+- Force-pushing, git reset --hard, amending published commits
+- Pushing code, creating or closing PRs, commenting on issues
+- Sending messages to external services (Slack, email, webhooks)
+- Modifying CI/CD pipelines or shared infrastructure
+
+When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`
+
+// 输出效率指引作用于面向用户的文字，不截断代码样本或模型工具调用参数。
+export const OUTPUT_GUIDANCE = `# Output efficiency
+Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
+
+Focus text output on:
+- Decisions that need the user's input
+- High-level status updates at key milestones (e.g. "build passing", "all tests green")
+- Errors or blockers that change the plan
+
+If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
 
 const builtIns = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -80,6 +154,10 @@ const builtIns = Layer.effectDiscard(
       `  Workspace root folder: ${location.project.directory}`,
       `  Is directory a git repo: ${location.vcs?.type === "git" ? "yes" : "no"}`,
       `  Platform: ${process.platform}`,
+      // OS 属于稳定环境事实，Shell 由 BashTool 的独立 typed source 观察。
+      `  OS Version: ${os.type()} ${os.release()}`,
+      // 目录不同只产生位置约束，不额外探测或宣称它一定是 Git worktree。
+      ...(location.project.directory !== location.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
       "</env>",
     ].join("\n")
     const context = SystemContext.combine([
@@ -107,6 +185,16 @@ const builtIns = Layer.effectDiscard(
         load: DateTime.nowAsDate.pipe(Effect.map((date) => date.toDateString())),
         baseline: (date) => `Today's date: ${date}`,
         update: (_previous, date) => `Today's date is now: ${date}`,
+      }),
+      // 独立 source 接纳稳定指引，已有 environment/Git 快照无需被整体替换或重采样。
+      SystemContext.make({
+        key: SystemContext.Key.make("core/action-guidance"),
+        // 字符串 codec 让提示版本变化可被既有 reconcile 精确比较，而非覆盖默认 agent。
+        codec: Schema.toCodecJson(Schema.String),
+        // 两个完整 literal 一起接纳；没有重复注册 environment 或重新采集 Git 的捷径。
+        load: Effect.succeed([ACTION_GUIDANCE, OUTPUT_GUIDANCE].join("\n\n")),
+        baseline: (text) => text,
+        update: (_previous, text) => text,
       }),
     ])
 
