@@ -40,7 +40,7 @@ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
-import { formatDuration } from "../../util/format"
+import { formatDuration, formatDurationCompact } from "../../util/format"
 import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
@@ -343,6 +343,7 @@ export function Prompt(props: PromptProps) {
     extmarkToPartIndex: Map<number, number>
     interrupt: number
     placeholder: number
+    agentLoopStartTime: number | undefined
   }>({
     placeholder: randomIndex(list().length),
     prompt: {
@@ -352,6 +353,7 @@ export function Prompt(props: PromptProps) {
     mode: "normal",
     extmarkToPartIndex: new Map(),
     interrupt: 0,
+    agentLoopStartTime: undefined,
   })
 
   createEffect(
@@ -363,6 +365,39 @@ export function Prompt(props: PromptProps) {
       { defer: true },
     ),
   )
+
+  createEffect(
+    on(
+      () => [props.sessionID, status().type] as const,
+      ([sessionID, currentType], previous) => {
+        // idle 结束循环；缺省 Session 不能留下上一页面的计时器。
+        if (!sessionID || currentType === "idle") {
+          setStore("agentLoopStartTime", undefined)
+          return
+        }
+        // Session 切换即使同为 busy 也重置，避免沿用另一会话的耗时；首次 retry 从本地计时，不伪造服务端起点。
+        // 同 Session 的 busy→retry→busy 保留已有起点，恢复状态不会重新开始计时。
+        if (sessionID !== previous?.[0] || store.agentLoopStartTime === undefined) {
+          setStore("agentLoopStartTime", Date.now())
+        }
+      },
+    ),
+  )
+
+  const [elapsedSeconds, setElapsedSeconds] = createSignal(0)
+  // effect 只跟踪起点，retry 通知不重建 interval，每秒只更新独立 signal。
+  createEffect(() => {
+    const start = store.agentLoopStartTime
+    // 毫秒零也是合法起点，只有 undefined 才代表没有循环。
+    if (start === undefined) {
+      setElapsedSeconds(0)
+      return
+    }
+    setElapsedSeconds(Math.floor((Date.now() - start) / 1000))
+    const interval = setInterval(() => { setElapsedSeconds(Math.floor((Date.now() - start) / 1000)) }, 1000)
+    // 起点变化与组件卸载都由创建 interval 的 effect owner 清理旧 tick。
+    onCleanup(() => clearInterval(interval))
+  })
 
   // Initialize agent/model/variant from last user message when session changes
   let syncedSessionID: string | undefined
@@ -1640,12 +1675,21 @@ export function Prompt(props: PromptProps) {
                     })()}
                   </box>
                 </box>
-                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
-                  esc{" "}
-                  <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
-                  </span>
-                </text>
+                <box gap={2} flexDirection="row" alignItems="center">
+                  <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                    esc{" "}
+                    <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
+                      {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                    </span>
+                  </text>
+                  {/* 同一运行区在 retry 时仍可见，正秒数才占用 footer 的横向空间。 */}
+                  <Show when={store.agentLoopStartTime !== undefined && elapsedSeconds() > 0}>
+                    <text fg={theme.textMuted}>
+                      {"· "}
+                      <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
+                    </text>
+                  </Show>
+                </box>
               </box>
             </Match>
             <Match when={workspace.notice()}>
