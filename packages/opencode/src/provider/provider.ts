@@ -171,7 +171,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
           },
         },
       }),
@@ -1149,14 +1149,33 @@ const layer: Layer.Layer<
 
         // extend database from config
         for (const [providerID, provider] of configProviders) {
-          const existing = database[providerID]
+          // Support extends field: inherit from another provider
+          const baseType = provider.extends
+          const existing = baseType ? database[baseType] : database[providerID]
+          
+          // ⭐ Critical fix: Clone and update inherited models' providerID
+          const inheritedModels: Record<string, Model> = {}
+          for (const [modelID, model] of Object.entries(existing?.models ?? {})) {
+            inheritedModels[modelID] = {
+              ...model,
+              providerID: ProviderID.make(providerID),  // ⭐ Update to new provider's ID
+              api: {
+                ...model.api,
+                // If new provider specifies npm/api, use them
+                npm: provider.npm ?? model.api.npm,
+                url: provider.api ?? model.api.url,
+              },
+            }
+          }
+
           const parsed: Info = {
             id: ProviderID.make(providerID),
-            name: provider.name ?? existing?.name ?? providerID,
+            // ⭐ When using extends, default to providerID instead of inherited name
+            name: provider.name ?? (baseType ? providerID : existing?.name ?? providerID),
             env: provider.env ?? existing?.env ?? [],
             options: mergeDeep(existing?.options ?? {}, provider.options ?? {}),
             source: "config",
-            models: existing?.models ?? {},
+            models: inheritedModels,  // ✅ Use models with updated providerID
           }
 
           for (const [modelID, model] of Object.entries(provider.models ?? {})) {
@@ -1166,6 +1185,8 @@ const layer: Layer.Layer<
               if (model.id && model.id !== modelID) return modelID
               return existingModel?.name ?? modelID
             })
+            // Use baseType for npm/api lookup if this provider extends another
+            const lookupProviderID = baseType ?? providerID
             const parsedModel: Model = {
               id: ModelID.make(modelID),
               api: {
@@ -1174,13 +1195,13 @@ const layer: Layer.Layer<
                   model.provider?.npm ??
                   provider.npm ??
                   existingModel?.api.npm ??
-                  modelsDev[providerID]?.npm ??
+                  modelsDev[lookupProviderID]?.npm ??
                   (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"),
-                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api ?? "",
+                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[lookupProviderID]?.api ?? "",
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,
-              providerID: ProviderID.make(providerID),
+              providerID: ProviderID.make(providerID),  // ⭐ Ensure correct providerID
               capabilities: {
                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
                 reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,

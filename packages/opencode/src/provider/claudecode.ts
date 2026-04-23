@@ -109,7 +109,8 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
     "claude-code-20250219",
     "prompt-caching-scope-2026-01-05",
     "interleaved-thinking-2025-05-14",
-    "context-management-2025-06-27"
+    "context-management-2025-06-27",
+    "redact-thinking-2026-02-12"
   ]
 
   if (
