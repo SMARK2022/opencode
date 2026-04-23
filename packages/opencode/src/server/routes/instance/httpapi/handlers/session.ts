@@ -8,6 +8,7 @@ import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
@@ -36,7 +37,7 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError } from "../errors"
+import { PermissionNotFoundError, notFound } from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -50,6 +51,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const session = yield* Session.Service
     const shareSvc = yield* SessionShare.Service
     const promptSvc = yield* SessionPrompt.Service
+    // 稳定服务在 handler layer 捕获，查询不重新构造数据库层或项目作用域。
+    const usageSvc = yield* SessionRequestUsage.Service
     const revertSvc = yield* SessionRevert.Service
     const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
@@ -410,6 +413,28 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* session.updatePart(payload)
     })
 
+    // 沿用原始 wire 对象；只有数据库边界把整数微美元转换成美元。
+    const requestUsageList = Effect.fn("SessionHttpApi.requestUsageList")(function* (ctx: {
+    params: { sessionID: SessionID }
+    query: { limit?: number; before?: number; rootRequestID?: MessageID; source?: SessionRequestUsage.Source }
+  }) {
+    yield* requireSession(ctx.params.sessionID)
+    return yield* usageSvc.list({ sessionID: ctx.params.sessionID, ...ctx.query })
+  })
+  // 资源缺失保持 404，不把有效 requestID 当成格式错误。
+    const requestUsageGet = Effect.fn("SessionHttpApi.requestUsageGet")(function* (ctx: { params: { sessionID: SessionID; requestID: MessageID } }) {
+    yield* requireSession(ctx.params.sessionID)
+    const result = yield* usageSvc.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID })
+    // 复用现有 name/data.message 404 body，不能用内建空错误改掉 source JSON 契约。
+    if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
+    return result
+  })
+  // source 明细查询不存在的 request 返回空数组；仅 Session 缺失在权限读取边界报 404。
+    const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: { params: { sessionID: SessionID; requestID: MessageID } }) {
+    yield* requireSession(ctx.params.sessionID)
+    return yield* usageSvc.assistants(ctx.params)
+  })
+
     return handlers
       .handle("list", list)
       .handle("status", status)
@@ -438,5 +463,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
       .handle("updatePart", updatePart)
+    .handle("requestUsageList", requestUsageList)
+    .handle("requestUsageGet", requestUsageGet)
+    .handle("requestUsageAssistants", requestUsageAssistants)
   }),
 )

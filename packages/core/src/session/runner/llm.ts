@@ -9,6 +9,7 @@ import {
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
 import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { and, asc, desc, eq, isNotNull, lte, or } from "drizzle-orm"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
 import { Database } from "../../database/database"
@@ -29,6 +30,10 @@ import { SessionCompaction } from "../compaction"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionInput } from "../input"
+import { SessionMessage } from "../message"
+import { SessionInputTable } from "../sql"
+import { RequestUsageTable } from "../request-usage.sql"
+import { SessionV1 } from "../../v1/session"
 import { SessionSchema } from "../schema"
 import { SessionStore } from "../store"
 import { type RunError, Service } from "./index"
@@ -106,7 +111,7 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
-    const compaction = SessionCompaction.make({ events, llm, config: yield* config.entries() })
+    const compaction = SessionCompaction.make({ events, llm, db, config: yield* config.entries() })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
@@ -184,19 +189,63 @@ const layer = Layer.effect(
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
-      if (promotion) {
+      let hasAssistantStarted = () => false
+      // restore 保留提升后的 listener 可中断性，只有归属快照/注册使用退出保护。
+      yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
         const cutoff = yield* EventV2.latestSequence(db, session.id)
-        let promoted = 0
-        if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
-        if (promotion === "queue") {
-          promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
-          promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
-        }
-        if (promoted > 0) currentStep = 1
-      }
+        yield* restore(Effect.gen(function* () {
+          if (promotion) {
+            let promoted = 0
+            if (promotion === "steer") promoted = yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+            if (promotion === "queue") {
+              promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
+              promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+            }
+            if (promoted > 0) currentStep = 1
+          }
+        })).pipe(Effect.onExit((promotionExit) => Effect.gen(function* () {
+          const promoted = yield* db.select({ id: SessionInputTable.id, seq: SessionInputTable.promoted_seq }).from(SessionInputTable)
+            .where(and(eq(SessionInputTable.session_id, session.id), isNotNull(SessionInputTable.promoted_seq)))
+            .orderBy(desc(SessionInputTable.promoted_seq)).limit(1).get().pipe(Effect.orDie)
+          if (!promoted || promoted.seq === null || (promotionExit._tag === "Failure" && promotion !== undefined && promoted.seq <= cutoff)) return
+          const requestID = SessionV1.MessageID.make(promoted.id)
+          // 已拥有助手的续轮沿用根；未拥有助手的已提升批次按 Started 的规则关联。
+          const requests = yield* db.select({ id: RequestUsageTable.request_id, status: RequestUsageTable.status }).from(RequestUsageTable)
+            .innerJoin(SessionInputTable, and(eq(SessionInputTable.session_id, RequestUsageTable.session_id), eq(SessionInputTable.id, RequestUsageTable.request_id)))
+            .where(and(eq(RequestUsageTable.session_id, session.id), eq(RequestUsageTable.source, "prompt"),
+              isNotNull(SessionInputTable.promoted_seq), lte(SessionInputTable.promoted_seq, promoted.seq),
+              or(eq(RequestUsageTable.root_request_id, requestID), and(eq(RequestUsageTable.status, "running"),
+                eq(RequestUsageTable.assistant_count, 0), eq(RequestUsageTable.root_request_id, RequestUsageTable.request_id)))))
+            .orderBy(asc(SessionInputTable.admitted_seq)).all().pipe(Effect.orDie)
+          // 使用现有 turn scope 的真实 exit；已开始助手仍由 publisher/Step owner 结算。
+          yield* Effect.addFinalizer((exit) => {
+            if (requests.length === 0 || hasAssistantStarted()) return Effect.void
+            if (exit._tag === "Success") return Effect.gen(function* () {
+              // raw 空成功只完成冻结的 running 成员；显式空续轮不能覆盖先前失败或确认消费。
+              if (!requests.some(row => row.status === "running")) return
+              yield* events.publish(SessionEvent.PromptCompleted, {
+                sessionID: session.id, messageID: SessionMessage.ID.make(requestID), timestamp: yield* DateTime.now,
+                requestIDs: requests.filter(row => row.status === "running").map(row => SessionMessage.ID.make(row.id)),
+              }, { finalizer: true })
+            })
+            const failure = Cause.squash(exit.cause)
+            if (failure instanceof TurnTransitionError && !Cause.hasInterrupts(exit.cause)) return Effect.void
+            return Effect.gen(function* () {
+              yield* events.publish(SessionEvent.PromptFailed, {
+                sessionID: session.id, messageID: SessionMessage.ID.make(requestID), timestamp: yield* DateTime.now,
+                // 此后新增 admission 不属于本次失败；cause 仅转换事件诊断，原 typed exit 不变。
+                requestIDs: requests.map(row => SessionMessage.ID.make(row.id)),
+                error: { type: "unknown", message: failure instanceof Error ? failure.message : String(failure) },
+                aborted: Cause.hasInterrupts(exit.cause),
+              }, { finalizer: true })
+            })
+          })
+        })))
+      }))
       const system =
         initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
-      const model = yield* models.resolve(session)
+      const selection = yield* models.resolve(session)
+      const model = selection.model
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
@@ -221,7 +270,8 @@ const layer = Layer.effect(
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep ? "none" : undefined,
       })
-      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
+      // 压缩复用本 turn 已采样的模型选择；不从稍后可能切换的 Session 重读 variant。
+      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()
       const publisher = createLLMEventPublisher(events, {
@@ -234,6 +284,7 @@ const layer = Layer.effect(
         },
         snapshot: startSnapshot,
       })
+      hasAssistantStarted = publisher.hasAssistantStarted
       const withPublication = Semaphore.makeUnsafe(1).withPermit
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
         withPublication(publisher.publish(event, outputPaths))
@@ -280,7 +331,8 @@ const layer = Layer.effect(
             ).pipe(FiberSet.run(toolFibers))
           }),
         ),
-        Effect.ensuring(withPublication(publisher.flush())),
+        // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
+        Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
       )
 
       return yield* Effect.uninterruptibleMask((restore) =>
@@ -292,38 +344,46 @@ const layer = Layer.effect(
             recoverOverflow &&
             !publisher.hasAssistantStarted() &&
             isContextOverflowFailure(overflowFailure ?? failure) &&
-            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
+            // 恢复摘要也属于这次失败 turn 的采样，不能再次 resolve 或采用新选择。
+            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })))
           )
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
           if (overflowFailure) yield* publish(overflowFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
           if (llmFailure && !publisher.hasProviderError()) {
-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
-            yield* withPublication(publisher.failAssistant(llmFailure.reason.message))
+            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true, true))
+            yield* withPublication(publisher.failAssistant(llmFailure.reason.message, false, true))
           }
           if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
+          // 仅真正失败/中断退出隔离通知；普通工具错误仍沿用原 model-facing 路径。
+          const finalizer = stream._tag === "Failure" ||
+            (settled._tag === "Failure" && (Cause.hasInterrupts(settled.cause) || isUserDeclined(settled.cause)))
           if (settled._tag === "Failure" && isUserDeclined(settled.cause)) {
             yield* FiberSet.clear(toolFibers)
-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
-            return yield* Effect.interrupt
+            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted", false, true))
+            // 用户拒绝也终结当前助手；退出延后到已收到的 provider 用量完成持久化。
+            if (publisher.hasAssistantStarted())
+              yield* withPublication(publisher.failAssistant("Provider turn interrupted", true, true))
           }
           if (
             (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) ||
             (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
           ) {
             yield* FiberSet.clear(toolFibers)
-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
-            if (publisher.hasActiveAssistant())
-              yield* withPublication(publisher.failAssistant("Provider turn interrupted"))
+            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted", false, true))
+            if (publisher.hasAssistantStarted())
+              // 中断是独立结算状态，保持真实事件标志而非依赖英文错误字符串。
+              yield* withPublication(publisher.failAssistant("Provider turn interrupted", true, true))
           }
-          if (settled._tag === "Failure" && !Cause.hasInterrupts(settled.cause)) {
+          if (settled._tag === "Failure" && !Cause.hasInterrupts(settled.cause) && !isUserDeclined(settled.cause)) {
             const failure = Cause.squash(settled.cause)
             const message = failure instanceof Error ? failure.message : String(failure)
-            yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`))
+            yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`, false, finalizer))
           }
           const stepSettlement = publisher.stepSettlement()
-          if (stepSettlement && !publisher.hasProviderError()) {
+          // step-finish 已确认的消耗不因随后失败退款；消息和账本保留此前失败身份。
+          if (stepSettlement) {
             const endSnapshot = yield* snapshots.capture()
             const files =
               startSnapshot && endSnapshot
@@ -335,22 +395,35 @@ const layer = Layer.effect(
               events.publish(SessionEvent.Step.Ended, {
                 sessionID: session.id,
                 timestamp: yield* DateTime.now,
-                assistantMessageID: yield* publisher.startAssistant(),
+                assistantMessageID: yield* publisher.startAssistant(finalizer),
                 finish: stepSettlement.finish,
-                cost: 0,
+                cost: SessionRunnerModel.cost(selection.pricing, stepSettlement.tokens),
                 tokens: stepSettlement.tokens,
                 snapshot: endSnapshot,
                 files,
-              }),
+              // 失败退出仍结算同一确认 step，模式只影响通知，不改变 cost/tokens。
+              }, { finalizer }),
             )
           }
           if (publisher.hasProviderError())
-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted", false, finalizer))
           if (stream._tag === "Success" && !publisher.hasProviderError())
-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
-          if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
+            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true, finalizer))
+          if (settled._tag === "Failure" && isUserDeclined(settled.cause)) return yield* Effect.interrupt
+          if (stream._tag === "Failure") {
+            // LLMError 已按上游 hosted-only 清理；其他 cause 才补清理，保留本地 raw partial。
+            if (!llmFailure) yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", false, true))
+            if (publisher.hasAssistantStarted() && !Cause.hasInterrupts(stream.cause))
+              yield* withPublication(publisher.failAssistant(String(Cause.squash(stream.cause)), false, true))
+            return yield* Effect.failCause(stream.cause)
+          }
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
+          if (publisher.hasActiveAssistant() && !stepSettlement) {
+            // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
+            yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))
+            // 只补消息和账本终态；raw EOF 的成功返回及原 continuation 契约保持。
+          }
           return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
         }),
       )

@@ -104,6 +104,8 @@ const layer = Layer.effect(
           },
         })
       }),
+      // 此 observer 只做同步转发和已提交行短读取；owner 退出时仍须送达 TUI。
+      { finalizerSafe: true },
     )
     yield* Effect.addFinalizer(() => unsubscribe)
 

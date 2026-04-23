@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -18,16 +18,63 @@ import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
+import { and, eq } from "drizzle-orm"
+import { MessageTable } from "@opencode-ai/core/session/sql"
+import type { EventV2 } from "@opencode-ai/core/event"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
+
+export const publishAssistant = Effect.fnUntraced(function* (message: SessionV1.Assistant, events: EventV2.Interface, finalizer = false) {
+  yield* events.publish(MessageV2.Event.Updated, { sessionID: message.sessionID, info: message }, {
+    // 同一 durable commit 保存快照；退出仅隔离可能阻塞的 callback，实时 fanout 保留。
+    finalizer,
+    commit: () => Effect.gen(function* () {
+      const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (usage) yield* usage.recordAssistant({ sessionID: message.sessionID, requestID: message.parentID, assistant: message })
+    }),
+  })
+})
+
+export const ownAssistant = Effect.fnUntraced(function* (input: { sessionID: SessionID; requestID: SessionV1.User["id"] }, dependencies: { events: EventV2.Interface; db: Database.Interface["db"] }) {
+  const db = dependencies.db
+  let message: SessionV1.Assistant | undefined
+  // 注册先于首次发布；唯一助手归属随后同步交接，不从最新 user 推测。
+  yield* Effect.addFinalizer((exit) => Effect.gen(function* () {
+    if (Exit.isSuccess(exit)) return
+    const row = message ? yield* db.select().from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, message.id))).get().pipe(Effect.orDie) : undefined
+    if (row && message) {
+      const current = Schema.decodeUnknownSync(SessionV1.Info)({ ...row.data, id: row.id, sessionID: row.session_id })
+      if (current.role !== "assistant" || current.time.completed !== undefined) return
+      // 以持久化 completed 为准；内存可能已在尚未提交的 cleanup 中改写。
+      const aborted = Cause.hasInterrupts(exit.cause)
+      message.error ??= MessageV2.fromError(aborted ? new DOMException("Aborted", "AbortError") : Cause.squash(exit.cause), { providerID: message.providerID, aborted })
+      // 准备窗口中断没有 provider finish；非取消故障仍保留原 error 结束原因。
+      if (!aborted) message.finish ??= "error"
+      message.time.completed = Date.now()
+      // 退出不重入阻塞 callback；短 bridge observer、typed/all 与 durable wake 仍收到终态。
+      yield* publishAssistant(message, dependencies.events, true)
+      return
+    }
+    const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+    if (!usage) return
+    const request = yield* usage.get({ sessionID: input.sessionID, requestID: input.requestID })
+    if (!request || request.assistantCount !== 0 || request.status !== "running") return
+    const failure = Cause.squash(exit.cause)
+    // 创建未提交或摘要尚未创建时只闭合已有请求，不能制造幽灵助手或消费。
+    yield* usage.complete({ sessionID: input.sessionID, requestID: input.requestID, status: Cause.hasInterrupts(exit.cause) ? "aborted" : "error",
+      error: failure instanceof Error ? failure.message : String(failure), timeCompleted: Date.now() })
+  }))
+  return (assistant: SessionV1.Assistant) => { message = assistant }
+})
 
 export interface Handle {
   readonly message: SessionV1.Assistant
@@ -482,7 +529,9 @@ const layer = Layer.effect(
               tokens: usage.tokens,
               cost: usage.cost,
             })
-            yield* session.updateMessage(ctx.assistantMessage)
+            // 先保存 step part，再在消息 commit 中读取确认 parts，仍按同一 parentID 聚合。
+            // 多工具续轮不能以当前助手 ID 新建另一轮用户请求。
+            yield* publishAssistant(ctx.assistantMessage, events)
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
@@ -622,7 +671,8 @@ const layer = Layer.effect(
         }
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
-        yield* session.updateMessage(ctx.assistantMessage)
+        // cleanup 的通知恢复可中断；若提交前被取消，已安装 owner 负责闭合持久化未完成助手。
+        yield* Effect.interruptible(publishAssistant(ctx.assistantMessage, events))
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {

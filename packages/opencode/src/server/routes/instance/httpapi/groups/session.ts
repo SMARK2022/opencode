@@ -4,6 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionStatus } from "@/session/status"
@@ -67,7 +68,8 @@ export const SummarizePayload = Schema.Struct({
   modelID: ModelV2.ID,
   auto: Schema.optional(Schema.Boolean),
 })
-export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID"]))
+// 请求来源和根请求属于服务端来源标记，外部 payload 不能伪造它们。
+export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID", "source", "rootRequestID"]))
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
 export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
@@ -442,6 +444,32 @@ export const SessionApi = HttpApi.make("session")
             description: "Update a part in a message.",
           }),
         ),
+      )
+      .add(
+        // 历史账本与 Session.request 即时投影分开命名，不能用最新请求视图替代历史分页。
+        HttpApiEndpoint.get("requestUsageList", "/session/:sessionID/request_usage", {
+          params: { sessionID: SessionID },
+          // URL 文本转换后拒绝 NaN/Infinity；零仍有效，不额外限制整数、正值或范围。
+          query: { ...WorkspaceRoutingQueryFields, limit: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), rootRequestID: Schema.optional(MessageID), source: Schema.optional(SessionRequestUsage.SourceSchema) },
+          success: Schema.Array(SessionRequestUsage.RequestUsageSchema),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.list", summary: "List request usage" })),
+      )
+      .add(
+        HttpApiEndpoint.get("requestUsageGet", "/session/:sessionID/request_usage/:requestID", {
+          params: { sessionID: SessionID, requestID: MessageID },
+          query: WorkspaceRoutingQuery,
+          success: SessionRequestUsage.RequestUsageSchema,
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.get", summary: "Get request usage" })),
+      )
+      .add(
+        HttpApiEndpoint.get("requestUsageAssistants", "/session/:sessionID/request_usage/:requestID/assistant", {
+          params: { sessionID: SessionID, requestID: MessageID },
+          query: WorkspaceRoutingQuery,
+          success: Schema.Array(SessionRequestUsage.AssistantUsageSchema),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" })),
       )
       .annotateMerge(
         OpenApi.annotations({

@@ -30,6 +30,8 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { Prompt } from "@opencode-ai/core/session/prompt"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
+import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator"
@@ -153,10 +155,13 @@ const echo = Layer.effectDiscard(
   ),
 )
 const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: echo, deps: [ToolRegistry.node] })
-let modelResolveHook = Effect.void
+// Hook 保留生产 resolver 的 typed error，不把不可用选择转换成成功模型。
+let modelResolveHook: Effect.Effect<void, SessionRunnerModel.Error> = Effect.void
 let currentModel = model
+const pricing: ModelV2.Info["cost"][number][] = []
 const models = SessionRunnerModel.layerWith((session) =>
   modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
+  pricing,
 )
 const systemContextKey = SystemContext.Key.make("test/context")
 let systemBaseline = "Initial context"
@@ -319,6 +324,7 @@ const setup = Effect.gen(function* () {
   systemLoadHook = Effect.void
   modelResolveHook = Effect.void
   currentModel = model
+  pricing.length = 0
   skillBaselines.clear()
   responses = undefined
   streamFailure = undefined
@@ -521,6 +527,68 @@ const verifyPartialFlushOnFailure = (kind: FragmentKind) =>
         content: [fixture.expectedContent],
       },
     ])
+    const db = (yield* Database.Service).db
+    const usage = SessionRequestUsage.make(db)
+    const original = (yield* usage.list({ sessionID }))[0]
+    expect(original).toMatchObject({ status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 } })
+    // 同一 partial fixture 改为正常 EOF；raw stream 成功不代表已开始的助手完成。
+    const eofFixture = fragmentFixture(kind, fragmentID(kind, "eof"), ["Partial EOF"])
+    const eofPrompt = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: `EOF after ${kind}` }), resume: false })
+    const queuedID = SessionMessage.ID.create()
+    responseStream = Stream.concat(
+      Stream.fromIterable(eofFixture.partialEvents),
+      Stream.fromEffect(session.prompt({ id: queuedID, sessionID, prompt: Prompt.make({ text: "Later queued" }), delivery: "queue", resume: false }).pipe(Effect.orDie)).pipe(Stream.drain),
+    )
+    const events = yield* EventV2.Service
+    // 默认 observer 必须看到真实 EOF 残片结束，再看到后续助手失败；不声明 finalizerSafe。
+    const observed: EventV2.Payload[] = []
+    const off = yield* events.listen(event => Effect.gen(function* () {
+      if (event.type === SessionEvent.Text.Ended.type || event.type === SessionEvent.Reasoning.Ended.type || event.type === SessionEvent.Tool.Input.Ended.type) {
+        observed.push(event)
+        return
+      }
+      if (event.type !== SessionEvent.Step.Failed.type) return
+      observed.push(event)
+      // 真实失败提交时 queue 尚未提升；成功 drain 随后可以按原契约消费它。
+      expect((yield* SessionInput.find(db, queuedID))?.promotedSeq).toBeUndefined()
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(queuedID) })).toMatchObject({ rootRequestID: queuedID, status: "running", assistantCount: 0, tokens: { total: 0 } })
+      responseStream = undefined
+      response = []
+    }))
+    yield* session.resume(sessionID)
+    yield* off
+    // 三类 fixture 各有一个 Ended，原片段身份和内容必须先于 Step.Failed 且仅交付一次。
+    expect(observed).toHaveLength(2)
+    expect(observed).toMatchObject([
+      { type: kind === "text" ? SessionEvent.Text.Ended.type : kind === "reasoning" ? SessionEvent.Reasoning.Ended.type : SessionEvent.Tool.Input.Ended.type,
+        data: { text: "Partial EOF", ...(kind === "text" ? { textID: fragmentID(kind, "eof") } : kind === "reasoning" ? { reasoningID: fragmentID(kind, "eof") } : { callID: fragmentID(kind, "eof") }) },
+      },
+      { type: SessionEvent.Step.Failed.type, data: { aborted: false } },
+    ])
+    expect((yield* session.context(sessionID)).findLast(message => message.type === "assistant")).toMatchObject({ type: "assistant", finish: "error", content: [eofFixture.expectedContent] })
+    const eofID = SessionV1.MessageID.make(eofPrompt.id)
+    const terminal = { rootRequestID: eofID, status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 }, time: { completed: expect.any(Number) } }
+    expect(yield* usage.get({ sessionID, requestID: eofID })).toMatchObject(terminal)
+    expect(yield* usage.assistants({ sessionID, requestID: eofID })).toMatchObject([{ status: "error", stepCount: 0, tokens: { total: 0 }, time: { completed: expect.any(Number) } }])
+    // 删除账本后真实重放；文本和本地 pending raw input 不被工具失败清理覆盖。
+    yield* db.delete(RequestUsageTable).where(eq(RequestUsageTable.session_id, sessionID)).run().pipe(Effect.orDie)
+    yield* replaySessionProjection(sessionID)
+    expect((yield* session.context(sessionID)).findLast(message => message.type === "assistant")).toMatchObject({ type: "assistant", finish: "error", content: [eofFixture.expectedContent] })
+    expect(yield* usage.get({ sessionID, requestID: eofID })).toMatchObject(terminal)
+    // queue 的空成功有自己的终态，不能覆盖前一个 partial EOF 请求的 error。
+    expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(queuedID) })).toMatchObject({ rootRequestID: queuedID, status: "completed", assistantCount: 0, tokens: { total: 0 } })
+    const saved = yield* usage.get({ sessionID, requestID: eofID })
+    responseStream = undefined
+    response = fragmentFixture("text", "text-after-eof", ["After EOF"]).completeEvents
+    const next = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Next real turn" }), resume: false })
+    yield* session.resume(sessionID)
+    // 下一次真实 Step.Started 只认领新输入，旧失败请求和原 typed failure 的根保持。
+    expect(yield* usage.get({ sessionID, requestID: eofID })).toEqual(saved)
+    expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(next.id) })).toMatchObject({ rootRequestID: next.id, status: "completed", assistantCount: 1 })
+    if (original) expect(yield* usage.get({ sessionID, requestID: original.requestID })).toMatchObject({ rootRequestID: original.rootRequestID, status: "error" })
+    yield* replaySessionProjection(sessionID)
+    expect(yield* usage.get({ sessionID, requestID: eofID })).toMatchObject(terminal)
+    expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(next.id) })).toMatchObject({ rootRequestID: next.id, status: "completed", assistantCount: 1 })
   })
 
 const verifyPartialFlushOnInterruption = (kind: FragmentKind) =>
@@ -631,19 +699,31 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("streams one request with registry definitions from chronological V2 user history", () =>
+  it.live("streams one request with registry definitions from chronological V2 user history", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }), resume: false })
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
+      const first = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }), resume: false })
+      const second = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
 
       requests.length = 0
       responses = undefined
       streamGate = undefined
       streamStarted = undefined
       response = []
-      yield* session.resume(sessionID)
+      // 空成功的真实 finalizer 遇到普通阻塞 observer，resume 仍完成且 typed 流收到原 cohort。
+      const events = yield* EventV2.Service
+      const release = yield* Deferred.make<void>()
+      const off = yield* events.listen(event => event.type === SessionEvent.PromptCompleted.type ? Deferred.await(release) : Effect.void)
+      yield* Effect.addFinalizer(() => off.pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.asVoid))
+      const delivered = yield* events.subscribe(SessionEvent.PromptCompleted).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild)
+      yield* Effect.yieldNow
+      const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+      yield* session.resume(sessionID).pipe(Effect.timeout("1 second"))
+      expect(yield* Deferred.isDone(release)).toBe(false)
+      yield* Fiber.interrupt(rescue)
+      yield* off
+      expect(Array.from(yield* Fiber.join(delivered).pipe(Effect.timeout("1 second")))).toMatchObject([{ data: { messageID: second.id, requestIDs: [first.id, second.id] } }])
 
       expect(requests).toHaveLength(1)
       expect(requests[0]?.model).toBe(model)
@@ -653,6 +733,29 @@ describe("SessionRunnerLLM", () => {
         { role: "user", content: [{ type: "text", text: "Second" }] },
       ])
       expect(yield* session.messages({ sessionID })).toHaveLength(2)
+      const db = (yield* Database.Service).db
+      const usage = SessionRequestUsage.make(db)
+      const empty = { rootRequestID: second.id, status: "completed", assistantCount: 0, stepCount: 0, cost: 0, tokens: { total: 0 }, time: { completed: expect.any(Number) } }
+      // 空成功没有助手；已提升 cohort 持久完成，同批零消费只属于第二个根。
+      for (const id of [first.id, second.id]) {
+        expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(id) })).toMatchObject(empty)
+        expect(yield* usage.assistants({ sessionID, requestID: SessionV1.MessageID.make(id) })).toEqual([])
+      }
+      expect((yield* session.history({ sessionID, limit: 100 })).events).toContainEqual(expect.objectContaining({ type: SessionEvent.PromptCompleted.type, data: expect.objectContaining({ messageID: second.id, requestIDs: [first.id, second.id] }) }))
+      // 请求终态必须由 durable event 重建，不能依赖内存或遗留账本行。
+      yield* db.delete(RequestUsageTable).where(eq(RequestUsageTable.session_id, sessionID)).run().pipe(Effect.orDie)
+      yield* replaySessionProjection(sessionID)
+      for (const id of [first.id, second.id]) expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(id) })).toMatchObject(empty)
+      expect(yield* session.messages({ sessionID })).toHaveLength(2)
+      response = fragmentFixture("text", "text-after-empty", ["After empty"]).completeEvents
+      const next = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+      yield* session.resume(sessionID)
+      // 真正新助手不能重绑已完成的旧 self-root 或把空请求计入它的消费。
+      for (const id of [first.id, second.id]) expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(id) })).toMatchObject(empty)
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(next.id) })).toMatchObject({ rootRequestID: next.id, status: "completed", assistantCount: 1 })
+      yield* replaySessionProjection(sessionID)
+      for (const id of [first.id, second.id]) expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(id) })).toMatchObject(empty)
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(next.id) })).toMatchObject({ rootRequestID: next.id, status: "completed", assistantCount: 1 })
     }),
   )
 
@@ -911,11 +1014,99 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("keeps the sampled model when selection changes during model resolution", () =>
+  it.live("keeps the sampled model when selection changes during model resolution", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
+      // 通过真实 public 选择/接纳/提升，再调用生产 variant resolver，不直接制造账本终态。
+      yield* insertSession(otherSessionID)
+      const unavailableModel = ModelV2.Info.make({
+        id: ModelV2.ID.make("fake-model"), providerID: ProviderV2.ID.make("fake"), name: "Unavailable variant",
+        api: { id: ModelV2.ID.make("fake-model"), type: "aisdk", package: "@ai-sdk/openai" },
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        request: { headers: {}, body: {} }, variants: [], time: { released: 0 },
+        cost: [], status: "active", enabled: true, limit: { context: 100, output: 20 },
+      })
+      yield* session.switchModel({ sessionID: otherSessionID, model: {
+        id: unavailableModel.id, providerID: unavailableModel.providerID, variant: ModelV2.VariantID.make("unknown"),
+      } })
+      const first = yield* session.prompt({ sessionID: otherSessionID, prompt: Prompt.make({ text: "First unavailable steer" }), resume: false })
+      const failed = yield* session.prompt({ sessionID: otherSessionID, prompt: Prompt.make({ text: "Second unavailable steer" }), resume: false })
+      const queued = yield* session.prompt({ sessionID: otherSessionID, prompt: Prompt.make({ text: "Wait after failure" }), delivery: "queue", resume: false })
+      const duringID = SessionMessage.ID.create()
+      // 在 resolve 内接纳更晚 queue，专门检测 finalizer 是否误读最新 admission。
+      modelResolveHook = Effect.gen(function* () {
+        yield* session.prompt({ sessionID: otherSessionID, id: duringID, prompt: Prompt.make({ text: "Later admission" }), delivery: "queue", resume: false }).pipe(Effect.orDie)
+        return yield* SessionRunnerModel.resolve(yield* session.get(otherSessionID).pipe(Effect.orDie), unavailableModel).pipe(Effect.asVoid)
+      })
+      // typed 失败与 public interrupt 共用普通阻塞 terminal observer，safe typed fanout 仍需交付。
+      const release = yield* Deferred.make<void>()
+      const off = yield* events.listen(event => event.type === SessionEvent.PromptFailed.type ? Deferred.await(release) : Effect.void)
+      yield* Effect.addFinalizer(() => off.pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.asVoid))
+      const delivered = yield* events.subscribe(SessionEvent.PromptFailed).pipe(Stream.filter(event => event.data.sessionID === otherSessionID), Stream.take(2), Stream.runCollect, Effect.forkChild)
+      yield* Effect.yieldNow
+      const resumeRescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+      requests.length = 0
+      const unavailableExit = yield* session.resume(otherSessionID).pipe(Effect.timeout("1 second"), Effect.exit)
+      expect(yield* Deferred.isDone(release)).toBe(false)
+      yield* Fiber.interrupt(resumeRescue)
+      expect(unavailableExit._tag).toBe("Failure")
+      if (unavailableExit._tag !== "Failure") return yield* Effect.die("Expected unavailable variant")
+      // 类型化 cause 原样传播，provider 未执行，因此成本、tokens、step 与助手数均为零。
+      expect(Cause.squash(unavailableExit.cause)).toBeInstanceOf(SessionRunnerModel.VariantUnavailableError)
+      expect(requests).toHaveLength(0)
+      const db = (yield* Database.Service).db
+      const usage = SessionRequestUsage.make(db)
+      const zero = { assistantCount: 0, stepCount: 0, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 } }
+      const terminal = { ...zero, status: "error" as const, error: "Variant unavailable for fake/fake-model: unknown", rootRequestID: SessionV1.MessageID.make(failed.id), time: { completed: expect.any(Number) } }
+      // 同批真实请求都闭合；不存在助手就不能用 fake Step.Started 补账。
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(first.id) })).toMatchObject(terminal)
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(failed.id) })).toMatchObject(terminal)
+      expect(yield* usage.assistants({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(failed.id) })).toEqual([])
+      expect((yield* session.messages({ sessionID: otherSessionID })).filter(message => message.type === "assistant")).toEqual([])
+      expect((yield* SessionInput.find(db, first.id))?.promotedSeq).toBeDefined()
+      expect((yield* SessionInput.find(db, failed.id))?.promotedSeq).toBeDefined()
+      // 未提升的早/晚 queue 都仍可由未来显式执行消费，没有被失败批次结算。
+      for (const id of [queued.id, duringID]) {
+        expect((yield* SessionInput.find(db, id))?.promotedSeq).toBeUndefined()
+        expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(id) })).toMatchObject({ ...zero, status: "running" })
+        expect((yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(id) }))?.time.completed).toBeUndefined()
+      }
+      // durable payload 固定原批次身份，replay 不需要 resolver 或当前最新输入。
+      const failedEvent = (yield* session.history({ sessionID: otherSessionID, limit: 100 })).events.find(event => event.type === SessionEvent.PromptFailed.type)
+      expect(failedEvent).toMatchObject({ data: { messageID: failed.id, requestIDs: [first.id, failed.id], aborted: false } })
+      // 同一真实准备边界被中断时只消费第一条 queue，并持久化 aborted 而非 error。
+      const ready = yield* Deferred.make<void>()
+      modelResolveHook = Deferred.succeed(ready, void 0).pipe(Effect.andThen(Effect.never))
+      const interrupted = yield* session.resume(otherSessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(ready)
+      // 局部救援仅防旧退出实现挂死；取消必须在 rescue release 之前返回。
+      const interruptRescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+      yield* session.interrupt(otherSessionID).pipe(Effect.timeout("1 second"))
+      expect(yield* Deferred.isDone(release)).toBe(false)
+      yield* Fiber.interrupt(interruptRescue)
+      yield* off
+      expect(Array.from(yield* Fiber.join(delivered).pipe(Effect.timeout("1 second")))).toMatchObject([{ data: { requestIDs: [first.id, failed.id], aborted: false } }, { data: { requestIDs: [queued.id], aborted: true } }])
+      const interruptedExit = yield* Fiber.await(interrupted)
+      expect(interruptedExit._tag).toBe("Failure")
+      if (interruptedExit._tag === "Failure") expect(Cause.hasInterruptsOnly(interruptedExit.cause)).toBe(true)
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(queued.id) })).toMatchObject({ ...zero, status: "aborted", time: { completed: expect.any(Number) } })
+      expect((yield* SessionInput.find(db, queued.id))?.promotedSeq).toBeDefined()
+      expect((yield* SessionInput.find(db, duringID))?.promotedSeq).toBeUndefined()
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(duringID) })).toMatchObject({ ...zero, status: "running" })
+      expect(requests).toHaveLength(0)
+      // 删除真实账本再重放 durable events，验证零助手失败能重建而不是依赖残留行。
+      yield* db.delete(RequestUsageTable).where(eq(RequestUsageTable.session_id, otherSessionID)).run().pipe(Effect.orDie)
+      yield* replaySessionProjection(otherSessionID)
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(first.id) })).toMatchObject(terminal)
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(failed.id) })).toMatchObject(terminal)
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(queued.id) })).toMatchObject({ ...zero, status: "aborted", time: { completed: expect.any(Number) } })
+      expect(yield* usage.get({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(duringID) })).toMatchObject({ ...zero, status: "running" })
+      expect((yield* SessionInput.find(db, duringID))?.promotedSeq).toBeUndefined()
+      expect(yield* usage.assistants({ sessionID: otherSessionID, requestID: SessionV1.MessageID.make(failed.id) })).toEqual([])
+      modelResolveHook = Effect.void
+      // 保留既有 sampled-model 场景及其精确期望，以上失败不能改变另一个 Session。
       let switched = false
       modelResolveHook = Effect.suspend(() => {
         if (switched) return Effect.void
@@ -1076,7 +1267,7 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("automatically compacts into a completed summary and retained recent turn", () =>
+  it.live("automatically compacts into a completed summary and retained recent turn", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
@@ -1088,12 +1279,24 @@ describe("SessionRunnerLLM", () => {
       })
       yield* session.resume(sessionID)
 
+      const events = yield* EventV2.Service
+      // 通过真实模型选择事件采样 variant，压缩身份必须来自 runner producer 而非测试直发 Started。
+      yield* events.publish(SessionEvent.ModelSwitched, {
+        sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
+        model: { id: ModelV2.ID.make(compactModel.id), providerID: ProviderV2.ID.make(compactModel.provider), variant: ModelV2.VariantID.make("high") },
+      })
       currentModel = compactModel
+      // 摘要和随后普通 turn 都经真实结算；缓存计入上下文阶梯，但不能按普通输入重复收费。
+      pricing.push(
+        { input: 1, output: 2, cache: { read: 0.1, write: 0.2 } },
+        { input: 3, output: 5, cache: { read: 2, write: 4 }, tier: { type: "context", size: 10 } },
+      )
       requests.length = 0
       responses = [
         fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
-      ]
+      ].map(events => events.map(event => LLMEvent.is.stepFinish(event)
+        ? LLMEvent.stepFinish({ ...event, usage: { inputTokens: 13, nonCachedInputTokens: 8, cacheReadInputTokens: 2, cacheWriteInputTokens: 3, outputTokens: 3, reasoningTokens: 1 } }) : event))
       yield* session.prompt({
         sessionID,
         prompt: Prompt.make({ text: "Recent exact request ".repeat(180) }),
@@ -1125,6 +1328,15 @@ describe("SessionRunnerLLM", () => {
         type: "compaction",
         summary: "## Objective\n- Preserve the task",
       })
+      const usage = SessionRequestUsage.make((yield* Database.Service).db)
+      // 查询真实 summary stream 的请求和助手账本，直接 projector fixture 不能证明 producer 携带 variant。
+      const compacted = (yield* usage.list({ sessionID, source: "system_compaction" }))[0]
+      if (!compacted) return yield* Effect.die("Missing compaction usage")
+      expect(compacted).toMatchObject({ status: "completed", model: { variant: "high" }, cost: 0.000055 })
+      expect(yield* usage.assistants({ sessionID, requestID: compacted.requestID })).toMatchObject([{ model: { variant: "high" }, cost: 0.000055 }])
+      expect(context[1]).toMatchObject({ type: "assistant", cost: 0.000055 })
+      expect((yield* usage.list({ sessionID, source: "prompt" })).some(row => row.cost === 0.000055)).toBe(true)
+      expect((yield* session.get(sessionID)).cost).toBeCloseTo(0.00011, 10)
 
       requests.length = 0
       executions.length = 0
@@ -1148,6 +1360,88 @@ describe("SessionRunnerLLM", () => {
         type: "compaction",
         summary: "## Objective\n- Preserve the updated task",
       })
+      const db = (yield* Database.Service).db
+      const settled = (yield* usage.list({ sessionID, source: "system_compaction" })).map(row => ({
+        requestID: row.requestID, rootRequestID: row.rootRequestID, status: row.status, model: row.model, cost: row.cost, tokens: row.tokens, stepCount: row.stepCount,
+      }))
+      const ready = yield* Deferred.make<void>()
+      // Started 通知可中断，普通 Failed observer 即使阻塞也不能被退出 owner 重新等待。
+      const release = yield* Deferred.make<void>()
+      const terminalOff = yield* events.listen(event => event.type === SessionEvent.Compaction.Failed.type || event.type === SessionEvent.PromptFailed.type ? Deferred.await(release) : Effect.void)
+      yield* Effect.addFinalizer(() => terminalOff.pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.asVoid))
+      const delivered = yield* events.all().pipe(Stream.filter(event => event.type === SessionEvent.Compaction.Failed.type || event.type === SessionEvent.PromptFailed.type), Stream.take(2), Stream.runCollect, Effect.forkChild)
+      yield* Effect.yieldNow
+      // 真实 Started 已提交但 publish 尚阻塞于 listener，不能用 stream gate 代替这个窗口。
+      const off = yield* events.listen(event => event.type === SessionEvent.Compaction.Started.type
+        ? Deferred.succeed(ready, void 0).pipe(Effect.andThen(Effect.never))
+        : Effect.void)
+      const interruptedPrompt = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt committed compaction ".repeat(180) }), resume: false })
+      requests.length = 0
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(ready)
+      const started = (yield* session.history({ sessionID, limit: 100 })).events.findLast(event => event.type === SessionEvent.Compaction.Started.type)
+      if (!started || started.type !== SessionEvent.Compaction.Started.type) return yield* Effect.die("Missing durable compaction Started")
+      // 从公开 durable history 读取身份证明 commit；summary provider 还未被调用。
+      expect(started.durable).toBeDefined()
+      expect(requests).toHaveLength(0)
+      const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+      yield* session.interrupt(sessionID).pipe(Effect.timeout("1 second"))
+      expect(yield* Deferred.isDone(release)).toBe(false)
+      yield* Fiber.interrupt(rescue)
+      yield* terminalOff
+      expect(Array.from(yield* Fiber.join(delivered).pipe(Effect.timeout("1 second")))).toMatchObject([{ type: SessionEvent.Compaction.Failed.type, data: { messageID: started.data.messageID, aborted: true } }, { type: SessionEvent.PromptFailed.type, data: { messageID: interruptedPrompt.id, aborted: true } }])
+      const exit = yield* Fiber.await(run)
+      expect(exit._tag).toBe("Failure")
+      if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      yield* off
+      const compactID = SessionV1.MessageID.make(started.data.messageID)
+      const promptID = SessionV1.MessageID.make(interruptedPrompt.id)
+      const zero = { cost: 0, stepCount: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 } }
+      // 外层 prompt 与独立压缩分别终结；Started 冻结的 variant 及原确认消费不能丢失。
+      const aborted = { ...zero, source: "system_compaction" as const, status: "aborted" as const, rootRequestID: promptID, model: { variant: "high" } }
+      expect(yield* usage.get({ sessionID, requestID: compactID })).toMatchObject(aborted)
+      expect(yield* usage.get({ sessionID, requestID: promptID })).toMatchObject({ ...zero, source: "prompt", status: "aborted" })
+      for (const prior of settled) expect(yield* usage.get({ sessionID, requestID: prior.requestID })).toMatchObject(prior)
+      const history = yield* session.history({ sessionID, limit: 100 })
+      expect(history.events.filter(event => event.type === SessionEvent.Compaction.Failed.type && event.data.messageID === started.data.messageID)).toHaveLength(1)
+      expect(history.events.filter(event => event.type === SessionEvent.Compaction.Ended.type && event.data.messageID === started.data.messageID)).toHaveLength(0)
+      // 重建消息时会话总额也从零重建；真实 durable Failed 只能结算自己的压缩身份。
+      const totals = db.select({ cost: SessionTable.cost, input: SessionTable.tokens_input, output: SessionTable.tokens_output,
+        reasoning: SessionTable.tokens_reasoning, read: SessionTable.tokens_cache_read, write: SessionTable.tokens_cache_write })
+        .from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+      const billed = yield* totals
+      yield* db.update(SessionTable).set({ cost: 0, tokens_input: 0, tokens_output: 0, tokens_reasoning: 0, tokens_cache_read: 0, tokens_cache_write: 0 })
+        .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+      // 全量重建同时清空账本投影；保留旧账本却清零总额会把已确认压缩用量抵消两次。
+      yield* db.delete(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, sessionID)).run().pipe(Effect.orDie)
+      yield* db.delete(RequestUsageTable).where(eq(RequestUsageTable.session_id, sessionID)).run().pipe(Effect.orDie)
+      yield* replaySessionProjection(sessionID)
+      expect(yield* totals).toEqual(billed)
+      expect(yield* usage.get({ sessionID, requestID: compactID })).toMatchObject(aborted)
+      expect(yield* usage.get({ sessionID, requestID: promptID })).toMatchObject({ ...zero, source: "prompt", status: "aborted" })
+      for (const prior of settled) expect(yield* usage.get({ sessionID, requestID: prior.requestID })).toMatchObject(prior)
+      // Started projector 真正回滚时没有独立请求，不允许 owner 伪造 Failed。
+      const before = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)
+      const defect = new Error("Compaction Started rolled back")
+      let rollbackStarted = false
+      yield* events.project(SessionEvent.Compaction.Started, () => Effect.sync(() => { rollbackStarted = true }).pipe(Effect.andThen(Effect.die(defect))))
+      // 中断保留的长历史已触发 auto；新增短输入让摘要仍可装入 context-output 预算。
+      const uncommittedPrompt = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Reject uncommitted compaction " }), resume: false })
+      requests.length = 0
+      const rollback = yield* session.resume(sessionID).pipe(Effect.exit)
+      // 必须实际进入 Started 的事务 projector，普通 turn 的失败不能充当回滚证据。
+      expect(rollbackStarted).toBe(true)
+      expect(rollback._tag).toBe("Failure")
+      if (rollback._tag === "Failure") expect(Cause.squash(rollback.cause)).toBe(defect)
+      expect(requests).toHaveLength(0)
+      const after = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)
+      for (const definition of [SessionEvent.Compaction.Started, SessionEvent.Compaction.Ended, SessionEvent.Compaction.Failed]) {
+        if (!definition.durable) return yield* Effect.die("Missing durable compaction definition")
+        const type = EventV2.versionedType(definition.type, definition.durable.version)
+        expect(after.filter(row => row.type === type)).toHaveLength(before.filter(row => row.type === type).length)
+      }
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(uncommittedPrompt.id) })).toMatchObject({ ...zero, source: "prompt", status: "error" })
+      expect(yield* usage.list({ sessionID, source: "system_compaction" })).toHaveLength(settled.length + 1)
     }),
   )
 
@@ -1215,6 +1509,12 @@ describe("SessionRunnerLLM", () => {
   it.effect("forces one compaction and retries after provider context overflow", () =>
     Effect.gen(function* () {
       const session = yield* setupOverflowRecovery
+      const events = yield* EventV2.Service
+      // overflow 分支走另一个调用边界，必须独立验证仍传同一 turn 的选择。
+      yield* events.publish(SessionEvent.ModelSwitched, {
+        sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
+        model: { id: ModelV2.ID.make(recoveryModel.id), providerID: ProviderV2.ID.make(recoveryModel.provider), variant: ModelV2.VariantID.make("medium") },
+      })
       responses = [
         [
           LLMEvent.stepStart({ index: 0 }),
@@ -1233,6 +1533,12 @@ describe("SessionRunnerLLM", () => {
         { type: "compaction", summary: "## Objective\n- Recover overflow" },
         { type: "assistant", finish: "stop" },
       ])
+      const usage = SessionRequestUsage.make((yield* Database.Service).db)
+      // 恢复用量结算保留 Started 冻结的 variant，后续 retry 不能回写其他选择。
+      const compacted = (yield* usage.list({ sessionID, source: "system_compaction" }))[0]
+      if (!compacted) return yield* Effect.die("Missing overflow compaction usage")
+      expect(compacted).toMatchObject({ status: "completed", model: { variant: "medium" } })
+      expect(yield* usage.assistants({ sessionID, requestID: compacted.requestID })).toMatchObject([{ model: { variant: "medium" } }])
       yield* replaySessionProjection(sessionID)
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "compaction" },
@@ -2468,7 +2774,11 @@ describe("SessionRunnerLLM", () => {
         name: "echo",
       })
       requests.length = 0
-      response = []
+      response = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      ]
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(1)
@@ -2476,7 +2786,30 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Recover interrupted tool input" },
         { type: "assistant", content: [{ type: "tool", id: "call-pending-interrupted", state: { status: "error" } }] },
+        { type: "assistant", finish: "stop" },
       ])
+      const db = (yield* Database.Service).db
+      const usage = SessionRequestUsage.make(db)
+      const assistants = yield* db.select().from(RequestUsageAssistantTable).all()
+      // 未确认 provider 用量的旧助手只补完成状态，工具中断不能伪造助手 Error 或计费 step。
+      expect(assistants.find(row => row.step_count === 0)).toMatchObject({
+        assistant_message_id: assistantMessageID, status: "completed", time_completed: 0, cost_micros: 0, tokens_total: 0,
+      })
+      expect(assistants).toHaveLength(2)
+      const stale = (yield* session.context(sessionID)).find(
+        (message): message is SessionMessage.Assistant => message.type === "assistant" && message.id === assistantMessageID,
+      )
+      expect(stale?.time.completed).toBeDefined()
+      expect(stale?.finish).toBeUndefined()
+      expect(stale?.error).toBeUndefined()
+      // 同请求的旧明细不再 running，新助手完成后原请求聚合才能真正到达 completed。
+      expect(yield* usage.list({ sessionID })).toMatchObject([
+        { status: "completed", assistantCount: 2, stepCount: 1, cost: 0, tokens: { total: 0 } },
+      ])
+      // 重放真实 durable 历史验证同一助手快照覆盖，不靠第二次手工写账本模拟幂等。
+      yield* replaySessionProjection(sessionID)
+      expect(yield* usage.list({ sessionID })).toMatchObject([{ status: "completed", assistantCount: 2, stepCount: 1, cost: 0 }])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toHaveLength(2)
     }),
   )
 
@@ -2860,6 +3193,8 @@ describe("SessionRunnerLLM", () => {
         { type: "user", text: "Call declined" },
         {
           type: "assistant",
+          finish: "error",
+          error: { type: "unknown", message: "Provider turn interrupted" },
           content: [
             {
               type: "tool",
@@ -2869,6 +3204,12 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+      const db = (yield* Database.Service).db
+      // 拒绝不是可续轮工具错误；助手和请求都须结束，已收到的零用量 step 仍计一次。
+      expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([
+        { status: "aborted", assistantCount: 1, stepCount: 1, cost: 0 },
+      ])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toMatchObject([{ status: "aborted", step_count: 1 }])
     }),
   )
 
@@ -2965,6 +3306,8 @@ describe("SessionRunnerLLM", () => {
         { type: "user", text: "Ask then stop" },
         {
           type: "assistant",
+          finish: "error",
+          error: { type: "unknown", message: "Provider turn interrupted" },
           content: [
             {
               type: "tool",
@@ -2974,6 +3317,12 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+      const db = (yield* Database.Service).db
+      // 真实 Question.reject 产生 RejectedError，与权限拒绝共享同一 durable 中断结算。
+      expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([
+        { status: "aborted", assistantCount: 1, stepCount: 1, cost: 0 },
+      ])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toMatchObject([{ status: "aborted", step_count: 1 }])
     }),
   )
 
@@ -3084,24 +3433,43 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("durably fails blocked local tools when interrupted while awaiting settlement", () =>
+  it.live("durably fails blocked local tools when interrupted while awaiting settlement", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt tool settlement" }), resume: false })
+      requests.length = 0
       executions.length = 0
       toolExecutionGate = yield* Deferred.make<void>()
       response = [
         LLMEvent.stepStart({ index: 0 }),
         LLMEvent.toolCall({ id: "call-await-interrupt", name: "echo", input: { text: "blocked" } }),
-        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
-        LLMEvent.finish({ reason: "tool-calls" }),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls",
+          usage: { inputTokens: 10, nonCachedInputTokens: 8, outputTokens: 4, reasoningTokens: 1, cacheReadInputTokens: 2 } }),
       ]
+      const providerFinished = yield* Deferred.make<void>()
+      // 明确等到 step-finish 被 publisher 接收，再中断仍阻塞的工具，避免测试只覆盖流中断。
+      responseStream = Stream.concat(
+        Stream.fromIterable(response),
+        Stream.fromEffect(Deferred.succeed(providerFinished, undefined).pipe(Effect.as(LLMEvent.finish({ reason: "tool-calls" })))),
+      )
 
-      const runner = yield* SessionRunner.Service
-      const run = yield* runner.run({ sessionID, force: true }).pipe(Effect.forkChild)
+      // public Coordinator 取消也须跨过 Tool.Failed/Step.Failed/已确认 Step.Ended 的普通阻塞通知。
+      const events = yield* EventV2.Service
+      const release = yield* Deferred.make<void>()
+      const off = yield* events.listen(event => event.type === SessionEvent.Tool.Failed.type || event.type === SessionEvent.Step.Failed.type || event.type === SessionEvent.Step.Ended.type ? Deferred.await(release) : Effect.void)
+      yield* Effect.addFinalizer(() => off.pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.asVoid))
+      const delivered = yield* events.subscribe(SessionEvent.Step.Ended).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild)
+      yield* Effect.yieldNow
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(providerFinished)
       while (executions.length === 0) yield* Effect.yieldNow
-      yield* Fiber.interrupt(run)
+      const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+      yield* session.interrupt(sessionID).pipe(Effect.timeout("1 second"))
+      expect(yield* Deferred.isDone(release)).toBe(false)
+      yield* Fiber.interrupt(rescue)
+      yield* off
+      expect(Array.from(yield* Fiber.join(delivered).pipe(Effect.timeout("1 second")))).toMatchObject([{ data: { tokens: { input: 8, output: 3, reasoning: 1, cache: { read: 2 } } } }])
       toolExecutionGate = undefined
 
       expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
@@ -3109,6 +3477,9 @@ describe("SessionRunnerLLM", () => {
         { type: "user", text: "Interrupt tool settlement" },
         {
           type: "assistant",
+          finish: "error",
+          error: { type: "unknown", message: "Provider turn interrupted" },
+          tokens: { input: 8, output: 3, reasoning: 1, cache: { read: 2, write: 0 } },
           content: [
             {
               type: "tool",
@@ -3118,6 +3489,22 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+      const db = (yield* Database.Service).db
+      // 固定 provider 用量作为 oracle：失败不退款，也不把 Failed 与 Ended 算成两步。
+      expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([
+        { status: "aborted", assistantCount: 1, stepCount: 1, cost: 0,
+          tokens: { input: 8, output: 3, reasoning: 1, cache: { read: 2, write: 0 }, total: 14 } },
+      ])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toMatchObject([{ status: "aborted", step_count: 1 }])
+      expect(yield* db.select().from(SessionTable).get()).toMatchObject({ cost: 0, tokens_input: 8, tokens_output: 3, tokens_reasoning: 1, tokens_cache_read: 2 })
+      expect(requests).toHaveLength(1)
+      // 从真实 durable events 重建消息，账本快照 upsert 必须继续保留 aborted，不能重复计费。
+      // helper 删除所有消息，因此会话累计也从零重建；助手账本保留以验证快照覆盖。
+      yield* db.update(SessionTable).set({ cost: 0, tokens_input: 0, tokens_output: 0, tokens_reasoning: 0,
+        tokens_cache_read: 0, tokens_cache_write: 0 }).where(eq(SessionTable.id, sessionID)).run()
+      yield* replaySessionProjection(sessionID)
+      expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([{ status: "aborted", stepCount: 1, tokens: { total: 14 } }])
+      expect(yield* db.select().from(SessionTable).get()).toMatchObject({ cost: 0, tokens_input: 8, tokens_output: 3 })
     }),
   )
 
@@ -3231,15 +3618,23 @@ describe("SessionRunnerLLM", () => {
       responses = undefined
       streamGate = undefined
       streamStarted = undefined
-      response = [LLMEvent.stepStart({ index: 0 }), LLMEvent.providerError({ message: "Provider unavailable" })]
+      // provider-error 可能晚于确认 usage；providerFailed 不能抹掉已发生的消耗。
+      response = [LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { nonCachedInputTokens: 8 } }),
+        LLMEvent.providerError({ message: "Provider unavailable" })]
 
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(1)
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Fail durably" },
-        { type: "assistant", finish: "error", error: { type: "unknown", message: "Provider unavailable" } },
+        { type: "assistant", finish: "error", tokens: { input: 8 }, error: { type: "unknown", message: "Provider unavailable" } },
       ])
+      const db = (yield* Database.Service).db
+      expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([
+        { status: "error", assistantCount: 1, stepCount: 1, tokens: { input: 8, total: 8 } },
+      ])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toMatchObject([{ status: "error", step_count: 1 }])
     }),
   )
 
@@ -3478,6 +3873,7 @@ describe("SessionRunnerLLM", () => {
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fail malformed stream" }), resume: false })
       responses = undefined
       streamGate = undefined
       streamStarted = undefined
@@ -3486,6 +3882,15 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.resume(sessionID).pipe(Effect.catchDefect(Effect.succeed))).toBe(
         "Duplicate text start: text-1",
       )
+      // stream 缺陷保留原失败 cause，但已开始助手仍要终结；未收到 step-finish 不虚构用量。
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user" }, { type: "assistant", finish: "error", error: { message: "Duplicate text start: text-1" } },
+      ])
+      const db = (yield* Database.Service).db
+      expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([
+        { status: "error", assistantCount: 1, stepCount: 0, tokens: { total: 0 } },
+      ])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toMatchObject([{ status: "error", step_count: 0 }])
     }),
   )
 

@@ -4,9 +4,21 @@ import { Session } from "@/session/session"
 import { NotFoundError } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
+import { RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
+import { eq } from "drizzle-orm"
 import { Project } from "@/project/project"
 import { InstanceRef } from "@/effect/instance-ref"
 
+const MICROS = 1_000_000
+
+// 模型明细与 Session 总量用途不同，只在这里统计助手身份对应的模型分布。
+// messages 是助手调用次数，多次相同助手修订已经在 ledger 层去重。
+export type ModelUsageEntry = { messages: number; tokens: { input: number; output: number; cache: { read: number; write: number } }; cost: number }
+// 每次调用累加一个助手，不能把 SQL 的一条分组汇总当作一次模型调用。
+function upsertModelUsage(acc: Record<string, ModelUsageEntry>, key: string, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number) {
+  if (!acc[key]) acc[key] = { messages: 0, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } }, cost: 0 }
+  acc[key].messages++; acc[key].tokens.input += input; acc[key].tokens.output += output; acc[key].tokens.cache.read += cacheRead; acc[key].tokens.cache.write += cacheWrite; acc[key].cost += cost; 
+}
 interface SessionStats {
   totalSessions: number
   totalMessages: number
@@ -168,38 +180,26 @@ const aggregateSessionStats = Effect.fn("Cli.stats.aggregate")(function* (
           .messages({ sessionID: session.id })
           .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
 
+        // 会话累计已覆盖 V1/V2 全历史，部分请求账本不能替换它。
         const sessionCost = session.cost ?? 0
         const sessionTokens = session.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        const db = (yield* Database.Service).db
+        const sessionAssistantUsageRows = yield* db.select().from(RequestUsageAssistantTable)
+          .where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
         let sessionToolUsage: Record<string, number> = {}
-        let sessionModelUsage: Record<
-          string,
-          {
-            messages: number
-            tokens: { input: number; output: number; cache: { read: number; write: number } }
-            cost: number
-          }
-        > = {}
+        // 新旧助手在同一个模型结果中合并，不新增第二套会话总额算法。
+        const sessionModelUsage: Record<string, ModelUsageEntry> = {}
 
+        // 模型明细按助手 ID 去重，旧消息只补尚未被账本覆盖的记录。
+        const tracked = new Set(sessionAssistantUsageRows.map(row => row.assistant_message_id))
+        for (const row of sessionAssistantUsageRows)
+          upsertModelUsage(sessionModelUsage, `${row.provider_id}/${row.model_id}`, row.tokens_input,
+            row.tokens_output + row.tokens_reasoning, row.tokens_cache_read, row.tokens_cache_write, row.cost_micros / MICROS)
         for (const message of messages) {
-          if (message.info.role === "assistant") {
-            const modelKey = `${message.info.providerID}/${message.info.modelID}`
-            if (!sessionModelUsage[modelKey]) {
-              sessionModelUsage[modelKey] = {
-                messages: 0,
-                tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-                cost: 0,
-              }
-            }
-            sessionModelUsage[modelKey].messages++
-            sessionModelUsage[modelKey].cost += message.info.cost || 0
-
-            if (message.info.tokens) {
-              sessionModelUsage[modelKey].tokens.input += message.info.tokens.input || 0
-              sessionModelUsage[modelKey].tokens.output +=
-                (message.info.tokens.output || 0) + (message.info.tokens.reasoning || 0)
-              sessionModelUsage[modelKey].tokens.cache.read += message.info.tokens.cache?.read || 0
-              sessionModelUsage[modelKey].tokens.cache.write += message.info.tokens.cache?.write || 0
-            }
+          if (message.info.role === "assistant" && !tracked.has(message.info.id)) {
+            const t = message.info.tokens
+            upsertModelUsage(sessionModelUsage, `${message.info.providerID}/${message.info.modelID}`,
+              t.input, t.output + t.reasoning, t.cache.read, t.cache.write, message.info.cost)
           }
 
           for (const part of message.parts) {
@@ -383,7 +383,7 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
   console.log()
 }
 
-function formatNumber(num: number): string {
+export function formatNumber(num: number): string {
   if (num >= 1000000) {
     return (num / 1000000).toFixed(1) + "M"
   } else if (num >= 1000) {

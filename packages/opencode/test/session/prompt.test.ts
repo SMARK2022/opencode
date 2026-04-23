@@ -1,12 +1,13 @@
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -50,7 +51,7 @@ import { Truncate } from "@/tool/truncate"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
-import { TestInstance } from "../fixture/fixture"
+import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -189,6 +190,8 @@ const promptRoot = LayerNode.group([
   SessionStatus.node,
   SessionRunState.node,
   Database.node,
+  // 测试与 prompt/processor 共用同一个全局 Database 账本，不能只断言完成后的消息投影。
+  SessionRequestUsage.node,
   EventV2Bridge.node,
   Question.node,
   Todo.node,
@@ -208,12 +211,14 @@ const promptRoot = LayerNode.group([
   RuntimeFlags.node,
 ])
 
-function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
+function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service> }) {
   const replacements = [
     [SessionSummary.node, summary],
     [LSP.node, lsp],
     [MCP.node, makeMcp(input?.mcpInstructions)],
     [RuntimeFlags.node, runtimeFlags],
+    ...(input?.database ? [[Database.node, input.database] as const] : []),
+    ...(input?.plugin ? [[Plugin.node, input.plugin] as const] : []),
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(promptRoot, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -634,6 +639,7 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
     const events = yield* EventV2Bridge.Service
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
+    const usage = yield* SessionRequestUsage.Service
     const chat = yield* sessions.create({ title: "Pinned" })
     const errors: NonNullable<SessionV1.Assistant["error"]>[] = []
     const expected = {
@@ -653,7 +659,7 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
       noReply: true,
       parts: [{ type: "text", text: "hello" }],
     })
-    yield* llm.push(reply().text("partial response").contentFilter())
+    yield* llm.push(reply().text("partial response").usage({ input: 8, output: 3 }).contentFilter())
 
     const result = yield* prompt.loop({ sessionID: chat.id })
     const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: result.info.id })
@@ -667,10 +673,177 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
       expect(result.info.error).toEqual(expected)
       expect(stored.info.error).toEqual(result.info.error)
       expect(errors).toContainEqual(expected)
+      // 同一已确认 step 的 tokens/cost 保留，最后追加的错误必须同时出现在助手和请求账本。
+      expect(stored.info.finish).toBe("content-filter")
+      const settled = { status: "error", stepCount: 1, cost: result.info.cost, tokens: { input: 8, output: 3, total: 11 }, error: expected.data.message }
+      expect(result.info.tokens).toMatchObject({ input: 8, output: 3 })
+      expect(stored.info.tokens).toMatchObject({ input: 8, output: 3 })
+      expect(yield* usage.get({ sessionID: chat.id, requestID: result.info.parentID })).toMatchObject({ ...settled, assistantCount: 1 })
+      expect(yield* usage.assistants({ sessionID: chat.id, requestID: result.info.parentID })).toMatchObject([{ ...settled, assistantMessageID: result.info.id }])
     }
     expect(result.parts).toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "text", text: "partial response" })]),
     )
+    // 同一既有进程内用例覆盖另一条终验分支，不依赖外部 structured-output live API。
+    const structuredChat = yield* sessions.create({ title: "Missing structured output" })
+    yield* prompt.prompt({
+      sessionID: structuredChat.id, agent: "build", noReply: true,
+      format: new SessionV1.OutputFormatJsonSchema({ type: "json_schema", schema: { type: "object" }, retryCount: 0 }),
+      parts: [{ type: "text", text: "Return structured output" }],
+    })
+    yield* llm.push(reply().text("plain response").usage({ input: 5, output: 2 }).stop())
+    const structuredResult = yield* prompt.loop({ sessionID: structuredChat.id })
+    const structuredStored = yield* MessageV2.get({ sessionID: structuredChat.id, messageID: structuredResult.info.id })
+    if (structuredResult.info.role !== "assistant" || structuredStored.info.role !== "assistant") return yield* Effect.die("Expected structured-output assistant")
+    const structuredError = { name: "StructuredOutputError" as const, data: { message: "Model did not produce structured output", retries: 0 } }
+    expect(structuredResult.info.finish).toBe("stop")
+    expect(structuredResult.info.error).toEqual(structuredError)
+    expect(structuredStored.info.error).toEqual(structuredResult.info.error)
+    expect(structuredResult.info.tokens).toMatchObject({ input: 5, output: 2 })
+    expect(structuredStored.info.tokens).toMatchObject({ input: 5, output: 2 })
+    // 格式失败也只修订同一助手快照，不能丢确认用量或把第二次记录计成两步。
+    const structuredSettled = { status: "error", stepCount: 1, cost: structuredResult.info.cost, tokens: { input: 5, output: 2, total: 7 }, error: structuredError.data.message }
+    expect(yield* usage.get({ sessionID: structuredChat.id, requestID: structuredResult.info.parentID })).toMatchObject({ ...structuredSettled, assistantCount: 1 })
+    expect(yield* usage.assistants({ sessionID: structuredChat.id, requestID: structuredResult.info.parentID })).toMatchObject([{ ...structuredSettled, assistantMessageID: structuredResult.info.id }])
+    expect(yield* llm.hits).toHaveLength(2)
+    // 合法持久化选择不保证 catalog 存在；真实 prompt 在助手创建前失败也必须闭合账本。
+    const failedChat = yield* sessions.create({ title: "Missing catalog model" })
+    const failedID = MessageID.ascending()
+    const missingModel = { providerID: ref.providerID, modelID: ModelV2.ID.make("missing-catalog-model") }
+    const failedExit = yield* prompt.prompt({
+      sessionID: failedChat.id, messageID: failedID, agent: "build", model: missingModel,
+      parts: [{ type: "text", text: "Use the unavailable catalog model" }],
+    }).pipe(Effect.exit)
+    expect(Exit.isFailure(failedExit)).toBe(true)
+    if (!Exit.isFailure(failedExit)) return yield* Effect.die("Expected catalog preparation failure")
+    const failure = Cause.squash(failedExit.cause)
+    if (!ProviderSvc.ModelNotFoundError.isInstance(failure)) return yield* Effect.die("Expected original model-not-found cause")
+    expect(failure).toMatchObject({ providerID: missingModel.providerID, modelID: missingModel.modelID })
+    const failedMessages = yield* sessions.messages({ sessionID: failedChat.id })
+    expect(failedMessages).toHaveLength(1)
+    expect(failedMessages[0]?.info).toMatchObject({ id: failedID, role: "user", model: missingModel })
+    expect(yield* sessions.get(failedChat.id)).toMatchObject({ model: { providerID: missingModel.providerID, id: missingModel.modelID } })
+    const status = yield* SessionStatus.Service
+    expect((yield* status.get(failedChat.id)).type).toBe("idle")
+    // 零助手失败不虚构 provider 消费，公开明细必须为空并有真实完成时间。
+    const zero = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }
+    expect(yield* usage.get({ sessionID: failedChat.id, requestID: failedID })).toMatchObject({ rootRequestID: failedID, status: "error", assistantCount: 0, stepCount: 0, cost: 0, tokens: zero, time: { completed: expect.any(Number) }, error: failure.message })
+    expect(yield* usage.assistants({ sessionID: failedChat.id, requestID: failedID })).toEqual([])
+    expect(yield* llm.hits).toHaveLength(2)
+    // 两条真实后处理分支都在已提交错误的 listener 中阻塞，取消不能被通知屏蔽。
+    for (const format of ["text", "json_schema"] as const) {
+      const blockedChat = yield* sessions.create({ title: `Blocked ${format} error notification` })
+      const userID = MessageID.ascending()
+      const ready = yield* Deferred.make<MessageID>()
+      const release = yield* Deferred.make<void>()
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, void 0).pipe(Effect.asVoid))
+      const blockedOff = yield* events.listen(event => Effect.gen(function* () {
+        if (event.type !== MessageV2.Event.Updated.type) return
+        const data = Schema.decodeUnknownSync(Schema.toType(MessageV2.Event.Updated.data))(event.data)
+        if (data.sessionID !== blockedChat.id || data.info.role !== "assistant" || !data.info.error) return
+        yield* Deferred.succeed(ready, data.info.id)
+        yield* Deferred.await(release)
+      }))
+      yield* Effect.addFinalizer(() => blockedOff)
+      const response = reply().text("blocked error response").usage({ input: 7, output: 4 })
+      yield* llm.push(format === "json_schema" ? response.stop() : response.contentFilter())
+      const run = yield* prompt.prompt({
+        sessionID: blockedChat.id, messageID: userID, agent: "build", model: ref, parts: [{ type: "text", text: "Trigger postprocessing error" }],
+        ...(format === "json_schema" ? { format: new SessionV1.OutputFormatJsonSchema({ type: "json_schema", schema: { type: "object" }, retryCount: 0 }) } : {}),
+      }).pipe(Effect.forkChild)
+      const assistantID = yield* awaitWithTimeout(Deferred.await(ready), "Postprocessing error listener was not reached")
+      const durable = yield* MessageV2.get({ sessionID: blockedChat.id, messageID: assistantID })
+      if (durable.info.role !== "assistant") return yield* Effect.die("Expected committed postprocessing assistant")
+      const blockedError = format === "json_schema" ? structuredError : expected
+      expect(durable.info.error).toEqual(blockedError)
+      expect(durable.info.parentID).toBe(userID)
+      const terminal = { status: "error", stepCount: 1, cost: durable.info.cost, tokens: { input: 7, output: 4, total: 11 }, error: blockedError.data.message }
+      // 通知尚未返回，账本已与实际错误消息一起提交，不能等待 cancel finalizer 才修正。
+      expect(yield* usage.get({ sessionID: blockedChat.id, requestID: userID })).toMatchObject({ ...terminal, assistantCount: 1 })
+      // 救援只防旧不可中断代码挂死；正常取消必须在 release 触发之前完成。
+      const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+      yield* prompt.cancel(blockedChat.id)
+      expect(yield* Deferred.isDone(release)).toBe(false)
+      yield* Fiber.interrupt(rescue)
+      const cancelled = yield* Fiber.join(run)
+      yield* blockedOff
+      expect(cancelled.info).toMatchObject({ id: assistantID, error: blockedError })
+      const final = yield* MessageV2.get({ sessionID: blockedChat.id, messageID: assistantID })
+      expect(final.info).toEqual(durable.info)
+      expect((yield* status.get(blockedChat.id)).type).toBe("idle")
+      expect(yield* usage.get({ sessionID: blockedChat.id, requestID: userID })).toMatchObject({ ...terminal, assistantCount: 1 })
+      expect(yield* usage.assistants({ sessionID: blockedChat.id, requestID: userID })).toMatchObject([{ ...terminal, assistantMessageID: assistantID }])
+    }
+    expect(yield* llm.hits).toHaveLength(4)
+    // 首次助手提交后的 listener 故意拦截所有修订，退出 owner 不能重入该 listener。
+    const startingChat = yield* sessions.create({ title: "Cancel initial assistant publication" })
+    const startingID = MessageID.ascending()
+    const startingReady = yield* Deferred.make<MessageID>()
+    const startingRelease = yield* Deferred.make<void>()
+    yield* Effect.addFinalizer(() => Deferred.succeed(startingRelease, void 0).pipe(Effect.asVoid))
+    let notifications = 0
+    const startingOff = yield* events.listen(event => Effect.gen(function* () {
+      if (event.type !== MessageV2.Event.Updated.type) return
+      const data = Schema.decodeUnknownSync(Schema.toType(MessageV2.Event.Updated.data))(event.data)
+      if (data.sessionID !== startingChat.id || data.info.role !== "assistant") return
+      notifications++
+      yield* Deferred.succeed(startingReady, data.info.id)
+      yield* Deferred.await(startingRelease)
+    }))
+    yield* Effect.addFinalizer(() => startingOff)
+    // 退出终态必须同时进入 typed/all 实时流，不能只在数据库中可见。
+    const typedTerminal = yield* events.subscribe(MessageV2.Event.Updated).pipe(Stream.filter(event => event.data.sessionID === startingChat.id && event.data.info.role === "assistant" && event.data.info.time.completed !== undefined), Stream.take(1), Stream.runCollect, Effect.forkChild)
+    const allTerminal = yield* events.all().pipe(Stream.filter(event => {
+      if (event.type !== MessageV2.Event.Updated.type) return false
+      const data = Schema.decodeUnknownSync(Schema.toType(MessageV2.Event.Updated.data))(event.data)
+      return data.sessionID === startingChat.id && data.info.role === "assistant" && data.info.time.completed !== undefined
+    }), Stream.take(1), Stream.runCollect, Effect.forkChild)
+    yield* Effect.yieldNow
+    const starting = yield* prompt.prompt({ sessionID: startingChat.id, messageID: startingID, agent: "build", model: ref, parts: [{ type: "text", text: "Cancel before processor setup" }] }).pipe(Effect.forkChild)
+    const startingAssistant = yield* awaitWithTimeout(Deferred.await(startingReady), "Initial assistant was not committed")
+    expect(yield* usage.get({ sessionID: startingChat.id, requestID: startingID })).toMatchObject({ status: "running", assistantCount: 1, stepCount: 0, cost: 0, tokens: zero })
+    const startingRescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(startingRelease, void 0)), Effect.forkChild)
+    yield* prompt.cancel(startingChat.id)
+    expect(yield* Deferred.isDone(startingRelease)).toBe(false)
+    yield* Fiber.interrupt(startingRescue)
+    const startingResult = yield* Fiber.join(starting)
+    yield* startingOff
+    expect(notifications).toBe(1)
+    expect(Array.from(yield* awaitWithTimeout(Fiber.join(typedTerminal), "Typed terminal was not delivered"))).toMatchObject([{ data: { info: { id: startingAssistant, error: { name: "MessageAbortedError" } } } }])
+    expect(Array.from(yield* awaitWithTimeout(Fiber.join(allTerminal), "All-event terminal was not delivered"))).toMatchObject([{ data: { info: { id: startingAssistant, error: { name: "MessageAbortedError" } } } }])
+    expect(startingResult.info).toMatchObject({ id: startingAssistant, role: "assistant", error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) } })
+    expect(yield* usage.get({ sessionID: startingChat.id, requestID: startingID })).toMatchObject({ rootRequestID: startingID, status: "aborted", assistantCount: 1, stepCount: 0, cost: 0, tokens: zero })
+    expect((yield* status.get(startingChat.id)).type).toBe("idle")
+    expect(yield* llm.hits).toHaveLength(4)
+    // 普通预处理缺陷走相同 owner，原 defect identity 必须继续返回给真实 prompt 调用方。
+    const transformFailure = new Error("Prompt message transform failed")
+    let transformCalls = 0
+    // fresh 只重建执行依赖；InstanceRef 的 project 与终态账本必须共用原真实数据库。
+    const database = yield* Database.Service
+    // 独立目录先写配置；完整图 fresh 重建捕获 Plugin 的 prompt，不能只替换叶服务。
+    yield* provideTmpdirInstance(() => Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const usage = yield* SessionRequestUsage.Service
+      const chat = yield* sessions.create({ title: "Fail actual message transform" })
+      const id = MessageID.ascending()
+      const exit = yield* prompt.prompt({ sessionID: chat.id, messageID: id, agent: "build", model: ref, parts: [{ type: "text", text: "Fail before handle.process" }] }).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (!Exit.isFailure(exit)) return yield* Effect.die("Expected preprocess defect")
+      expect(Cause.squash(exit.cause)).toBe(transformFailure)
+      expect(transformCalls).toBe(1)
+      const assistant = (yield* sessions.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant")
+      if (!assistant || assistant.info.role !== "assistant") return yield* Effect.die("Missing owned assistant")
+      expect(assistant.info).toMatchObject({ parentID: id, error: { name: "UnknownError", data: { message: transformFailure.message } }, time: { completed: expect.any(Number) } })
+      expect(yield* usage.get({ sessionID: chat.id, requestID: id })).toMatchObject({ rootRequestID: id, status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: zero, error: transformFailure.message })
+      const status = yield* SessionStatus.Service
+      expect((yield* status.get(chat.id)).type).toBe("idle")
+    }).pipe(Effect.provide(Layer.fresh(makePrompt({ database: Layer.succeed(Database.Service, database), plugin: Layer.mock(Plugin.Service)({
+      trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => name === "experimental.chat.messages.transform" ? Effect.sync(() => { transformCalls++ }).pipe(Effect.andThen(Effect.die(transformFailure))) : Effect.succeed(output),
+      list: () => Effect.succeed([]),
+      init: () => Effect.void,
+    }) })))), { config: providerCfg(llm.url) })
+    expect(yield* llm.hits).toHaveLength(4)
   }),
 )
 

@@ -137,6 +137,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         )
       },
       "session.next.prompt.admitted": () => Effect.void,
+      // 零助手请求终态只更新账本，消息投影保留真实零助手历史。
+      "session.next.prompt.failed": () => Effect.void,
+      "session.next.prompt.completed": () => Effect.void,
       "session.next.context.updated": (event) =>
         adapter.appendMessage(
           SessionMessage.System.make({
@@ -209,7 +212,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.step.ended": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           draft.time.completed = event.data.timestamp
-          draft.finish = event.data.finish
+          // 迟到的用量结算可更新快照，但不能将已有失败投影成成功 finish。
+          draft.finish = draft.error ? "error" : event.data.finish
           draft.cost = event.data.cost
           draft.tokens = event.data.tokens
           if (event.data.snapshot || event.data.files)
@@ -374,6 +378,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.retried": () => Effect.void,
       "session.next.compaction.started": () => Effect.void,
       "session.next.compaction.delta": () => Effect.void,
+      // 失败压缩不替换上下文，使用量 projector 结算而不制造摘要。
+      "session.next.compaction.failed": () => Effect.void,
       "session.next.compaction.ended": (event) => {
         return adapter.appendMessage(
           SessionMessage.Compaction.make({

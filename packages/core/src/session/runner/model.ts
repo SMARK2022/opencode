@@ -72,13 +72,29 @@ export type Error =
   | Integration.AuthorizationError
 
 export interface Interface {
-  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
+  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model; readonly pricing: ModelV2.Info["cost"] }, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionRunnerModel") {}
 
-/** Test or embedding seam for supplying a model resolver directly. */
-export const layerWith = (resolve: Interface["resolve"]) => Layer.succeed(Service, Service.of({ resolve }))
+// 测试和嵌入入口可显式提供价格；未配置价格的模型仍按免费模型处理。
+export const layerWith = (
+  resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>,
+  pricing: ModelV2.Info["cost"] = [],
+) => Layer.succeed(Service, Service.of({
+  resolve: session => resolve(session).pipe(Effect.map(model => ({ model, pricing: [...pricing] }))),
+}))
+
+export const cost = (pricing: ModelV2.Info["cost"], tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) => {
+  // 阶梯按完整输入上下文选择；非缓存输入和缓存读写仍按各自单价结算。
+  const context = tokens.input + tokens.cache.read + tokens.cache.write
+  const rate = pricing.filter(item => item.tier && context > item.tier.size)
+    .sort((a, b) => (b.tier?.size ?? 0) - (a.tier?.size ?? 0))[0] ?? pricing.find(item => !item.tier)
+  if (!rate) return 0
+  // 已分栏的 reasoning 与可见输出合并一次收费，不能再次扣减或重复计算。
+  return Math.max(0, (tokens.input * rate.input + (tokens.output + tokens.reasoning) * rate.output
+    + tokens.cache.read * rate.cache.read + tokens.cache.write * rate.cache.write) / 1_000_000)
+}
 
 const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
   // ClaudeCode 的配置、环境、已保存 API key 顺序来自源 loader，不能继承通用 credential-first。
@@ -236,11 +252,15 @@ export const locationLayer = Layer.effect(
         const connection = yield* integrations.connection.active(
           provider?.integrationID ?? Integration.ID.make(selected.providerID),
         )
-        return yield* resolve(
-          session,
-          selected,
-          connection ? yield* integrations.connection.resolve(connection) : undefined,
-        )
+        return {
+          model: yield* resolve(
+            session,
+            selected,
+            connection ? yield* integrations.connection.resolve(connection) : undefined,
+          ),
+          // 价格与执行模型来自同一个 Catalog 选择，完成时不重新解析已切换的 Session。
+          pricing: selected.cost,
+        }
       }),
     })
   }),

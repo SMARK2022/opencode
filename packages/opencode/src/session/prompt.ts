@@ -5,6 +5,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionRevert } from "./revert"
 import { Session } from "./session"
 import { Agent } from "../agent/agent"
@@ -476,6 +477,11 @@ const layer = Layer.effect(
               model: { providerID: model.providerID, modelID: model.modelID },
             }
             yield* sessions.updateMessage(userMsg)
+            // shell 用户消息已解析模型与 agent，不能再次用输入默认值覆盖实际保存的身份。
+            const shellReqUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+            if (shellReqUsage) {
+              yield* shellReqUsage.begin({ sessionID: input.sessionID, requestID: userMsg.id, rootRequestID: userMsg.id, source: "shell", agent: userMsg.agent, providerID: userMsg.model.providerID, modelID: userMsg.model.modelID, timeCreated: userMsg.time.created })
+            }
             const userPart: SessionV1.Part = {
               type: "text",
               id: PartID.ascending(),
@@ -581,6 +587,12 @@ const layer = Layer.effect(
             aborted = true
           }
           yield* finish
+
+          // finish 已保存助手终态；shell 没有 step-finish，也必须区分中断、执行缺陷与成功。
+          const shellCompleteUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (shellCompleteUsage) {
+            yield* shellCompleteUsage.complete({ sessionID: input.sessionID, requestID: msg.parentID, status: aborted ? "aborted" : Exit.isFailure(exit) ? "error" : "completed", timeCompleted: Date.now() })
+          }
 
           if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
             return yield* Effect.failCause(exit.cause)
@@ -1055,6 +1067,14 @@ const layer = Layer.effect(
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       yield* revert.cleanup(session)
       const message = yield* createUserMessage(input)
+      // begin 位于用户消息保存之后，读取插件处理及默认模型解析后的真实消息描述。
+      const reqUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (reqUsage) {
+        yield* reqUsage.begin({ sessionID: input.sessionID, requestID: message.info.id,
+        // 压缩调用传入原始请求根身份，其余请求以已保存用户消息为根，保留因果链。
+        rootRequestID: input.rootRequestID ?? message.info.id,
+        source: input.source ?? "prompt", agent: message.info.agent, providerID: message.info.model.providerID, modelID: message.info.model.modelID, variant: message.info.model.variant, timeCreated: message.info.time.created })
+      }
       yield* sessions.touch(input.sessionID)
 
       const permissions: PermissionV1.Rule[] = []
@@ -1066,7 +1086,13 @@ const layer = Layer.effect(
         yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
       }
 
-      if (input.noReply === true) return message
+      if (input.noReply === true) {
+        // noReply 不启动 provider，零费用请求仍须有终态，不能永远等待不存在的助手。
+        if (reqUsage) {
+          yield* reqUsage.complete({ sessionID: input.sessionID, requestID: message.info.id, status: "completed" })
+        }
+        return message
+      }
       return yield* loop({ sessionID: input.sessionID })
     })
 
@@ -1080,6 +1106,23 @@ const layer = Layer.effect(
 
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
+        let requestID: MessageID | undefined
+        let existingAssistantID: MessageID | undefined
+        // 只在真实 work fiber 结算；加入同一 runner 的调用方取消不能替它关闭请求。
+        yield* Effect.addFinalizer((exit) => Effect.gen(function* () {
+          const id = requestID
+          if (Exit.isSuccess(exit) || id === undefined) return
+          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (!usage) return
+          const request = yield* usage.get({ sessionID, requestID: id })
+          if (!request || request.assistantCount !== 0 || request.status !== "running") return
+          // 旧助手身份在准备前冻结；新助手与账本同事务创建，无需退出时扫描历史。
+          if (existingAssistantID !== undefined) return
+          const failure = Cause.squash(exit.cause)
+          // complete 仅闭合冻结的请求；原 cause 继续退出，确认消费和根身份均不改。
+          yield* usage.complete({ sessionID, requestID: id, status: Cause.hasInterrupts(exit.cause) ? "aborted" : "error",
+            error: failure instanceof Error ? failure.message : String(failure), timeCompleted: Date.now() })
+        }))
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
@@ -1129,6 +1172,9 @@ const layer = Layer.effect(
             break
           }
 
+          // 本轮选中的 user 在模型/agent/上下文准备前冻结，失败时不重读后来保存的 steer。
+          requestID = lastUser.id
+          existingAssistantID = lastAssistant?.parentID === lastUser.id ? lastAssistant.id : undefined
           step++
           if (step === 1)
             yield* title({
@@ -1198,17 +1244,9 @@ const layer = Layer.effect(
             time: { created: Date.now() },
             sessionID,
           }
-          yield* sessions.updateMessage(msg)
-
-          const finalizeInterruptedAssistant = Effect.gen(function* () {
-            if (msg.time.completed) return
-            msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
-              providerID: msg.providerID,
-              aborted: true,
-            })
-            msg.time.completed = Date.now()
-            yield* sessions.updateMessage(msg)
-          })
+          const own = yield* SessionProcessor.ownAssistant({ sessionID, requestID: msg.parentID }, { events, db })
+          own(msg)
+          yield* SessionProcessor.publishAssistant(msg, events)
 
           const handle = yield* processor
             .create({
@@ -1216,7 +1254,6 @@ const layer = Layer.effect(
               sessionID,
               model,
             })
-            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
@@ -1302,7 +1339,8 @@ const layer = Layer.effect(
                 handle.message.error = new SessionV1.ContentFilterError({
                   message: "The response was blocked by the provider's content filter",
                 }).toObject()
-                yield* sessions.updateMessage(handle.message)
+                // 共用助手 owner 原子修订过滤错误，保留确认消费与通知可中断性。
+                yield* SessionProcessor.publishAssistant(handle.message, events)
                 yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
                 return "break" as const
               }
@@ -1311,7 +1349,8 @@ const layer = Layer.effect(
                   message: "Model did not produce structured output",
                   retries: 0,
                 }).toObject()
-                yield* sessions.updateMessage(handle.message)
+                // 格式终验沿用同一 owner；已完成助手仍须同步错误到原请求账本。
+                yield* SessionProcessor.publishAssistant(handle.message, events)
                 return "break" as const
               }
             }
@@ -1329,7 +1368,6 @@ const layer = Layer.effect(
             return "continue" as const
           }).pipe(
             Effect.ensuring(instruction.clear(handle.message.id)),
-            Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
           if (outcome === "break") break
           continue
@@ -1338,6 +1376,7 @@ const layer = Layer.effect(
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)
       },
+      Effect.scoped,
     )
 
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
@@ -1470,6 +1509,8 @@ const layer = Layer.effect(
         agent: userAgent,
         parts,
         variant: input.variant,
+        // 命令复用 prompt 执行，但入口身份仍是 command，不能被默认 prompt 来源覆盖。
+        source: "command",
       })
       yield* events.publish(Command.Event.Executed, {
         name: input.command,
@@ -1499,6 +1540,10 @@ const ModelRef = Schema.Struct({
 export const PromptInput = Schema.Struct({
   sessionID: SessionID,
   messageID: Schema.optional(MessageID),
+  // 根身份保留内部因果关联；HttpApi payload 排除该字段，不能接受客户端伪造根链。
+  rootRequestID: Schema.optional(MessageID),
+  // 内部调用也使用闭合来源 Schema，存储和公开响应不出现任意新来源字符串。
+  source: Schema.optional(SessionRequestUsage.SourceSchema),
   model: Schema.optional(ModelRef),
   agent: Schema.optional(Schema.String),
   noReply: Schema.optional(Schema.Boolean),

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { APICallError } from "ai"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
@@ -20,6 +21,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { Snapshot } from "../../src/snapshot"
 
 import { Provider } from "@/provider/provider"
 import * as SessionProcessorModule from "../../src/session/processor"
@@ -228,6 +230,7 @@ const compactionTestNode = LayerNode.group([
   SessionNs.node,
   SessionProjector.node,
   Database.node,
+  SessionRequestUsage.node,
   EventV2Bridge.node,
   CrossSpawnSpawner.node,
 ])
@@ -240,7 +243,7 @@ const env = AppNodeBuilder.build(compactionTestNode, [
 const it = testEffect(env)
 
 const compactionEnv = AppNodeBuilder.build(
-  LayerNode.group([SessionNs.node, SessionProjector.node, Database.node, EventV2Bridge.node, CrossSpawnSpawner.node]),
+  LayerNode.group([SessionNs.node, SessionProjector.node, Database.node, SessionRequestUsage.node, EventV2Bridge.node, CrossSpawnSpawner.node]),
 )
 const itCompaction = testEffect(compactionEnv)
 
@@ -248,6 +251,8 @@ type CompactionProcessOptions = {
   result?: "continue" | "compact"
   llm?: Layer.Layer<LLM.Service>
   plugin?: Layer.Layer<Plugin.Service>
+  snapshot?: Layer.Layer<Snapshot.Service>
+  database?: Layer.Layer<Database.Service>
   provider?: ReturnType<typeof wide>
   config?: Layer.Layer<Config.Service>
 }
@@ -261,6 +266,8 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
     [Provider.node, (options?.provider ?? wide()).layer],
     [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
     [SessionSummary.node, summary],
+    ...(options?.database ? [[Database.node, options.database] as const] : []),
+    ...(options?.snapshot ? [[Snapshot.node, options.snapshot] as const] : []),
   ]
   if (!options?.llm) {
     return AppNodeBuilder.build(compactionTestNode, [
@@ -901,6 +908,32 @@ describe("session.compaction.process", () => {
         expect(summary.info.finish).toBe("error")
         expect(JSON.stringify(summary.info.error)).toContain("Session too large to compact")
       }
+      const ledger = yield* SessionRequestUsage.Service
+      expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({ source: "system_compaction", rootRequestID: msg.id, status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 } })
+      // fresh 避开 fake processor/provider，但沿用 Project 所在的真实数据库确认用量和 overflow。
+      const database = yield* Database.Service
+      const stub = llm()
+      stub.push(Stream.concat(
+        Stream.make(LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason: "stop", usage: usage({ inputTokens: 8, outputTokens: 3, totalTokens: 11 }) })),
+        Stream.fail(new APICallError({ message: "request entity too large", url: "https://example.com/v1/chat/completions", requestBodyValues: {}, statusCode: 413, responseBody: '{"error":"request entity too large"}', isRetryable: false })),
+      ))
+      yield* Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const ledger = yield* SessionRequestUsage.Service
+        const chat = yield* ssn.create({ title: "Confirmed usage before summary overflow" })
+        const parent = yield* createUserMessage(chat.id, "Overflow after a confirmed step")
+        const result = yield* SessionCompaction.use.process({ parentID: parent.id, messages: yield* ssn.messages({ sessionID: chat.id }), sessionID: chat.id, auto: false })
+        expect(result).toBe("stop")
+        const summary = (yield* ssn.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant" && message.info.summary)
+        if (!summary || summary.info.role !== "assistant") return yield* Effect.die("Missing overflow summary")
+        expect(summary.info.error?.name).toBe("ContextOverflowError")
+        if (!SessionV1.ContextOverflowError.isInstance(summary.info.error)) return yield* Effect.die("Expected original overflow error")
+        expect(summary.info.cost).toBeGreaterThan(0)
+        expect(summary.info.tokens).toMatchObject({ input: 8, output: 3 })
+        const settled = { status: "error", stepCount: 1, cost: summary.info.cost, tokens: { input: 8, output: 3, total: 11 }, error: summary.info.error.data.message }
+        expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({ ...settled, rootRequestID: parent.id, source: "system_compaction", assistantCount: 1 })
+        expect(yield* ledger.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([{ ...settled, assistantMessageID: summary.info.id }])
+      }).pipe(Effect.provide(Layer.fresh(compactionProcessLayer({ database: Layer.succeed(Database.Service, database), llm: stub.llmLayer, provider: ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000, cost: { input: 2, output: 4, cache: { read: 0, write: 0 } } }) }) }))))
     }).pipe(withCompaction({ result: "compact" })),
   )
 
@@ -1258,7 +1291,11 @@ describe("session.compaction.process", () => {
           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
           expect(Date.now() - start).toBeLessThan(250)
         }
-      }).pipe(withCompaction({ llm: stub.llmLayer }))
+      }).pipe(withCompaction({
+        llm: stub.llmLayer,
+        // 此例计量重试取消，不将 Git 快照子进程收尾混入 250ms 预算。
+        config: Layer.succeed(Config.Service, TestConfig.make({ get: () => Effect.succeed({ snapshot: false }) })),
+      }))
     },
     { git: true },
     { timeout: 10_000 },
@@ -1269,7 +1306,7 @@ describe("session.compaction.process", () => {
     () =>
       Effect.gen(function* () {
         const ready = yield* Deferred.make<void>()
-        return yield* Effect.gen(function* () {
+        yield* Effect.gen(function* () {
           const ssn = yield* SessionNs.Service
           const session = yield* ssn.create({})
           const msg = yield* createUserMessage(session.id, "hello")
@@ -1291,7 +1328,46 @@ describe("session.compaction.process", () => {
           expect(Exit.isFailure(exit)).toBe(true)
           if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
           expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
+          const ledger = yield* SessionRequestUsage.Service
+          expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({ rootRequestID: msg.id, status: "aborted", assistantCount: 0, stepCount: 0, tokens: { total: 0 } })
         }).pipe(withCompaction({ plugin: plugin(ready) }))
+        // 同一取消 case 再覆盖 summary 已提交的通知与真实 snapshot.track 两个初始化窗口。
+        for (const phase of ["publish", "snapshot"] as const) {
+          const gate = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          const stub = llm()
+          let calls = 0
+          stub.push(input => { calls++; return reply("unused")(input) })
+          yield* Effect.gen(function* () {
+            const ssn = yield* SessionNs.Service
+            const events = yield* EventV2Bridge.Service
+            const ledger = yield* SessionRequestUsage.Service
+            const chat = yield* ssn.create({ title: `Cancel summary ${phase}` })
+            const parent = yield* createUserMessage(chat.id, "Cancel summary initialization")
+            yield* Effect.addFinalizer(() => Deferred.succeed(release, void 0).pipe(Effect.asVoid))
+            const off = yield* events.listen(event => Effect.gen(function* () {
+              if (phase !== "publish" || event.type !== MessageV2.Event.Updated.type) return
+              const data = Schema.decodeUnknownSync(MessageV2.Event.Updated.data)(event.data)
+              if (data.sessionID !== chat.id || data.info.role !== "assistant") return
+              yield* Deferred.succeed(gate, void 0)
+              yield* Deferred.await(release)
+            }))
+            yield* Effect.addFinalizer(() => off)
+            const fiber = yield* SessionCompaction.use.process({ parentID: parent.id, messages: yield* ssn.messages({ sessionID: chat.id }), sessionID: chat.id, auto: false }).pipe(Effect.forkChild)
+            yield* Deferred.await(gate).pipe(Effect.timeout("1 second"))
+            const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+            yield* Fiber.interrupt(fiber)
+            expect(yield* Deferred.isDone(release)).toBe(false)
+            yield* Fiber.interrupt(rescue)
+            const exit = yield* Fiber.await(fiber)
+            expect(Exit.isFailure(exit)).toBe(true)
+            if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+            const summary = (yield* ssn.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant" && message.info.summary)
+            expect(summary?.info).toMatchObject({ parentID: parent.id, error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) } })
+            expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({ rootRequestID: parent.id, source: "system_compaction", status: "aborted", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 } })
+            expect(calls).toBe(0)
+          }).pipe(withCompaction({ llm: stub.llmLayer, ...(phase === "snapshot" ? { snapshot: Layer.mock(Snapshot.Service)({ track: () => Deferred.succeed(gate, void 0).pipe(Effect.andThen(Effect.never)) }) } : {}) }))
+        }
       }),
     { git: true },
   )

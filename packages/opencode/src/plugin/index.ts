@@ -259,7 +259,8 @@ const layer = Layer.effect(
               void hook["event"]?.({ event: { id: event.id, type: event.type, properties: event.data } as any })
             }
           })
-        })
+        // 既有 adapter 顺序调用 hook 并丢弃 Promise，退出通知不等待插件异步工作。
+        }, { finalizerSafe: true })
         yield* Effect.addFinalizer(() => unsubscribe)
 
         yield* Effect.addFinalizer(() =>
