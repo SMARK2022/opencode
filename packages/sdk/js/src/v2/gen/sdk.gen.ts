@@ -205,6 +205,12 @@ import type {
   SessionPromptAsyncResponses,
   SessionPromptErrors,
   SessionPromptResponses,
+  SessionRequestUsageAssistantsErrors,
+  SessionRequestUsageAssistantsResponses,
+  SessionRequestUsageGetErrors,
+  SessionRequestUsageGetResponses,
+  SessionRequestUsageListErrors,
+  SessionRequestUsageListResponses,
   SessionRevertErrors,
   SessionRevertResponses,
   SessionShareErrors,
@@ -3359,6 +3365,122 @@ export class Provider extends HeyApiClient {
   }
 }
 
+export class RequestUsage extends HeyApiClient {
+  /**
+   * List request usage
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      limit?: string
+      before?: string
+      rootRequestID?: string
+      source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "limit" },
+            { in: "query", key: "before" },
+            { in: "query", key: "rootRequestID" },
+            { in: "query", key: "source" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionRequestUsageListResponses,
+      SessionRequestUsageListErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/request_usage",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get request usage
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      requestID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "requestID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionRequestUsageGetResponses,
+      SessionRequestUsageGetErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/request_usage/{requestID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List assistant usage
+   */
+  public assistants<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      requestID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "requestID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionRequestUsageAssistantsResponses,
+      SessionRequestUsageAssistantsErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/request_usage/{requestID}/assistant",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Session2 extends HeyApiClient {
   /**
    * List sessions
@@ -4324,6 +4446,11 @@ export class Session2 extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _requestUsage?: RequestUsage
+  get requestUsage(): RequestUsage {
+    return (this._requestUsage ??= new RequestUsage({ client: this.client }))
   }
 }
 

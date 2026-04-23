@@ -1670,6 +1670,41 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
+  // 空会话没有请求账本，列表应为空，不在夹具伪造已结算请求。
+  http.protected
+    .get("/session/{sessionID}/request_usage", "session.request_usage.list")
+    .seeded((ctx) => ctx.session({ title: "Request usage session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/request_usage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      array(body)
+      check(body.length === 0, "new session should have no request usage")
+    }),
+  // 精确请求与assistant明细分别覆盖，不能用列表成功代替缺失资源语义。
+  ...["", "/assistant"].map((suffix) =>
+    http.protected
+      .get(
+        `/session/{sessionID}/request_usage/{requestID}${suffix}`,
+        `session.request_usage.${suffix ? "assistants" : "get"}`,
+      )
+      // 沿真实会话中间件，只让requestID缺失，避免误测会话不存在。
+      .seeded((ctx) => ctx.session({ title: "Missing request usage session" }))
+      .at((ctx) => ({
+        path: route(`/session/{sessionID}/request_usage/{requestID}${suffix}`, {
+          sessionID: ctx.state.id,
+          requestID: "msg_httpapi_missing",
+        }),
+        headers: ctx.headers(),
+      }))
+      // 精确核对资源错误，不接受任意非成功响应作为通过。
+      .json(404, (body) => {
+        object(body)
+        object(body.data)
+        check(body.data.message === "Request usage not found: msg_httpapi_missing", "missing request should remain a resource error")
+      }),
+  ),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))

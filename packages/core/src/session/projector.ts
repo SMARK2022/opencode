@@ -1,9 +1,13 @@
 export * as SessionProjector from "./projector"
 
-import { and, desc, eq, gt, or, sql } from "drizzle-orm"
+import { and, desc, eq, gt, inArray, isNotNull, lte, ne, or, sql } from "drizzle-orm"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
+import { SessionRequestUsage } from "./request-usage"
+import { RequestUsageTable, RequestUsageAssistantTable } from "./request-usage.sql"
+import { ProviderV2 } from "../provider"
+import { ModelV2 } from "../model"
 import { makeGlobalNode } from "../effect/app-node"
 import { SessionEvent } from "./event"
 import { SessionV1 } from "../v1/session"
@@ -110,6 +114,49 @@ function applyUsage(
 
 function run(db: DatabaseService, event: SessionEvent.Event) {
   return Effect.gen(function* () {
+    const ledger = SessionRequestUsage.make(db)
+    if (event.type === "session.next.prompt.failed" || event.type === "session.next.prompt.completed") {
+      const failed = event.type === "session.next.prompt.failed" ? event.data : undefined
+      // 请求终态已经冻结真实提升批次；空成功和失败都不能在重放时认领后来输入。
+      const requestID = SessionV1.MessageID.make(event.data.messageID)
+      yield* db.update(RequestUsageTable).set({ root_request_id: requestID }).where(and(
+        eq(RequestUsageTable.session_id, event.data.sessionID), eq(RequestUsageTable.assistant_count, 0),
+        inArray(RequestUsageTable.request_id, event.data.requestIDs.map(id => SessionV1.MessageID.make(id))),
+      )).run().pipe(Effect.orDie)
+      // complete 只改终态，零助手不伪造用量，已有确认消费也不被清空。
+      for (const id of event.data.requestIDs) yield* ledger.complete({ sessionID: event.data.sessionID,
+        requestID: SessionV1.MessageID.make(id), status: failed ? (failed.aborted ? "aborted" : "error") : "completed",
+        error: failed?.error.message, timeCompleted: DateTime.toEpochMillis(event.data.timestamp) })
+      return
+    }
+    if (event.type === "session.next.prompt.admitted" || event.type === "session.next.prompted") {
+      // 接纳先落账本，promote 只复用此行；exact retry 不重置已经结算的用量。
+      const session = yield* db.select().from(SessionTable)
+        .where(eq(SessionTable.id, event.data.sessionID)).get().pipe(Effect.orDie)
+      if (session) yield* db.insert(RequestUsageTable).values({
+        session_id: event.data.sessionID,
+        request_id: SessionV1.MessageID.make(event.data.messageID),
+        root_request_id: SessionV1.MessageID.make(event.data.messageID),
+        source: "prompt", status: "running",
+        // 接纳时模型可以尚未解析；空字符串表示未选定，Step.Started 写入实际执行模型。
+        agent: session.agent ?? "", provider_id: session.model?.providerID ?? "", model_id: session.model?.id ?? "",
+        variant: session.model?.variant,
+        time_created: DateTime.toEpochMillis(event.data.timestamp),
+        time_updated: DateTime.toEpochMillis(event.data.timestamp),
+      }).onConflictDoNothing().run().pipe(Effect.orDie)
+    }
+    if (event.type === "session.next.compaction.started" && event.data.model) {
+      const promoted = yield* db.select().from(SessionInputTable)
+        .where(and(eq(SessionInputTable.session_id, event.data.sessionID), isNotNull(SessionInputTable.promoted_seq)))
+        .orderBy(desc(SessionInputTable.promoted_seq)).limit(1).get().pipe(Effect.orDie)
+      // 压缩拥有独立请求行；根请求关联在开始时冻结，不在摘要结束时重选。
+      yield* ledger.begin({
+        sessionID: event.data.sessionID, requestID: SessionV1.MessageID.make(event.data.messageID),
+        rootRequestID: SessionV1.MessageID.make(promoted?.id ?? event.data.messageID), source: "system_compaction",
+        agent: "compaction", providerID: event.data.model.providerID, modelID: event.data.model.id,
+        variant: event.data.model.variant, timeCreated: DateTime.toEpochMillis(event.data.timestamp),
+      })
+    }
     const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type })
     const updateMessage = (message: SessionMessage.Message) => {
@@ -185,7 +232,113 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
       updateShell: updateMessage,
       appendMessage,
     }
+    const recordAssistant = (assistant: SessionMessage.Assistant, requestID: SessionV1.MessageID, aborted: boolean | undefined) => Effect.gen(function* () {
+      const tokens = assistant.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+      // 与 #9 的 Session 累计并行投影但不二次计费；同一助手修订覆盖快照后重新求和。
+      yield* ledger.recordAssistant({
+        sessionID: event.data.sessionID, requestID,
+        assistant: {
+          id: SessionV1.MessageID.make(assistant.id), agent: assistant.agent, providerID: assistant.model.providerID, modelID: assistant.model.id,
+          variant: assistant.model.variant,
+          time: { created: DateTime.toEpochMillis(assistant.time.created),
+            completed: assistant.time.completed ? DateTime.toEpochMillis(assistant.time.completed) : undefined },
+          // 补结算旧助手沿用持久化失败身份，不把工具错误升级为助手错误。
+          // 新 Failed 使用自身 aborted 标志，旧消息错误也不通过文案猜测。
+          error: assistant.error ? { name: aborted ? "MessageAbortedError" : "UnknownError", data: { message: assistant.error.message } } : undefined,
+        },
+        usage: { count: assistant.tokens ? 1 : 0, costMicros: Math.round((assistant.cost ?? 0) * 1_000_000),
+          tokens: { ...tokens, total: tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write } },
+      })
+      const request = yield* ledger.get({ sessionID: event.data.sessionID, requestID })
+      // 批次成员同步状态而不复制 tokens/cost，既消除永久 running，也不让同一消费重复计费。
+      if (request) yield* db.update(RequestUsageTable).set({ status: request.status,
+        time_completed: request.time.completed ?? null, error_message: request.error ?? null,
+        time_updated: request.time.updated,
+      }).where(and(eq(RequestUsageTable.session_id, event.data.sessionID), eq(RequestUsageTable.source, "prompt"),
+        eq(RequestUsageTable.root_request_id, requestID), ne(RequestUsageTable.request_id, requestID),
+        eq(RequestUsageTable.assistant_count, 0))).run().pipe(Effect.orDie)
+    })
+    // updater 会关闭旧助手后追加新助手；必须先冻结它选中的旧身份，再读取闭合快照。
+    const previous = event.type === "session.next.step.started" ? yield* adapter.getCurrentAssistant() : undefined
     yield* SessionMessageUpdater.update(adapter, event)
+    if (previous) {
+      const closed = yield* adapter.getAssistant(previous.id)
+      const owned = yield* db.select().from(RequestUsageAssistantTable)
+        .where(and(eq(RequestUsageAssistantTable.session_id, event.data.sessionID), eq(RequestUsageAssistantTable.assistant_message_id, SessionV1.MessageID.make(previous.id))))
+        .get().pipe(Effect.orDie)
+      // 旧请求归属只取现有助手行；新输入的 promotion 不能重绑旧助手或其批次成员。
+      if (closed && owned) yield* recordAssistant(closed, owned.request_id, owned.status === "aborted")
+    }
+    if (event.type === "session.next.compaction.ended" || event.type === "session.next.compaction.failed") {
+      const requestID = SessionV1.MessageID.make(event.data.messageID)
+      const usage = event.data.usage
+      const request = yield* db.select().from(RequestUsageTable)
+        .where(and(eq(RequestUsageTable.session_id, event.data.sessionID), eq(RequestUsageTable.request_id, requestID)))
+        .get().pipe(Effect.orDie)
+      // 历史压缩事件没有模型/usage，不虚构 provider 数据或历史成本。
+      if (!request || !usage) return
+      const previous = yield* db.select().from(RequestUsageAssistantTable)
+        .where(and(eq(RequestUsageAssistantTable.session_id, event.data.sessionID), eq(RequestUsageAssistantTable.assistant_message_id, requestID)))
+        .get().pipe(Effect.orDie)
+      const failed = event.type === "session.next.compaction.failed" ? event.data : undefined
+      yield* ledger.recordAssistant({
+        sessionID: event.data.sessionID, requestID,
+        // 存储列是字符串；在结算适配边界用同一 ID 工厂恢复品牌，不改存储或 wire 单位。
+        assistant: { id: requestID, agent: "compaction", providerID: ProviderV2.ID.make(request.provider_id),
+          modelID: ModelV2.ID.make(request.model_id),
+          variant: request.variant ?? undefined,
+          time: { created: request.time_created, completed: DateTime.toEpochMillis(event.data.timestamp) },
+          error: failed ? { name: failed.aborted ? "MessageAbortedError" : "UnknownError", data: { message: failed.error.message } } : undefined },
+        usage: { count: usage.stepCount, tokens: { ...usage.tokens,
+          total: usage.tokens.input + usage.tokens.output + usage.tokens.reasoning + usage.tokens.cache.read + usage.tokens.cache.write },
+          costMicros: Math.round(usage.cost * 1_000_000) },
+      })
+      // Session 是唯一会话总额；压缩也在同一事件事务减旧加新，不从部分账本替换历史总额。
+      if (previous) yield* applyUsage(db, event.data.sessionID, { cost: previous.cost_micros / 1_000_000,
+        tokens: { input: previous.tokens_input, output: previous.tokens_output, reasoning: previous.tokens_reasoning,
+          cache: { read: previous.tokens_cache_read, write: previous.tokens_cache_write } } }, -1)
+      yield* applyUsage(db, event.data.sessionID, usage)
+      return
+    }
+    if (event.type !== "session.next.step.started" && event.type !== "session.next.step.ended" && event.type !== "session.next.step.failed") return
+    const assistant = yield* adapter.getAssistant(event.data.assistantMessageID)
+    if (!assistant) return
+    const assistantID = SessionV1.MessageID.make(assistant.id)
+    const owned = yield* db.select().from(RequestUsageAssistantTable)
+      .where(and(eq(RequestUsageAssistantTable.session_id, event.data.sessionID), eq(RequestUsageAssistantTable.assistant_message_id, assistantID)))
+      .get().pipe(Effect.orDie)
+    // 只在开始边界选择已提升输入，之后所有结算使用持久化助手归属，不受新 steer/queue 干扰。
+    const promoted = event.type === "session.next.step.started" ? yield* db.select().from(SessionInputTable)
+      .where(and(eq(SessionInputTable.session_id, event.data.sessionID), isNotNull(SessionInputTable.promoted_seq)))
+      .orderBy(desc(SessionInputTable.promoted_seq)).limit(1).get().pipe(Effect.orDie) : undefined
+    // Started 选定的请求经下方明细写入冻结，后续结算优先沿用 owned.request_id。
+    const requestID = owned?.request_id ?? (promoted ? SessionV1.MessageID.make(promoted.id) : undefined)
+    if (!requestID) return
+    // SQL 的 IS NOT NULL 过滤不收窄返回行类型；比较边界必须先证明是数值，零序列仍有效。
+    if (event.type === "session.next.step.started" && promoted && promoted.promoted_seq !== null) {
+      // 同批已提升但未拥有助手的输入共享一次响应；未提升 queue 不进入此关联。
+      const pending = db.select({ id: RequestUsageTable.request_id }).from(RequestUsageTable)
+        .innerJoin(SessionInputTable, and(eq(SessionInputTable.session_id, RequestUsageTable.session_id),
+          eq(SessionInputTable.id, RequestUsageTable.request_id)))
+        .where(and(eq(RequestUsageTable.session_id, event.data.sessionID), eq(RequestUsageTable.source, "prompt"),
+          eq(RequestUsageTable.status, "running"), eq(RequestUsageTable.assistant_count, 0),
+          eq(RequestUsageTable.root_request_id, RequestUsageTable.request_id),
+          isNotNull(SessionInputTable.promoted_seq), lte(SessionInputTable.promoted_seq, promoted.promoted_seq)))
+      // 根关联仅在第一次 Step.Started 冻结；旧批次零用量成员不能被后续 steer 重新绑定。
+      yield* db.update(RequestUsageTable).set({ root_request_id: requestID,
+        agent: assistant.agent, provider_id: assistant.model.providerID, model_id: assistant.model.id,
+        variant: assistant.model.variant, time_updated: DateTime.toEpochMillis(event.data.timestamp),
+      }).where(and(eq(RequestUsageTable.session_id, event.data.sessionID),
+        inArray(RequestUsageTable.request_id, pending))).run().pipe(Effect.orDie)
+    }
+    if (event.type === "session.next.step.started") yield* db.update(RequestUsageTable).set({
+      // provider 选择属于 runner；账本记录实际模型，而不是接纳时未解析的会话默认值。
+      agent: assistant.agent, provider_id: assistant.model.providerID, model_id: assistant.model.id,
+      variant: assistant.model.variant, status: "running", time_completed: null, error_message: null,
+      time_updated: DateTime.toEpochMillis(event.data.timestamp),
+    }).where(and(eq(RequestUsageTable.session_id, event.data.sessionID), eq(RequestUsageTable.request_id, requestID)))
+      .run().pipe(Effect.orDie)
+    yield* recordAssistant(assistant, requestID, event.type === "session.next.step.failed" ? event.data.aborted : owned?.status === "aborted")
   })
 }
 
@@ -370,8 +523,11 @@ const layer = Layer.effectDiscard(
           delivery: event.data.delivery,
           timeCreated: event.data.timestamp,
         })
+        yield* run(db, event)
       }),
     )
+    yield* events.project(SessionEvent.PromptFailed, (event) => run(db, event))
+    yield* events.project(SessionEvent.PromptCompleted, (event) => run(db, event))
     yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
@@ -412,7 +568,9 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
     // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Failed, (event) => run(db, event))
     yield* events.project(SessionEvent.RevertEvent.Staged, (event) =>
       db
         .update(SessionTable)

@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
-import { Effect, Layer, Context } from "effect"
+import { Effect, Option, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -22,6 +22,8 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
+import { Database } from "@opencode-ai/core/database/database"
 
 export const Event = SessionCompactionEvent
 
@@ -199,6 +201,7 @@ const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const db = (yield* Database.Service).db
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -360,6 +363,22 @@ const layer = Layer.effect(
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
+
+      const requestUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (requestUsage)
+        yield* requestUsage.begin({
+          sessionID: input.sessionID,
+          // V1 压缩沿用 parentID 请求身份，不能换成 summary 助手身份拆分费用。
+          requestID: input.parentID,
+          rootRequestID: input.parentID,
+          source: "system_compaction",
+          agent: "compaction",
+          // compaction agent 可选择不同模型，账本必须保存已解析的实际 provider/model。
+          providerID: model.providerID,
+          modelID: model.id,
+          variant: userMessage.model.variant,
+        })
+      const own = yield* SessionProcessor.ownAssistant({ sessionID: input.sessionID, requestID: input.parentID }, { events, db })
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
@@ -416,7 +435,9 @@ const layer = Layer.effect(
           created: Date.now(),
         },
       }
-      yield* session.updateMessage(msg)
+      own(msg)
+      // 入口仅拥有来源标记，tokens/cost 仍由共用 processor 的结算快照拥有。
+      yield* SessionProcessor.publishAssistant(msg, events)
       const processor = yield* processors.create({
         assistantMessage: msg,
         sessionID: input.sessionID,
@@ -454,7 +475,9 @@ const layer = Layer.effect(
             : "Session too large to compact - context exceeds model limit even after stripping media",
         }).toObject()
         processor.message.finish = "error"
-        yield* session.updateMessage(processor.message)
+        // overflow 是 cleanup 之后的真实终验失败，原确认用量只覆盖快照，不退款。
+        processor.message.time.completed ??= Date.now()
+        yield* SessionProcessor.publishAssistant(processor.message, events)
         return "stop"
       }
 
@@ -554,7 +577,7 @@ const layer = Layer.effect(
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
       return result
-    })
+    }, Effect.scoped)
 
     const create = Effect.fn("SessionCompaction.create")(function* (input: {
       sessionID: SessionID
@@ -595,6 +618,7 @@ export const node = LayerNode.make({
   layer: layer,
   deps: [
     Config.node,
+    Database.node,
     Session.node,
     Agent.node,
     Plugin.node,

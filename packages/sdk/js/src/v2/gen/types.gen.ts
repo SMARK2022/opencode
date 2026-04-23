@@ -21,6 +21,8 @@ export type Event =
   | EventSessionNextMoved
   | EventSessionNextPrompted
   | EventSessionNextPromptAdmitted
+  | EventSessionNextPromptFailed
+  | EventSessionNextPromptCompleted
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
   | EventSessionNextShellStarted
@@ -45,6 +47,7 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
+  | EventSessionNextCompactionFailed
   | EventSessionNextRevertStaged
   | EventSessionNextRevertCleared
   | EventSessionNextRevertCommitted
@@ -873,6 +876,28 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.prompt.failed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          requestIDs: Array<string>
+          error: SessionErrorUnknown
+          aborted?: boolean
+        }
+      }
+    | {
+        id: string
+        type: "session.next.prompt.completed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          requestIDs: Array<string>
+        }
+      }
+    | {
+        id: string
         type: "session.next.context.updated"
         properties: {
           timestamp: number
@@ -954,6 +979,7 @@ export type GlobalEvent = {
           sessionID: string
           assistantMessageID: string
           error: SessionErrorUnknown
+          aborted?: boolean
         }
       }
     | {
@@ -1141,6 +1167,7 @@ export type GlobalEvent = {
           sessionID: string
           messageID: string
           reason: "auto" | "manual"
+          model?: ModelRef
         }
       }
     | {
@@ -1163,6 +1190,43 @@ export type GlobalEvent = {
           reason: "auto" | "manual"
           text: string
           recent: string
+          usage?: {
+            tokens: {
+              input: number
+              output: number
+              reasoning: number
+              cache: {
+                read: number
+                write: number
+              }
+            }
+            cost: number
+            stepCount: number
+          }
+        }
+      }
+    | {
+        id: string
+        type: "session.next.compaction.failed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          error: SessionErrorUnknown
+          aborted?: boolean
+          usage?: {
+            tokens: {
+              input: number
+              output: number
+              reasoning: number
+              cache: {
+                read: number
+                write: number
+              }
+            }
+            cost: number
+            stepCount: number
+          }
         }
       }
     | {
@@ -1614,6 +1678,8 @@ export type GlobalEvent = {
     | SyncEventSessionNextMoved
     | SyncEventSessionNextPrompted
     | SyncEventSessionNextPromptAdmitted
+    | SyncEventSessionNextPromptFailed
+    | SyncEventSessionNextPromptCompleted
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
     | SyncEventSessionNextShellStarted
@@ -1634,6 +1700,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextRetried
     | SyncEventSessionNextCompactionStarted
     | SyncEventSessionNextCompactionEnded
+    | SyncEventSessionNextCompactionFailed
     | SyncEventSessionNextRevertStaged
     | SyncEventSessionNextRevertCleared
     | SyncEventSessionNextRevertCommitted
@@ -2764,6 +2831,8 @@ export type SessionDurableEvent =
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextPromptFailed
+  | SessionNextPromptCompleted
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2784,6 +2853,7 @@ export type SessionDurableEvent =
   | SessionNextRetried
   | SessionNextCompactionStarted
   | SessionNextCompactionEnded
+  | SessionNextCompactionFailed
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
@@ -2891,6 +2961,8 @@ export type V2Event =
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextPromptFailed
+  | SessionNextPromptCompleted
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2915,6 +2987,7 @@ export type V2Event =
   | SessionNextCompactionStarted
   | SessionNextCompactionDelta
   | SessionNextCompactionEnded
+  | SessionNextCompactionFailed
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
@@ -3421,6 +3494,42 @@ export type SyncEventSessionNextPromptAdmitted = {
   }
 }
 
+export type SyncEventSessionNextPromptFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.prompt.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      requestIDs: Array<string>
+      error: SessionErrorUnknown
+      aborted?: boolean
+    }
+  }
+}
+
+export type SyncEventSessionNextPromptCompleted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.prompt.completed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      requestIDs: Array<string>
+    }
+  }
+}
+
 export type SyncEventSessionNextContextUpdated = {
   type: "sync"
   id: string
@@ -3551,6 +3660,7 @@ export type SyncEventSessionNextStepFailed = {
       sessionID: string
       assistantMessageID: string
       error: SessionErrorUnknown
+      aborted?: boolean
     }
   }
 }
@@ -3789,6 +3899,7 @@ export type SyncEventSessionNextCompactionStarted = {
       sessionID: string
       messageID: string
       reason: "auto" | "manual"
+      model?: ModelRef
     }
   }
 }
@@ -3808,6 +3919,50 @@ export type SyncEventSessionNextCompactionEnded = {
       reason: "auto" | "manual"
       text: string
       recent: string
+      usage?: {
+        tokens: {
+          input: number
+          output: number
+          reasoning: number
+          cache: {
+            read: number
+            write: number
+          }
+        }
+        cost: number
+        stepCount: number
+      }
+    }
+  }
+}
+
+export type SyncEventSessionNextCompactionFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.compaction.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      error: SessionErrorUnknown
+      aborted?: boolean
+      usage?: {
+        tokens: {
+          input: number
+          output: number
+          reasoning: number
+          cache: {
+            read: number
+            write: number
+          }
+        }
+        cost: number
+        stepCount: number
+      }
     }
   }
 }
@@ -4301,6 +4456,48 @@ export type SessionNextPromptAdmitted = {
   }
 }
 
+export type SessionNextPromptFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.prompt.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    requestIDs: Array<string>
+    error: SessionErrorUnknown
+    aborted?: boolean
+  }
+}
+
+export type SessionNextPromptCompleted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.prompt.completed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    requestIDs: Array<string>
+  }
+}
+
 export type SessionNextContextUpdated = {
   id: string
   metadata?: {
@@ -4453,6 +4650,7 @@ export type SessionNextStepFailed = {
     sessionID: string
     assistantMessageID: string
     error: SessionErrorUnknown
+    aborted?: boolean
   }
 }
 
@@ -4727,6 +4925,7 @@ export type SessionNextCompactionStarted = {
     sessionID: string
     messageID: string
     reason: "auto" | "manual"
+    model?: ModelRef
   }
 }
 
@@ -4749,6 +4948,53 @@ export type SessionNextCompactionEnded = {
     reason: "auto" | "manual"
     text: string
     recent: string
+    usage?: {
+      tokens: {
+        input: number
+        output: number
+        reasoning: number
+        cache: {
+          read: number
+          write: number
+        }
+      }
+      cost: number
+      stepCount: number
+    }
+  }
+}
+
+export type SessionNextCompactionFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.compaction.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    error: SessionErrorUnknown
+    aborted?: boolean
+    usage?: {
+      tokens: {
+        input: number
+        output: number
+        reasoning: number
+        cache: {
+          read: number
+          write: number
+        }
+      }
+      cost: number
+      stepCount: number
+    }
   }
 }
 
@@ -6342,6 +6588,30 @@ export type EventSessionNextPromptAdmitted = {
   }
 }
 
+export type EventSessionNextPromptFailed = {
+  id: string
+  type: "session.next.prompt.failed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    requestIDs: Array<string>
+    error: SessionErrorUnknown
+    aborted?: boolean
+  }
+}
+
+export type EventSessionNextPromptCompleted = {
+  id: string
+  type: "session.next.prompt.completed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    requestIDs: Array<string>
+  }
+}
+
 export type EventSessionNextContextUpdated = {
   id: string
   type: "session.next.context.updated"
@@ -6431,6 +6701,7 @@ export type EventSessionNextStepFailed = {
     sessionID: string
     assistantMessageID: string
     error: SessionErrorUnknown
+    aborted?: boolean
   }
 }
 
@@ -6633,6 +6904,7 @@ export type EventSessionNextCompactionStarted = {
     sessionID: string
     messageID: string
     reason: "auto" | "manual"
+    model?: ModelRef
   }
 }
 
@@ -6657,6 +6929,44 @@ export type EventSessionNextCompactionEnded = {
     reason: "auto" | "manual"
     text: string
     recent: string
+    usage?: {
+      tokens: {
+        input: number
+        output: number
+        reasoning: number
+        cache: {
+          read: number
+          write: number
+        }
+      }
+      cost: number
+      stepCount: number
+    }
+  }
+}
+
+export type EventSessionNextCompactionFailed = {
+  id: string
+  type: "session.next.compaction.failed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    error: SessionErrorUnknown
+    aborted?: boolean
+    usage?: {
+      tokens: {
+        input: number
+        output: number
+        reasoning: number
+        cache: {
+          read: number
+          write: number
+        }
+      }
+      cost: number
+      stepCount: number
+    }
   }
 }
 
@@ -10512,6 +10822,207 @@ export type PartUpdateResponses = {
 }
 
 export type PartUpdateResponse = PartUpdateResponses[keyof PartUpdateResponses]
+
+export type SessionRequestUsageListData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    limit?: string
+    before?: string
+    rootRequestID?: string
+    source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+  }
+  url: "/session/{sessionID}/request_usage"
+}
+
+export type SessionRequestUsageListErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionRequestUsageListError = SessionRequestUsageListErrors[keyof SessionRequestUsageListErrors]
+
+export type SessionRequestUsageListResponses = {
+  /**
+   * Success
+   */
+  200: Array<{
+    sessionID: string
+    requestID: string
+    rootRequestID: string
+    source: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+    status: "running" | "completed" | "error" | "aborted"
+    agent: string
+    model: {
+      providerID: string
+      modelID: string
+      variant?: string
+    }
+    tokens: {
+      input: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      output: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      reasoning: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      cache: {
+        read: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+        write: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      }
+      total: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+    cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    time: {
+      created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      completed?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+    assistantCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    stepCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    error?: string
+  }>
+}
+
+export type SessionRequestUsageListResponse = SessionRequestUsageListResponses[keyof SessionRequestUsageListResponses]
+
+export type SessionRequestUsageGetData = {
+  body?: never
+  path: {
+    sessionID: string
+    requestID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/request_usage/{requestID}"
+}
+
+export type SessionRequestUsageGetErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionRequestUsageGetError = SessionRequestUsageGetErrors[keyof SessionRequestUsageGetErrors]
+
+export type SessionRequestUsageGetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    sessionID: string
+    requestID: string
+    rootRequestID: string
+    source: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+    status: "running" | "completed" | "error" | "aborted"
+    agent: string
+    model: {
+      providerID: string
+      modelID: string
+      variant?: string
+    }
+    tokens: {
+      input: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      output: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      reasoning: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      cache: {
+        read: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+        write: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      }
+      total: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+    cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    time: {
+      created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      completed?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+    assistantCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    stepCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    error?: string
+  }
+}
+
+export type SessionRequestUsageGetResponse = SessionRequestUsageGetResponses[keyof SessionRequestUsageGetResponses]
+
+export type SessionRequestUsageAssistantsData = {
+  body?: never
+  path: {
+    sessionID: string
+    requestID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/request_usage/{requestID}/assistant"
+}
+
+export type SessionRequestUsageAssistantsErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionRequestUsageAssistantsError =
+  SessionRequestUsageAssistantsErrors[keyof SessionRequestUsageAssistantsErrors]
+
+export type SessionRequestUsageAssistantsResponses = {
+  /**
+   * Success
+   */
+  200: Array<{
+    sessionID: string
+    requestID: string
+    assistantMessageID: string
+    rootRequestID: string
+    model: {
+      providerID: string
+      modelID: string
+      variant?: string
+    }
+    status: "running" | "completed" | "error" | "aborted"
+    stepCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    error?: string
+    tokens: {
+      input: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      output: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      reasoning: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      cache: {
+        read: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+        write: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      }
+      total: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+    cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    time: {
+      created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      completed?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
+  }>
+}
+
+export type SessionRequestUsageAssistantsResponse =
+  SessionRequestUsageAssistantsResponses[keyof SessionRequestUsageAssistantsResponses]
 
 export type SyncStartData = {
   body?: never

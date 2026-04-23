@@ -98,6 +98,22 @@ export const PromptAdmitted = Event.define({
 })
 export type PromptAdmitted = typeof PromptAdmitted.Type
 
+// 准备失败属于真实请求，不需要制造一条尚未执行的助手消息。
+export const PromptFailed = Event.define({
+  type: "session.next.prompt.failed", ...options,
+  // 根和成员由执行边界冻结；公开事件和 replay 共用唯一 payload 契约。
+  schema: { ...Base, messageID: SessionMessage.ID, requestIDs: Schema.Array(SessionMessage.ID),
+    error: UnknownError, aborted: Schema.Boolean.pipe(optional) },
+})
+export type PromptFailed = typeof PromptFailed.Type
+
+// 零助手成功是请求终态，不伪造 provider Step 或改变已有失败 payload。
+export const PromptCompleted = Event.define({
+  type: "session.next.prompt.completed", ...options,
+  schema: { ...Base, messageID: SessionMessage.ID, requestIDs: Schema.Array(SessionMessage.ID) },
+})
+export type PromptCompleted = typeof PromptCompleted.Type
+
 export const ContextUpdated = Event.define({
   type: "session.next.context.updated",
   ...options,
@@ -189,6 +205,8 @@ export namespace Step {
       ...Base,
       assistantMessageID: SessionMessage.ID,
       error: UnknownError,
+      // 旧失败事件缺少此属性仍按 error；新中断使用明确标志，不解析错误文案。
+      aborted: Schema.Boolean.pipe(optional),
     },
   })
   export type Failed = typeof Failed.Type
@@ -403,6 +421,8 @@ export namespace Compaction {
       ...Base,
       messageID: SessionMessage.ID,
       reason: Schema.Union([Schema.Literal("auto"), Schema.Literal("manual")]),
+      // 模型由已有压缩 producer 解析后带入，历史事件允许缺失，不能重放时重新选模型。
+      model: Model.Ref.pipe(optional),
     },
   })
   export type Started = typeof Started.Type
@@ -417,6 +437,12 @@ export namespace Compaction {
   })
   export type Delta = typeof Delta.Type
 
+  // 压缩使用独立 provider turn，但共享正常 step 的非重叠 token 分类契约。
+  const Usage = Schema.Struct({
+    tokens: Step.Ended.data.fields.tokens, cost: Schema.Finite,
+    stepCount: NonNegativeInt,
+  })
+
   export const Ended = Event.define({
     type: "session.next.compaction.ended",
     ...options,
@@ -426,9 +452,18 @@ export namespace Compaction {
       reason: Started.data.fields.reason,
       text: Schema.String,
       recent: Schema.String,
+      usage: Usage.pipe(optional),
     },
   })
   export type Ended = typeof Ended.Type
+
+  // 失败只结算账本，不产生一条伪成功的摘要消息；沿用现有 durable event 基础设施。
+  export const Failed = Event.define({
+    type: "session.next.compaction.failed", ...options,
+    schema: { ...Base, messageID: SessionMessage.ID, error: UnknownError,
+      aborted: Schema.Boolean.pipe(optional), usage: Usage.pipe(optional) },
+  })
+  export type Failed = typeof Failed.Type
 }
 
 export namespace RevertEvent {
@@ -451,6 +486,8 @@ export const DurableDefinitions = Event.inventory(
   Moved,
   Prompted,
   PromptAdmitted,
+  PromptFailed,
+  PromptCompleted,
   ContextUpdated,
   Synthetic,
   Shell.Started,
@@ -471,6 +508,7 @@ export const DurableDefinitions = Event.inventory(
   Retried,
   Compaction.Started,
   Compaction.Ended,
+  Compaction.Failed,
   RevertEvent.Staged,
   RevertEvent.Cleared,
   RevertEvent.Committed,
@@ -482,6 +520,8 @@ export const Definitions = Event.inventory(
   Moved,
   Prompted,
   PromptAdmitted,
+  PromptFailed,
+  PromptCompleted,
   ContextUpdated,
   Synthetic,
   Shell.Started,
@@ -506,6 +546,7 @@ export const Definitions = Event.inventory(
   Compaction.Started,
   Compaction.Delta,
   Compaction.Ended,
+  Compaction.Failed,
   RevertEvent.Staged,
   RevertEvent.Cleared,
   RevertEvent.Committed,

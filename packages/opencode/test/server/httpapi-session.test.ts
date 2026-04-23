@@ -26,6 +26,7 @@ import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/se
 import { Session } from "@/session/session"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -44,7 +45,8 @@ const noopBootstrapLayer = Layer.succeed(
   InstanceBootstrapService.Service.of({ run: Effect.void }),
 )
 const appLayer = AppNodeBuilder.build(
-  LayerNode.group([InstanceStore.node, Project.node, Session.node, Workspace.node, Database.node, Ripgrep.node]),
+  // 种子写入与 HttpApi app 都依赖同一个全局 Database 节点，不另建请求级账本层。
+  LayerNode.group([InstanceStore.node, Project.node, Session.node, Workspace.node, Database.node, Ripgrep.node, SessionRequestUsage.node]),
   [[InstanceStore.bootstrapNode, noopBootstrapLayer]],
 )
 const servedRoutes: Layer.Layer<never, Config.ConfigError, HttpServer.HttpServer> = HttpRouter.serve(
@@ -249,6 +251,109 @@ describe("session HttpApi", () => {
         })
       }
     }),
+  )
+
+  it.instance(
+    "serves request usage query codecs, wire values and missing request errors",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory }
+        const info = yield* createSession({ title: "request usage wire" })
+        const session = yield* Session.Service
+        const usage = yield* SessionRequestUsage.Service
+        // 用户身份经正常消息 owner 持久化；账本创建时间可独立验证 epoch 零游标。
+        const root = yield* createTextMessage(info.id, "root")
+        const shell = yield* createTextMessage(info.id, "shell")
+        const other = yield* createTextMessage(info.id, "other root")
+        const newer = yield* createTextMessage(info.id, "newer")
+        const model = { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test"), variant: "small" }
+        const base = { sessionID: info.id, rootRequestID: root.info.id, agent: "build", ...model }
+        // 同根不同来源、同来源不同根和较新输入分别隔离三个过滤条件的漏传。
+        yield* usage.begin({ ...base, requestID: root.info.id, source: "prompt", timeCreated: 0 })
+        yield* usage.begin({ ...base, requestID: shell.info.id, source: "shell", variant: undefined, timeCreated: 0 })
+        yield* usage.begin({ ...base, requestID: other.info.id, rootRequestID: other.info.id, source: "prompt", timeCreated: 0 })
+        yield* usage.begin({ ...base, requestID: newer.info.id, source: "prompt", timeCreated: 2 })
+
+        // V1 账本从持久化 step-finish 读取费用，只有助手 info.cost 不能替代这条结算。
+        // 不传原生 usage 快照，确保 HTTP 测试确实经过现有 V1 parts 适配边界。
+        const tokens = { input: 5, output: 3, reasoning: 2, cache: { read: 1, write: 0 }, total: 11 }
+        const assistant = yield* session.updateMessage({
+          id: MessageID.ascending(), role: "assistant", sessionID: info.id,
+          parentID: root.info.id, mode: "build", agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          ...model, cost: 1.25, tokens,
+          time: { created: 0, completed: 0 }, finish: "stop",
+        })
+        // completed=0 必须编码为已完成；真实时钟仅影响 updated，不需要全局时钟替身。
+        yield* session.updatePart({
+          id: PartID.ascending(), messageID: assistant.id, sessionID: info.id,
+          type: "step-finish", reason: "stop", cost: 1.25, tokens,
+        })
+        yield* usage.recordAssistant({ sessionID: info.id, requestID: root.info.id, assistant })
+
+        // 独立美元常量是 oracle，不复写整数微美元换算或账本求和算法。
+        const wire = {
+          sessionID: info.id, requestID: root.info.id, rootRequestID: root.info.id,
+          status: "completed", model, tokens, cost: 1.25,
+          time: { created: 0, updated: expect.any(Number), completed: 0 },
+        }
+        const url = `/session/${info.id}/request_usage`
+        const expected = { ...wire, source: "prompt", agent: "build", assistantCount: 1, stepCount: 1 }
+        expect(yield* requestJson<unknown>(`${url}/${root.info.id}`, { headers })).toEqual(expected)
+        // 明细身份是 assistantMessageID；精确形状也拒绝扁平模型、时间或 costMicros wire。
+        expect(yield* requestJson<unknown>(`${url}/${root.info.id}/assistant`, { headers })).toEqual([
+          { ...wire, assistantMessageID: assistant.id, stepCount: 1 },
+        ])
+
+        // 复用被 source 过滤排除的 shell 行，不新增请求改变既有分页和联合过滤 oracle。
+        const zero = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }
+        const running = yield* session.updateMessage({
+          id: MessageID.ascending(), role: "assistant", sessionID: info.id,
+          parentID: shell.info.id, mode: "build", agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          providerID: model.providerID, modelID: model.modelID, cost: 0, tokens: zero,
+          time: { created: 0 },
+        })
+        yield* usage.recordAssistant({ sessionID: info.id, requestID: shell.info.id, assistant: running })
+        // 精确 JSON 对象不列可选键，variant/completed/error 输出 null 也必须失败。
+        const runningWire = {
+          ...wire, requestID: shell.info.id, status: "running",
+          model: { providerID: model.providerID, modelID: model.modelID }, tokens: zero, cost: 0,
+          time: { created: 0, updated: expect.any(Number) },
+        }
+        const runningRequest = { ...runningWire, source: "shell", agent: "build", assistantCount: 1, stepCount: 0 }
+        expect(yield* requestJson<unknown>(`${url}/${shell.info.id}`, { headers })).toEqual(runningRequest)
+        expect(yield* requestJson<unknown>(`${url}?source=shell`, { headers })).toEqual([runningRequest])
+        // 明细也经真实 response codec；助手尚未完成不能编码为 completed:null。
+        expect(yield* requestJson<unknown>(`${url}/${shell.info.id}/assistant`, { headers })).toEqual([
+          { ...runningWire, assistantMessageID: running.id, stepCount: 0 },
+        ])
+
+        expect(
+          (yield* requestJson<Array<{ requestID: string }>>(`${url}?limit=1`, { headers })).map((row) => row.requestID),
+        ).toEqual([newer.info.id])
+        // URL 的数字文本必须被解码；before=0 严格排除创建时间恰为零的已有行。
+        expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=0`, { headers })).toEqual([])
+        // limit=0 也属于显式输入，不能退回默认一百条。
+        expect(yield* requestJson<unknown[]>(`${url}?limit=0`, { headers })).toEqual([])
+        // 每个排除行只违反一个条件，不能靠单一 source/root/before 条件碰巧通过。
+        expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
+
+        // 数字 codec 拒绝不可转换文本，避免只测试服务方法而遗漏 HttpApi query 解码。
+        expect((yield* request(`${url}?limit=bad`, { headers })).status).toBe(400)
+        // Session 已存在且 message ID 合法，404 必须来自缺失账本资源而非路由或 ID 校验。
+        const missingID = MessageID.ascending()
+        const missing = yield* request(`${url}/${missingID}`, { headers })
+        expect(missing.status).toBe(404)
+        expect(yield* responseJson(missing)).toEqual({
+          name: "NotFoundError",
+          data: { message: `Request usage not found: ${missingID}` },
+        })
+        // source 的明细接口对不存在请求返回空数组，与详情资源的 404 契约不同。
+        expect(yield* requestJson<unknown[]>(`${url}/${missingID}/assistant`, { headers })).toEqual([])
+      }),
+    { git: false, config: { formatter: false, lsp: false } },
   )
 
   it.instance(

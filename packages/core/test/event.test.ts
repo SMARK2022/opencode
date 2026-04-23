@@ -335,9 +335,10 @@ describe("EventV2", () => {
 
       yield* events.publish(Message, { text: "one" })
       yield* Deferred.await(consuming)
-      yield* events.publish(Message, { text: "two" })
-      yield* events.publish(Message, { text: "overflow" })
-      const last = yield* events.publish(Message, { text: "still delivered" })
+      // 退出发布保留真实 bounded overflow：慢订阅结束，快订阅继续收齐终态。
+      yield* events.publish(Message, { text: "two" }, { finalizer: true })
+      yield* events.publish(Message, { text: "overflow" }, { finalizer: true })
+      const last = yield* events.publish(Message, { text: "still delivered" }, { finalizer: true })
       yield* Deferred.succeed(release, undefined)
 
       const slowExit = yield* Fiber.await(slow)

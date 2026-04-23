@@ -121,6 +121,8 @@ export interface PublishOptions {
   readonly location?: Location.Ref
   /** Local operational projection committed atomically with a new durable event. Not replayed or serialized. */
   readonly commit?: (seq: number) => Effect.Effect<void>
+  /** 仅生命周期退出隔离普通 inline callback；实时 fanout 与显式短 observer 保持。 */
+  readonly finalizer?: boolean
 }
 
 export interface Interface {
@@ -133,7 +135,7 @@ export interface Interface {
   readonly all: () => Stream.Stream<Payload>
   readonly durable: (input: { readonly aggregateID: string; readonly after?: number }) => Stream.Stream<Payload>
   /** @deprecated Use `all()` and consume the returned stream. */
-  readonly listen: (listener: Subscriber) => Effect.Effect<Unsubscribe>
+  readonly listen: (listener: Subscriber, options?: { readonly finalizerSafe?: boolean }) => Effect.Effect<Unsubscribe>
   readonly project: <D extends Definition>(definition: D, projector: Subscriber<D>) => Effect.Effect<void>
   readonly replay: (
     event: SerializedEvent,
@@ -158,6 +160,8 @@ export const allBounded = (events: Interface, capacity: number) =>
           accepted ? Effect.void : Queue.fail(queue, new SubscriberOverflowError({ capacity })).pipe(Effect.asVoid),
         ),
       ),
+      // dropping 队列满时立即结束该订阅，不在退出发布中等待消费者。
+      { finalizerSafe: true },
     )
     yield* Effect.addFinalizer(() => unsubscribe.pipe(Effect.andThen(Queue.shutdown(queue)), Effect.asVoid))
     return Stream.fromQueue(queue)
@@ -178,7 +182,7 @@ export const layerWith = (options?: LayerOptions) =>
       }
       const projectors = new Map<string, Subscriber[]>()
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
-      const listeners = new Array<Subscriber>()
+      const listeners = new Array<{ callback: Subscriber; finalizerSafe: boolean }>()
       const { db } = yield* Database.Service
 
       const getOrCreate = (definition: Definition) =>
@@ -366,7 +370,7 @@ export const layerWith = (options?: LayerOptions) =>
         })
       }
 
-      function publishEvent<D extends Definition>(definition: D, event: Payload<D>, commit?: PublishOptions["commit"]) {
+      function publishEvent<D extends Definition>(definition: D, event: Payload<D>, commit?: PublishOptions["commit"], finalizer = false) {
         return Effect.gen(function* () {
           if (!definition?.durable && commit)
             return yield* Effect.die(
@@ -386,11 +390,11 @@ export const layerWith = (options?: LayerOptions) =>
                   version: definition.durable.version,
                 },
               }
-              yield* notify(event as Payload, true)
+              yield* notify(event as Payload, true, finalizer)
               return event
             }
           }
-          yield* notify(event as Payload, false)
+          yield* notify(event as Payload, false, finalizer)
           return event
         })
       }
@@ -403,16 +407,21 @@ export const layerWith = (options?: LayerOptions) =>
           ),
         )
 
-      function notify(event: Payload, isolateListeners: boolean) {
+      function notify(event: Payload, isolateListeners: boolean, finalizer = false) {
         return Effect.gen(function* () {
+          const fanout = Effect.gen(function* () {
+            const typed = pubsub.typed.get(event.type)
+            if (typed) yield* PubSub.publish(typed, event)
+            yield* PubSub.publish(pubsub.all, event)
+          })
+          // 已提交 durable event 先进入实时流，取消 inline 通知不会抹掉已发生的提交。
+          if (isolateListeners) yield* fanout
           yield* Effect.forEach(
-            listeners,
-            (listener) => (isolateListeners ? observe(event, listener) : listener(event)),
+            finalizer ? listeners.filter(listener => listener.finalizerSafe) : listeners,
+            (listener) => (isolateListeners ? observe(event, listener.callback) : listener.callback(event)),
             { discard: true },
           )
-          const typed = pubsub.typed.get(event.type)
-          if (typed) yield* PubSub.publish(typed, event)
-          yield* PubSub.publish(pubsub.all, event)
+          if (!isolateListeners) yield* fanout
         })
       }
 
@@ -434,6 +443,7 @@ export const layerWith = (options?: LayerOptions) =>
               data,
             } as Payload<D>,
             options?.commit,
+            options?.finalizer,
           )
         })
       }
@@ -603,11 +613,12 @@ export const layerWith = (options?: LayerOptions) =>
           }),
         )
 
-      const listen = (listener: Subscriber): Effect.Effect<Unsubscribe> =>
+      const listen = (listener: Subscriber, options?: { readonly finalizerSafe?: boolean }): Effect.Effect<Unsubscribe> =>
         Effect.sync(() => {
-          listeners.push(listener)
+          const entry = { callback: listener, finalizerSafe: options?.finalizerSafe === true }
+          listeners.push(entry)
           return Effect.sync(() => {
-            const index = listeners.indexOf(listener)
+            const index = listeners.indexOf(entry)
             if (index >= 0) listeners.splice(index, 1)
           })
         })

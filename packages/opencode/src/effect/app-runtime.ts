@@ -27,6 +27,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionProcessor } from "@/session/processor"
 import { SessionCompaction } from "@/session/compaction"
 import { SessionRevert } from "@/session/revert"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionSummary } from "@/session/summary"
 import { SessionPrompt } from "@/session/prompt"
 import { Instruction } from "@/session/instruction"
@@ -86,6 +87,8 @@ export const AppLayer = AppNodeBuilderV1.build(
     SessionCompaction.node,
     SessionRevert.node,
     SessionSummary.node,
+    // V1 prompt 与 processor 使用同一个全局账本实例，不能按项目构造另一份明细状态。
+    SessionRequestUsage.node,
     SessionPrompt.node,
     Instruction.node,
     LLM.node,

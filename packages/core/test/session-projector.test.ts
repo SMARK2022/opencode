@@ -22,6 +22,9 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
+import { RequestUsageTable, RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Location } from "@opencode-ai/core/location"
@@ -47,6 +50,100 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  it.effect("keeps native request ownership and rolls back incomplete ledger updates", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const events = yield* EventV2.Service
+      // 使用真实 projector、事务和外键；不在测试里复制请求聚合算法。
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "test",
+        directory: "/project", title: "test", version: "test" }).run()
+      const first = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_usage_first"),
+        sessionID, prompt: Prompt.make({ text: "first" }), delivery: "steer" })
+      const firstRequestID = SessionV1.MessageID.make(first.id)
+      const usage = SessionRequestUsage.make(db)
+      // admit-only 必须已有零用量请求，尚未产生可见用户消息或助手归属。
+      expect(yield* usage.get({ sessionID, requestID: firstRequestID })).toMatchObject({ source: "prompt", assistantCount: 0, cost: 0 })
+      expect(yield* db.select().from(SessionMessageTable).all()).toEqual([])
+      const second = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_usage_second"),
+        sessionID, prompt: Prompt.make({ text: "second" }), delivery: "steer" })
+      const requestID = SessionV1.MessageID.make(second.id)
+      // 两个真实 admission 一次 promote，不能只修最终输入而留下前一行永久 running。
+      yield* SessionInput.promoteSteers(db, events, sessionID, second.admittedSeq)
+      const assistantMessageID = SessionMessage.ID.make("msg_usage_assistant")
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp: created, agent: "resolved", model })
+      // 后来接纳的 queue 不能抢走已经开始的 turn，结束时只读冻结的助手归属。
+      const queued = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_usage_queued"),
+        sessionID, prompt: Prompt.make({ text: "later" }), delivery: "queue" })
+      const tokens = { input: 2, output: 3, reasoning: 4, cache: { read: 5, write: 6 } }
+      const settlement = { sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(0), finish: "stop", cost: 0.5, tokens }
+      yield* events.publish(SessionEvent.Step.Ended, settlement)
+      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ agent: "resolved", assistantCount: 1,
+        stepCount: 1, cost: 0.5, tokens: { ...tokens, total: 20 }, status: "completed", time: { completed: 0 } })
+      expect(yield* usage.get({ sessionID, requestID: firstRequestID })).toMatchObject({ rootRequestID: requestID,
+        status: "completed", assistantCount: 0, stepCount: 0, cost: 0, tokens: { total: 0 } })
+      expect(yield* usage.list({ sessionID, before: 0 })).toEqual([])
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(queued.id) })).toMatchObject({
+        rootRequestID: queued.id, status: "running", assistantCount: 0, cost: 0 })
+      // 同一助手修订覆盖快照，request 与 #9 Session 累计都不能把两次结算相加。
+      yield* events.publish(SessionEvent.Step.Ended, { ...settlement, cost: 0.75 })
+      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ assistantCount: 1, stepCount: 1, cost: 0.75 })
+      expect(yield* db.select().from(SessionTable).get()).toMatchObject({ cost: 0.75, tokens_input: 2, tokens_reasoning: 4 })
+      // 模拟最终请求回写失败，验证前面的助手 upsert 真正回滚，而非只有接口声明为原子。
+      yield* db.run(sql`CREATE TRIGGER reject_request_update BEFORE UPDATE ON request_usage BEGIN SELECT RAISE(ABORT, 'ledger failure'); END`)
+      const exit = yield* usage.recordAssistant({ sessionID, requestID,
+        assistant: { id: SessionV1.MessageID.make(assistantMessageID), agent: "resolved", providerID: model.providerID,
+          modelID: model.id, time: { created: 0, completed: 10 } },
+        usage: { count: 1, costMicros: 900000, tokens: { ...tokens, total: 20 } },
+      }).pipe(Effect.exit)
+      expect(exit._tag).toBe("Failure")
+      expect(yield* db.select().from(RequestUsageAssistantTable).get()).toMatchObject({ cost_micros: 750000 })
+      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ cost: 0.75 })
+      yield* db.run(sql`DROP TRIGGER reject_request_update`)
+      // 中断通过事件标志区分 error；已结算 usage 仍保留，不把 provider 消耗退款。
+      yield* events.publish(SessionEvent.Step.Failed, { sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(11),
+        aborted: true, error: { type: "unknown", message: "interrupted" } })
+      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ status: "aborted", cost: 0.75, error: "interrupted" })
+      expect(yield* usage.get({ sessionID, requestID: firstRequestID })).toMatchObject({
+        status: "aborted", error: "interrupted", cost: 0, tokens: { total: 0 } })
+      // 重放 Failed→Ended 的补结算顺序，不能将 aborted 降成 UnknownError 或重复收费。
+      yield* events.publish(SessionEvent.Step.Ended, { ...settlement, timestamp: DateTime.makeUnsafe(11), cost: 0.75 })
+      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ status: "aborted", cost: 0.75,
+        assistantCount: 1, stepCount: 1, tokens: { ...tokens, total: 20 }, error: "interrupted" })
+      expect(yield* usage.assistants({ sessionID, requestID })).toMatchObject([{ status: "aborted", cost: 0.75, stepCount: 1 }])
+      expect(yield* usage.get({ sessionID, requestID: firstRequestID })).toMatchObject({ status: "aborted", cost: 0 })
+      expect(yield* db.select().from(SessionTable).get()).toMatchObject({ cost: 0.75, tokens_input: 2, tokens_reasoning: 4 })
+      expect((yield* db.select().from(SessionMessageTable).all()).find(row => row.id === assistantMessageID)?.data).toMatchObject({
+        finish: "error", error: { type: "unknown", message: "interrupted" }, tokens,
+      })
+      // 压缩失败结算也有独立请求和根请求；失败不能投影成成功摘要。
+      const compactID = SessionMessage.ID.make("msg_usage_compaction")
+      yield* events.publish(SessionEvent.Compaction.Started, { sessionID, messageID: compactID,
+        timestamp: DateTime.makeUnsafe(12), reason: "auto", model })
+      yield* events.publish(SessionEvent.Compaction.Failed, { sessionID, messageID: compactID, timestamp: DateTime.makeUnsafe(13),
+        error: { type: "unknown", message: "summary failed" }, usage: { tokens, cost: 0, stepCount: 1 } })
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(compactID) })).toMatchObject({
+        source: "system_compaction", rootRequestID: requestID, status: "error", stepCount: 1 })
+      expect((yield* db.select().from(SessionMessageTable).all()).some(row => row.type === "compaction")).toBe(false)
+      // 后续 steer 属于新的提升批次，不得把旧的零用量成员重新归属到新助手。
+      const future = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_usage_future"),
+        sessionID, prompt: Prompt.make({ text: "future" }), delivery: "steer" })
+      yield* SessionInput.promoteSteers(db, events, sessionID, future.admittedSeq)
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: SessionMessage.ID.make("msg_usage_future_assistant"),
+        timestamp: DateTime.makeUnsafe(14), agent: "resolved", model })
+      yield* events.publish(SessionEvent.Step.Ended, { ...settlement, assistantMessageID: SessionMessage.ID.make("msg_usage_future_assistant"),
+        timestamp: DateTime.makeUnsafe(15), cost: 0 })
+      // 新的零美元事件按零记录；旧批次错误和未提升 queue 均不能被这次终态清除。
+      expect(yield* usage.get({ sessionID, requestID: firstRequestID })).toMatchObject({ rootRequestID: requestID, status: "aborted", cost: 0 })
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(future.id) })).toMatchObject({ status: "completed", cost: 0 })
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make(queued.id) })).toMatchObject({ status: "running", cost: 0 })
+      // 删除 Session 由 SQL 外键清理两张明细表，与 Drizzle 定义和迁移契约一致。
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
+      expect(yield* db.select().from(RequestUsageTable).all()).toEqual([])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toEqual([])
+    }),
+  )
+
   it.effect("projects native settlements into public Session totals exactly once", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service

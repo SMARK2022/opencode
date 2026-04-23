@@ -91,6 +91,21 @@ const SUBCOMMANDS = [
 const SNAPSHOT_ENV = { COLUMNS: "120" }
 
 describe("opencode CLI help-text snapshots", () => {
+  cliIt.live("session info keeps the source required option shape", ({ opencode }) =>
+    Effect.gen(function* () {
+      // 真正运行帮助入口；选项名称正确但被改成 positional 也属于接口回归。
+      const result = yield* opencode.spawn(["session", "info", "--help"], { env: SNAPSHOT_ENV })
+      expect(result.exitCode).toBe(0)
+      const help = normalize(result.stderr)
+      expect(help).toContain("opencode session info")
+      expect(help).toContain("--session")
+      expect(help).toContain("-s,")
+      expect(help).toContain("session ID")
+      expect(help).toContain("[required]")
+      expect(help).not.toContain("Positionals:")
+    }),
+  )
+
   // Single test, parallel spawns. Each command's help fires under
   // `concurrency: 8` — wall-clock stays under ~10s even for ~35 commands,
   // versus ~1 minute if we serialized.

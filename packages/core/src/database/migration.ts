@@ -12,6 +12,8 @@ const lock = Semaphore.makeUnsafe(1)
 
 export type Migration = {
   id: string
+  // 旧库完成记录的身份由迁移自身声明，路径或编号变化不能重放已完成的DDL。
+  legacy?: readonly string[]
   up: (tx: Transaction) => Effect.Effect<void, unknown>
 }
 
@@ -75,7 +77,9 @@ export function applyOnly(db: Database, input: Migration[]) {
           `)
 
           for (const entry of entries) {
-            const migration = input.find((item) => item.id.startsWith(`${entry.prefix}_`))
+            const migration = input.find((item) =>
+              [item.id, ...(item.legacy ?? [])].some((id) => id.startsWith(`${entry.prefix}_`)),
+            )
             if (!migration) {
               return yield* Effect.die(
                 new Error(`Legacy migration timestamp ${entry.created_at} does not match any known migration`),
@@ -97,7 +101,8 @@ export function applyOnly(db: Database, input: Migration[]) {
       if (completed.has(migration.id)) continue
       yield* db.transaction((tx) =>
         Effect.gen(function* () {
-          yield* migration.up(tx)
+          // 部分新账本也可能来自上次失败启动；原身份已完成时只原子登记新身份。
+          if (!migration.legacy?.some((id) => completed.has(id))) yield* migration.up(tx)
           yield* tx.run(
             sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
           )

@@ -15,7 +15,8 @@ type Input = {
 
 const safe = (value: number | undefined) => Math.max(0, Number.isFinite(value) ? (value ?? 0) : 0)
 
-const tokens = (usage: Usage | undefined) => {
+// 正常 turn 与压缩复用同一分类，避免缓存、推理被重复计入 inclusive totals。
+export const tokens = (usage: Usage | undefined) => {
   const reasoning = safe(usage?.reasoningTokens)
   const read = safe(usage?.cacheReadInputTokens)
   const write = safe(usage?.cacheWriteInputTokens)
@@ -71,7 +72,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
   let providerFailed = false
   let stepSettlement: { readonly finish: string; readonly tokens: ReturnType<typeof tokens> } | undefined
 
-  const startAssistant = Effect.fnUntraced(function* () {
+  const startAssistant = Effect.fnUntraced(function* (finalizer = false) {
     if (assistantMessageID !== undefined) return assistantMessageID
     assistantMessageID = SessionMessage.ID.create()
     assistantActive = true
@@ -80,7 +81,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
       assistantMessageID,
       timestamp: yield* timestamp,
       snapshot: input.snapshot,
-    })
+    }, { finalizer })
     return assistantMessageID
   })
   const currentAssistantMessageID = () =>
@@ -90,7 +91,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
 
   const fragments = (
     name: string,
-    ended: (id: string, value: string, providerMetadata?: ProviderMetadata) => Effect.Effect<void>,
+    ended: (id: string, value: string, providerMetadata: ProviderMetadata | undefined, finalizer: boolean) => Effect.Effect<void>,
   ) => {
     const chunks = new Map<string, string[]>()
     const start = (id: string) =>
@@ -106,19 +107,20 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         current.push(value)
         return Effect.void
       })
-    const end = Effect.fnUntraced(function* (id: string, providerMetadata?: ProviderMetadata) {
+    const end = Effect.fnUntraced(function* (id: string, providerMetadata?: ProviderMetadata, finalizer = false) {
       const current = chunks.get(id)
       if (!current) return yield* Effect.die(`${name} end before start: ${id}`)
-      yield* ended(id, current.join(""), providerMetadata)
+      yield* ended(id, current.join(""), providerMetadata, finalizer)
       chunks.delete(id)
     })
-    const flush = Effect.fnUntraced(function* () {
-      for (const id of chunks.keys()) yield* end(id)
+    const flush = Effect.fnUntraced(function* (finalizer = false) {
+      // ensuring 闭合 raw partial 时只传递退出通知模式，片段内容与原顺序保持。
+      for (const id of chunks.keys()) yield* end(id, undefined, finalizer)
     })
     return { start, append, end, flush }
   }
 
-  const text = fragments("text", (textID, value) =>
+  const text = fragments("text", (textID, value, _providerMetadata, finalizer) =>
     Effect.gen(function* () {
       yield* events.publish(SessionEvent.Text.Ended, {
         sessionID: input.sessionID,
@@ -126,10 +128,10 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         timestamp: yield* timestamp,
         textID,
         text: value,
-      })
+      }, { finalizer })
     }),
   )
-  const reasoning = fragments("reasoning", (reasoningID, value, providerMetadata) =>
+  const reasoning = fragments("reasoning", (reasoningID, value, providerMetadata, finalizer) =>
     Effect.gen(function* () {
       yield* events.publish(SessionEvent.Reasoning.Ended, {
         sessionID: input.sessionID,
@@ -138,10 +140,10 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         reasoningID,
         text: value,
         providerMetadata,
-      })
+      }, { finalizer })
     }),
   )
-  const toolInput = fragments("tool input", (callID, value) =>
+  const toolInput = fragments("tool input", (callID, value, _providerMetadata, finalizer) =>
     Effect.gen(function* () {
       const tool = tools.get(callID)
       if (!tool) return yield* Effect.die(`Tool input end before start: ${callID}`)
@@ -151,15 +153,16 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
         assistantMessageID: tool.assistantMessageID,
         callID,
         text: value,
-      })
+      }, { finalizer })
       tool.inputEnded = true
     }),
   )
 
-  const flushFragments = Effect.fnUntraced(function* () {
-    yield* text.flush()
-    yield* reasoning.flush()
-    yield* toolInput.flush()
+  const flushFragments = Effect.fnUntraced(function* (finalizer = false) {
+    // 三类残片复用同一局部参数，不添加事件流、缓存或第二个 publisher。
+    yield* text.flush(finalizer)
+    yield* reasoning.flush(finalizer)
+    yield* toolInput.flush(finalizer)
   })
 
   const startToolInput = Effect.fnUntraced(function* (event: { readonly id: string; readonly name: string }) {
@@ -192,14 +195,15 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
     yield* toolInput.end(event.id)
   })
 
-  const flush = Effect.fn("SessionRunner.flush")(function* () {
-    yield* flushFragments()
+  // 只有真实退出 caller 传入此标志；正常 provider 事件继续同步通知。
+  const flush = Effect.fn("SessionRunner.flush")(function* (finalizer = false) {
+    yield* flushFragments(finalizer)
   })
 
-  const failAssistant = Effect.fnUntraced(function* (message: string) {
+  const failAssistant = Effect.fnUntraced(function* (message: string, aborted = false, finalizer = false) {
     if (assistantFailed) return
-    yield* flush()
-    const assistantMessageID = yield* startAssistant()
+    yield* flush(finalizer)
+    const assistantMessageID = yield* startAssistant(finalizer)
     assistantActive = false
     assistantFailed = true
     yield* events.publish(SessionEvent.Step.Failed, {
@@ -207,12 +211,14 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
       timestamp: yield* timestamp,
       assistantMessageID,
       error: { type: "unknown", message },
-    })
+      aborted,
+    }, { finalizer })
   })
 
   const failUnsettledTools = Effect.fn("SessionRunner.failUnsettledTools")(function* (
     message: string,
     hostedOnly = false,
+    finalizer = false,
   ) {
     for (const [callID, tool] of tools) {
       if (tool.settled || (hostedOnly && !tool.providerExecuted)) continue
@@ -227,7 +233,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
           executed: tool.providerExecuted,
           ...(tool.providerMetadata === undefined ? {} : { metadata: tool.providerMetadata }),
         },
-      })
+      }, { finalizer })
     }
   })
 

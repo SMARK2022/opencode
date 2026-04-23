@@ -33,6 +33,7 @@ import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
 import { SessionProcessor } from "@/session/processor"
 import { SessionPrompt } from "@/session/prompt"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { Session } from "@/session/session"
@@ -243,6 +244,9 @@ const app = LayerNode.group([
   SessionRevert.node,
   SessionSummary.node,
   SessionPrompt.node,
+  // 此 HTTP app 与 V1 AppRuntime 分开装配；声明 handler 依赖后必须在本组提供账本节点。
+  // 节点只提供全局数据库能力，访问目标 Session 仍由每个端点的 requireSession 校验。
+  SessionRequestUsage.node,
   Instruction.node,
   LLM.node,
   LSP.node,

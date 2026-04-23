@@ -1,13 +1,20 @@
 export * as SessionCompaction from "./compaction"
 
 import { LLM, LLMError, LLMEvent, Message, type LLMRequest, type Model } from "@opencode-ai/llm"
-import { DateTime, Effect, Stream } from "effect"
+import { Cause, DateTime, Effect, Exit, Stream } from "effect"
+import { and, eq, inArray } from "drizzle-orm"
 import type { Config } from "../config"
-import type { EventV2 } from "../event"
+import { EventV2 } from "../event"
+import type { Database } from "../database/database"
+import { EventTable } from "../event/sql"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { Token } from "../util/token"
+import { tokens } from "./runner/publish-llm-event"
+import { ModelV2 } from "../model"
+import { ProviderV2 } from "../provider"
+import { SessionRunnerModel } from "./runner/model"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
@@ -66,6 +73,8 @@ type Settings = {
 }
 
 type Dependencies = {
+  // 唯一 runner 传入同一个 db；只验证本次 durable 身份，不查询或修改其他请求。
+  readonly db: Database.Interface["db"]
   readonly events: EventV2.Interface
   readonly llm: {
     readonly stream: (request: LLMRequest) => Stream.Stream<LLMEvent, LLMError>
@@ -77,6 +86,9 @@ type Input = {
   readonly sessionID: SessionSchema.ID
   readonly entries: readonly Entry[]
   readonly model: Model
+  // 私有调用输入保留同次采样的价格和选择，不向公共 LLM Model 增加元数据字段。
+  readonly pricing: ModelV2.Info["cost"]
+  readonly variant?: ModelV2.Ref["variant"]
   readonly request: LLMRequest
 }
 
@@ -189,12 +201,35 @@ export const make = (dependencies: Dependencies) => {
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
     if (Token.estimate(summaryPrompt) > context - summaryOutput) return false
     const messageID = SessionMessage.ID.create()
+    const startedEventID = EventV2.ID.create()
+    const terminalEventID = EventV2.ID.create()
+    // 一个现有压缩 stream 只有一个 provider turn，结算快照不另外驱动模型。
+    let usage = { tokens: tokens(undefined), cost: 0, stepCount: 0 }
+    const fail = Effect.fnUntraced(function* (aborted: boolean, message: string, finalizer = false) {
+      yield* dependencies.events.publish(SessionEvent.Compaction.Failed, {
+        sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now,
+        error: { type: "unknown", message }, aborted, usage,
+      }, { id: terminalEventID, finalizer })
+    })
+    // 在 Started 之前注册，publish 的 commit 后 listener 与 terminal notify 都属于同一 scope。
+    yield* Effect.addFinalizer((exit) => Effect.gen(function* () {
+      if (Exit.isSuccess(exit)) return
+      const committed = yield* dependencies.db.select({ id: EventTable.id }).from(EventTable)
+        .where(and(eq(EventTable.aggregate_id, input.sessionID), inArray(EventTable.id, [startedEventID, terminalEventID]))).all().pipe(Effect.orDie)
+      // commit hook 和返回前标志不能证明 SQL commit；已有 terminal 时不能重复 Ended/Failed。
+      if (!committed.some(row => row.id === startedEventID) || committed.some(row => row.id === terminalEventID)) return
+      // 只在真实 scope 退出启用短通知；运行时无摘要失败继续通知全部原 observer。
+      yield* fail(Cause.hasInterrupts(exit.cause), String(Cause.squash(exit.cause)), true)
+    }))
     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
       reason: "auto",
-    })
+      // Started 冻结真实调用的 variant；未选择时仍省略，不在 finish 时查询会话或猜默认值。
+      model: { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
+        ...(input.variant === undefined ? {} : { variant: input.variant }) },
+    }, { id: startedEventID })
 
     const chunks: string[] = []
     let failed = false
@@ -212,13 +247,20 @@ export const make = (dependencies: Dependencies) => {
         Stream.runForEach((event) => {
           if (LLMEvent.is.providerError(event)) failed = true
           if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
+          if (LLMEvent.is.stepFinish(event)) {
+            const counted = tokens(event.usage)
+            usage = { tokens: counted, cost: SessionRunnerModel.cost(input.pricing, counted), stepCount: 1 }
+          }
           return Effect.void
         }),
         Effect.as(true),
         Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
       )
     const summary = chunks.join("")
-    if (!summarized || failed || !summary.trim()) return false
+    if (!summarized || failed || !summary.trim()) {
+      yield* fail(false, "Compaction did not produce a usable summary")
+      return false
+    }
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,
@@ -226,9 +268,11 @@ export const make = (dependencies: Dependencies) => {
       reason: "auto",
       text: summary,
       recent: selected.recent,
-    })
+      usage,
+    }, { id: terminalEventID })
     return true
-  })
+    // 压缩返回前关闭自己的生命周期，不借用外层 prompt 的终态保护。
+  }, Effect.scoped)
   const compactIfNeeded = Effect.fn("SessionCompaction.compactIfNeeded")(function* (input: Input) {
     if (!config.auto) return false
     const context = input.model.route.defaults.limits?.context
