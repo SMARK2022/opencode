@@ -1,8 +1,9 @@
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
 
 const id = "internal:sidebar-context"
 
@@ -16,6 +17,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   const session = createMemo(() => props.api.state.session.get(props.session_id))
 
+  // retry 也属于等待；首次引导不能在重试间隙闪回空闲零值。
+  const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
   // sidebar 保持直接可读对象，新增括号累计也随同一节流快照发布。
   // 主值属于请求，total 字段属于全局，不能复用一个变量伪装两种范围。
   // 费用随 token 同一快照发布，不能继续读取独立的会话 cost memo。
@@ -33,50 +36,26 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
     // plugin 的 session.get 已直通同步 Session，不能另建 sidebar 私有请求账本。
     const request = session()?.request
-    // 没有持久化助手才是新请求无回复；用户和早期助手被窗口淘汰不触发此分支。
-    if (!request?.assistantID) {
+    // 侧栏和 Prompt 共用引导 owner，synthetic 文件正文也参与首轮输入估算。
+    const getParts = (id: string) => props.api.state.part(id)
+    const bootstrapInputTokens = getBootstrapInputTokens(messages, request, getParts)
+    // 空闲无回复保持全字段零值，避免新 Session 留下上一请求的费用或百分比。
+    if (!request || (!request.assistantID && !isRunning())) {
       return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
     }
-    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
     const last = requestAssistants.at(-1)
     // 当前 step 确认值由完整请求投影提供，窗口只保留流式字符近似的职责。
 
-    // 从最后一条消息添加流式估算
+    // 参数只含当前助手尾部，不能把其他请求的缓存 parts 传给共享计算。
     const lastParts = last ? props.api.state.part(last.id) : []
-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
-    const streamingOut = !last || last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "text" && !p.ignored) return sum + p.text.length
-          if (p.type === "reasoning") return sum + p.text.length
-          // pending 工具的 state.raw 由 processor.ts 累积流式 delta。
-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
-          return sum
-        }, 0)
-    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
-    const pendingIn = !last || last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
-          return sum
-        }, 0)
-
-    // 缺少模型 context limit 时保留 token 实数，不能捏造百分比上限。
-    // 两个范围各加入一次当前尾部，stepInput 已排除尚未确认的 V1 尾部。
-    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-    const input = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
-    const output = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
-    // 括号保留全部请求轮次，用投影而非缓存 sumConfirmed 保证长请求完整。
-    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
-    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
+    // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
+    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
-    const model = request?.model ? props.api.state.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
+    // 未确认请求可用其用户模型；已确认 native 请求不依赖用户仍在显示窗口。
+    const modelRef = request.model ?? messages.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+    const model = modelRef ? props.api.state.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
     return {
       tokens,
       totalTokens,
