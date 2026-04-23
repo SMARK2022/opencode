@@ -6,27 +6,27 @@ import { createHash, randomUUID } from "crypto"
 export const VERSION = "2.1.117" // 当前最新的 Claude Code 版本号
 const SALT = "59cf53e54c78"
 
-// CLI 身份声明 Block
-export const CLI_IDENTITY_BLOCK = {
-  type: "text" as const,
-  text: "You are Claude Code, Anthropic's official CLI for Claude.",
-  cache_control: { type: "ephemeral" as const },
-}
+// // CLI 身份声明 Block
+// export const CLI_IDENTITY_BLOCK = {
+//   type: "text" as const,
+//   text: "You are Claude Code, Anthropic's official CLI for Claude.",
+//   cache_control: { type: "ephemeral" as const },
+// }
 
-// 主 System Prompt Block (这里仅为摘要仿真)
-export const MAIN_SYSTEM_BLOCK = {
-  type: "text" as const,
-  text: [
-    "You are an interactive agent that helps users with software engineering tasks.",
-    "Use the instructions below and the tools available to you to assist the user.",
-    "",
-    "# System",
-    " - All text you output outside of tool use is displayed to the user.",
-    " - Tool results and user messages may include <system-reminder> tags.",
-    " - The conversation has unlimited context through automatic summarization.",
-  ].join("\n"),
-  cache_control: { type: "ephemeral" as const },
-}
+// // 主 System Prompt Block (这里仅为摘要仿真)
+// export const MAIN_SYSTEM_BLOCK = {
+//   type: "text" as const,
+//   text: [
+//     "You are an interactive agent that helps users with software engineering tasks.",
+//     "Use the instructions below and the tools available to you to assist the user.",
+//     "",
+//     "# System",
+//     " - All text you output outside of tool use is displayed to the user.",
+//     " - Tool results and user messages may include <system-reminder> tags.",
+//     " - The conversation has unlimited context through automatic summarization.",
+//   ].join("\n"),
+//   cache_control: { type: "ephemeral" as const },
+// }
 
 // ============================================================================
 // 会话状态管理
@@ -83,12 +83,12 @@ export function buildBillingHeaderBlock(fp: string) {
   }
 }
 
-/**
- * 构建必须的 System Blocks 组合
- */
-export function buildSystemBlocks(fp: string) {
-  return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
-}
+// /**
+//  * 构建必须的 System Blocks 组合
+//  */
+// export function buildSystemBlocks(fp: string) {
+//   return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
+// }
 
 /**
  * 构建紧凑的 User ID Metadata 字符串
@@ -289,15 +289,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     const fp = computeFingerprint(firstUserText, VERSION)
 
-    // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
-    let newSystem = buildSystemBlocks(fp)
-    if (originalBody.system) {
-      if (Array.isArray(originalBody.system)) {
-        newSystem = newSystem.concat(originalBody.system)
-      } else {
-        newSystem.push({ type: "text" as const, text: originalBody.system })
-      }
-    }
+    // // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
+    // let newSystem = buildSystemBlocks(fp)
+    // if (originalBody.system) {
+    //   if (Array.isArray(originalBody.system)) {
+    //     newSystem = newSystem.concat(originalBody.system)
+    //   } else {
+    //     newSystem.push({ type: "text" as const, text: originalBody.system })
+    //   }
+    // }
 
     // 3. 合并 Metadata (保留原有字段)
     const newMetadata = {
@@ -352,7 +352,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     const patchedBody = {
       ...originalBody,
-      system: newSystem,
+      // system: newSystem,
       metadata: newMetadata,
       tools: patchedTools,
       ...(thinking ? { thinking } : {}),

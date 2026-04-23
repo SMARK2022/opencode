@@ -1520,14 +1520,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               // environment 改为异步：需要在此处拉取 git 上下文。
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
+              sys.mcpInstructions(),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
-            const system = [...env, ...(skills ? [skills] : []), ...instructions]
+            const system = [...env, ...(skills ? [skills] : []), ...instructions, ...(mcpInstr ? [mcpInstr] : [])]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
