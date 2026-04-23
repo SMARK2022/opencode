@@ -244,6 +244,17 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       ? JSON.parse(typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body as ArrayBuffer))
       : {}
 
+    // 24 仅恢复计费消费者；首 user 的首 text 决定指纹，不拼接工具或附件文字。
+    const content: unknown = (originalBody.messages ?? []).find((message: { role?: string }) => message.role === "user")?.content
+    const firstText: unknown = Array.isArray(content)
+      ? content.find((block) => block?.type === "text")?.text : content
+    const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", VERSION)
+    // 数组的缓存属性和附加字段原样保留，字符串包括空串也转换为 text block。
+    const system: unknown = originalBody.system
+    const newSystem: unknown[] = [buildBillingHeaderBlock(fp),
+      ...(Array.isArray(system) ? system : typeof system === "string" ? [{ type: "text", text: system }] : []),
+    ]
+    // 不恢复 buildSystemBlocks 或两段身份；真正的 agent/project 指令仍来自原始 system。
 
     // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
     const newMetadata = {
@@ -298,16 +309,17 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     }
 
     const patchedBody = {
-      // 撤销适配器身份及计费注入，完整保留 Session owner 组装的原始 system。
-      ...originalBody,
+      // 首字段首块固定为自有 billing，用户同名 cch 文字不能参与定位。
+      system: newSystem,
+      ...Object.fromEntries(Object.entries(originalBody).filter(([key]) => key !== "system")),
       metadata: newMetadata,
       tools: patchedTools,
       ...(thinking ? { thinking } : {}),
       ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
     }
 
-    // billing block 已停止注入，没有 adapter 占位符可修补；用户的同名文本必须保持原样。
-    const finalBodyStr = JSON.stringify(patchedBody)
+    // 所有 metadata/thinking/tools 合并完毕后修补最终字节，继续复用源保留的 patchCch。
+    const finalBodyStr = patchCch(JSON.stringify(patchedBody))
 
     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
     const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })

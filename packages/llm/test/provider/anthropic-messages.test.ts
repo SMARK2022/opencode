@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { createHash } from "node:crypto"
 import { Effect } from "effect"
 import { HttpClientRequest } from "effect/unstable/http"
 import { CacheHint, LLM, LLMError, Message, ToolCallPart, Usage } from "../../src"
@@ -899,8 +900,11 @@ describe("Anthropic Messages route", () => {
       // 四名额已由工具用完；system 与 history 保持原有裁剪，身份不额外发出第五个标记。
       expect(claude.body.system?.filter((block) => block.cache_control !== undefined)).toEqual([])
       expect(claude.body.messages.every((message) => message.content.every((block) => !("cache_control" in block) || block.cache_control === undefined))).toBe(true)
-      // 20 撤销的只是自有身份阶段，四个工具缓存和真正 system/history 仍由上游 owner 保留。
-      expect(claude.body.system?.map((block) => block.text)).toEqual(["system-tail"])
+      // 24 只恢复计费首块，上游 system-tail 与四个工具缓存保持原有顺序和预算。
+      expect(claude.body.system?.map((block) => block.text)).toEqual([
+        expect.stringMatching(/^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/),
+        "system-tail",
+      ])
 
       // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
       expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })
@@ -921,6 +925,57 @@ describe("Anthropic Messages route", () => {
           LLM.updateRequest(input, { model: claude.model, providerOptions: { anthropic: { thinking } } }),
         )
         expect(explicit.body.thinking).toEqual(thinking)
+      }
+    }),
+  )
+  it.effect("preserves raw ClaudeCode system and signs final wire bytes", () =>
+    Effect.gen(function* () {
+      const route = AnthropicMessages.route.with({ provider: "claudecode" })
+      // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
+      for (const raw of ["原始字符串", [
+        { type: "text", text: "原始数组", cache_control: { type: "ephemeral", ttl: "5m" }, source: "retained" },
+        { type: "text", text: "第二块", cache_control: { type: "ephemeral", ttl: "1h" }, source: "second" },
+      ]]) {
+        for (const count of [0, 3, 4]) {
+          const input = LLM.request({ model: route.model({ id: "claude-sonnet-4-5" }), cache: "none",
+            system: "Session system", messages: [Message.user([{ type: "text", text: "abcdefghijklmnopqrstuv", cache: new CacheHint({ type: "ephemeral" }) }])],
+            // 四工具的优先级在所有 system 之前，history 只能领取 system 之后的剩余预算。
+            tools: ["t1", "t2", "t3", "t4"].slice(0, count).map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, cache: new CacheHint({ type: "ephemeral" }) })),
+            providerOptions: { anthropic: { system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
+            http: { body: { extra: "中文 cch=00000;" } },
+          })
+          const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input)
+          // 手工列出原始块预期，额外属性和缓存标记不能被 typed 编码剥离。
+          expect(prepared.body.system?.slice(1)).toEqual(typeof raw === "string"
+            ? [{ type: "text", text: "Session system" }, { type: "text", text: "原始字符串" }]
+            : [{ type: "text", text: "Session system" },
+              { type: "text", text: "原始数组", cache_control: count < 4 ? { type: "ephemeral", ttl: "5m" } : undefined, source: "retained" },
+              { type: "text", text: "第二块", cache_control: count < 3 ? { type: "ephemeral", ttl: "1h" } : undefined, source: "second" },
+            ])
+          // 显式 raw 标记必须先消耗预算，不能先给 history 标记再凑数删 system。
+          expect(prepared.body.messages[0]?.content[0]?.cache_control).toEqual(count === 0 || (count === 3 && typeof raw === "string") ? { type: "ephemeral" } : undefined)
+          expect(prepared.body.system?.[0]?.cache_control).toBeUndefined()
+          expect(prepared.body.metadata).toMatchObject({ retained: "yes" })
+          expect(prepared.body.thinking).toEqual({ type: "disabled" })
+          expect(prepared.body.output_config).toEqual({ effort: "high" })
+          expect(prepared.body.tools?.map((tool) => tool.name)).toEqual([...(["t1", "t2", "t3", "t4"].slice(0, count)), "Read"])
+          expect(prepared.body.tools?.filter((tool) => tool.cache_control !== undefined)).toHaveLength(count)
+          const wire = yield* route.prepareTransport(prepared.body, input)
+          const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+          const text = yield* Effect.promise(() => web.text())
+          // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
+          const fp = createHash("sha256").update("59cf53e54c78ehu2.1.117").digest("hex").slice(0, 3)
+          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=`
+          expect(text.startsWith(prefix)).toBe(true)
+          const offset = prefix.length
+          // 只还原自有五位占位，独立校验最终 overlay/metadata/thinking 的完整 UTF-8 字节。
+          const zeroed = text.slice(0, offset) + "00000" + text.slice(offset + 5)
+          const cch = (Bun.hash.xxHash64(new TextEncoder().encode(zeroed)) & 0xfffffn).toString(16).padStart(5, "0")
+          expect(text.slice(offset, offset + 5)).toBe(cch)
+          expect(text).toContain("中文 cch=00000;")
+          expect(text).not.toContain("You are Claude Code")
+          expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
+        }
       }
     }),
   )

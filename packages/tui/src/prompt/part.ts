@@ -22,8 +22,10 @@ function isPastedTextPart(part: unknown): part is { type: "text"; text: string; 
 }
 
 export function expandTrackedPastedText(text: string, ranges: { start: number; end: number; text: string }[]) {
+  // 源24修复 UTF-16 与 extmark 坐标错配；现 extmark 是显示宽度，沿用 grapheme 切片。
   return ranges
     .slice()
+    // 从右向左展开，前面的显示坐标不因中文、组合字符或 emoji 替换而漂移。
     .sort((a, b) => b.start - a.start)
     .reduce((result, part) => displaySlice(result, 0, part.start) + part.text + displaySlice(result, part.end), text)
 }

@@ -1,5 +1,6 @@
 import { Effect, Schema } from "effect"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
+import { HttpTransport } from "../route/transport"
 import { Route } from "../route/client"
 import { Auth } from "../route/auth"
 import { Endpoint } from "../route/endpoint"
@@ -48,6 +49,10 @@ const AnthropicTextBlock = Schema.Struct({
   cache_control: Schema.optional(AnthropicCacheControl),
 })
 type AnthropicTextBlock = Schema.Schema.Type<typeof AnthropicTextBlock>
+
+// 原始 system 的附加 JSON 字段属于调用方，不能在 typed 编码时静默剥离。
+const AnthropicSystemBlock = Schema.StructWithRest(AnthropicTextBlock, [Schema.Record(Schema.String, Schema.Unknown)])
+const decodeSystem = ProviderShared.validateWith(Schema.decodeUnknownEffect(Schema.Union([Schema.String, Schema.Array(AnthropicSystemBlock)])))
 
 const AnthropicImageBlock = Schema.Struct({
   type: Schema.tag("image"),
@@ -165,8 +170,9 @@ const ClaudeCodeThinking = Schema.Union([AnthropicThinking,
   Schema.Struct({ type: Schema.Literal("disabled") }),
 ])
 const AnthropicBodyFields = {
+  // billing 固定为首字段首块；最终字节签名不扫描用户消息中的同名文本。
+  system: optionalArray(AnthropicSystemBlock),
   model: Schema.String,
-  system: optionalArray(AnthropicTextBlock),
   messages: Schema.Array(AnthropicMessage),
   tools: optionalArray(AnthropicTool),
   tool_choice: Schema.optional(AnthropicToolChoice),
@@ -567,6 +573,17 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
           text: part.text,
           cache_control: cacheControl(breakpoints, part.cache),
         }))
+  const rawSystem = request.model.provider === "claudecode" ? anthropicOptions(request)?.system : undefined
+  const originalSystem = rawSystem === undefined ? undefined : yield* decodeSystem(rawSystem)
+  // 全部 system 必须先于 history 领取同一预算，原始块不能绕过四断点上限。
+  const retainedSystem = originalSystem === undefined ? [] : typeof originalSystem === "string"
+    ? [{ type: "text" as const, text: originalSystem }] : originalSystem.map((block) => ({
+      ...block,
+      // none 只禁用自动标记；显式原始 TTL 保留，但超额标记由上游 cacheControl 裁剪。
+      cache_control: block.cache_control && cacheControl(breakpoints, {
+        type: "ephemeral", ttlSeconds: block.cache_control.ttl === "1h" ? 3600 : undefined,
+      }) ? block.cache_control : undefined,
+    }))
   const messages = yield* lowerMessages(request, breakpoints)
   if (breakpoints.dropped > 0) {
     yield* Effect.logWarning(
@@ -582,10 +599,19 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     user_id: encodeMetadata({ device_id: claudeCodeSession.deviceId, account_uuid: "", session_id: claudeCodeSession.sessionId }),
   }
   const outputConfig = anthropicOptions(request)?.output_config
+  // 指纹只服务于专用计费块；普通 Anthropic 不采样消息，也不执行无消费者的 SHA。
+  const billing = claudecode ? (() => {
+    // 首 user 的首 text 采样与源 helper 一致，短消息缺失位置补字符零。
+    const firstUserText = messages.find((message) => message.role === "user")?.content.find((block) => block.type === "text")?.text ?? ""
+    const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
+    const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
+    // 三位版本后缀和五位占位保持源 wire 契约，不添加身份或缓存断点。
+    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;` }]
+  })() : []
   return {
+    // 只恢复 billing，20 撤销的两段身份没有任何新消费者。
+    system: claudecode ? [...billing, ...(system ?? []), ...retainedSystem] : system,
     model: request.model.id,
-    // 与 V1 的 20 同步撤销身份注入，保留真实 typed system lowering 的所有上游能力。
-    system,
     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
     // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
     ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
@@ -896,14 +922,28 @@ export const protocol = Protocol.make({
   },
 })
 
+// 复用现有 HTTP 执行/取消路径，只在最终 overlay 编码之后修补自有五位 CCH。
+const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
 export const route = Route.make({
   id: ADAPTER,
   provider: "anthropic",
   protocol,
   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,
-  // billing 阶段结束后复用标准 transport；用户的 cch 同名内容不再进入修补逻辑。
-  framing: Framing.sse,
+  transport: {
+    ...transport,
+    prepare: (input) => Effect.gen(function* () {
+      if (input.request.model.provider !== "claudecode") return yield* transport.prepare(input)
+      const parts = yield* HttpTransport.jsonRequestParts(input)
+      // Schema/return 保证自有 ASCII 首块；URL、MCP 和用户 UTF-8 内容不影响定位。
+      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
+      if (!parts.bodyText.startsWith(`${prefix}00000;`)) return yield* invalid("ClaudeCode billing layout changed before transport")
+      // xxHash64 零种子低 20 位只覆盖占位值，不重新解析或编码已合并的请求。
+      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
+      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
+      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
+    }),
+  },
   // 请求头在 protocol route 的既有构造点产生，运输层仍拥有取消和 stream 生命周期。
   headers: ({ request }) => {
     // 使用已合并的配置/variant beta；仅在协议 owner 去重，不生成另一条 HTTP 覆盖路径。
