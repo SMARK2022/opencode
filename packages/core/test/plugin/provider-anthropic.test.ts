@@ -41,7 +41,7 @@ describe("AnthropicPlugin", () => {
       })
       yield* addPlugin()
       expect(required(yield* catalog.provider.get(ProviderV2.ID.anthropic)).request.headers["anthropic-beta"]).toBe(
-        "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+        "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
       )
       expect(required(yield* catalog.provider.get(ProviderV2.ID.anthropic)).request.headers.Existing).toBe("1")
     }),

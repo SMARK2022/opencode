@@ -912,11 +912,11 @@ export const route = Route.make({
       "anthropic-version": "2023-06-01",
       ...(request.model.provider === "claudecode" ? {
         "anthropic-beta": [...new Set([
-          // 1M 只随源三型号添加；配置 beta 同样排除 interleaved/redact，其余功能需求保留。
-          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27" +
+          // 23 原生恢复 redact；1M 仍只随 15 的三个型号添加，不改变 disabled/adaptive。
+          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27,redact-thinking-2026-02-12" +
             (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((id) => String(request.model.id).includes(id)) ? ",context-1m-2025-08-07" : ""),
           ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
-        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(","),
+        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(","),
         "x-app": "cli",
         "user-agent": "claude-cli/2.1.117 (external, cli)",
         // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。

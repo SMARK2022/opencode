@@ -10,8 +10,9 @@ export const AnthropicPlugin = define({
           if (item.provider.api.type !== "aisdk") continue
           if (item.provider.api.package !== "@ai-sdk/anthropic") continue
           evt.provider.update(item.provider.id, (provider) => {
+            // 原生 catalog 也恢复源 beta；不在这里强改模型 thinking 配置。
             provider.request.headers["anthropic-beta"] =
-              "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+              "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12"
           })
         }
       }),

@@ -604,15 +604,18 @@ describe("Config", () => {
               docs: { path: "../docs", description: "Use for product documentation", hidden: true },
             })
             expect(documents[0]?.info.attachments).toEqual({ image: { auto_resize: false, max_width: 1200 } })
+            // API 未决时保留原选项；真正转换后的字段另由 Catalog 用例核对。
             expect(documents[0]?.info.providers?.custom).toMatchObject({
-              request: { body: { apiKey: "secret" } },
+              v1: { options: { apiKey: "secret" } },
               models: {
                 model: {
-                  request: { body: { reasoningEffort: "high" } },
-                  variants: [{ id: "fast", body: { temperature: 0.2 } }],
+                  v1: { options: { reasoningEffort: "high" }, variants: { fast: { temperature: 0.2 } } },
                 },
               },
             })
+            expect(documents[0]?.info.providers?.custom?.request).toBeUndefined()
+            expect(documents[0]?.info.providers?.custom?.models?.model?.request).toBeUndefined()
+            expect(documents[0]?.info.providers?.custom?.models?.model?.variants).toBeUndefined()
             expect(documents[0]?.info.providers?.openai).toMatchObject({
               api: { settings: {} },
               request: { headers: { Authorization: "Bearer secret", "OpenAI-Organization": "org" } },

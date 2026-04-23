@@ -239,7 +239,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
           },
         },
       }),
@@ -1557,19 +1557,27 @@ const layer = Layer.effect(
 
         // extend database from config
         for (const [providerID, provider] of configProviders) {
-          const existing = database[providerID]
+          // 支持从现有提供者类型继承模型和默认值
+          const baseType = provider.extends
+          const existing = baseType ? database[baseType] : database[providerID]
+          // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
+          const inheritedModels = existing
+            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => [mid, { ...model, providerID: ProviderV2.ID.make(providerID), api: { ...model.api, npm: provider.npm ?? model.api.npm, url: provider.api ?? model.api.url ?? "" } }]))
+            : {}
           const parsed: Info = {
             id: ProviderV2.ID.make(providerID),
-            name: provider.name ?? existing?.name ?? providerID,
+            // 用户指定 name 优先；extends 时默认用 providerID 而非继承的 name
+            name: provider.name ?? (baseType ? providerID : existing?.name ?? providerID),
             env: provider.env ?? existing?.env ?? [],
             options: mergeDeep(existing?.options ?? {}, provider.options ?? {}),
             source: "config",
-            models: existing?.models ?? {},
+            models: inheritedModels,
           }
 
           for (const [modelID, model] of Object.entries(provider.models ?? {})) {
             const existingModel = parsed.models[model.id ?? modelID]
             const apiID = model.id ?? existingModel?.api.id ?? modelID
+            // extends 时从基础提供者类型查找 modelsDev
             const apiNpm =
               model.provider?.npm ??
               provider.npm ??
@@ -1577,7 +1585,7 @@ const layer = Layer.effect(
               // Config-defined gateway models bypass fromModelsDevModel, so resolve the
               // native passthrough npm here before falling back to the catalog default.
               cloudflareGatewayNpm(providerID, apiID) ??
-              modelsDev[providerID]?.npm ??
+              modelsDev[baseType ?? providerID]?.npm ??
               // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
               (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
             const name = iife(() => {
@@ -1590,7 +1598,7 @@ const layer = Layer.effect(
               api: {
                 id: apiID,
                 npm: apiNpm,
-                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api ?? "",
+                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api ?? "",
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,

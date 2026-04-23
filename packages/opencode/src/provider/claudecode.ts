@@ -63,11 +63,12 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
 
 // 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
 export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
-  // 15 撤销 redact-thinking，按当前要求排除已弃用 interleaved；功能 beta 由后面的 SDK 合并保留。
+  // 23 恢复 redact beta；不改 15 的 disabled/adaptive 策略，也不恢复已弃用 interleaved。
   const betas = [
     "claude-code-20250219",
     "prompt-caching-scope-2026-01-05",
-    "context-management-2025-06-27"
+    "context-management-2025-06-27",
+    "redact-thinking-2026-02-12"
   ]
 
   // 检查服务端实际 modelId 而非配置显示名，别名不应决定可用 context beta。
@@ -313,10 +314,9 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     const requestHeaders = new Headers(init?.headers)
 
     for (const [key, value] of Object.entries(customHeaders)) {
-      // SDK 的 MCP/task-budget/thinking-binding beta 与实际 body 配套，必须同源 beta 一起发送。
-      // 仅撤销源明确移除和当前弃用的 beta，其余去重保留，不能丢掉对应 body 的功能开关。
+      // SDK beta 与实际 body 配套，合并时去重并仅排除弃用 interleaved，恢复的 redact 也必须发出。
       requestHeaders.set(key, key === "anthropic-beta"
-        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(",")
+        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(",")
         : value)
     }
 

@@ -1807,6 +1807,7 @@ export type ProviderConfig = {
   env?: Array<string>
   id?: string
   npm?: string
+  extends?: string
   whitelist?: Array<string>
   blacklist?: Array<string>
   options?: {
