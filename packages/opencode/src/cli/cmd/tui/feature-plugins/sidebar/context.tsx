@@ -3,6 +3,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
+import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
 
 const id = "internal:sidebar-context"
 
@@ -14,6 +15,7 @@ const money = new Intl.NumberFormat("en-US", {
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+  const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
 
   type StateValue = {
     tokens: number
@@ -31,79 +33,48 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
     const users = messages.filter((item): item is UserMessage => item.role === "user")
 
-    // If no assistant messages yet, show zeros
-    if (assistants.length === 0) {
-      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-    }
-
-    const sumConfirmed = (items: AssistantMessage[]) =>
-      items.reduce(
-        (acc, a) => {
-          const parts = props.api.state.part(a.id)
-          const { input, output } = parts.reduce(
-            (t, p) => {
-              if (p.type !== "step-finish") return t
-              return {
-                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-                output: t.output + p.tokens.output + p.tokens.reasoning,
-              }
-            },
-            { input: 0, output: 0 },
-          )
-          return { input: acc.input + input, output: acc.output + output }
-        },
-        { input: 0, output: 0 },
-      )
+    const getParts = (id: string) => props.api.state.part(id)
 
     const lastUser = users.at(-1)
     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
 
+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
+
     if (requestAssistants.length === 0) {
-      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+      if (!isRunning()) {
+        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+      }
+      const requestModel =
+        lastUser &&
+        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
+      const percent =
+        bootstrapInputTokens > 0 && requestModel?.limit.context
+          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
+          : null
+      return {
+        tokens: bootstrapInputTokens,
+        totalTokens: bootstrapInputTokens,
+        input: bootstrapInputTokens,
+        output: 0,
+        totalInput: bootstrapInputTokens,
+        totalOutput: 0,
+        percent,
+        cost: 0,
+      }
     }
 
     // 显示规则：外面是最后一个 step 的累计（真实上下文大小）；括号里是当前 user request / agent loop 的累计。
-    const requestConfirmed = sumConfirmed(requestAssistants)
+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
 
     // Add streaming estimates from the last (potentially in-flight) message of current request
     const last = requestAssistants.at(-1)!
     const lastParts = props.api.state.part(last.id)
-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-    const streamingOut = last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "text" && !p.ignored) return sum + p.text.length
-          if (p.type === "reasoning") return sum + p.text.length
-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
-          return sum
-        }, 0)
-    const pendingIn = last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
-          return sum
-        }, 0)
-
-    const pendingInputTokens = Math.round(pendingIn / 4)
-    const pendingOutputTokens = Math.round(streamingOut / 4)
-    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-    const lastStepFinish =
-      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
-    const currentStepInputConfirmed =
-      !hasInFlightTail && lastStepFinish
-        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-        : 0
-    const currentStepOutputConfirmed =
-      !hasInFlightTail && lastStepFinish
-        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-        : 0
-    const input = currentStepInputConfirmed + pendingInputTokens
-    const output = currentStepOutputConfirmed + pendingOutputTokens
-    const totalInput = requestConfirmed.input + pendingInputTokens
-    const totalOutput = requestConfirmed.output + pendingOutputTokens
+    const {
+      input,
+      output,
+      totalInput,
+      totalOutput,
+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]

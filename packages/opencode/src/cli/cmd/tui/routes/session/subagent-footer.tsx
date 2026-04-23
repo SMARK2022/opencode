@@ -7,6 +7,7 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util"
+import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 
@@ -51,88 +52,42 @@ export function SubagentFooter() {
     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
     const users = msg.filter((item): item is UserMessage => item.role === "user")
 
-    // If no assistant messages yet, show zeros when running
-    if (assistants.length === 0) {
-      if (!isRunning) return
-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
-    }
-
-    const sumConfirmed = (items: AssistantMessage[]) =>
-      items.reduce(
-        (acc, a) => {
-          const parts = sync.data.part[a.id] ?? []
-          const { input, output } = parts.reduce(
-            (t, p) => {
-              if (p.type !== "step-finish") return t
-              return {
-                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-                output: t.output + p.tokens.output + p.tokens.reasoning,
-              }
-            },
-            { input: 0, output: 0 },
-          )
-          return { input: acc.input + input, output: acc.output + output }
-        },
-        { input: 0, output: 0 },
-      )
+    const getParts = (id: string) => sync.data.part[id] ?? []
 
     const lastUser = users.at(-1)
+    const requestModel =
+      lastUser &&
+      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+
+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
 
     if (requestAssistants.length === 0) {
       if (!isRunning) return
+      const tokens = bootstrapInputTokens
+      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
       return {
-        input: 0,
+        input: tokens,
         output: 0,
-        totalInput: 0,
+        totalInput: tokens,
         totalOutput: 0,
-        context: undefined,
+        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
         cost: undefined,
       }
     }
 
     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
-    const requestConfirmed = sumConfirmed(requestAssistants)
+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
 
     // Add streaming estimates from the last (potentially in-flight) message of current request
     const last = requestAssistants.at(-1)!
     const lastParts = sync.data.part[last.id] ?? []
-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-    const streamingOut = last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "text" && !p.ignored) return sum + p.text.length
-          if (p.type === "reasoning") return sum + p.text.length
-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
-          return sum
-        }, 0)
-    const pendingIn = last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
-          return sum
-        }, 0)
-
-    const pendingInputTokens = Math.round(pendingIn / 4)
-    const pendingOutputTokens = Math.round(streamingOut / 4)
-    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-    const lastStepFinish =
-      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
-    const currentStepInputConfirmed =
-      !hasInFlightTail && lastStepFinish
-        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-        : 0
-    const currentStepOutputConfirmed =
-      !hasInFlightTail && lastStepFinish
-        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-        : 0
-    const currentInput = currentStepInputConfirmed + pendingInputTokens
-    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
-    const totalInput = requestConfirmed.input + pendingInputTokens
-    const totalOutput = requestConfirmed.output + pendingOutputTokens
+    const {
+      input: currentInput,
+      output: currentOutput,
+      totalInput,
+      totalOutput,
+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 
@@ -149,7 +104,10 @@ export function SubagentFooter() {
     }
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
+    const pct =
+      requestTokens > 0 && model?.limit.context
+        ? `${Math.round((requestTokens / model.limit.context) * 100)}%`
+        : undefined
     const cost = requestAssistants.reduce((sum, item) => sum + (item.cost || 0), 0)
     return {
       input: currentInput,
