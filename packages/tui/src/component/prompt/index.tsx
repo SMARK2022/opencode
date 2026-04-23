@@ -41,6 +41,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
 import { formatDuration } from "../../util/format"
+import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
@@ -286,49 +287,22 @@ export function Prompt(props: PromptProps) {
     // 身份和已确认请求累计来自完整投影；缓存中用户缺失不等于请求缺失。
     // 这里只读取最后助手的流式尾部，不从 100 条显示页计算已确认总量。
     const request = session?.request
-    // 空回复由持久化 assistantID 判断，不能由缓存筛选长度判断。
-    // 新请求尚无回复时清零请求与 step，旧请求的费用和尾部均不得借用。
-    if (!request?.assistantID) {
+    // 引导只读取匹配持久化身份的正文；缓存后来的用户不应覆盖当前请求。
+    const getParts = (id: string) => sync.data.part[id] ?? []
+    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
+    // 空闲无回复仍隐藏；运行中无回复进入共享估算，不借用旧请求的确认值。
+    if (!request || (!request.assistantID && !isRunning)) {
       if (!isRunning) return
       return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
     }
-    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
     const last = requestAssistants.at(-1)
     // #14 主值改为当前 step，括号改为当前请求累计，全局 tokens 不被改写。
 
-    // 已确认边界之前的内容已进入服务端投影，不能再次进入字符近似。
+    // 当前助手缺失时仍显示 native 或已分页淘汰的确认投影，不恢复窗口累计。
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
-    // 流式字符仅来自当前助手未确认尾部，不能把 step-finish 之前内容再计入。
-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-    const streamingOut = !last || last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "text" && !p.ignored) return sum + p.text.length
-          if (p.type === "reasoning") return sum + p.text.length
-          // pending 尚无解析后的 input；必须读取 processor 累积的 raw 参数片段。
-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
-          return sum
-        }, 0)
-    // 工具输出属于下一轮输入；仍只近似未确认尾部，不新增历史文本估算器。
-    const pendingIn = !last || last.time.completed
-      ? 0
-      : lastParts.reduce((sum, p, i) => {
-          if (i <= lastSFIdx) return sum
-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
-          return sum
-        }, 0)
-
-    // part 的流式事件可先于请求快照到达，当前可见尾部立即遮掉旧 step 确认值。
-    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-    // 当前 step 确认值随完整投影读出，native 无 V1 parts 也有真实确认用量。
-    const currentInput = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
-    const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
-    // 括号是请求所有轮次累计，不能用最后一步或 Session.tokens 替代。
-    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
-    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
+    // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
+    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
     if (requestTokens <= 0 && totalTokens <= 0) {
@@ -337,7 +311,9 @@ export function Prompt(props: PromptProps) {
     }
 
     // 模型随完整请求投影提供，窗口淘汰助手后仍不丢真实上下文上限。
-    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
+    // 首次等待的模型来自同一用户，确认后继续优先使用请求投影中的实际模型。
+    const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
     const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
     // 恢复源提交的请求费用范围；服务端来源并不使 Session.cost 等同请求 cost。
     // 确认价格继续由原生产者计算，此处只消费完整请求的助手费用求和。
