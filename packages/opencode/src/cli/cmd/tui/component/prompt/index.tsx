@@ -30,7 +30,7 @@ import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util"
 import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
-import { formatDuration } from "@/util/format"
+import { formatDuration, formatDurationCompact } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
@@ -251,6 +251,7 @@ export function Prompt(props: PromptProps) {
     extmarkToPartIndex: Map<number, number>
     interrupt: number
     placeholder: number
+    agentLoopStartTime: number | undefined
   }>({
     placeholder: randomIndex(list().length),
     prompt: {
@@ -260,6 +261,7 @@ export function Prompt(props: PromptProps) {
     mode: "normal",
     extmarkToPartIndex: new Map(),
     interrupt: 0,
+    agentLoopStartTime: undefined,
   })
 
   createEffect(
@@ -271,6 +273,35 @@ export function Prompt(props: PromptProps) {
       { defer: true },
     ),
   )
+
+  // Track agent loop start time
+  createEffect(
+    on(
+      () => status().type,
+      (currentType, prevType) => {
+        if (currentType === "busy" && prevType !== "busy") {
+          setStore("agentLoopStartTime", Date.now())
+        } else if (currentType === "idle" && prevType !== "idle") {
+          setStore("agentLoopStartTime", undefined)
+        }
+      },
+    ),
+  )
+
+  // Timer signal for agent loop elapsed time
+  const [elapsedSeconds, setElapsedSeconds] = createSignal(0)
+
+  createEffect(() => {
+    if (store.agentLoopStartTime) {
+      const interval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - store.agentLoopStartTime!) / 1000)
+        setElapsedSeconds(elapsed)
+      }, 1000)
+      onCleanup(() => clearInterval(interval))
+    } else {
+      setElapsedSeconds(0)
+    }
+  })
 
   // Initialize agent/model/variant from last user message when session changes
   let syncedSessionID: string | undefined
@@ -1392,12 +1423,20 @@ export function Prompt(props: PromptProps) {
                   })()}
                 </box>
               </box>
-              <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
-                esc{" "}
-                <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                  {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
-                </span>
-              </text>
+              <box gap={2} flexDirection="row" alignItems="center">
+                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                  esc{" "}
+                  <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
+                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                  </span>
+                </text>
+                <Show when={store.agentLoopStartTime && elapsedSeconds() > 0}>
+                  <text fg={theme.textMuted}>
+                    {"· "}
+                    <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
+                  </text>
+                </Show>
+              </box>
             </box>
           </Show>
           <Show when={status().type !== "retry"}>

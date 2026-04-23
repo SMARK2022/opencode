@@ -18,3 +18,22 @@ export function formatDuration(secs: number) {
   const weeks = Math.floor(secs / 604800)
   return weeks === 1 ? "~1 week" : `~${weeks} weeks`
 }
+
+export function formatDurationCompact(secs: number) {
+  if (secs <= 0) return "0s"
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) {
+    const mins = Math.floor(secs / 60)
+    const remaining = secs % 60
+    return `${mins}m${remaining}s`
+  }
+  const hours = Math.floor(secs / 3600)
+  const mins = Math.floor((secs % 3600) / 60)
+  const remaining = secs % 60
+  if (hours < 24) {
+    return remaining > 0 ? `${hours}h${mins}m${remaining}s` : `${hours}h${mins}m`
+  }
+  const days = Math.floor(secs / 86400)
+  const remainingHours = Math.floor((secs % 86400) / 3600)
+  return `${days}d${remainingHours}h`
+}
