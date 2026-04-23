@@ -126,12 +126,14 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
     headers: claudecode ? Object.fromEntries(Object.entries(model.request.headers).filter(([key]) =>
       !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) : model.request.headers,
     http: { body: claudecode ? Object.fromEntries(Object.entries(httpBody).filter(([key]) =>
-      !["thinking", "metadata", "output_config"].includes(key))) : httpBody },
+      !["system", "thinking", "metadata", "output_config"].includes(key))) : httpBody },
     // metadata 不再出现在后置 overlay，保证最终 user_id 由专用 adapter 决定。
     ...(claudecode ? { providerOptions: { anthropic: {
       // 配置 beta 转入既有协议选项，HTTP 后置 overlay 不再覆盖专用 beta 或身份头。
       betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
       thinking: body.thinking,
+      // 原始 system 转交 typed 协议校验与合并，不能从 HTTP overlay 覆盖自有计费首块。
+      system: body.system,
       metadata: body.metadata,
       output_config: body.output_config,
     } } } : {}),
