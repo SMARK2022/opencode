@@ -800,7 +800,14 @@ export function Prompt(props: PromptProps) {
     const messageID = MessageID.ascending()
     let inputText = store.prompt.input
 
-    // Expand pasted text inline before submitting
+    // Expand pasted text inline before submitting.
+    // We replace virtual placeholder strings (e.g. "[Pasted ~27 lines]") with
+    // the original pasted content.  Extmark offsets come from the Zig native
+    // layer and may use display-width units that don't map 1:1 to JS string
+    // indices (CJK chars are 2 columns wide but 1 JS char).  To avoid any
+    // coordinate-system mismatch we locate each placeholder by its literal
+    // text value instead of slicing by offset.  Processing right-to-left
+    // (descending start) ensures earlier positions stay valid.
     const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
     const sortedExtmarks = allExtmarks.sort((a: { start: number }, b: { start: number }) => b.start - a.start)
 
@@ -808,11 +815,12 @@ export function Prompt(props: PromptProps) {
       const partIndex = store.extmarkToPartIndex.get(extmark.id)
       if (partIndex !== undefined) {
         const part = store.prompt.parts[partIndex]
-        if (part?.type === "text" && part.text) {
-          const buf = Buffer.from(inputText)
-          const before = buf.subarray(0, extmark.start).toString("utf8")
-          const after = buf.subarray(extmark.end).toString("utf8")
-          inputText = before + part.text + after
+        if (part?.type === "text" && part.text && part.source?.text?.value) {
+          const virtualText = part.source.text.value
+          const idx = inputText.lastIndexOf(virtualText)
+          if (idx !== -1) {
+            inputText = inputText.slice(0, idx) + part.text + inputText.slice(idx + virtualText.length)
+          }
         }
       }
     }
@@ -913,7 +921,7 @@ export function Prompt(props: PromptProps) {
   function pasteText(text: string, virtualText: string) {
     const currentOffset = input.visualCursor.offset
     const extmarkStart = currentOffset
-    const extmarkEnd = extmarkStart + virtualText.length
+    const extmarkEnd = extmarkStart + Bun.stringWidth(virtualText)
 
     input.insertText(virtualText + " ")
 
@@ -954,7 +962,7 @@ export function Prompt(props: PromptProps) {
       return x.mime.startsWith("image/")
     }).length
     const virtualText = pdf ? `[PDF ${count + 1}]` : `[Image ${count + 1}]`
-    const extmarkEnd = extmarkStart + virtualText.length
+    const extmarkEnd = extmarkStart + Bun.stringWidth(virtualText)
     const textToInsert = virtualText + " "
 
     input.insertText(textToInsert)
