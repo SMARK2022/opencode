@@ -290,15 +290,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     const fp = computeFingerprint(firstUserText, VERSION)
 
-    // // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
-    // let newSystem = buildSystemBlocks(fp)
-    // if (originalBody.system) {
-    //   if (Array.isArray(originalBody.system)) {
-    //     newSystem = newSystem.concat(originalBody.system)
-    //   } else {
-    //     newSystem.push({ type: "text" as const, text: originalBody.system })
-    //   }
-    // }
+    // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
+    let newSystem: any[] = [buildBillingHeaderBlock(fp)]
+    if (originalBody.system) {
+      if (Array.isArray(originalBody.system)) {
+        newSystem = newSystem.concat(originalBody.system)
+      } else {
+        newSystem.push({ type: "text" as const, text: originalBody.system })
+      }
+    }
 
     // 3. 合并 Metadata (保留原有字段)
     const newMetadata = {
@@ -353,7 +353,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     const patchedBody = {
       ...originalBody,
-      // system: newSystem,
+      system: newSystem,
       metadata: newMetadata,
       tools: patchedTools,
       ...(thinking ? { thinking } : {}),

@@ -809,8 +809,9 @@ export function Prompt(props: PromptProps) {
       if (partIndex !== undefined) {
         const part = store.prompt.parts[partIndex]
         if (part?.type === "text" && part.text) {
-          const before = inputText.slice(0, extmark.start)
-          const after = inputText.slice(extmark.end)
+          const buf = Buffer.from(inputText)
+          const before = buf.subarray(0, extmark.start).toString("utf8")
+          const after = buf.subarray(extmark.end).toString("utf8")
           inputText = before + part.text + after
         }
       }
