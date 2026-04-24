@@ -1,8 +1,5 @@
 #!/usr/bin/env bun
 
-// CRITICAL: Load version-env first to set OPENCODE_VERSION before any other imports
-import "./version-env"
-
 import { $ } from "bun"
 import fs from "fs"
 import path from "path"
@@ -17,7 +14,15 @@ process.chdir(dir)
 
 await import("./generate.ts")
 
-import { Script } from "@opencode-ai/script"
+const versionFromEquals = process.argv.find((arg) => arg.startsWith("--version="))?.replace("--version=", "")
+if (versionFromEquals) process.env.OPENCODE_VERSION = versionFromEquals
+
+const versionIndex = process.argv.findIndex((arg) => arg === "--version")
+if (versionIndex >= 0 && process.argv[versionIndex + 1]) {
+  process.env.OPENCODE_VERSION = process.argv[versionIndex + 1]
+}
+
+const { Script } = await import("@opencode-ai/script")
 import pkg from "../package.json"
 
 // Load migrations from migration directories
