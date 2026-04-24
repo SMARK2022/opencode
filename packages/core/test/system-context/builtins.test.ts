@@ -1,7 +1,8 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import os from "node:os"
 import { ConfigProvider, Effect, Layer, Schema } from "effect"
 import { AppProcess } from "@opencode-ai/core/process"
+import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 import * as TestClock from "effect/testing/TestClock"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -287,4 +288,32 @@ describe("SystemContextBuiltIns", () => {
       )
     }),
   )
+})
+
+test("uses actual tool names and preserves parallel write boundaries", () => {
+  // 空能力来自最后一步请求，不能输出工具可用性声明。
+  expect(SystemContextBuiltIns.toolUsage([])).toBeUndefined()
+  const guidance = SystemContextBuiltIns.toolUsage(["read", "apply_patch", "todowrite"])
+  // patch-only 模式应广告 patch，而不是隐式补回已过滤的 edit/write。
+  expect(guidance).toContain("use the apply_patch tool")
+  expect(guidance).not.toContain("use the edit tool")
+  expect(guidance).not.toContain("use the write tool")
+  expect(guidance).toContain("Use the todowrite tool")
+  expect(guidance).not.toContain("TodoWrite")
+  // 独立读取、同响应分组和写入冲突边界都属于实际 formatter 契约。
+  expect(guidance).toContain("independent file reads, searches, and status checks")
+  expect(guidance).toContain("Issue independent tool calls in the same response")
+  expect(guidance).toContain('Never chain bash commands with separators like `echo "====";`')
+  expect(guidance).toContain("target files or edit ranges cannot conflict")
+  expect(guidance).toContain("one edit/patch containing all non-overlapping changes")
+  expect(SystemContextBuiltIns.toolUsage(["read"])).not.toContain("todowrite")
+  // 共享的是完整正文，而非摘要；V2族选择与V1的实际模型ID规则相同。
+  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("# Task Management")
+  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("Parallel writes are only appropriate")
+  expect(SessionPrompts.provider("unknown", "kimi-for-coding")).toContain("newly created subagent")
+  expect(SessionPrompts.provider("muse-glimmer", "meta")).toContain("Muse Glimmer")
+  expect(SessionPrompts.reminders("plan", false)).toEqual([SessionPrompts.plan])
+  expect(SessionPrompts.reminders("build", true)).toEqual([SessionPrompts.buildSwitch])
+  expect(SessionPrompts.reminders("build", false)).toEqual([])
+  expect(SessionPrompts.reminders("reviewer", true)).toEqual([])
 })

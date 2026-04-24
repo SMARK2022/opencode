@@ -22,6 +22,8 @@ import { QuestionV2 } from "../../question"
 import { SystemContext } from "../../system-context/index"
 import { SystemContextRegistry } from "../../system-context/registry"
 import { SystemContextBuiltIns } from "../../system-context/builtins"
+import { SessionPrompts } from "../../system-context/prompts"
+import { SessionReminders } from "../reminders"
 import { SkillGuidance } from "../../skill/guidance"
 import { ReferenceGuidance } from "../../reference/guidance"
 import { ToolRegistry } from "../../tool/registry"
@@ -45,6 +47,8 @@ import { MAX_STEPS_PROMPT } from "./max-steps"
 import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
+import { FSUtil } from "../../fs-util"
+import { Global } from "../../global"
 
 /**
  * Runs one durable coding-agent Session until it settles.
@@ -112,6 +116,7 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
+    const buildReminders = yield* SessionReminders.make
     const compaction = SessionCompaction.make({ events, llm, db, config: yield* config.entries() })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
@@ -255,6 +260,8 @@ const layer = Layer.effect(
       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
+      // 普通提醒逐轮生成，实验计划沿既有synthetic持久化；两者都不新增用户admission或放宽权限。
+      const reminders = yield* buildReminders(agent.id, session.id, context)
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const request = LLM.request({
         model,
@@ -268,11 +275,12 @@ const layer = Layer.effect(
           },
         },
         providerOptions: { openai: { promptCacheKey } },
-        system: [agent.info?.system, system.baseline, toolGuidance,
+        // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
+        system: [agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline, toolGuidance,
           `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        messages: [...toLLMMessages(context, model), ...reminders.map(text => Message.user(text)), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep ? "none" : undefined,
       })
@@ -516,5 +524,7 @@ export const node = makeLocationNode({
     Config.node,
     Snapshot.node,
     Database.node,
+    FSUtil.node,
+    Global.node,
   ],
 })

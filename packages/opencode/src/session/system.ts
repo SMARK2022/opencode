@@ -3,17 +3,7 @@ import { Context, Effect, Layer } from "effect"
 
 import { InstanceState } from "@/effect/instance-state"
 
-import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
-import PROMPT_DEFAULT from "./prompt/default.txt"
-import PROMPT_BEAST from "./prompt/beast.txt"
-import PROMPT_GEMINI from "./prompt/gemini.txt"
-import PROMPT_GPT from "./prompt/gpt.txt"
-import PROMPT_ASTRA from "./prompt/gpt-astra.txt"
-import PROMPT_KIMI from "./prompt/kimi.txt"
-import PROMPT_META from "./prompt/meta.txt"
-
-import PROMPT_CODEX from "./prompt/codex.txt"
-import PROMPT_TRINITY from "./prompt/trinity.txt"
+import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
@@ -35,28 +25,8 @@ import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins
 const MAX_STATUS_CHARS = 2000
 
 export function provider(model: Provider.Model) {
-  if (model.api.id.includes("muse")) {
-    const name = model.api.id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
-    return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]
-  }
-  if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-    return [PROMPT_BEAST]
-  if (model.api.id.includes("gpt")) {
-    if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
-    if (model.api.id.includes("codex")) {
-      return [PROMPT_CODEX]
-    }
-    return [PROMPT_GPT]
-  }
-  if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
-  if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
-  if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
-  if (
-    model.api.id.toLowerCase().includes("kimi") ||
-    ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)
-  )
-    return [PROMPT_KIMI]
-  return [PROMPT_DEFAULT]
+  // 两代按同一实际模型选择完整正文，后续族补丁不再维护两套文本。
+  return [SessionPrompts.provider(model.api.id, model.providerID)]
 }
 
 export interface Interface {
@@ -124,7 +94,8 @@ const layer = Layer.effect(
       const truncatedStatus =
         status.length > MAX_STATUS_CHARS
           ? status.substring(0, MAX_STATUS_CHARS) +
-            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
+            // 截断提示中工具名统一小写，与提示词文件保持一致
+            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using the bash tool)"
           : status
 
       const lines = [
