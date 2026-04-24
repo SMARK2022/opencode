@@ -10,8 +10,10 @@ import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { SessionMessageTable, SessionTable } from "./sql"
 import { fromRow, selection } from "./info"
+import type { PermissionV2 } from "../permission"
 
 export interface Interface {
+  readonly permissions: (sessionID: SessionSchema.ID) => Effect.Effect<PermissionV2.Ruleset>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info | undefined>
   readonly context: (sessionID: SessionSchema.ID) => Effect.Effect<SessionMessage.Message[], MessageDecodeError>
   readonly runnerContext: (
@@ -32,6 +34,11 @@ const layer = Layer.effect(
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
 
     return Service.of({
+      permissions: Effect.fn("SessionStore.permissions")(function* (sessionID) {
+        const row = yield* db.select({ rules: SessionTable.permission }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+        // 旧wire只在存储边界转换，权限执行与广告复用同一持久子会话范围。
+        return row?.rules?.map(rule => ({ action: rule.permission, resource: rule.pattern, effect: rule.action })) ?? []
+      }),
       get: Effect.fn("SessionStore.get")(function* (sessionID) {
         // 与会话行同一次读取，首次挂载不能由 TUI 的有限消息页重建请求用量。
         // SessionStore 仍按 Session ID 读取，没有新建请求执行服务或生命周期。

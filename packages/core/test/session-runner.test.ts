@@ -62,6 +62,8 @@ import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, 
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import PROMPT_DEFAULT from "../src/system-context/prompt/default.txt"
+import { TaskTool } from "@opencode-ai/core/tool/task"
+import { BackgroundJob } from "@opencode-ai/core/background-job"
 import { Global } from "@opencode-ai/core/global"
 import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 import path from "path"
@@ -898,6 +900,134 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.messages({ sessionID })).toHaveLength(3)
     }),
   )
+
+  it.live("executes and resumes canonical task sessions with durable results and scoped permissions", () => Effect.gen(function* () {
+    yield* setup
+    const registry = yield* ToolRegistry.Service
+    const sessions = yield* SessionV2.Service
+    const store = yield* SessionStore.Service
+    const agents = yield* AgentV2.Service
+    const db = (yield* Database.Service).db
+    const taskAssertions: PermissionV2.AssertInput[] = []
+    yield* agents.transform(draft => draft.update(AgentV2.ID.make("research"), agent => {
+      agent.mode = "subagent"
+      agent.description = "Research with the registered echo tool"
+      agent.system = "Research identity"
+      agent.permissions.push({ action: "*", resource: "*", effect: "allow" })
+    }))
+    const parentModel = { providerID: ProviderV2.ID.make("fake"), id: ModelV2.ID.make("fake-model") }
+    yield* sessions.switchModel({ sessionID, model: parentModel })
+    yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer"), agent => {
+      agent.mode = "subagent"
+      agent.system = "Reviewer identity"
+      agent.model = { providerID: ProviderV2.ID.make("fake"), id: ModelV2.ID.make("replacement") }
+      agent.permissions.push({ action: "*", resource: "*", effect: "allow" })
+    }))
+    // 在真实Session/registry/runner图中注册leaf；fake模型只替代provider边界，不替代子会话执行。
+    yield* Layer.build(TaskTool.layer.pipe(Layer.provide(Layer.mock(PermissionV2.Service, {
+      assert: input => Effect.sync(() => { taskAssertions.push(input) }),
+    })), Layer.provide(Layer.succeed(Location.Service, {
+      directory: AbsolutePath.make("/project"), project: { id: Project.ID.global, directory: AbsolutePath.make("/project") },
+    }))))
+    const definitions = (yield* registry.materialize()).definitions
+    expect(definitions.map(tool => tool.name)).toContain("task")
+    expect(definitions.find(tool => tool.name === "task")?.description).toContain("Prompting rules")
+    response = fragmentFixture("text", "task-first", ["Research result"]).completeEvents
+    const invoke = (task_id?: string, subagent_type = "research") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
+      sessionID, agent: AgentV2.ID.make("build"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
+      call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
+        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}) } },
+    })))
+    const first = yield* invoke()
+    expect(first.result.type).toBe("text")
+    expect(taskAssertions).toMatchObject([{ action: "task", resources: ["research"], sessionID,
+      agent: "build", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
+    const output = Schema.decodeUnknownSync(TaskTool.Output)(first.output?.structured)
+    const childID = output.task_id
+    if (typeof childID !== "string") throw new Error("expected durable child task ID")
+    const child = yield* sessions.get(SessionV2.ID.make(childID))
+    expect(child.parentID).toBe(sessionID)
+    expect(child.agent).toBe(AgentV2.ID.make("research"))
+    expect(child.title).toBe("Research scoped implementation (@research subagent)")
+    expect(first.output?.content).toEqual([{ type: "text", text: `task_id: ${childID}\n<task_result>\nResearch result\n</task_result>` }])
+    expect(yield* store.permissions(child.id)).toEqual([
+      { action: "todowrite", resource: "*", effect: "deny" },
+      { action: "task", resource: "*", effect: "deny" },
+    ])
+    const actual = requests.at(-1)
+    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+    expect(userTexts(actual!)).toContain("Inspect the requested module")
+    // 同一task_id恢复同一durable子会话；第一次正文与第二次结果均保留在真实历史中。
+    response = fragmentFixture("text", "task-second", ["Continued result"]).completeEvents
+    const resumed = yield* invoke(childID)
+    expect(resumed.output?.structured).toMatchObject({ task_id: childID, state: "completed" })
+    expect(resumed.output?.content[0]).toEqual({ type: "text", text: `task_id: ${childID}\n<task_result>\nContinued result\n</task_result>` })
+    expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
+    const rows = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.parent_id, sessionID)).all().pipe(Effect.orDie)
+    expect(rows).toEqual([{ id: child.id }])
+    // 另一个父会话不能恢复这个任务，失败不会创建或推进子会话。
+    yield* insertSession(otherSessionID)
+    const foreign = yield* registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
+      sessionID: otherSessionID, agent: AgentV2.ID.make("build"), assistantMessageID: SessionMessage.ID.make("msg_foreign"),
+      call: { type: "tool-call", id: "call-foreign-task", name: "task", input: { description: "Foreign resume", prompt: "Continue", subagent_type: "research", task_id: childID } },
+    })))
+    expect(foreign.result.type).toBe("error")
+    expect(foreign.result).toMatchObject({ value: `Unknown task_id: ${childID}` })
+    expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
+    // 提升现有前台job触发同一后台通知入口，不修改全局实验开关。
+    const jobs = yield* BackgroundJob.Service
+    const events = yield* EventV2.Service
+    const notified = yield* Deferred.make<void>()
+    const unsubscribe = yield* events.listen(event => {
+      if (event.type !== SessionEvent.PromptAdmitted.type || !Schema.is(Schema.Struct({ sessionID: Schema.String, prompt: Prompt }))(event.data)) return Effect.void
+      return event.data.sessionID === sessionID && event.data.prompt.text.includes(`<task id="${childID}"`)
+        ? Deferred.succeed(notified, undefined).pipe(Effect.asVoid) : Effect.void
+    })
+    yield* Effect.addFinalizer(() => unsubscribe)
+    streamGate = yield* Deferred.make<void>()
+    streamStarted = yield* Deferred.make<void>()
+    response = fragmentFixture("text", "task-background", ["Background result"]).completeEvents
+    const requestStart = requests.length
+    const waiting = yield* invoke(childID).pipe(Effect.forkChild)
+    yield* Deferred.await(streamStarted)
+    yield* jobs.promote(childID)
+    const promoted = yield* Fiber.join(waiting)
+    expect(promoted.output?.structured).toMatchObject({ task_id: childID, state: "running" })
+    expect(promoted.output?.content[0]).toMatchObject({ text: expect.stringContaining("DO NOT sleep, poll") })
+    // A尚在provider中时排入B再A；审批立即发生，持久身份只能在各段实际开始时更新。
+    expect((yield* invoke(childID, "reviewer")).output?.structured).toMatchObject({ task_id: childID, state: "running" })
+    expect((yield* invoke(childID, "research")).output?.structured).toMatchObject({ task_id: childID, state: "running" })
+    expect(taskAssertions.slice(-2).map(item => item.resources)).toEqual([["reviewer"], ["research"]])
+    expect((yield* sessions.get(child.id)).agent).toBe(AgentV2.ID.make("research"))
+    expect((yield* sessions.get(child.id)).model).toMatchObject(parentModel)
+    const release = streamGate
+    streamGate = undefined
+    streamStarted = undefined
+    yield* Deferred.succeed(release, undefined)
+    yield* Deferred.await(notified).pipe(Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.die("background result was not admitted") }))
+    const admitted = yield* db.select({ prompt: SessionInputTable.prompt }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
+    expect(admitted.some(row => row.prompt.text.includes("Background result"))).toBe(true)
+    // 等待已排入父Session的完成通知实际drain结束，避免下一次门控接管上一轮provider。
+    yield* sessions.resume(sessionID)
+    const delegated = requests.slice(requestStart).filter(request => request.system.some(part => /Research identity|Reviewer identity/.test(part.text)))
+    expect(delegated.map(request => request.system.some(part => part.text.includes("Reviewer identity")) ? "reviewer" : "research")).toEqual(["research", "reviewer", "research"])
+    expect(delegated.map(request => request.model.id)).toEqual([model.id, replacementModel.id, model.id])
+    const final = yield* sessions.get(child.id)
+    expect(final.agent).toBe(AgentV2.ID.make("research"))
+    expect(final.model).toMatchObject(parentModel)
+    const assistants = (yield* sessions.context(child.id)).filter(message => message.type === "assistant")
+    expect(assistants.slice(-3).map(message => message.agent)).toEqual(["research", "reviewer", "research"].map(value => AgentV2.ID.make(value)))
+    // 取消另一次前台等待使原job和子Session停止，不把旧完成结果返回为新成功。
+    streamGate = yield* Deferred.make<void>()
+    streamStarted = yield* Deferred.make<void>()
+    const cancelled = yield* invoke(childID).pipe(Effect.forkChild)
+    yield* Deferred.await(streamStarted)
+    yield* Fiber.interrupt(cancelled)
+    expect((yield* jobs.get(childID))?.status).toBe("cancelled")
+    expect(yield* sessions.active).not.toContain(child.id)
+    streamGate = undefined
+    streamStarted = undefined
+  }).pipe(Effect.provide(Layer.effect(BackgroundJob.Service, BackgroundJob.make))))
 
   it.live("includes the effective default agent system before durable context", () =>
     Effect.gen(function* () {

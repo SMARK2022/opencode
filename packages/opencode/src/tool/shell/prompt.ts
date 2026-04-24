@@ -3,6 +3,7 @@ import DESCRIPTION from "./shell.txt"
 import { PositiveInt } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
 import { ShellID } from "./id"
+import { Shell } from "@opencode-ai/core/shell"
 
 const PS = new Set(["powershell", "pwsh"])
 const CMD = new Set(["cmd"])
@@ -15,6 +16,10 @@ export type Limits = {
 export function parameterSchema() {
   return Schema.Struct({
     command: Schema.String.annotate({ description: "The command to execute" }),
+    // 调用说明是可选元数据，不能拼入实际 command 或改变权限匹配。
+    description: Schema.optional(Schema.String).annotate({
+      description: "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
+    }),
     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
     workdir: Schema.optional(Schema.String).annotate({
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
@@ -64,7 +69,8 @@ function powershellNotes(name: string) {
 
 function chainGuidance(name: string) {
   if (name === "powershell") {
-    return "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell (5.1) does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
+    // 5.1 两种链式运算符都不可用，不能只提醒避免 &&。
+    return "If the commands depend on each other and must run sequentially, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
   }
   if (PS.has(name)) {
     return "If the commands depend on each other and must run sequentially, use a single bash tool call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like New-Item before Copy-Item, Write before bash for git operations, or git add before git commit), run these operations sequentially instead."
@@ -79,8 +85,9 @@ function bashCommandSection(chain: string, limits: Limits, defaultTimeoutMs: num
   return `Before executing the command, please follow these steps:
 
 1. Directory Verification:
-   - If the command will create new directories or files, first use \`ls\` to verify the parent directory exists and is the correct location
-   - For example, before running "mkdir foo/bar", first use \`ls foo\` to check that "foo" exists and is the intended parent directory
+   <!-- 目录确认不要求运行 ls；专用工具能保留可审查的读取结果。 -->
+   - If the command will create new directories or files, first verify the parent directory exists and is correct using available read/glob tools.
+   - If terminal verification is necessary, use this shell's native directory listing command.
 
 2. Command Execution:
    - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
@@ -255,8 +262,8 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
     }
   }
   return {
-    intro:
-      "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.",
+    // 每次命令独立执行，不能向模型承诺跨调用的持久 shell 状态。
+    intro: "Executes a shell command in the current workspace with optional timeout.",
     workdirSection:
       "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.",
     commandSection: bashCommandSection(chain, limits, defaultTimeoutMs),
@@ -273,7 +280,8 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
 export function render(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
   const selected = profile(name, platform, limits, defaultTimeoutMs)
   return {
-    description: renderPrompt(DESCRIPTION, {
+    // 完整工具说明复用既有 profile，平台编码与环境变量约束由 Core Shell 提供，避免追加第二份工具列表或复制 V1 模板。
+    description: Shell.guidance(name, platform) + "\n\n" + renderPrompt(DESCRIPTION, {
       intro: selected.intro,
       os: platform,
       shell: name,

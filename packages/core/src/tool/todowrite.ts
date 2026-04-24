@@ -32,7 +32,9 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.make({
           description:
-            "Create and maintain a structured task list for the current coding session. Use it to track progress during multi-step work and keep todo statuses current.",
+            // 真实注册工具保留源27的使用边界，不向 Core 增加不存在的 task/plan。
+            // 验证与状态变化属于任务追踪，不改变 SessionTodo 的持久化或权限 owner。
+            "Create and maintain a structured task list for the current coding session. Use todowrite for 3 or more meaningful steps, explicit progress tracking, multiple requirements, planning/implementation/verification, or changed instructions. Skip single straightforward, trivial or informational requests. Keep items short, concrete and verifiable; include required verification. Keep exactly one in_progress while work remains, mark it before working, mark completed only after required work and verification, cancel irrelevant items, and update the list when understanding changes. Do not batch completion updates.",
           input: Input,
           output: Output,
           toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],

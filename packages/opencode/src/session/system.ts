@@ -136,7 +136,8 @@ const layer = Layer.effect(
             ...gitContext.split("\n").map((line) => `  ${line}`),
             `  Platform: ${process.platform}`,
             // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
-            `  Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
+            // 沿用上方 cfg.shell 的真实选择，共用说明不能重新猜测环境变量。
+            ...Shell.guidance(shell, process.platform).split("\n").map((line) => `  ${line}`),
             `  OS Version: ${os.type()} ${os.release()}`,
             ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
             `  Today's date: ${new Date().toDateString()}`,

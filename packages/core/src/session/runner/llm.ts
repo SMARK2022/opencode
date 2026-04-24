@@ -255,7 +255,9 @@ const layer = Layer.effect(
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
-      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
+      // 委派Session的持久范围也决定本轮广告，防止正文可见工具与实际权限分裂。
+      const sessionPermissions = yield* store.permissions(session.id)
+      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions])
       // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。

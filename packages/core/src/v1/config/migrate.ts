@@ -38,6 +38,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     shell: info.shell,
     model: info.model,
     default_agent: info.default_agent,
+    subagent_depth: info.subagent_depth,
     autoupdate: info.autoupdate,
     share: info.share ?? (info.autoshare ? "auto" : undefined),
     enterprise: info.enterprise,

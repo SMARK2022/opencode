@@ -37,6 +37,7 @@ import { SessionRevert } from "./session/revert"
 import { Revert } from "@opencode-ai/schema/revert"
 import { FSUtil } from "./fs-util"
 import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
+import type { PermissionV2 } from "./permission"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -80,6 +81,10 @@ type CreateInput = {
   id?: SessionSchema.ID
   agent?: AgentV2.ID
   model?: ModelV2.Ref
+  // 子会话沿现有Created投影持久化归属和权限，不构造第二种会话记录。
+  parentID?: SessionSchema.ID
+  title?: string
+  permissions?: PermissionV2.Ruleset
   location: Location.Ref
 }
 
@@ -225,7 +230,10 @@ const layer = Layer.effect(
           directory: input.location.directory,
           path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
           workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
-          title: `New session - ${new Date(now).toISOString()}`,
+          parentID: input.parentID,
+          title: input.title ?? `New session - ${new Date(now).toISOString()}`,
+          // 复用既有持久permission列的wire形状，Core消费者仍使用当前Rule。
+          permission: input.permissions?.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect })),
           agent: input.agent,
           model: input.model
             ? {

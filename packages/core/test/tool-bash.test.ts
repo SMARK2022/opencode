@@ -18,6 +18,8 @@ import { Shell } from "@opencode-ai/core/shell"
 import { BashTool } from "@opencode-ai/core/tool/bash"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
+import { SystemContext } from "@opencode-ai/core/system-context"
+import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
 import { location } from "./fixture/location"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -29,6 +31,7 @@ const runs: Array<{
   readonly command: string
   readonly cwd?: string
   readonly shell?: string | boolean
+  readonly args?: readonly string[]
   readonly options?: AppProcess.RunOptions
 }> = []
 let denyAction: string | undefined
@@ -68,7 +71,8 @@ const appProcess = Layer.succeed(
     run: (command: ChildProcess.Command, options?: AppProcess.RunOptions) =>
       Effect.suspend(() => {
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
-        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
+        // 显式PowerShell argv也记录原命令和实际可执行文件，同时保留完整argv供启动边界断言。
+        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell, args: command.args, options })
         return runFailure ? Effect.fail(runFailure) : Effect.succeed(result)
       }),
   } as unknown as AppProcess.Interface),
@@ -102,6 +106,7 @@ const withTool = <A, E, R>(
   directory: string,
   body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>,
   processLayer: Layer.Layer<AppProcess.Service> = appProcess,
+  shell?: string,
 ) => {
   const activeLocation = Layer.succeed(
     Location.Service,
@@ -112,12 +117,16 @@ const withTool = <A, E, R>(
   }).pipe(
     Effect.provide(
       AppNodeBuilder.build(
-        LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, LocationMutation.node, BashTool.node]),
+        // 显式导出 Bash 依赖的同一 registry，测试 body 不能读取另建实例。
+        LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, LocationMutation.node, BashTool.node, SystemContextRegistry.node]),
         [
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
           [AppProcess.node, processLayer],
-          [Config.node, config],
+          // 显式 Config 文档驱动真实 selectedShell，不改测试进程的 SHELL 或 platform。
+          [Config.node, shell === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
+            entries: () => Effect.succeed([new Config.Document({ type: "document", info: new Config.Info({ shell }) })]),
+          }))],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
       ),
@@ -144,12 +153,15 @@ describe("BashTool", () => {
             const definitions = yield* toolDefinitions(registry)
             expect(definitions.map((tool) => tool.name)).toEqual(["bash"])
             expect(definitions[0]?.inputSchema).not.toHaveProperty("properties.background")
-            expect(definitions[0]?.inputSchema).not.toHaveProperty("properties.description")
+            // 描述字段只记录调用意图，旧调用不提供它仍然合法。
+            expect(definitions[0]?.inputSchema).toHaveProperty("properties.description")
+            expect(definitions[0]?.inputSchema).toHaveProperty("required", ["command"])
             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.output")
             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.command")
             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.cwd")
             expect(yield* toolDefinitions(registry, [{ action: "bash", resource: "*", effect: "deny" }])).toEqual([])
-            expect(yield* settleTool(registry, call({ command: "pwd" }))).toEqual({
+            // 真实 settlement 接纳说明字段，但授权与进程仍只收到原始 pwd 命令。
+            expect(yield* settleTool(registry, call({ command: "pwd", description: "Shows the current working directory" }))).toEqual({
               result: {
                 type: "content",
                 value: [
@@ -176,8 +188,81 @@ describe("BashTool", () => {
               maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
             })
             expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
+            // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
+            const contexts = yield* SystemContextRegistry.Service
+            const initialized = yield* SystemContext.initialize(yield* contexts.load())
+            expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
+            expect(initialized.baseline).toContain("captured output is decoded as UTF-8")
+            // 同一配置 refresh 不重复注入，保留既有 Context Epoch 的比较边界。
+            expect(yield* SystemContext.reconcile(yield* contexts.load(), initialized.snapshot)).toEqual({ _tag: "Unchanged" })
+            expect(definitions[0]?.description).toContain("Use workdir instead of changing directories")
+            // 防止通用shell选项重新启用用户profile，直接检查实际单次命令的argv。
+            if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
+              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "pwd"])
           }),
         )
+          .pipe(Effect.andThen(() => Effect.gen(function* () {
+            if (process.platform !== "win32") return
+            for (const shell of ["pwsh.exe", "powershell.exe", "cmd.exe"]) {
+              const cmd = shell === "cmd.exe"
+              // 全部源分支走实际 registry settlement；路径参数故意在工作目录之外。
+              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+                const blocked = [
+                  ...["tail", "head", "sed", "awk", "grep.exe"].map((name) => `${name} missing`),
+                  cmd ? "ls" : "find .",
+                  cmd ? '"HEAD.EXE" missing' : '& "HEAD.EXE" missing',
+                  cmd ? 'call "grep.exe" missing' : ". 'grep.exe' missing",
+                  cmd ? "@g^rep.exe missing" : "gre`p.exe missing",
+                  cmd ? "echo ok&head missing" : "Write-Output ok;head missing",
+                  // cmd 命令组与 PowerShell 条件块都应在授权前拒绝内部 Unix 命令。
+                  ...(cmd ? ["(head)", "(head -n 1 missing)", "echo ok && (head -n 1 missing)"] : ["Write-Output ok; if ($?) { head -n 1 missing }"]),
+                  "echo ok&&grep.exe missing",
+                  "echo ok|awk missing",
+                  "echo ok||sed missing",
+                  "echo ok\ntail missing",
+                ]
+                for (const command of blocked) {
+                  reset()
+                  const settled = yield* settleTool(registry, call({ command, workdir: path.dirname(tmp.path) }))
+                  expect(settled.result).toMatchObject({ type: "error", value: expect.stringMatching(/Unix utility|instead of ls|ambiguous/) })
+                  // 同时证明 external_directory 与 bash 权限均未请求，进程边界也未调用。
+                  expect(assertions).toEqual([])
+                  expect(runs).toEqual([])
+                }
+                // PowerShell 递归检查命令节点；引号内的脚本文本仍然只是参数。
+                const allowed = cmd ? ["echo head grep", 'echo "head&grep.exe"', "echo head^&grep.exe", "find needle input", '" head" missing'] : [
+                  "Write-Output head grep", "Write-Output 'head;grep.exe'", 'Write-Output "head|grep.exe"',
+                  "Write-Output 'if ($true) { head -n 1 missing }'",
+                  "Write-Output head`;grep.exe", "Write-Output 'it''s head; grep'", "'head'", "ls",
+                  "g`rep.exe missing",
+                  "& ' head' missing",
+                ]
+                if (cmd) allowed.push(
+                  // 显式路径即使basename是head也不属于源guard裸名范围，仍走实际授权。
+                  '"C:\\tools with spaces\\HEAD.EXE" missing', 'call "C:\\tools with spaces\\grep.exe" missing', '.\\head.exe missing',
+                )
+                if (!cmd) allowed.push('& "C:\\tools with spaces\\HEAD.EXE" missing', ". 'C:\\tools with spaces\\grep.exe' missing", '.\\head.exe missing')
+                for (const command of allowed) {
+                  reset()
+                  expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
+                  expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
+                  expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
+                }
+              }), appProcess, shell)
+            }
+            // 配置 Git Bash 仍执行原 Unix 命令，不能把 Windows OS 当成 Windows shell。
+            reset()
+            // Shell选择器验证路径存在；使用临时文件和既有进程替身，不依赖主机Git安装位置或启动该文件。
+            const gitBash = path.join(tmp.path, "Git with spaces", "bin", "bash.exe")
+            yield* Effect.promise(() => fs.mkdir(path.dirname(gitBash), { recursive: true }))
+            yield* Effect.promise(() => fs.writeFile(gitBash, "fixture executable is never invoked"))
+            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+              const command = "head input | grep needle; ls; find ."
+              expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
+              expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
+              expect(runs).toMatchObject([{ command, shell: gitBash }])
+            }), appProcess, gitBash)
+          })))
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),

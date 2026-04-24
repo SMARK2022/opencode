@@ -26,6 +26,8 @@ import { Reference } from "./reference"
 import { ReferenceGuidance } from "./reference/guidance"
 import * as SessionRunnerLLM from "./session/runner/llm"
 import { SessionRunnerModel } from "./session/runner/model"
+import { SessionExecution } from "./session/execution"
+import { SessionExecutionLocal } from "./session/execution/local"
 import { SessionTodo } from "./session/todo"
 import { SkillV2 } from "./skill"
 import { SkillGuidance } from "./skill/guidance"
@@ -86,9 +88,11 @@ export function buildLocationServiceMap(
 ): Layer.Layer<LocationServiceMap.Service> {
   return Layer.effect(
     LocationServiceMap.Service,
-    LayerMap.make(
+    Effect.gen(function* () {
+      const locations: LayerMap.LayerMap<Location.Ref, LocationServices, LocationError> = yield* LayerMap.make(
       (ref: Location.Ref) => {
-        const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
+        const defaults: LayerNode.Replacements = [[SessionExecution.node, SessionExecutionLocal.node]]
+        const allReplacements = defaults.concat(replacements, [[Location.node, Location.boundNode(ref)]])
         // Apply replacements during hoist, not afterward: replacements can
         // introduce new tagged dependencies (Location.boundNode depends on
         // Project), and the hoist walk is the only pass that can still slice
@@ -103,11 +107,14 @@ export function buildLocationServiceMap(
               workspaceID: ref.workspaceID,
             }),
           ),
-          Layer.provide(LayerNode.compile(location.hoisted)),
+          // lookup晚于map构造；绑定同一实例并保留共享memo，避免另建Session/Execution全局所有者。
+          Layer.provide(LayerNode.compile(location.hoisted, [[LocationServiceMap.node, Layer.succeed(LocationServiceMap.Service, locations)]])),
         )
       },
       { idleTimeToLive: "60 minutes" },
-    ),
+      )
+      return locations
+    }),
   )
 }
 

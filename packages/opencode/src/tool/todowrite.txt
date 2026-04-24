@@ -1,19 +1,17 @@
 Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.
 
-## When to use
-Use proactively when:
-- The task requires 3+ distinct steps or actions (not just 3 tool calls for a single conceptual step)
-- The work is non-trivial and benefits from planning
-- The user provides multiple tasks (numbered or comma-separated) or explicitly asks for a todo list
-- New instructions arrive - capture them as todos
-- You start a task - mark it `in_progress` (only one at a time) before working
-- You finish a task - mark it `completed` and add any follow-ups discovered during the work
+<!-- 追踪围绕有意义的任务步骤，不按调用次数制造额外任务。 -->
+Use todowrite when:
+- The task has 3 or more meaningful steps.
+- The user explicitly asks for a todo list or progress tracking.
+- The user provides multiple tasks or requirements.
+- The work needs planning, implementation, and verification phases.
+- New instructions change the plan and the task list should be updated.
 
-## When NOT to use
-Skip when:
-- The work is a single, straightforward task (or <3 trivial steps)
-- The request is purely informational or conversational
-- Tracking adds no organizational value
+Do not use todowrite when:
+- The task is a single straightforward action.
+- The task is trivial or purely informational.
+- Tracking would add noise without improving execution.
 
 ## States
 - `pending` - not started
@@ -24,9 +22,12 @@ Skip when:
 ## Rules
 - Update status in real time; don't batch completions
 - Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.
+<!-- 完成状态代表已执行且验证的结果，不能从计划直接跳为完成。 -->
+- Move an item to `in_progress` before working on it; do not jump from pending directly to completed.
 - Keep exactly one `in_progress` while work remains
 - If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker
 - Preserve user-provided commands verbatim (flags, args, order)
+- Update the list when your understanding changes before continuing implementation.
 - Items should be specific and actionable; break large work into smaller steps
 
 ## Examples
