@@ -109,9 +109,13 @@ export const layer = Layer.effect(
 
       items.push(
         ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-        `You can call multiple tools in a single response. When there are no dependencies between calls,` +
-        ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
-        ` Only call sequentially when one result is needed to inform the next.`,
+        ``,
+        `PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.`,
+        `Issue independent tool calls in the same response so they can run in parallel.`,
+        `Never chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.`,
+        `Parallel writes are only appropriate when target files or edit ranges cannot conflict.`,
+        `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
+        `Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`,
       )
 
       return ["# Using your tools", ...items].join("\n")
@@ -154,7 +158,7 @@ export const layer = Layer.effect(
       ], { concurrency: 5 })
 
       const truncatedStatus = status.length > MAX_STATUS_CHARS
-        ? status.substring(0, MAX_STATUS_CHARS) + "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
+        ? status.substring(0, MAX_STATUS_CHARS) + "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using the bash tool)"
         : status
 
       const lines = [
