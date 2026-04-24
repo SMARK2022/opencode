@@ -26,7 +26,7 @@ assistant: Yes
 
 <example>
 user: what command should I run to list files in the current directory?
-assistant: ls
+assistant: [use the read tool on the directory, or the glob tool when you need a pattern]
 </example>
 
 <example>
@@ -42,7 +42,7 @@ assistant: 150000
 
 <example>
 user: what files are in the directory src/?
-assistant: [uses glob and sees src/foo.c, src/bar.c, src/baz.c]
+assistant: [uses read on the directory or glob with the relevant pattern and sees src/foo.c, src/bar.c, src/baz.c]
 user: which file contains the implementation of foo?
 assistant: src/foo.c
 </example>

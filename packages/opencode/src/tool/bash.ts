@@ -58,7 +58,7 @@ export const Parameters = Schema.Struct({
   }),
   description: Schema.String.annotate({
     description:
-      "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: ls\nOutput: Lists files in current directory\n\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
+      "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
   }),
 })
 
@@ -323,6 +323,89 @@ const parser = lazy(async () => {
   return { bash, ps }
 })
 
+const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
+
+function shellGuidance(name: string) {
+  if (process.platform !== "win32") return ""
+
+  if (name === "powershell") {
+    return [
+      "PowerShell notes:",
+      "- This shell is Windows PowerShell 5.1 unless configured otherwise.",
+      "- Do NOT use Unix utilities such as tail, head, sed, awk, or grep. They are not PowerShell built-ins.",
+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+      "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+      "- Do NOT use /dev/null. Use $null.",
+      "- Do NOT use && or ||. Use `A; if ($?) { B }` when B depends on A succeeding.",
+      "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+    ].join("\n")
+  }
+
+  if (name === "pwsh") {
+    return [
+      "PowerShell notes:",
+      "- This shell is PowerShell 7+.",
+      "- Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may still be unavailable.",
+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+      "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+      "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+    ].join("\n")
+  }
+
+  if (name === "cmd") {
+    return [
+      "Windows cmd notes:",
+      "- Use cmd.exe syntax, not Bash or PowerShell syntax.",
+      "- Use `dir` for directory listing and `type` for simple file output.",
+      "- Do NOT use Unix utilities such as ls, tail, head, sed, awk, or grep.",
+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+      "- Use `NUL` for the null device, not `/dev/null`.",
+    ].join("\n")
+  }
+
+  return [
+    "Windows shell notes:",
+    "- This shell may not support Unix utilities. Prefer dedicated OpenCode tools for file operations.",
+  ].join("\n")
+}
+
+function listCommand(name: string) {
+  if (process.platform !== "win32") return "`ls`"
+  if (name === "powershell" || name === "pwsh") return "`Get-ChildItem`"
+  if (name === "cmd") return "`dir`"
+  return "the shell-native directory listing command"
+}
+
+function shellCompatibilityError(root: Node, shellName: string): string | undefined {
+  if (process.platform !== "win32") return
+  if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
+
+  for (const node of commands(root)) {
+    const command = parts(node)
+    const raw = command[0]?.text
+    if (!raw) continue
+    const name = raw.toLowerCase().replace(/\.exe$/, "")
+
+    if (UNIX_TEXT_COMMANDS.has(name)) {
+      return [
+        `The current shell is ${shellName}, but the command uses Unix utility \`${raw}\`.`,
+        `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
+        shellName === "powershell" || shellName === "pwsh"
+          ? `If a shell command is truly required, use PowerShell equivalents such as Get-Content -Tail or Select-String.`
+          : `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
+      ].join(" ")
+    }
+
+    if (shellName === "cmd" && name === "ls") {
+      return `The current shell is cmd.exe, where \`ls\` is not native. Use read/glob for file listing, or \`dir\` only when a shell command is required.`
+    }
+
+    if ((shellName === "powershell" || shellName === "pwsh") && name === "find") {
+      return `The current shell is ${shellName}; \`find\` is ambiguous on Windows. Use glob for file search or grep for content search.`
+    }
+  }
+}
+
 // TODO: we may wanna rename this tool so it works better on other shells
 export const BashTool = Tool.define(
   "bash",
@@ -570,8 +653,12 @@ export const BashTool = Tool.define(
         const name = Shell.name(shell)
         const chain =
           name === "powershell"
-            ? "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell 5.1 does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
-            : "If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead."
+            ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
+            : name === "pwsh"
+              ? "If commands depend on each other, use `&&` when the second command should only run after the first succeeds. Use `;` only for unconditional sequencing."
+              : name === "cmd"
+                ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
+                : "If commands depend on each other, use a single shell call with '&&' to chain them together."
         log.info("bash tool using shell", { shell })
 
         const limits = yield* trunc.limits()
@@ -581,6 +668,8 @@ export const BashTool = Tool.define(
             .replaceAll("${os}", process.platform)
             .replaceAll("${shell}", name)
             .replaceAll("${chaining}", chain)
+            .replaceAll("${shellGuidance}", shellGuidance(name))
+            .replaceAll("${listCommand}", listCommand(name))
             .replaceAll("${maxLines}", String(limits.maxLines))
             .replaceAll("${maxBytes}", String(limits.maxBytes)),
           parameters: Parameters,
@@ -595,6 +684,8 @@ export const BashTool = Tool.define(
               const timeout = params.timeout ?? DEFAULT_TIMEOUT
               const ps = PS.has(name)
               const root = yield* parse(params.command, ps)
+              const compatibility = shellCompatibilityError(root, name)
+              if (compatibility) throw new Error(compatibility)
               const scan = yield* collect(root, cwd, ps, shell)
               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
               yield* ask(ctx, scan)

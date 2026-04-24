@@ -1,16 +1,22 @@
-Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+Executes a shell command in the current workspace with optional timeout.
 
-Be aware: OS: ${os}, Shell: ${shell}
+Environment:
+- OS: ${os}
+- Shell: ${shell}
+- Working directory: ${directory}
 
 All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
+${shellGuidance}
+
 Before executing the command, please follow these steps:
 
 1. Directory Verification:
-   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location
-   - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
+   - If the command will create new directories or files, first verify the parent directory exists and is correct.
+   - Prefer the read or glob tools for workspace directory checks.
+   - If shell verification is necessary, use the shell-native listing command: ${listCommand}
 
 2. Command Execution:
    - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
@@ -28,12 +34,12 @@ Usage notes:
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
 
-  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
-    - File search: Use Glob (NOT find or ls)
-    - Content search: Use Grep (NOT grep or rg)
-    - Read files: Use Read (NOT cat/head/tail)
-    - Edit files: Use Edit (NOT sed/awk)
-    - Write files: Use Write (NOT echo >/cat <<EOF)
+  - Avoid using shell for file operations. Prefer dedicated tools:
+    - File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)
+    - Content search: Use Grep (NOT grep/rg/findstr/Select-String)
+    - Read files: Use Read (NOT cat/head/tail/type/Get-Content)
+    - Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)
+    - Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)
     - Communication: Output text directly (NOT echo/printf)
   - When issuing multiple commands:
     - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two Bash tool calls in parallel.

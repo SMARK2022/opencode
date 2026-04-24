@@ -1,6 +1,5 @@
 import { Context, Effect, Layer } from "effect"
 import { type as osType, release as osRelease } from "os"
-import path from "path"
 
 import { Instance } from "../project/instance"
 
@@ -21,6 +20,7 @@ import { Git } from "@/git"
 import { Flag } from "@/flag/flag"
 import { MCP } from "@/mcp"
 import { ToolRegistry } from "@/tool"
+import { Shell } from "@/shell/shell"
 
 // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
 const MAX_STATUS_CHARS = 2000
@@ -62,25 +62,42 @@ export const layer = Layer.effect(
     const gitContextCache = new Map<string, string>()
 
     const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
-      const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
-      const shellName = shell.includes("zsh") ? "zsh"
-        : shell.includes("bash") ? "bash"
-        : shell.includes("fish") ? "fish"
-        : shell.includes("nu")   ? "nu"
-        : shell.includes("cmd")  ? "cmd"
-        : shell.includes("powershell") ? "powershell"
-        : shell.includes("pwsh") ? "pwsh"
-        : path.basename(shell, ".exe").toLowerCase()
-
-      const shellLine = process.platform === "win32"
-        ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
-        : shellName
+      const actualShell = Shell.acceptable()
+      const shellName = Shell.name(actualShell)
+      const shellNotes =
+        process.platform !== "win32"
+          ? [`Shell: ${shellName}`]
+          : shellName === "powershell"
+            ? [
+                `Shell: powershell (Windows PowerShell 5.1)`,
+                `Shell syntax: use PowerShell syntax, not Unix shell syntax.`,
+                `Do NOT use Unix-only commands such as tail, head, sed, awk, or grep in shell commands.`,
+                `Do NOT use /dev/null. Use $null or dedicated tools instead.`,
+                `Do NOT use && or || in Windows PowerShell 5.1. Use A; if ($?) { B } for conditional chaining.`,
+              ]
+            : shellName === "pwsh"
+              ? [
+                  `Shell: pwsh (PowerShell 7+)`,
+                  `Shell syntax: use PowerShell syntax. Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may not exist.`,
+                  `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`,
+                ]
+              : shellName === "cmd"
+                ? [
+                    `Shell: cmd.exe`,
+                    `Shell syntax: use Windows cmd syntax, not Bash or PowerShell syntax.`,
+                    `Use dir instead of ls, type instead of cat, and do not use tail/head/sed/awk/grep.`,
+                    `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`,
+                  ]
+                : [
+                    `Shell: ${shellName}`,
+                    `Shell syntax: this Windows shell may not support Unix commands. Prefer dedicated OpenCode tools for file operations.`,
+                  ]
 
       const osVersion = process.platform === "win32"
         ? `${osType()} ${osRelease()}`
         : `${osType()} ${osRelease()}`
 
-      return { shellLine, osVersion }
+      return { shellNotes, osVersion }
     })
 
     const getKnowledgeCutoff = (modelApiId: string): string | null => {
@@ -106,6 +123,12 @@ export const layer = Layer.effect(
       if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
       if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
       if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
+      if (has("todowrite"))  items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
+      if (process.platform === "win32") {
+        items.push(
+          ` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`,
+        )
+      }
 
       items.push(
         ` - Reserve bash for system commands and terminal operations requiring shell execution`,
@@ -117,6 +140,15 @@ export const layer = Layer.effect(
         `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
         `Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`,
       )
+
+      if (has("todo")) {
+        items.push(
+          ``,
+          `Keep todo state current while working: only one item should be in_progress at a time.`,
+          `Move an item to in_progress before completing it; do not jump directly from pending to completed.`,
+          `If your understanding changes, update the todo list before continuing implementation.`,
+        )
+      }
 
       return ["# Using your tools", ...items].join("\n")
     }
@@ -179,7 +211,7 @@ export const layer = Layer.effect(
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const gitContext = yield* getGitContext()
-        const { shellLine, osVersion } = yield* getEnvExtras()
+        const { shellNotes, osVersion } = yield* getEnvExtras()
         const isWorktree = Instance.worktree !== Instance.directory
         const cutoff = getKnowledgeCutoff(model.api.id)
         const toolIds = yield* registry.ids()
@@ -192,7 +224,7 @@ export const layer = Layer.effect(
           // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
           ...gitContext.split("\n").map((line) => `  ${line}`),
           `  Platform: ${process.platform}`,
-          `  Shell: ${shellLine}`,
+          ...shellNotes.map((line) => `  ${line}`),
           `  OS Version: ${osVersion}`,
           ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
           `  Today's date: ${new Date().toDateString()}`,
@@ -219,6 +251,21 @@ Actions that typically require user confirmation before proceeding:
 - Modifying CI/CD pipelines or shared infrastructure
 
 When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`,
+          `# Shared worktree
+You may be working in a dirty worktree with user or other-agent changes.
+- If unknown changes are in files you need to edit, read them first and work with the current contents.
+- If unknown changes are unrelated to your task, ignore them.
+- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
+- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
+          `# Verification
+Before reporting a coding task complete, verify the change when feasible.
+Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
+If you cannot verify, state that plainly and explain the blocker.`,
+          `# Context continuity
+The conversation may be compacted or resumed from a summary when context gets long.
+After compaction, resume from the summary and current messages rather than restarting from scratch.
+Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
+Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
           `# Output efficiency
 Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
 

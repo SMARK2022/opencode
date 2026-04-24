@@ -2,24 +2,32 @@ Launch a new agent to handle complex, multistep tasks autonomously.
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
 
-When to use the Task tool:
-- When you are instructed to execute custom slash commands. Use the Task tool with the slash command invocation as the entire prompt. The slash command can take arguments. For example: Task(description="Check the file", prompt="/check-file path/to/file.py")
+Use task when:
+- The user invokes a custom slash command; pass the slash command invocation as the full prompt.
+- A broad codebase question requires multiple rounds of search/read synthesis.
+- A non-blocking subtask can run in parallel while you continue useful local work.
+- A specialized agent clearly matches the task and can materially advance the request.
 
-When NOT to use the Task tool:
-- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
-- Other tasks that are not related to the agent descriptions above
+Do NOT use task when:
+- You need to read a known file path; use read.
+- You need to find files by name; use glob.
+- You need to search known keywords or a small set of files; use grep/read.
+- The next local step is blocked on the result and you can answer it faster yourself.
+- The task is trivial or would duplicate work you are already doing.
 
+Prompting rules:
+- Make the prompt self-contained unless resuming with task_id.
+- State whether the agent should research only or edit files.
+- For code-editing subtasks, specify the owned files/modules and avoid overlapping write scopes with other agents.
+- Include relevant paths, constraints, and expected final output.
+- Ask for concise findings when you only need a summary.
+- Tell the agent how to verify its work when verification is possible.
 
 Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result. The output includes a task_id you can reuse later to continue the same subagent session.
-3. Each agent invocation starts with a fresh context unless you provide task_id to resume the same subagent session (which continues with its previous messages and tool outputs). When starting fresh, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
-4. The agent's outputs should generally be trusted
-5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
-6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-
+- Launch independent agents in parallel in one response when their scopes do not overlap.
+- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
+- Reuse task_id only when continuing the same subagent context is useful.
+- The agent result is returned to you, not directly to the user; summarize relevant results yourself.
 Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
 
 <example_agent_descriptions>
