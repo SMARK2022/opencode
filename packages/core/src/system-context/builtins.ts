@@ -37,9 +37,16 @@ export const toolUsage = (ids: readonly string[]) => {
     ...(ids.includes("grep") ? [" - To search file content use the grep tool instead of grep/rg"] : []),
     ...(ids.includes("glob") ? [" - To find files use the glob tool instead of find or ls"] : []),
     // Todo 工具也受当前 turn 权限约束，不能从静态提示推断其存在。
-    ...(ids.includes("todowrite") ? ["# Task Management", "Use the TodoWrite tool to plan non-trivial tasks and track progress. Mark todos as completed as soon as each task is done; do not batch completion updates."] : []),
+    ...(ids.includes("todowrite") ? ["# Task Management", "Use the todowrite tool to plan non-trivial tasks and track progress. Mark todos as completed as soon as each task is done; do not batch completion updates."] : []),
     " - Reserve bash for system commands and terminal operations requiring shell execution",
-    "You can call multiple tools in a single response. When there are no dependencies between calls, make them IN PARALLEL. Maximize parallel tool calls to increase efficiency. Only call sequentially when one result is needed to inform the next.",
+    // 分段分隔是格式契约，避免指引紧贴前面的能力列表。
+    "",
+    "PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.",
+    "Issue independent tool calls in the same response so they can run in parallel.",
+    "Never chain bash commands with separators like `echo \"====\";` to simulate grouped output, because it renders poorly for the user.",
+    "Parallel writes are only appropriate when target files or edit ranges cannot conflict.",
+    "For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.",
+    "Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.",
   ].join("\n")
 }
 

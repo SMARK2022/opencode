@@ -58,10 +58,15 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
+import PROMPT_DEFAULT from "../src/system-context/prompt/default.txt"
+import { Global } from "@opencode-ai/core/global"
+import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
+import path from "path"
 
+const environment = { ...process.env, OPENCODE_EXPERIMENTAL_PLAN_MODE: "false" }
 const requests: LLMRequest[] = []
 let response: LLMEvent[] = []
 let responses: LLMEvent[][] | undefined
@@ -116,7 +121,14 @@ const expectedToolGuidance = `# Using your tools
 Do NOT use the bash tool when a dedicated tool is available.
 Using dedicated tools lets the user review and track your work:
  - Reserve bash for system commands and terminal operations requiring shell execution
-You can call multiple tools in a single response. When there are no dependencies between calls, make them IN PARALLEL. Maximize parallel tool calls to increase efficiency. Only call sequentially when one result is needed to inform the next.`
+
+PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.
+Issue independent tool calls in the same response so they can run in parallel.
+Never chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.
+Parallel writes are only appropriate when target files or edit ranges cannot conflict.
+For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.
+Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`
+// 全文期望检查真实 request.system，echo-only fixture 的空文件能力不能因公共指引扩展而获得 read/edit/write 广告。
 // 身份固定到 fixture 的真实 provider/id；未知型号没有 cutoff，不能从持久 baseline 或显示名拼造。
 const expectedModelIdentity = "You are powered by the model named fake-model. The exact model ID is fake/fake-model"
 const expectedReplacementIdentity = "You are powered by the model named replacement. The exact model ID is fake/replacement"
@@ -302,7 +314,7 @@ const it = testEffect(
       [SessionExecution.node, execution],
       [Config.node, config],
     ],
-  ),
+  ).pipe(Layer.provide(Layer.succeed(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment)))),
 )
 const sessionID = SessionV2.ID.make("ses_runner_test")
 const otherSessionID = SessionV2.ID.make("ses_runner_other")
@@ -328,6 +340,7 @@ const insertSession = (id: SessionV2.ID) =>
 const setup = Effect.gen(function* () {
   const { db } = yield* Database.Service
   response = []
+  environment.OPENCODE_EXPERIMENTAL_PLAN_MODE = "false"
   systemBaseline = "Initial context"
   systemRemoved = false
   systemUnavailable = false
@@ -866,8 +879,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
       ])
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
@@ -886,7 +899,7 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("includes the effective default agent system before durable context", () =>
+  it.live("includes the effective default agent system before durable context", () =>
     Effect.gen(function* () {
       yield* setup
       const agent = yield* AgentV2.Service
@@ -904,6 +917,54 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+      const db = (yield* Database.Service).db
+      const row = yield* db.select({ created: SessionTable.time_created, slug: SessionTable.slug }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+      if (!row) throw new Error("expected persisted Session")
+      const file = path.join(Global.Path.data, "plans", `${row.created}-${row.slug}.md`)
+      environment.OPENCODE_EXPERIMENTAL_PLAN_MODE = "true"
+      const resume = () => session.resume(sessionID)
+      yield* agent.transform(editor => editor.update(AgentV2.ID.make("plan"), item => { item.mode = "primary" }))
+      yield* session.switchAgent({ sessionID, agent: "plan" })
+      yield* session.prompt({ sessionID, prompt: { text: "Plan the requested change" }, resume: false })
+      requests.length = 0
+      response = fragmentFixture("text", "text-plan", ["Planned"]).completeEvents
+      yield* resume()
+      const planning = SessionPrompts.planMode.replace("${planInfo}", () => `No plan file exists yet. You should create your plan at ${file} using the write tool.`)
+      expect(requests.map(userTexts).at(-1)).toContain(planning)
+      const synthetic = () => session.context(sessionID).pipe(Effect.map(history => history.filter(message => message.type === "synthetic")))
+      expect((yield* synthetic()).map(message => message.text)).toEqual([planning])
+      // 续轮读取持久synthetic，不产生额外用户输入或每轮重复记录同一提醒。
+      yield* resume()
+      expect(requests.map(userTexts).at(-1)?.filter(text => text === planning)).toHaveLength(1)
+      expect(yield* synthetic()).toHaveLength(1)
+      yield* Effect.promise(() => Bun.write(file, "# Accepted plan"))
+      yield* session.switchAgent({ sessionID, agent: "build" })
+      yield* session.prompt({ sessionID, prompt: { text: "Implement the plan" }, resume: false })
+      response = fragmentFixture("text", "text-build-plan", ["Built"]).completeEvents
+      yield* resume()
+      const building = `${SessionPrompts.buildSwitch}\n\nA plan file exists at ${file}. You should execute on the plan defined within it`
+      expect(requests.map(userTexts).at(-1)).toContain(building)
+      expect((yield* synthetic()).map(message => message.text)).toEqual([planning, building])
+      yield* resume()
+      expect(requests.map(userTexts).at(-1)?.filter(text => text === building)).toHaveLength(1)
+      expect(yield* synthetic()).toHaveLength(2)
+      expect(requests).toHaveLength(4)
+      const admitted = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
+      expect(admitted).toHaveLength(3)
+      // 旧阶段相同正文不能压住当前模式；不仅检查出现过，还检查本轮模型与durable尾部。
+      const existingPlan = SessionPrompts.planMode.replace("${planInfo}", () => `A plan file already exists at ${file}. You can read it and make incremental edits using the edit tool.`)
+      for (const mode of ["plan", "build", "plan", "build"]) {
+        yield* session.switchAgent({ sessionID, agent: mode })
+        yield* session.prompt({ sessionID, prompt: { text: `Switch to ${mode} again` }, resume: false })
+        yield* resume()
+        const expected = mode === "plan" ? existingPlan : building
+        expect(requests.map(userTexts).at(-1)?.at(-1)).toBe(expected)
+        expect((yield* synthetic()).at(-1)?.text).toBe(expected)
+      }
+      expect(yield* synthetic()).toHaveLength(6)
+      expect(requests).toHaveLength(8)
+      const repeated = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
+      expect(repeated).toHaveLength(7)
     }),
   )
 
@@ -985,8 +1046,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
       ])
       expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
     }),
@@ -1019,7 +1080,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
       ])
     }),
   )
@@ -1137,7 +1198,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
       expect(requests.map((request) => request.model)).toEqual([model])
       // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context", expectedToolGuidance, expectedModelIdentity]])
+      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity]])
     }),
   )
 
@@ -1187,9 +1248,9 @@ describe("SessionRunnerLLM", () => {
 
       // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
       ])
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
@@ -1233,9 +1294,9 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
       ])
     }),
   )
@@ -1271,8 +1332,8 @@ describe("SessionRunnerLLM", () => {
 
       // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-        ["Replacement context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Replacement context", expectedToolGuidance, expectedModelIdentity],
       ])
       yield* replaySessionProjection(sessionID)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
@@ -1688,7 +1749,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context", expectedToolGuidance, expectedModelIdentity])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity])
       expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
     }),
   )
@@ -1887,8 +1948,8 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
       ])
       expect(systemTexts(requests[1]!)).toContain("Replacement context")
     }),
