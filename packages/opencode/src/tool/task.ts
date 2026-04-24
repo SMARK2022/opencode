@@ -1,5 +1,5 @@
 import * as Tool from "./tool"
-import DESCRIPTION from "./task.txt"
+import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
 import { ToolJsonSchema } from "./json-schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { BackgroundJob } from "@/background/job"
@@ -360,8 +360,8 @@ export const TaskTool = Tool.define(
 
     return {
       description: flags.experimentalBackgroundSubagents
-        ? [DESCRIPTION, BACKGROUND_DESCRIPTION].join("\n\n")
-        : DESCRIPTION,
+        ? [TaskPrompt.description, BACKGROUND_DESCRIPTION].join("\n\n")
+        : TaskPrompt.description,
       parameters: Parameters,
       jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>

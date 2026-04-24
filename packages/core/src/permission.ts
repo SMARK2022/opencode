@@ -141,7 +141,8 @@ const layer = Layer.effect(
       const session = yield* sessions.get(sessionID)
       if (!session) return yield* new SessionV2.NotFoundError({ sessionID })
       const agent = yield* agents.resolve(agentID ?? session.agent)
-      return agent?.permissions ?? missingAgentPermissions
+      // 子会话限制位于代理规则之后；审批和实际执行不能只看代理默认allow。
+      return merge(agent?.permissions ?? missingAgentPermissions, yield* sessions.permissions(sessionID))
     })
 
     function denied(input: AssertInput, rules: Permission.Ruleset) {

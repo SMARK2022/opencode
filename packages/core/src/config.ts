@@ -33,6 +33,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   shell: Schema.String.pipe(Schema.optional).annotate({
     description: "Default shell to use for terminal and shell tool execution",
   }),
+  // 与V1相同的深度配置归运行时消费者，不借工具广告绕过父子Session约束。
+  subagent_depth: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.optional).annotate({
+    description: "Maximum subagent nesting depth; defaults to one level",
+  }),
   model: Schema.String.pipe(Schema.optional).annotate({
     description: "Default model to use when no session or agent model is selected",
   }),

@@ -218,6 +218,37 @@ describe("tool.shell", () => {
   )
 })
 
+it.live("guards Windows command heads without rejecting literal arguments", () => Effect.gen(function* () {
+  // 平台无关地验证实际共用 renderer；5.1/7+/cmd 的变量与链式规则不能混用。
+  expect(Shell.guidance("powershell", "win32")).toContain("do NOT use && or ||")
+  expect(Shell.guidance("pwsh", "win32")).toContain("PowerShell 7+: && and || are supported")
+  expect(Shell.guidance("cmd", "win32")).toContain("%NAME%")
+  expect(Shell.guidance("bash", "win32")).not.toContain("Do NOT use Unix text utilities")
+  if (process.platform !== "win32") return
+  for (const item of shells.filter((item) => PS.has(item.label) || item.label === "cmd")) {
+    // 显式配置所测 shell，环境默认值不能冒充本用例的执行配置。
+    const tmp = yield* tmpdirScoped({ config: { shell: item.shell } })
+    yield* runIn(tmp, Effect.gen(function* () {
+      const tool = yield* initShell()
+      expect(tool.description).toContain("captured output is decoded as UTF-8")
+      const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+      for (const command of ["head -n 1 missing", "grep.exe needle missing", item.label === "cmd" ? "ls" : "find ."]) {
+        // 真正命令头在执行与权限之前被阻止，不调用外部 Unix 程序来证明失败。
+        const error = yield* fail({ command }, capture(requests))
+        expect(error.message).toMatch(/Unix utility|instead of ls|ambiguous/)
+      }
+      expect(requests).toEqual([])
+      // 同样的文字作为参数必须正常执行，阻止基于整串关键词的假 guard。
+      const result = yield* tool.execute({
+        command: item.label === "cmd" ? "echo head grep" : "Write-Output 'head grep'",
+        description: "Prints literal words without invoking utilities",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.output).toContain("head grep")
+    }))
+  }
+}))
+
 describe("tool.shell permissions", () => {
   each("asks for bash permission with correct pattern", () =>
     Effect.gen(function* () {
@@ -988,17 +1019,18 @@ describe("tool.shell permissions", () => {
     }),
   )
 
-  each("always pattern has space before wildcard to not include different commands", () =>
+  each("always pattern has space before wildcard to not include different commands", (item) =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
       yield* runIn(
         tmp,
         Effect.gen(function* () {
           const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-          yield* run({ command: "ls -la" }, capture(requests))
+          // cmd 的 ls 被真实 guard 拦截；原权限 wildcard 断言继续用原生命令验证。
+          yield* run({ command: item.label === "cmd" ? "dir /a" : "ls -la" }, capture(requests))
           const bashReq = requests.find((r) => r.permission === "bash")
           expect(bashReq).toBeDefined()
-          expect(bashReq!.always[0]).toBe("ls *")
+          expect(bashReq!.always[0]).toBe(item.label === "cmd" ? "dir *" : "ls *")
         }),
       )
     }),

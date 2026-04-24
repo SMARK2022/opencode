@@ -5,8 +5,10 @@ import { spawn, type ChildProcess } from "child_process"
 import { readFile } from "fs/promises"
 import { statSync } from "fs"
 import { setTimeout as sleep } from "node:timers/promises"
+import { fileURLToPath } from "url"
 import { Flag } from "./flag/flag"
 import { FSUtil } from "./fs-util"
+import { lazy } from "./util/lazy"
 import { which } from "./util/which"
 
 const SIGKILL_TIMEOUT_MS = 200
@@ -223,4 +225,147 @@ acceptable.reset = () => {
 export async function list(): Promise<Item[]> {
   const shells = process.platform === "win32" ? win() : await unix()
   return shells.filter((s) => resolve(s)).map(info)
+}
+
+const resolveWasm = (asset: string) => {
+  if (asset.startsWith("file://")) return fileURLToPath(asset)
+  if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
+  const url = new URL(asset, import.meta.url)
+  return fileURLToPath(url)
+}
+
+// 两套语法共用一次惰性初始化，V1 与 Core 使用同一缓存。
+const parser = lazy(async () => {
+  const { Parser, Language } = await import("web-tree-sitter")
+  const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
+    with: { type: "wasm" },
+  })
+  const treePath = resolveWasm(treeWasm)
+  await Parser.init({
+    locateFile() {
+      return treePath
+    },
+  })
+  const { default: bashWasm } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, {
+    with: { type: "wasm" },
+  })
+  const { default: psWasm } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, {
+    with: { type: "wasm" },
+  })
+  const bashPath = resolveWasm(bashWasm)
+  const psPath = resolveWasm(psWasm)
+  const [bashLanguage, psLanguage] = await Promise.all([Language.load(bashPath), Language.load(psPath)])
+  const bash = new Parser()
+  bash.setLanguage(bashLanguage)
+  const ps = new Parser()
+  ps.setLanguage(psLanguage)
+  return { bash, ps }
+})
+
+export async function parse(command: string, ps: boolean) {
+  const p = await parser()
+  const tree = (ps ? p.ps : p.bash).parse(command)
+  if (!tree) throw new Error("Failed to parse command")
+  return tree
+}
+
+// 只渲染已选择的 shell，调用方继续拥有各自的配置优先级与 fallback。
+export function guidance(file: string, platform: NodeJS.Platform) {
+  const shell = name(file)
+  return [
+    `Shell: ${file}`,
+    // PowerShell 跨平台仍使用自身语法，不能根据 OS 把它误判为 Bash。
+    ...(ps(file) ? [
+      "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
+      // 5.1 与 7+ 链式能力不同，分号始终是无条件顺序执行。
+      shell === "powershell" ? "Windows PowerShell 5.1: do NOT use && or ||. Use A; if ($?) { B } for success-dependent commands." : "PowerShell 7+: && and || are supported; use ; only for unconditional sequencing.",
+    ] : shell === "cmd" ? [
+      // cmd 的变量与空设备均不同于 PowerShell 和 POSIX。
+      "Use cmd.exe syntax, %NAME% for environment variables, NUL instead of /dev/null, and && for success-dependent commands.",
+    ] : ["Use this shell's native syntax."]),
+    // Git Bash 保留 Unix 工具；严格禁用仅面向 Windows 原生 shell。
+    ...(platform === "win32" && ["powershell", "pwsh", "cmd"].includes(shell) ? [
+      "Do NOT use Unix text utilities tail/head/sed/awk/grep for file operations. Prefer available dedicated tools.",
+      // 仅必要的终端处理给出等价命令，不宣称当前请求拥有未注册工具。
+      shell === "cmd" ? "For necessary terminal checks use dir/type/findstr." : "For necessary terminal checks use Test-Path, Get-Content -Tail or Select-String.",
+    ] : []),
+    // 两条执行路径都按 UTF-8 解码，非 ASCII 程序输出必须使用相同编码。
+    "For non-ASCII output, configure the shell/native program to emit UTF-8; captured output is decoded as UTF-8.",
+  ].join("\n")
+}
+
+// 只识别直接调用和顶层命令链；复杂脚本保留 Core 原有权限路径，不在这里补写 shell 解释器。
+export function* commandHeads(command: string, shellName: string) {
+  if (!["powershell", "pwsh", "cmd"].includes(shellName)) return
+  const powershell = shellName !== "cmd"
+  const separators = powershell ? ";|&\r\n" : "|&\r\n"
+  const escapes: Record<string, string> = { "0": "\0", a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", ...(shellName === "pwsh" ? { e: "\x1b" } : {}) }
+  let head = true
+  let invoked = false
+  let depth = 0
+  for (let index = 0; index < command.length;) {
+    const character = command[index]
+    if (powershell && character === "#") {
+      while (index < command.length && command[index] !== "\n") index++
+      continue
+    }
+    // cmd 在命令起点的括号是命令组，不应遮掉组内首个实际命令。
+    if (!powershell && head && character === "(") { index++; continue }
+    // 嵌套表达式和脚本块不属于此浅层检查，避免把标签、数组值或哈希键当命令。
+    if ("({".includes(character)) { depth++; head = false; index++; continue }
+    if (")}".includes(character)) { depth = Math.max(0, depth - 1); index++; continue }
+    if (separators.includes(character)) {
+      if (!depth) { invoked = powershell && character === "&" && head; head = true }
+      index++
+      continue
+    }
+    if (/\s/.test(character)) { index++; continue }
+    const quoted = character === '"' || (powershell && character === "'")
+    let quote = ""
+    let text = ""
+    while (index < command.length) {
+      const current = command[index]
+      // 引号与转义只用于划分参数，参数中的分隔符不能制造新命令。
+      if (current === (powershell ? "`" : "^") && (powershell ? quote !== "'" : !quote)) {
+        index++
+        text += (powershell ? escapes[command[index] ?? ""] : undefined) ?? command[index] ?? ""
+        index++
+        continue
+      }
+      if (quote) {
+        if (current === quote) {
+          if (powershell && command[index + 1] === quote) { text += current; index += 2; continue }
+          quote = ""
+        } else text += current
+        index++
+        continue
+      }
+      if (current === '"' || (powershell && current === "'")) { quote = current; index++; continue }
+      if (/\s/.test(current) || separators.includes(current) || "(){}".includes(current)) break
+      text += current
+      index++
+    }
+    if (!head || depth) continue
+    // 保留常见显式调用形式，不把 PowerShell 裸字符串当成可执行文件。
+    if ((powershell && text === ".") || (!powershell && text.toLowerCase() === "call")) { invoked = true; continue }
+    if (text && (!powershell || !quoted || invoked)) yield text
+    head = false
+    invoked = false
+  }
+}
+
+// 两条执行路径共用分类；调用方传 AST 或词法命令头，不传任意参数文字。
+export function compatibilityError(heads: Iterable<string>, shellName: string) {
+  if (process.platform !== "win32" || !["powershell", "pwsh", "cmd"].includes(shellName)) return
+  for (const raw of heads) {
+    // 源guard仅匹配裸命令名，显式路径交给原权限/advisory，不用basename扩大范围。
+    const file = raw.replace(/^[&.]\s+/, "").replace(/^(['"])(.*)\1$/, "$2")
+    const command = (shellName === "cmd" ? file.replace(/^@/, "") : file).toLowerCase().replace(/\.exe$/, "")
+    if (["tail", "head", "sed", "awk", "grep"].includes(command)) {
+      return `The current shell is ${shellName}, but the command uses Unix utility ${raw}. Prefer available dedicated file tools; if terminal processing is required, use ${shellName === "cmd" ? "dir/type/findstr" : "Get-Content -Tail or Select-String"}.`
+    }
+    // ls 是 PS 的目录别名，只有 cmd 需要拦截；find 在 PS 语义含糊。
+    if (shellName === "cmd" && command === "ls") return "The current shell is cmd.exe; use available directory tools or dir instead of ls."
+    if (shellName !== "cmd" && command === "find") return `The current shell is ${shellName}; find is ambiguous on Windows. Prefer available dedicated search tools.`
+  }
 }

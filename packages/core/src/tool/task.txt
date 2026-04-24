@@ -1,0 +1,34 @@
+Launch a new agent to handle complex, multistep tasks autonomously.
+
+When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+
+<!-- 委派前先判断收益；已知路径的读取不应绕到另一个 agent。 -->
+Use task when:
+- The user invokes a custom slash command; pass the slash command invocation as the full prompt.
+- A broad codebase question requires multiple rounds of search/read synthesis.
+- A non-blocking subtask can run in parallel while you continue useful local work.
+- A specialized agent clearly matches the task and can materially advance the request.
+
+Do NOT use task when:
+- You need to read a known file path; use read.
+- You need to find files by name; use glob.
+- You need to search known keywords or a small set of files; use grep/read.
+- The next local step is blocked on the result and you can answer it faster yourself.
+- The task is trivial or would duplicate work you are already doing.
+
+<!-- 新 agent 没有当前上下文，明确所有权与验证要求才能避免重叠修改。 -->
+Prompting rules:
+- Make the prompt self-contained unless resuming with task_id.
+- State whether the agent should research only or edit files.
+- For code-editing subtasks, specify the owned files/modules and avoid overlapping write scopes with other agents.
+- Include relevant paths, constraints, and expected final output.
+- Ask for concise findings when you only need a summary.
+- Tell the agent how to verify its work when verification is possible.
+
+
+Usage notes:
+<!-- 回传结果供主 agent 整合；成功结论仍需查看实际修改与验证证据。 -->
+- Launch independent agents in parallel in one response when their scopes do not overlap.
+- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
+- Reuse task_id only when continuing the same subagent context is useful.
+- The agent result is returned to you, not directly to the user; summarize relevant results yourself.
