@@ -24,7 +24,15 @@ import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
-import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
+import {
+  BoxRenderable,
+  ScrollBoxRenderable,
+  addDefaultParsers,
+  TextAttributes,
+  RGBA,
+  MouseButton,
+  type MouseEvent,
+} from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import type {
   AssistantMessage,
@@ -1930,13 +1938,23 @@ function BlockTool(props: {
   title?: string
   children: JSX.Element
   onClick?: () => void
+  // 右键是独立动作，不能复用左键折叠导致完成态无法切换模型视图。
+  onRightClick?: () => void
   part?: ToolPart
   spinner?: boolean
+  contextView?: boolean
+  contextLabel?: string
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+  // 上下文状态优先于 hover，鼠标移入不能抹掉当前视图的颜色提示。
+  const background = createMemo(() => {
+    if (props.contextView) return theme.diffContextBg
+    if (hover()) return theme.backgroundMenu
+    return theme.backgroundPanel
+  })
   return (
     <box
       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
@@ -1946,13 +1964,21 @@ function BlockTool(props: {
       paddingLeft={2}
       marginTop={1}
       gap={1}
-      backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
+      backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
-      borderColor={theme.background}
-      onMouseOver={() => props.onClick && setHover(true)}
+      borderColor={props.contextView ? theme.info : theme.background}
+      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt?: MouseEvent) => {
+        // 文本选择优先于视图动作，右键不会在复制日志时意外切换内容。
         if (renderer.getSelection()?.getSelectedText()) return
+        if (evt?.button === MouseButton.RIGHT) {
+          if (!props.onRightClick) return
+          evt.preventDefault()
+          evt.stopPropagation()
+          props.onRightClick()
+          return
+        }
         props.onClick?.()
       }}
     >
@@ -1963,6 +1989,7 @@ function BlockTool(props: {
             fallback={
               <text paddingLeft={3} fg={theme.textMuted}>
                 {title()}
+                <Show when={props.contextView && props.contextLabel}> · {props.contextLabel}</Show>
               </text>
             }
           >
@@ -1983,7 +2010,13 @@ function Shell(props: ToolProps) {
   const pathFormatter = usePathFormatter()
   const ctx = use()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  const output = createMemo(() => stripAnsi(stringValue(props.metadata.output)?.trim() ?? ""))
+  const [showContextOutput, setShowContextOutput] = createSignal(false)
+  // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
+  const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
+  const output = createMemo(() => {
+    const text = showContextOutput() && contextOutputAvailable() ? props.output : stringValue(props.metadata.output)
+    return stripAnsi(text?.trim() ?? "")
+  })
   const [expanded, setExpanded] = createSignal(false)
   const maxLines = 10
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
@@ -2007,6 +2040,13 @@ function Shell(props: ToolProps) {
     return `# Running in ${wd}`
   })
 
+  // 切换时展开完整窗口，避免压缩前后行数变化被旧的折叠状态隐藏。
+  const toggleContextOutput = () => {
+    if (!contextOutputAvailable()) return
+    setExpanded(true)
+    setShowContextOutput((prev) => !prev)
+  }
+
   return (
     <Switch>
       <Match when={stringValue(props.metadata.output) !== undefined}>
@@ -2014,10 +2054,17 @@ function Shell(props: ToolProps) {
           title={title()}
           part={props.part}
           onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+          onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
+          contextView={showContextOutput()}
+          contextLabel="returned to model"
         >
           <box gap={1}>
             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
+            </Show>
+            {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
+            <Show when={showContextOutput() && contextOutputAvailable()}>
+              <text fg={theme.info}>Model context output</text>
             </Show>
             <Show when={output()}>
               <text fg={theme.text}>{limited()}</text>

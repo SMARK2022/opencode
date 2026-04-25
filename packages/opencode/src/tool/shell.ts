@@ -12,6 +12,7 @@ import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -401,6 +402,7 @@ export const ShellTool = Tool.define(
         cwd: string
         env: NodeJS.ProcessEnv
         timeout: number
+        compressOutput: boolean
       },
       ctx: Tool.Context,
     ) {
@@ -441,6 +443,10 @@ export const ShellTool = Tool.define(
         ).pipe(Effect.catch(() => Effect.void))
       })
 
+      // 诊断观察完整流，不能只观察已经丢弃旧块的内存窗口。
+      const diag = new BashDiagnosticCollector()
+      const started = Date.now()
+
       yield* ctx.metadata({
         metadata: {
           output: "",
@@ -456,6 +462,8 @@ export const ShellTool = Tool.define(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
               const size = Buffer.byteLength(chunk, "utf-8")
               list.push({ text: chunk, size })
+              // 采样容量独立于 capture 限额，无换行输出也不能无限积累。
+              diag.push(chunk)
               used += size
               while (used > keep && list.length > 1) {
                 const item = list.shift()
@@ -535,19 +543,28 @@ export const ShellTool = Tool.define(
       }
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
-      const end = tail(raw, limits.maxLines, limits.maxBytes)
+      // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
+      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
+      diag.end()
+      const diagnostic = diag.snapshot()
+      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
-      if (!file && end.cut) {
+      // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
+      if (!file && (end.cut || compressed.stats.applied || diagnostic.discardedChars > 0)) {
         file = yield* trunc.write(raw)
       }
 
       let output = end.text
       if (!output) output = "(no output)"
 
-      if (cut && file) {
-        output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
+      // 路径必须进入模型文本，metadata.outputPath 不会自动投影给模型。
+      if (file && (cut || compressed.stats.applied || diagnostic.discardedChars > 0)) {
+        output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
       }
 
+      // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
+      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+      if (appendix) output += "\n\n" + appendix
       if (meta.length > 0) {
         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
       }
@@ -557,7 +574,14 @@ export const ShellTool = Tool.define(
           output: last || preview(output),
           exit: code,
           truncated: cut,
-          ...(cut && file ? { outputPath: file } : {}),
+          ...((cut || compressed.stats.applied || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+          // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
+          ...bashCompressionMetadata(compressed.stats),
+          durationMs: Date.now() - started,
+          // 错误频率与采样遗漏独立持久化，未观察的长行中段不能被计为无错误。
+          diagnosticErrorLikeLines: diagnostic.errorLikeLines,
+          diagnosticWarningLikeLines: diagnostic.warningLikeLines,
+          diagnosticDiscardedChars: diagnostic.discardedChars,
         },
         output,
       }
@@ -570,10 +594,13 @@ export const ShellTool = Tool.define(
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
+        // 使用既有 per-shell renderer 的正文，不恢复第二套 shell 语法说明。
+        const compressionEnabled = cfg.tool_output?.bash_compression ?? true
+        const compressionGuidance = compressionEnabled ? "Bash output compression is enabled by default. Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting." : ""
         yield* Effect.logInfo("shell tool using shell", { shell })
 
         return {
-          description: prompt.description,
+          description: prompt.description + (compressionGuidance ? "\n\n" + compressionGuidance : ""),
           parameters: prompt.parameters,
           execute: (params: Parameters, ctx: Tool.Context) =>
             Effect.gen(function* () {
@@ -586,6 +613,8 @@ export const ShellTool = Tool.define(
               }
               const timeout = params.timeout ?? defaultTimeoutMs
               const ps = Shell.ps(shell)
+              // 全局 false 优先于单次 true；精确排版可由单次 false 独立关闭。
+              const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
               yield* Effect.scoped(
                 Effect.gen(function* () {
                   const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
@@ -607,6 +636,7 @@ export const ShellTool = Tool.define(
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
+                  compressOutput,
                 },
                 ctx,
               )

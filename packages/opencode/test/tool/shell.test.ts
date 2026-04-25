@@ -1187,6 +1187,12 @@ describe("tool.shell truncation", () => {
           command: fill("bytes", byteCount),
         })
         mustTruncate(result)
+        // 无换行日志必须报告诊断采样损失；producer 的原始文件仍保持完整字节数。
+        expect(result.metadata.diagnosticDiscardedChars).toBeGreaterThan(0)
+        const retained = result.metadata.outputPath
+        if (typeof retained !== "string") throw new Error("expected retained raw output")
+        const fs = yield* FSUtil.Service
+        expect(yield* fs.readFileString(retained)).toBe("a".repeat(byteCount))
         expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
         expect(result.output).toMatch(/Full output saved to:\s+\S+/)
       }),
@@ -1202,6 +1208,15 @@ describe("tool.shell truncation", () => {
         })
         expect((result.metadata as { truncated?: boolean }).truncated).toBe(false)
         expect(result.output).toContain("1")
+        // 小于截断限额的行内重复也要向模型广告原文路径，不能只藏在 metadata。
+        const compacted = yield* run({ command: fill("bytes", 1000), compress_output: true })
+        expect(compacted.metadata.compressed).toBe(true)
+        expect(compacted.metadata.truncated).toBe(false)
+        const retained = compacted.metadata.outputPath
+        if (typeof retained !== "string") throw new Error("expected compacted raw output")
+        expect(compacted.output).toContain(retained)
+        const fs = yield* FSUtil.Service
+        expect(yield* fs.readFileString(retained)).toBe("a".repeat(1000))
       }),
     ),
   )
