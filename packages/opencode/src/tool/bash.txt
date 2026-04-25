@@ -33,6 +33,7 @@ Usage notes:
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
+${compressionGuidance}
 
   - Avoid using shell for file operations. Prefer dedicated tools:
     - File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)

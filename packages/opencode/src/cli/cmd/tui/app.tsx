@@ -23,7 +23,7 @@ import { DialogProvider, useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
 import { ErrorComponent } from "@tui/component/error-component"
 import { PluginRouteMissing } from "@tui/component/plugin-route-missing"
-import { ProjectProvider } from "@tui/context/project"
+import { ProjectProvider, useProject } from "@tui/context/project"
 import { EditorContextProvider } from "@tui/context/editor"
 import { useEvent } from "@tui/context/event"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
@@ -221,6 +221,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
   const themeState = useTheme()
   const { theme, mode, setMode, locked, lock, unlock } = themeState
   const sync = useSync()
+  const project = useProject()
   const exit = useExit()
   const promptRef = usePromptRef()
   const routes: RouteMap = new Map()
@@ -405,6 +406,11 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
   )
 
   const connected = useConnected()
+  const [bashCompressionOverride, setBashCompressionOverride] = createSignal<boolean>()
+  createEffect(() => {
+    setBashCompressionOverride(sync.data.config.tool_output?.bash_compression ?? true)
+  })
+  const bashCompressionEnabled = createMemo(() => bashCompressionOverride() ?? true)
   command.register(() => [
     {
       title: "Switch session",
@@ -623,6 +629,50 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       onSelect: (dialog) => {
         if (locked()) unlock()
         else lock()
+        dialog.clear()
+      },
+      category: "System",
+    },
+    {
+      title: bashCompressionEnabled() ? "Disable Bash output compression" : "Enable Bash output compression",
+      value: "bash.output_compression.toggle",
+      slash: {
+        name: "bash-compression",
+        aliases: ["toggle-bash-compression"],
+      },
+      onSelect: async (dialog) => {
+        const next = !bashCompressionEnabled()
+        setBashCompressionOverride(next)
+        const workspace = project.workspace.current()
+
+        const result = await sdk.client.config.update(
+          {
+            workspace,
+            config: {
+              tool_output: {
+                bash_compression: next,
+              },
+            },
+          },
+          { throwOnError: false },
+        )
+
+        if (result.error) {
+          setBashCompressionOverride(!next)
+          toast.show({
+            variant: "error",
+            message: "Failed to update Bash output compression setting",
+            duration: 5000,
+          })
+          return
+        }
+
+        await sync.bootstrap({ fatal: false })
+        toast.show({
+          variant: "info",
+          message: next ? "Bash output compression enabled" : "Bash output compression disabled",
+          duration: 3000,
+        })
         dialog.clear()
       },
       category: "System",

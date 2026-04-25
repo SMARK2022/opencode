@@ -21,7 +21,15 @@ import { useEvent } from "@tui/context/event"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
 import { selectedForeground, useTheme } from "@tui/context/theme"
-import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
+import {
+  BoxRenderable,
+  ScrollBoxRenderable,
+  addDefaultParsers,
+  TextAttributes,
+  RGBA,
+  MouseButton,
+  type MouseEvent as TuiMouseEvent,
+} from "@opentui/core"
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type {
   AssistantMessage,
@@ -1742,13 +1750,21 @@ function BlockTool(props: {
   title: string
   children: JSX.Element
   onClick?: () => void
+  onRightClick?: () => void
   part?: ToolPart
   spinner?: boolean
+  contextView?: boolean
+  contextLabel?: string
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+  const background = createMemo(() => {
+    if (props.contextView) return theme.diffContextBg
+    if (hover()) return theme.backgroundMenu
+    return theme.backgroundPanel
+  })
   return (
     <box
       border={["left"]}
@@ -1757,13 +1773,20 @@ function BlockTool(props: {
       paddingLeft={2}
       marginTop={1}
       gap={1}
-      backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
+      backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
-      borderColor={theme.background}
-      onMouseOver={() => props.onClick && setHover(true)}
+      borderColor={props.contextView ? theme.info : theme.background}
+      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt?: TuiMouseEvent) => {
         if (renderer.getSelection()?.getSelectedText()) return
+        if (evt?.button === MouseButton.RIGHT) {
+          if (!props.onRightClick) return
+          evt.preventDefault()
+          evt.stopPropagation()
+          props.onRightClick()
+          return
+        }
         props.onClick?.()
       }}
     >
@@ -1772,6 +1795,7 @@ function BlockTool(props: {
         fallback={
           <text paddingLeft={3} fg={theme.textMuted}>
             {props.title}
+            <Show when={props.contextView && props.contextLabel}> · {props.contextLabel}</Show>
           </text>
         }
       >
@@ -1789,7 +1813,12 @@ function Bash(props: ToolProps<typeof BashTool>) {
   const { theme } = useTheme()
   const sync = useSync()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
+  const [showContextOutput, setShowContextOutput] = createSignal(false)
+  const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
+  const output = createMemo(() => {
+    const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
+    return stripAnsi(text?.trim() ?? "")
+  })
   const [expanded, setExpanded] = createSignal(false)
   const lines = createMemo(() => output().split("\n"))
   const overflow = createMemo(() => lines().length > 10)
@@ -1823,6 +1852,12 @@ function Bash(props: ToolProps<typeof BashTool>) {
     return `# ${desc} in ${wd}`
   })
 
+  const toggleContextOutput = () => {
+    if (!contextOutputAvailable()) return
+    setExpanded(true)
+    setShowContextOutput((prev) => !prev)
+  }
+
   return (
     <Switch>
       <Match when={props.metadata.output !== undefined}>
@@ -1831,9 +1866,15 @@ function Bash(props: ToolProps<typeof BashTool>) {
           part={props.part}
           spinner={isRunning()}
           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+          onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
+          contextView={showContextOutput()}
+          contextLabel="returned to model"
         >
           <box gap={1}>
             <text fg={theme.text}>$ {props.input.command}</text>
+            <Show when={showContextOutput()}>
+              <text fg={theme.info}>Model context output</text>
+            </Show>
             <Show when={output()}>
               <text fg={theme.text}>{limited()}</text>
             </Show>

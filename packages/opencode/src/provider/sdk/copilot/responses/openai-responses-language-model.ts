@@ -280,7 +280,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
       // provider options:
       max_tool_calls: openaiOptions?.maxToolCalls,
       metadata: openaiOptions?.metadata,
-      parallel_tool_calls: openaiOptions?.parallelToolCalls,
+      parallel_tool_calls: openaiOptions?.parallelToolCalls ?? true,
       previous_response_id: openaiOptions?.previousResponseId,
       store: openaiOptions?.store,
       user: openaiOptions?.user,

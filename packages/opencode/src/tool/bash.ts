@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Effect, Option, Schema, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -17,9 +17,15 @@ import { Shell } from "@/shell/shell"
 import { BashArity } from "@/permission/arity"
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
-import { Effect, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
+import { Config } from "@/config"
+import {
+  BashDiagnosticCollector,
+  bashCompressionMetadata,
+  compressVisibleOutput,
+  renderDiagnosticAppendix,
+} from "./bash-compress"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
@@ -59,6 +65,10 @@ export const Parameters = Schema.Struct({
   description: Schema.String.annotate({
     description:
       "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
+  }),
+  compress_output: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important.",
   }),
 })
 
@@ -214,6 +224,10 @@ function pathArgs(list: Part[], ps: boolean) {
 function preview(text: string) {
   if (text.length <= MAX_METADATA_LENGTH) return text
   return "...\n\n" + text.slice(-MAX_METADATA_LENGTH)
+}
+
+function bashCompressionEnabled(config?: Config.Info) {
+  return config?.tool_output?.bash_compression ?? true
 }
 
 function tail(text: string, maxLines: number, maxBytes: number) {
@@ -496,6 +510,7 @@ export const BashTool = Tool.define(
         env: NodeJS.ProcessEnv
         timeout: number
         description: string
+        compressOutput: boolean
       },
       ctx: Tool.Context,
     ) {
@@ -511,6 +526,9 @@ export const BashTool = Tool.define(
       let expired = false
       let aborted = false
 
+      const started = Date.now()
+      const diag = new BashDiagnosticCollector()
+
       yield* ctx.metadata({
         metadata: {
           output: "",
@@ -524,6 +542,8 @@ export const BashTool = Tool.define(
 
           yield* Effect.forkScoped(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
+              diag.push(chunk)
+
               const size = Buffer.byteLength(chunk, "utf-8")
               list.push({ text: chunk, size })
               used += size
@@ -599,6 +619,10 @@ export const BashTool = Tool.define(
         }),
       ).pipe(Effect.orDie)
 
+      diag.end()
+      const durationMs = Date.now() - started
+      const diagnosticSnapshot = diag.snapshot()
+
       const meta: string[] = []
       if (expired) {
         meta.push(
@@ -607,9 +631,13 @@ export const BashTool = Tool.define(
       }
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
-      const end = tail(raw, limits.maxLines, limits.maxBytes)
+
+      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
+      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
+
       if (end.cut) cut = true
-      if (!file && end.cut) {
+
+      if (!file && (end.cut || compressed.stats.applied)) {
         file = yield* trunc.write(raw)
       }
 
@@ -620,9 +648,20 @@ export const BashTool = Tool.define(
         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
       }
 
+      const appendix = renderDiagnosticAppendix(diagnosticSnapshot, {
+        durationMs,
+        exitCode: code,
+        visibleOutput: output,
+      })
+
+      if (appendix) {
+        output += "\n\n" + appendix
+      }
+
       if (meta.length > 0) {
         output += "\n\n<bash_metadata>\n" + meta.join("\n") + "\n</bash_metadata>"
       }
+
       if (sink) {
         const stream = sink
         yield* Effect.promise(
@@ -641,7 +680,11 @@ export const BashTool = Tool.define(
           exit: code,
           description: input.description,
           truncated: cut,
-          ...(cut && file ? { outputPath: file } : {}),
+          durationMs,
+          diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
+          diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
+          ...bashCompressionMetadata(compressed.stats),
+          ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
         },
         output,
       }
@@ -662,6 +705,17 @@ export const BashTool = Tool.define(
         log.info("bash tool using shell", { shell })
 
         const limits = yield* trunc.limits()
+        const configSvc = yield* Effect.serviceOption(Config.Service)
+        const config = Option.isSome(configSvc)
+          ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
+          : undefined
+        const userCompressionEnabled = bashCompressionEnabled(config)
+        const compressionGuidance = userCompressionEnabled
+          ? [
+              "  - Bash output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
+              "  - Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result.",
+            ].join("\n")
+          : ""
 
         return {
           description: DESCRIPTION.replaceAll("${directory}", Instance.directory)
@@ -671,7 +725,8 @@ export const BashTool = Tool.define(
             .replaceAll("${shellGuidance}", shellGuidance(name))
             .replaceAll("${listCommand}", listCommand(name))
             .replaceAll("${maxLines}", String(limits.maxLines))
-            .replaceAll("${maxBytes}", String(limits.maxBytes)),
+            .replaceAll("${maxBytes}", String(limits.maxBytes))
+            .replaceAll("${compressionGuidance}", compressionGuidance),
           parameters: Parameters,
           execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
             Effect.gen(function* () {
@@ -689,6 +744,11 @@ export const BashTool = Tool.define(
               const scan = yield* collect(root, cwd, ps, shell)
               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
               yield* ask(ctx, scan)
+              const configSvc = yield* Effect.serviceOption(Config.Service)
+              const config = Option.isSome(configSvc)
+                ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
+                : undefined
+              const compressOutput = bashCompressionEnabled(config) && (params.compress_output ?? true)
 
               return yield* run(
                 {
@@ -699,6 +759,7 @@ export const BashTool = Tool.define(
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
                   description: params.description,
+                  compressOutput,
                 },
                 ctx,
               )
