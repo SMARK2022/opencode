@@ -25,6 +25,9 @@ export interface RunOptions {
   readonly maxErrorBytes?: number
   readonly signal?: AbortSignal
   readonly timeout?: Duration.Input
+  // 在 capture 截断之前观察合并字节流；回调不能改变内存前缀的既有限额。
+  // 等待回调完成再取下一块，背压与 typed error 都由同一次收集传播。
+  readonly onOutput?: (chunk: Uint8Array) => Effect.Effect<void, AppProcessError>
   readonly stdin?: string | Uint8Array | Stream.Stream<Uint8Array, PlatformError>
 }
 
@@ -118,7 +121,8 @@ const normalizeStdin = (
       ? Stream.make(input)
       : input
 
-export const collectStream = (stream: Stream.Stream<Uint8Array, PlatformError>, maxOutputBytes: number | undefined) =>
+// 收集器保留输入流的错误通道，不能把观察回调的预期失败收窄成无错误或 defect。
+export const collectStream = <E>(stream: Stream.Stream<Uint8Array, E>, maxOutputBytes: number | undefined) =>
   Stream.runFold(
     stream,
     () => ({ chunks: [] as Uint8Array[], bytes: 0, truncated: false }),
@@ -148,7 +152,8 @@ const layer = Layer.effect(
           const handle = yield* spawner.spawn(command)
           if (options?.combineOutput) {
             const [output, exitCode] = yield* Effect.all(
-              [collectStream(handle.all, options.maxOutputBytes), handle.exitCode],
+              // 同一 handle.all 只消费一次，磁盘保留和诊断看到相同的 stdout/stderr 顺序。
+              [collectStream(options.onOutput ? handle.all.pipe(Stream.tap(options.onOutput)) : handle.all, options.maxOutputBytes), handle.exitCode],
               { concurrency: "unbounded" },
             )
             return {

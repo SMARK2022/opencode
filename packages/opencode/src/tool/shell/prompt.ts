@@ -24,6 +24,10 @@ export function parameterSchema() {
     workdir: Schema.optional(Schema.String).annotate({
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
     }),
+    // false 只关闭有损呈现，不绕过权限、执行限额或原文保留。
+    compress_output: Schema.optional(Schema.Boolean).annotate({
+      description: "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important.",
+    }),
   })
 }
 

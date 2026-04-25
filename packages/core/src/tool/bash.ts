@@ -2,7 +2,7 @@ export * as BashTool from "./bash"
 
 import path from "path"
 import { ToolFailure } from "@opencode-ai/llm"
-import { Duration, Effect, Layer, Schema } from "effect"
+import { Clock, Duration, Effect, Layer, Schema } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
@@ -17,6 +17,8 @@ import { Tools } from "./tools"
 import { SystemContext } from "../system-context/index"
 import { SystemContextRegistry } from "../system-context/registry"
 import { Shell } from "../shell"
+import { ToolOutputStore } from "../tool-output-store"
+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -37,17 +39,39 @@ export const Input = Schema.Struct({
     .annotate({
       description: `Timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS} and may not exceed ${MAX_TIMEOUT_MS}.`,
     }),
+  // 只控制模型呈现，false 不能改变进程 capture 限额或绕过完整原文保留。
+  compress_output: Schema.Boolean.pipe(Schema.optional).annotate({
+    description: "Whether repetitive output may be compressed. Defaults to the user's bash_compression setting. Set false for exact raw formatting.",
+  }),
 })
 
 const StructuredOutput = Schema.Struct({
   exit: Schema.Number.pipe(Schema.optional),
   truncated: Schema.Boolean,
   timeout: Schema.Boolean.pipe(Schema.optional),
+  // 统计属于 typed transcript，不能把内存窗口的收益误称为磁盘全日志的收益。
+  compression: Schema.Struct({
+    compressed: Schema.Boolean,
+    compressionOriginalBytes: Schema.Number,
+    compressionCompressedBytes: Schema.Number,
+    compressionSavedBytes: Schema.Number,
+    compressionSavingRatio: Schema.Number,
+    compressionCarriageReturnGroups: Schema.Number,
+    compressionRepeatedBlockGroups: Schema.Number,
+    compressionRepeatedLineGroups: Schema.Number,
+    compressionInlinePatternGroups: Schema.Number,
+  }).pipe(Schema.optional),
+  durationMs: Schema.Number.pipe(Schema.optional),
+  diagnosticErrorLikeLines: Schema.Number.pipe(Schema.optional),
+  diagnosticWarningLikeLines: Schema.Number.pipe(Schema.optional),
+  diagnosticDiscardedChars: Schema.Number.pipe(Schema.optional),
 })
 
 const Output = Schema.Struct({
   ...StructuredOutput.fields,
   output: Schema.String,
+  // 原文与模型窗口保持分离，路径和最终限额仍由 registry/store 持有。
+  contextOutput: Schema.String,
   warnings: Schema.Array(Schema.String).pipe(Schema.optional),
 })
 
@@ -83,7 +107,6 @@ const isTimeout = (error: AppProcess.AppProcessError) =>
 // TODO: Add HTTP background-job observation only after durable status, restart recovery, and authorization are defined.
 // TODO: Revisit process-group cleanup and platform coverage with shell-specific tests if current AppProcess semantics do not fully cover it.
 // TODO: Revisit binary output handling if stdout/stderr decoding is text-only.
-// TODO: Stream full shell output into managed storage while retaining only a bounded in-memory preview.
 
 const shellTokens = (command: string) => command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []
 const unquote = (value: string) => value.replace(/^(['"])(.*)\1$/, "$2")
@@ -110,6 +133,7 @@ const layer = Layer.effectDiscard(
     const fs = yield* FSUtil.Service
     const appProcess = yield* AppProcess.Service
     const config = yield* Config.Service
+    const outputStore = yield* ToolOutputStore.Service
     const permission = yield* PermissionV2.Service
     const registry = yield* SystemContextRegistry.Service
     // Shell source 随实际执行配置刷新；持久快照比较和更新仍由 Session Context Epoch 处理。
@@ -131,7 +155,7 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.make({
           // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
           input: Input,
           output: Output,
           structured: StructuredOutput,
@@ -139,9 +163,14 @@ const layer = Layer.effectDiscard(
             truncated: output.truncated,
             ...(output.exit === undefined ? {} : { exit: output.exit }),
             ...(output.timeout === undefined ? {} : { timeout: output.timeout }),
+            ...(output.compression === undefined ? {} : { compression: output.compression }),
+            ...(output.durationMs === undefined ? {} : { durationMs: output.durationMs }),
+            ...(output.diagnosticErrorLikeLines === undefined ? {} : { diagnosticErrorLikeLines: output.diagnosticErrorLikeLines }),
+            ...(output.diagnosticWarningLikeLines === undefined ? {} : { diagnosticWarningLikeLines: output.diagnosticWarningLikeLines }),
+            ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
           }),
           toModelOutput: ({ output }) => [
-            { type: "text", text: output.output },
+            { type: "text", text: output.contextOutput },
             { type: "text", text: modelOutput(output) },
           ],
           execute: (input, context) =>
@@ -202,6 +231,33 @@ const layer = Layer.effectDiscard(
               if ((yield* fs.stat(target.canonical)).type !== "Directory")
                 return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
 
+              // leaf 消费同一配置快照中的单次覆盖，全局 false 优先于单次 true，通用 store 不读取 Bash 开关。
+              const configured = Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info.tool_output ?? {}] : []))
+              const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
+              const diag = new BashDiagnosticCollector()
+              const decoder = new TextDecoder()
+              const parts: string[] = []
+              let captured = 0
+              let cut = false
+              const observe = (text: string) => {
+                // 诊断先观察全流；淘汰仅影响有界正文，原文字节仍由同一capture保留。
+                diag.push(text)
+                if (!text) return
+                parts.push(text)
+                captured += Buffer.byteLength(text)
+                for (let first = parts[0]; captured > MAX_CAPTURE_BYTES && first !== undefined; first = parts[0]) {
+                  const bytes = Buffer.from(first)
+                  let start = Math.min(bytes.length, captured - MAX_CAPTURE_BYTES)
+                  // 从完整UTF-8字符开始展示，不能因窗口淘汰制造替换字符。
+                  while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++
+                  captured -= start
+                  parts.shift()
+                  if (start < bytes.length) parts.unshift(bytes.subarray(start).toString("utf8"))
+                  cut = true
+                }
+              }
+              const started = yield* Clock.currentTimeMillis
+              const limits = yield* outputStore.limits()
               // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
               const powershell = process.platform === "win32" && Shell.ps(shell)
               // 与V1同样禁用PowerShell profile和交互；仍只创建一个命令并调用一次AppProcess.run。
@@ -214,39 +270,62 @@ const layer = Layer.effectDiscard(
                 forceKillAfter: Duration.seconds(3),
               })
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
+              // 原文由现有 ToolOutputStore capture 保留，leaf 只产出模型窗口，不发布托管路径或自行做通用截断。
+              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => Effect.gen(function* () {
               const result = yield* appProcess
                 .run(command, {
                   combineOutput: true,
                   timeout: Duration.millis(timeout),
                   maxOutputBytes: MAX_CAPTURE_BYTES,
+                  // 写盘失败适配既有 AppProcessError 并保留 StorageError cause；解码仍跨字节块续接。
+                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.decode(chunk, { stream: true }))))),
                 })
                 .pipe(
                   Effect.catchTag("AppProcessError", (error) =>
                     isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
                   ),
                 )
-              if (!result) {
-                return {
-                  output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
-                  truncated: false,
-                  timeout: true,
-                  ...(warnings.length ? { warnings } : {}),
-                }
-              }
+              observe(decoder.decode())
+              diag.end()
+              const diagnostic = diag.snapshot()
+              const durationMs = (yield* Clock.currentTimeMillis) - started
 
-              const output = result.output?.toString("utf8") || "(no output)"
-              const notice = result.outputTruncated
+              // 正常结束和超时共用正文与压缩；超时不伪造退出码，也不丢弃已观察的ready等普通行。
+              const text = parts.join("")
+              const output = text || "(no output)"
+              const truncated = cut || result?.outputTruncated === true
+              const outcome = result ? { exit: result.exitCode } : { timeout: true }
+              const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
+              const compressed = compressVisibleOutput(output, { enabled })
+              // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
+              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "" })
+              const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
+              // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
+              const visible = !compressed.stats.applied && !truncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
+              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible })
+              const notice = truncated
                 ? "[output capture truncated at the in-memory safety limit]"
                 : undefined
               return {
-                exit: result.exitCode,
-                output: notice ? `${output}\n\n${notice}` : output,
+                // 采样损失即使未压缩也保留原文；压缩不能被混记成进程 capture 截断。
+                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || diagnostic.discardedChars > 0,
+                value: {
+                ...outcome,
+                output: [output, notice, timeoutNotice].filter(Boolean).join("\n\n"),
+                contextOutput: [compressed.text, notice, timeoutNotice, appendix].filter(Boolean).join("\n\n"),
                   // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
-                truncated: result.outputTruncated === true,
+                truncated,
+                compression: bashCompressionMetadata(compressed.stats),
+                durationMs,
+                diagnosticErrorLikeLines: diagnostic.errorLikeLines,
+                diagnosticWarningLikeLines: diagnostic.warningLikeLines,
+                diagnosticDiscardedChars: diagnostic.discardedChars,
                 ...(warnings.length ? { warnings } : {}),
+                },
               }
+              }))
               // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
-            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
+            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }))),
         }),
       })
       .pipe(Effect.orDie)
@@ -256,5 +335,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/bash",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node, SystemContextRegistry.node],
+  deps: [ToolRegistry.node, ToolOutputStore.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node, SystemContextRegistry.node],
 })

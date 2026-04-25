@@ -48,6 +48,8 @@ const registryLayer = Layer.effect(
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
 
     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
+      // 把暂存原文的清理绑定整个 settlement，而不是仅绑定成功返回路径。
+      return yield* Effect.gen(function* () {
       const registration =
         local.get(input.call.name)?.at(-1)?.registration ?? applications.entries().get(input.call.name)
       if (!registration)
@@ -79,6 +81,7 @@ const registryLayer = Layer.effect(
       return bounded.outputPaths.length > 0
         ? { result, output: bounded.output, outputPaths: bounded.outputPaths }
         : { result, output: bounded.output }
+      }).pipe(Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })))
     })
 
     return Service.of({

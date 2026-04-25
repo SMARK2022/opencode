@@ -15,6 +15,8 @@ import { testEffect } from "./lib/effect"
 const bounds: ToolOutputStore.BoundInput[] = []
 const retentionFailure = new ToolOutputStore.StorageError({ operation: "write", cause: new Error("disk full") })
 const outputStore = Layer.mock(ToolOutputStore.Service, {
+  // 本 fixture 的工具不采集原始流，无暂存文件时 discard 与真实 store 一样无操作。
+  discard: () => Effect.void,
   bound: (input) => {
     if (input.toolCallID === "call-retention-failure") return Effect.fail(retentionFailure)
     return Effect.sync(() => bounds.push(input)).pipe(

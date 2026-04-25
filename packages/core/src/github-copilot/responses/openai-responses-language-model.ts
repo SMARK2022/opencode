@@ -280,7 +280,8 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
       // provider options:
       max_tool_calls: openaiOptions?.maxToolCalls,
       metadata: openaiOptions?.metadata,
-      parallel_tool_calls: openaiOptions?.parallelToolCalls,
+      // nullish 默认值保留用户显式 false，不能用逻辑或强制开启并行。
+      parallel_tool_calls: openaiOptions?.parallelToolCalls ?? true,
       previous_response_id: openaiOptions?.previousResponseId,
       store: openaiOptions?.store,
       user: openaiOptions?.user,

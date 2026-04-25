@@ -42,6 +42,12 @@ export type Error = StorageError
 export interface Interface {
   readonly limits: () => Effect.Effect<{ readonly maxLines: number; readonly maxBytes: number }>
   readonly bound: (input: BoundInput) => Effect.Effect<BoundResult, Error>
+  // capture 不暴露路径给 leaf；只有 registry 的 bound 才能发布托管恢复引用。
+  readonly capture: <A, E>(
+    input: Pick<BoundInput, "sessionID" | "toolCallID">,
+    body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
+  ) => Effect.Effect<A, E | Error>
+  readonly discard: (input: Pick<BoundInput, "sessionID" | "toolCallID">) => Effect.Effect<void>
   readonly cleanup: () => Effect.Effect<void>
 }
 
@@ -115,6 +121,10 @@ const layer = Layer.effect(
     const fs = yield* FSUtil.Service
     const global = yield* Global.Service
     const config = yield* Effect.serviceOption(Config.Service)
+    // 暂存引用只属于本次 settlement，成功、失败与中断都由 registry 收尾。
+    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error> }>()
+    // Session 与 call 联合定位，避免不同 Session 的同名 call 串用原文。
+    const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) => JSON.stringify([input.sessionID, input.toolCallID])
     const directory = path.join(global.data, MANAGED_DIRECTORY)
     const limits = Effect.fn("ToolOutputStore.limits")(function* () {
       if (Option.isNone(config)) return { maxLines: MAX_LINES, maxBytes: MAX_BYTES }
@@ -135,6 +145,56 @@ const layer = Layer.effect(
       return file
     })
 
+    const discard = Effect.fn("ToolOutputStore.discard")(function* (input: Pick<BoundInput, "sessionID" | "toolCallID">) {
+      const key = captureKey(input)
+      const captured = captures.get(key)
+      captures.delete(key)
+      // 已发布路径已在 bound 中移出暂存表，不能在返回后误删可恢复的日志。
+      if (captured?.path) yield* fs.remove(captured.path).pipe(Effect.orDie)
+    })
+    const capture = <A, E>(
+      input: Pick<BoundInput, "sessionID" | "toolCallID">,
+      body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
+    ) => Effect.gen(function* () {
+      // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
+      const chunks: Uint8Array[] = []
+      let bytes = 0
+      const captured = { path: "", retain: false, flush: (): Effect.Effect<string, Error> => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+        // 只屏蔽排他创建与路径登记；wx 失败没有所有权，不能删除碰撞文件。
+        if (!captured.path) captured.path = yield* write("")
+        // 路径已归本次 capture 所有，append 恢复可中断并保留失败 cause，ensuring 才能按所有权清理。
+        yield* restore(Effect.forEach(chunks, (chunk) => fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause }))), { discard: true }))
+        // 后续 flush 不能重放已写前缀，失败时直接终止本次 capture。
+        chunks.length = 0
+        bytes = 0
+        return captured.path
+      })) }
+      let completed = false
+      return yield* Effect.gen(function* () {
+        const result = yield* body((chunk) => Effect.gen(function* () {
+          if (!chunk.byteLength) return
+          // 固定 MAX_BYTES 限制采集内存，不随用户模型预算放大或关闭。
+          if (!captured.path && bytes + chunk.byteLength <= MAX_BYTES) {
+            // 复制观察窗口，不能持有进程可能复用的缓冲；空 chunk 不增加对象数。
+            chunks.push(Uint8Array.from(chunk))
+            bytes += chunk.byteLength
+            return
+          }
+          // 跨过限额前先写已有窗口，当前大块直接追加，不扩大内存副本。
+          yield* captured.flush()
+          // 直接追加原始字节保留跨块 UTF-8；ENOSPC 等映射为同类存储失败并保留 cause，不升级为会话 defect。
+          yield* fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
+        }))
+        captured.retain = result.retain
+        // 压缩或诊断损失要求原文时必须成功落盘；失败不能伪装成普通内存路径。
+        if (result.retain) yield* captured.flush()
+        // 未落盘窗口留到 bound 决定最终投影是否超限，退出状态也可能触发保留。
+        captures.set(captureKey(input), captured)
+        completed = true
+        return result.value
+      }).pipe(Effect.ensuring(Effect.suspend(() => completed || !captured.path ? Effect.void : fs.remove(captured.path).pipe(Effect.orDie))))
+    })
+
     const bound = Effect.fn("ToolOutputStore.bound")(function* (input: BoundInput) {
       const outputLimits = yield* limits()
       const media = input.output.content.filter((item) => item.type === "file")
@@ -146,22 +206,30 @@ const layer = Layer.effect(
               catch: (cause) => new StorageError({ operation: "encode", cause }),
             })
           : text.map((item) => item.text).join("")
-      if (
-        lineCount(contextual) <= outputLimits.maxLines &&
-        Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
-      )
+      const captured = captures.get(captureKey(input))
+      const fits = lineCount(contextual) <= outputLimits.maxLines && Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
+      // 压缩未截断也需要恢复标记；不能只靠 outputPaths 向模型广告原文。
+      if (fits && !captured?.retain)
         return {
           output: input.output,
           outputPaths: [],
         }
 
-      const outputPath = yield* write(contextual)
-      const marker = `... output truncated; full content saved to ${outputPath} ...`
+      // 有流式原文时复用同一个托管文件，不能把压缩后的文本另存成所谓完整原文。
+      const outputPath = captured ? yield* captured.flush() : yield* write(contextual)
+      const marker = captured
+        ? `... output ${fits ? "presentation changed" : "truncated"}; captured raw output saved to ${outputPath} ...`
+        : `... output truncated; full content saved to ${outputPath} ...`
+      captures.delete(captureKey(input))
+      // 通用预算仍只在这里执行；恢复标记本身也占用字节与行数预算。
+      const withMarker = `${contextual}\n\n${marker}`
+      // 若总预算允许就保留原 content 分段，退出状态与媒体位置不能因增加路径而变化。
+      const preserveParts = lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
 
       return {
         output: {
           structured: input.output.structured,
-          content: [
+          content: preserveParts ? [...input.output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
             {
               type: "text" as const,
               text: boundedPreview(contextual, marker, outputLimits.maxLines, outputLimits.maxBytes),
@@ -188,7 +256,7 @@ const layer = Layer.effect(
       }
     })
 
-    return Service.of({ limits, bound, cleanup })
+    return Service.of({ limits, bound, capture, discard, cleanup })
   }),
 )
 

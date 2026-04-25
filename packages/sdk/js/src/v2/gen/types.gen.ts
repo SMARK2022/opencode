@@ -2099,6 +2099,10 @@ export type Config = {
   tool_output?: {
     max_lines?: number
     max_bytes?: number
+    /**
+     * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.
+     */
+    bash_compression?: boolean
   }
   compaction?: {
     auto?: boolean
