@@ -470,7 +470,8 @@ describe("tool.shell permissions", () => {
                 expect(
                   yield* fail(
                     {
-                      command: 'Get-Content "C:../outside.txt"',
+                      // 相对盘符必须跟随临时目录，跨盘运行仍验证同一外部目录权限。
+                      command: `Get-Content "${path.parse(tmp).root.slice(0, 2)}../outside.txt"`,
                     },
                     capture(requests, err),
                   ),
@@ -1217,6 +1218,16 @@ describe("tool.shell truncation", () => {
         expect(compacted.output).toContain(retained)
         const fs = yield* FSUtil.Service
         expect(yield* fs.readFileString(retained)).toBe("a".repeat(1000))
+        // 真实 V1 caller 的短输出没有其它压缩命中，也必须脱敏并保留未修改 raw。
+        const secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+        const redacted = yield* run({ command: `echo ${secret}` })
+        expect(redacted.output).toContain("<REDACTED_API-KEY>")
+        expect(redacted.output).not.toContain(secret)
+        expect(redacted.metadata).toMatchObject({ compressed: false, compressionSecretsRedacted: 1 })
+        const rawPath = redacted.metadata.outputPath
+        if (typeof rawPath !== "string") throw new Error("expected redacted raw output")
+        expect(redacted.output).toContain(rawPath)
+        expect(yield* fs.readFileString(rawPath)).toContain(secret)
       }),
     ),
   )

@@ -446,7 +446,8 @@ export const ShellTool = Tool.define(
       })
 
       // 诊断观察完整流，不能只观察已经丢弃旧块的内存窗口。
-      const diag = new BashDiagnosticCollector()
+      // V1 采样与最终附录复用同一个开关，保留源逐字 opt-out。
+      const diag = new BashDiagnosticCollector({ enabled: input.compressOutput })
       const started = Date.now()
 
       yield* ctx.metadata({
@@ -546,26 +547,27 @@ export const ShellTool = Tool.define(
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
       // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
-      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
+      // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
+      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput }, input.command)
       diag.end()
       const diagnostic = diag.snapshot()
       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
       // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
-      if (!file && (end.cut || compressed.stats.applied || diagnostic.discardedChars > 0)) {
+      if (!file && (end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
         file = yield* trunc.write(raw)
       }
 
       let output = end.text
       if (!output) output = "(no output)"
 
-      // 路径必须进入模型文本，metadata.outputPath 不会自动投影给模型。
-      if (file && (cut || compressed.stats.applied || diagnostic.discardedChars > 0)) {
+      // 单独脱敏也广告原文路径；写盘输入仍是未改动的 raw。
+      if (file && (cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
         output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
       }
 
       // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
-      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
       if (appendix) output += "\n\n" + appendix
       if (meta.length > 0) {
         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
@@ -576,7 +578,7 @@ export const ShellTool = Tool.define(
           output: last || preview(output),
           exit: code,
           truncated: cut,
-          ...((cut || compressed.stats.applied || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+          ...((cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
           // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
           ...bashCompressionMetadata(compressed.stats),
           durationMs: Date.now() - started,

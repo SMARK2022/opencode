@@ -567,6 +567,183 @@ describe("BashTool", () => {
         expect(snapshot.truncatedFrames).toBe(1)
         expect(snapshot.contexts.flatMap((context) => context.lines).every((line) => line.text.length < 4200)).toBe(true)
         expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain("diagnostic sampling omitted")
+        // 无其他变换命中且收益被拒绝时，凭据掩码仍必须提交。
+        const secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+        const sensitive = `error: ${secret}`
+        const masked = compressVisibleOutput(sensitive, { enabled: true, minSavedBytes: 100000 })
+        expect(masked.text).toBe("error: <REDACTED_API-KEY>")
+        expect(masked.stats).toMatchObject({ applied: false, secretsRedacted: 1 })
+        expect(masked.stats.compressedBytes).toBe(Buffer.byteLength(masked.text))
+        expect(compressVisibleOutput(sensitive, { enabled: false }).text).toBe(sensitive)
+        // 普通跨LF凭据在正文、snapshot与附录都必须缺席，原文只由已有capture归档。
+        const credential = "abcdefghijklmnop"
+        const crossline = `password:\n${credential} ERROR: rejected`
+        const crossMasked = compressVisibleOutput(crossline)
+        expect(crossMasked.text).toBe("\n<REDACTED_CREDENTIAL> ERROR: rejected")
+        expect(crossMasked.stats).toMatchObject({ applied: false, secretsRedacted: 1, originalBytes: Buffer.byteLength(crossline), compressedBytes: Buffer.byteLength(crossMasked.text) })
+        expect(crossMasked.stats.savedBytes).toBe(Buffer.byteLength(crossline) - Buffer.byteLength(crossMasked.text))
+        expect(compressVisibleOutput(crossline, { enabled: false }).text).toBe(crossline)
+        const crossDiagnostic = new BashDiagnosticCollector()
+        crossDiagnostic.push("password:\n")
+        crossDiagnostic.push(`${credential} ERROR: rejected`)
+        crossDiagnostic.end()
+        const crossSnapshot = crossDiagnostic.snapshot()
+        expect(JSON.stringify(crossSnapshot)).not.toContain(credential)
+        const crossAppendix = renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })
+        expect(crossAppendix).toContain("> 2 | <REDACTED_CREDENTIAL> ERROR: rejected")
+        expect(crossAppendix).not.toContain(credential)
+        expect(renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: crossMasked.text })).toBe("")
+        // 半径0与多个空白帧使标签完全离开邻域，续接仍受同一个canonical字段/长度门槛约束。
+        for (const label of ["password:", "passwd=", "pwd:", "secret=", "token:", "key=", "api_key:", "api-key=", "apikey:", "password\n:", "api_key\n ="]) {
+          const outside = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+          outside.push(`${label}\n${" ".repeat(8192)}\n\n \n\t\n\n`)
+          outside.push(`${credential} ERROR: rejected`)
+          outside.end()
+          expect(JSON.stringify(outside.snapshot())).not.toContain(credential)
+          expect(compressVisibleOutput(`${label}\n${credential} ERROR: rejected`).text).not.toContain(credential)
+          expect(renderDiagnosticAppendix(outside.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain("<REDACTED_CREDENTIAL> ERROR: rejected")
+        }
+        // 非秘密字段与首个短值终止续接，不能把随后无标签的普通输出误作凭据。
+        const cleared = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+        cleared.push(`password:\nshort\n${credential} ERROR: public value\nunknown:\n${credential} ERROR: ordinary`)
+        cleared.end()
+        expect(renderDiagnosticAppendix(cleared.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain(`${credential} ERROR: ordinary`)
+        // 超过长度预筛但没有重复或高熵命中，同样不能回退到原秘密。
+        const plain = sensitive + "\n" + "ordinary output without repeated patterns ".repeat(6)
+        expect(compressVisibleOutput(plain, { enabled: true, minSavedBytes: 100000 }).text).not.toContain(secret)
+        const burst = new BashDiagnosticCollector({ diagnosticContextRadius: 6 })
+        const burstRaw = Array.from({ length: 12 }, (_, i) => `error: burst-${i + 1}${i === 0 ? " " + secret : ""}\n`).join("")
+        burst.push(burstRaw)
+        burst.end()
+        const early = burst.snapshot()
+        // 大半径使第四个错误早于第一条封存，oracle 直接指定准入帧 1/2/3。
+        expect(early.firstErrorContexts.flatMap((ctx) => ctx.lines).map((line) => line.text).join("\n")).toContain("burst-1")
+        expect(early.firstErrorContexts[0]?.priority).toBe("first")
+        expect(early.firstErrorContexts[0]?.centerLine).toBe(3)
+        expect(burst.snapshot()).toEqual(early)
+        const excerpt = renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: "" })
+        expect(excerpt).toContain("root cause")
+        expect(excerpt).toContain("<REDACTED_API-KEY>")
+        expect(excerpt).not.toContain(secret)
+        // 末中心可见不代表first/recent整块可见；全部掩码中心可见时不重复附录。
+        const latestVisible = renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: "error: burst-12" })
+        expect(latestVisible).toContain("error: burst-1 <REDACTED_API-KEY>")
+        expect(latestVisible).toContain("error: burst-2")
+        expect(latestVisible).toContain("> 8 | error: burst-8")
+        expect(renderDiagnosticAppendix(early, { durationMs: 3000, exitCode: 1, visibleOutput: burstRaw.replace(secret, "<REDACTED_API-KEY>") })).toBe("")
+        // 三条邻接错误与末帧无LF精确复现V1 tail只剩C的输入，oracle直接指定A/B。
+        const adjacent = new BashDiagnosticCollector()
+        const adjacentRaw = "error: root A\nerror: follow B\nerror: end C"
+        adjacent.push(adjacentRaw)
+        adjacent.end()
+        const roots = renderDiagnosticAppendix(adjacent.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "error: end C" })
+        expect(roots).toContain("> 1 | error: root A")
+        expect(roots).toContain("> 2 | error: follow B")
+        expect(roots).toContain("(root cause)")
+        expect(renderDiagnosticAppendix(adjacent.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: adjacentRaw })).toBe("")
+        // snapshot 样例也已掩码，未经过 renderer 的调用方没有原文秘密副本。
+        expect(JSON.stringify(early)).not.toContain(secret)
+        const first = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+        first.push(Array.from({ length: 20 }, (_, i) => `error: ${i + 1}\n`).join(""))
+        first.end()
+        expect(first.snapshot().firstErrorContexts.map((ctx) => ctx.centerLine)).toEqual([3])
+        const one = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+        one.push(sensitive)
+        one.end()
+        // 可见性比较使用同一掩码，不能因 raw 与正文不同而重复附录。
+        expect(renderDiagnosticAppendix(one.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: masked.text })).toBe("")
+        const entropy = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(16)
+        expect(compressVisibleOutput(entropy).text).toContain("high-entropy base64 omitted: 1024 bytes")
+        expect(compressVisibleOutput(entropy).stats.highEntropyLines).toBe(1)
+        const template = Array.from({ length: 20 }, (_, i) => `12:00:${String(i).padStart(2, "0")} worker completed a substantial ordinary task`).join("\n")
+        expect(compressVisibleOutput(template).stats.templateGroups).toBe(1)
+        expect(compressVisibleOutput(template, { templateNormalizationLevel: "off" }).stats.templateGroups).toBe(0)
+        // 哈希碰撞 Aa/BB 的原文不同，不能合并成重复块。
+        const collision = ["Aa".repeat(100), "BB".repeat(100), "Aa".repeat(100), "Aa".repeat(100)].join("\n")
+        expect(compressVisibleOutput(collision, { minSavedBytes: 0, minSavingRatio: 0 }).stats.repeatedBlockGroups).toBe(0)
+        // 私钥 body 的错误没有 BEGIN 邻域，状态掩码仍覆盖它并保留 fatal 队列。
+        const privateKey = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+        privateKey.push("-----BEGIN PRIVATE KEY-----\nerror: hidden-private-body\n-----END PRIVATE KEY-----\npanic: visible-fatal\n")
+        privateKey.end()
+        expect(JSON.stringify(privateKey.snapshot())).not.toContain("hidden-private-body")
+        expect(privateKey.snapshot().fatalContexts[0]?.priority).toBe("fatal")
+        expect(compressVisibleOutput("#".repeat(500)).text).toContain("[bar ")
+        const list = Array.from({ length: 100 }, (_, i) => `item-${i}-with-long-name`).join(", ")
+        expect(compressVisibleOutput(list).text).toContain("... (94 more)")
+        // CSI 清行之后保留终态，未达阈值/收益的编辑则原样通过。
+        const terminal = Array.from({ length: 10 }, () => "working ".repeat(20) + "\r\x1b[2Kdone").join("\n")
+        expect(compressVisibleOutput(terminal).text).toContain("terminal progress collapsed")
+        expect(compressVisibleOutput(terminal, { minSavedBytes: 100000 }).text).toBe(terminal)
+        // 归一化新拼出的秘密必须被掩码；独立oracle固定最终密钥与实际UTF-8统计。
+        const decoratedSecret = ("noise ".repeat(100) + "\r\x1b[2K").repeat(4) + "sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345"
+        const canonical = compressVisibleOutput(decoratedSecret)
+        expect(canonical.text).toContain("<REDACTED_API-KEY>")
+        expect(canonical.text).not.toContain(secret)
+        expect(canonical.stats).toMatchObject({ applied: true, carriageReturnGroups: 1, secretsRedacted: 1 })
+        expect(canonical.stats.originalBytes).toBe(Buffer.byteLength(decoratedSecret))
+        expect(canonical.stats.compressedBytes).toBe(Buffer.byteLength(canonical.text))
+        expect(canonical.stats.savedBytes).toBe(Buffer.byteLength(decoratedSecret) - Buffer.byteLength(canonical.text))
+        // 未采用VT或未知CSI保留格式，canonical匹配仍能遮住ANSI分隔的原始凭据。
+        expect(compressVisibleOutput(decoratedSecret, { minSavedBytes: 100000 }).text).not.toContain("abcdefghijklmnopqrstuvwxyz012345")
+        const unsupported = "\x1b[99qerror: sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345"
+        expect(compressVisibleOutput(unsupported).text).toBe("\x1b[99qerror: <REDACTED_API-KEY>")
+        const decoratedDiagnostic = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+        decoratedDiagnostic.push("error: sk-\x1b[0mabcdefghijklmnopqrstuvwxyz012345\n")
+        decoratedDiagnostic.end()
+        const maskedAppendix = renderDiagnosticAppendix(decoratedDiagnostic.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "" })
+        expect(maskedAppendix).toContain("<REDACTED_API-KEY>")
+        expect(maskedAppendix).not.toContain("abcdefghijklmnopqrstuvwxyz012345")
+        expect(renderDiagnosticAppendix(decoratedDiagnostic.snapshot(), { durationMs: 3000, exitCode: 1, visibleOutput: "error: <REDACTED_API-KEY>" })).toBe("")
+        const unhealthy = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
+        unhealthy.push("no errors\n0 failed\nall tests passed\nTS1234 compile problem\nENOENT missing\npanic with 0 errors\n")
+        unhealthy.end()
+        expect(unhealthy.snapshot()).toMatchObject({ errorLikeLines: 3, fatalLikeLines: 1 })
+        // 交错编号与长成功日志保证adapter有净收益，FAILED必须准确归属于步骤2。
+        const docker = ["#1 [prepare]", "#2 [compile]", "#3 [package]",
+          ...Array.from({ length: 100 }, (_, i) => `#${i % 2 ? 3 : 1} 0.1 successful log ${i}: a substantial build operation completed`),
+          "#2 0.2 DETAILS2", "#1 DONE", "#2 ERROR: compile failed", "#3 DONE"].join("\n")
+        // 命令参数由真实 registry caller 传入；固定输出替身不安装四个外部工具。
+        for (const [command, output, marker] of [
+          ["npm install", Array.from({ length: 20 }, (_, i) => `WARN peer dep package-${i} ${"detail ".repeat(10)}`).join("\n"), "peer dependency warnings grouped"],
+          ["pytest", "--- Captured stdout call ---\n" + Array.from({ length: 80 }, (_, i) => `captured ${i} ${"detail ".repeat(10)}`).join("\n"), "lines of captured output omitted"],
+          ["docker build .", docker, "docker_build_summary"],
+          ["tsc", Array.from({ length: 40 }, (_, i) => `file-${i}.ts(1,1): error TS1234: ${"detail ".repeat(10)}`).join("\n"), "tsc_diagnostics_summary"],
+          ["redaction-only", sensitive, "<REDACTED_API-KEY>"],
+          ["terminal-redaction", decoratedSecret, "<REDACTED_API-KEY>"],
+          ["crossline-redaction", crossline, "<REDACTED_CREDENTIAL>"],
+        ]) {
+          // 禁用适配器或收益拒绝仍走同一入口，不用私有适配函数作为测试 oracle。
+          if (command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
+            expect(compressVisibleOutput(output, { enableCommandAdapters: false }, command).text).not.toContain(marker)
+            expect(compressVisibleOutput(output, { minSavedBytes: 100000 }, command).text).toBe(output)
+          }
+          reset()
+          result = { ...result, output: Buffer.from(output) }
+          yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+            const settled = yield* settleTool(registry, call({ command }))
+            const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
+            expect(text).toContain(marker)
+            expect(text).not.toContain(secret)
+            if (command === "crossline-redaction") expect(text).not.toContain(credential)
+            expect(runs).toHaveLength(1)
+            expect(runs[0]?.command).toBe(command)
+            if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
+            if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
+            if (command === "docker build .") {
+              // 不用adapter计算预期值，直接指定步骤摘要与失败详情的归属。
+              expect(text).toContain("#2 compile: FAILED")
+              expect(text).toContain("#3 package: DONE")
+              expect(text).not.toContain("#3 package: FAILED")
+              expect(text).toContain('<docker_failed_step step="#2">\n#2 [compile]\n#2 0.2 DETAILS2\n#2 ERROR: compile failed\n</docker_failed_step>')
+              expect(text).not.toContain('<docker_failed_step step="#3">')
+              expect(settled.output?.structured).toMatchObject({ compression: { compressed: true } })
+            }
+            const retained = settled.outputPaths?.[0]
+            if (!retained) throw new Error("expected retained raw output")
+            expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(output)
+            expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+          }))
+        }
         // 收益针对原始窗口，false 与不合算候选都必须原样通过，不能误报节省。
         const raw = "repeat payload with meaningful width\n".repeat(400)
         const compressed = compressVisibleOutput(raw, { enabled: true })
