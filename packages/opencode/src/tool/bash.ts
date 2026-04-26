@@ -495,8 +495,19 @@ export const BashTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
+
+      // 兼容性修改：探测 Windows 平台并静默挂载 UTF-8 强控变量以解决管道读取乱码
+      const isWin = process.platform === "win32"
+      const utf8EnvOverrides = isWin ? {
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+        JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
+        RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim()
+      } : {}
+
       return {
         ...process.env,
+        ...utf8EnvOverrides,
         ...extra.env,
       }
     })
