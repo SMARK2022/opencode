@@ -5,8 +5,19 @@ on:
     inputs:
       version:
         description: 'Version (e.g., 1.14.25-smark)'
-        required: true
+        required: false
         type: string
+  push:
+    branches:
+      - dev-smark
+    paths:
+      - ".github/workflows/build-opencode.yml"
+      - "packages/opencode/**"
+      - "package.json"
+      - "bun.lock"
+
+env:
+  DEFAULT_VERSION: "1.14.25-smark"
 
 jobs:
   build-linux:
@@ -19,17 +30,18 @@ jobs:
       - name: Build Linux
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version }} --os=linux --skip-embed-web-ui
+          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=linux --skip-embed-web-ui
         
       - name: Package Linux tar.gz
         run: |
           cd packages/opencode/dist/opencode-linux-x64/bin
-          tar -czf ../../../opencode-linux-x64-${{ inputs.version }}.tar.gz opencode
+          tar -czf ../../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
 
       - name: Package Linux .deb
         run: |
+          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
           DEB_DIR="/tmp/deb_build"
-          PKG_NAME="opencode_${{ inputs.version }}_amd64"
+          PKG_NAME="opencode_${VERSION}_amd64"
           BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
           
           mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
@@ -40,23 +52,23 @@ jobs:
           
           cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
           Package: opencode
-          Version: ${{ inputs.version }}
+          Version: ${VERSION}
           Section: utils
           Priority: optional
           Architecture: amd64
           Maintainer: smark <smark@local>
           Description: opencode AI-powered development tool (smark build)
-           A standalone AI coding assistant with TUI, version ${{ inputs.version }}.
+           A standalone AI coding assistant with TUI, version ${VERSION}.
           EOF
           
-          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb"
+          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
 
       - uses: actions/upload-artifact@v4
         with:
           name: opencode-linux
           path: |
-            packages/opencode/dist/opencode-linux-x64-${{ inputs.version }}.tar.gz
-            packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb
+            packages/opencode/dist/opencode-linux-x64-*.tar.gz
+            packages/opencode/dist/opencode_*_amd64.deb
 
   build-macos:
     runs-on: macos-latest
@@ -68,21 +80,22 @@ jobs:
       - name: Build macOS
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version }} --os=darwin --skip-embed-web-ui
+          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=darwin --skip-embed-web-ui
         
       - name: Package macOS tar.gz
         run: |
+          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
           cd packages/opencode/dist/opencode-darwin-arm64/bin
-          tar -czf ../../../opencode-darwin-arm64-${{ inputs.version }}.tar.gz opencode
+          tar -czf ../../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
           cd ../../opencode-darwin-x64/bin
-          tar -czf ../../../opencode-darwin-x64-${{ inputs.version }}.tar.gz opencode
+          tar -czf ../../../opencode-darwin-x64-${VERSION}.tar.gz opencode
 
       - uses: actions/upload-artifact@v4
         with:
           name: opencode-macos
           path: |
-            packages/opencode/dist/opencode-darwin-arm64-${{ inputs.version }}.tar.gz
-            packages/opencode/dist/opencode-darwin-x64-${{ inputs.version }}.tar.gz
+            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
+            packages/opencode/dist/opencode-darwin-x64-*.tar.gz
 
   build-windows:
     runs-on: windows-latest
@@ -95,19 +108,20 @@ jobs:
         shell: pwsh
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version }} --os=win32 --skip-embed-web-ui
+          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --skip-embed-web-ui
         
       - name: Package Windows zip
         shell: pwsh
         run: |
+          $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
           cd packages/opencode/dist/opencode-windows-x64/bin
-          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-${{ inputs.version }}.zip"
+          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-$VERSION.zip"
           cd ../../opencode-windows-arm64/bin
-          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-arm64-${{ inputs.version }}.zip"
+          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-arm64-$VERSION.zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: opencode-windows
           path: |
-            packages/opencode/dist/opencode-windows-x64-${{ inputs.version }}.zip
-            packages/opencode/dist/opencode-windows-arm64-${{ inputs.version }}.zip
+            packages/opencode/dist/opencode-windows-x64-*.zip
+            packages/opencode/dist/opencode-windows-arm64-*.zip
