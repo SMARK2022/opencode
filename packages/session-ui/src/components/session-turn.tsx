@@ -26,6 +26,7 @@ import { TextReveal } from "@opencode-ai/ui/text-reveal"
 import { createAutoScroll } from "@opencode-ai/ui/hooks"
 import { useI18n } from "@opencode-ai/ui/context/i18n"
 import { normalize } from "./session-diff"
+import { ScrollView } from "@opencode-ai/ui/scroll-view"
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
@@ -384,8 +385,9 @@ export function SessionTurn(
 
   return (
     <div data-component="session-turn" class={props.classes?.root}>
-      <div
-        ref={autoScroll.scrollRef}
+      <ScrollView
+        // 自动跟随和用户滚动检测必须绑定实际 viewport，不能绑定外层布局容器。
+        viewportRef={autoScroll.scrollRef}
         onScroll={autoScroll.handleScroll}
         data-slot="session-turn-content"
         class={props.classes?.content}
@@ -534,7 +536,7 @@ export function SessionTurn(
           </Show>
           {props.children}
         </div>
-      </div>
+      </ScrollView>
     </div>
   )
 }

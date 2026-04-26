@@ -44,6 +44,15 @@ describe("partDefaultOpen", () => {
   test("preserves shell defaults", () => {
     expect(partDefaultOpen(tool("shell", {}), true, false)).toBe(true)
   })
+
+  test("collapses file tools by default without overriding unrelated tools", () => {
+    // 默认策略不能强制无关工具关闭；受控展开仍由上层 props 承载。
+    for (const name of ["edit", "write", "patch", "apply_patch"]) {
+      expect(partDefaultOpen(tool(name, {}))).toBe(false)
+    }
+    expect(partDefaultOpen(tool("bash", {}))).toBe(false)
+    expect(partDefaultOpen(tool("read", {}))).toBeUndefined()
+  })
 })
 
 function tool(name: string, metadata: Record<string, unknown>): PartType {
