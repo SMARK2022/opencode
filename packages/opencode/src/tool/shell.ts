@@ -391,6 +391,8 @@ export const ShellTool = Tool.define(
       )
       return {
         ...process.env,
+        // 保留源顺序：宿主环境、Windows UTF-8、插件 extras；插件显式覆盖仍最后生效。
+        ...Shell.utf8Environment(),
         ...extra.env,
       }
     })

@@ -24,6 +24,19 @@ const META: Record<string, { deny?: boolean; login?: boolean; posix?: boolean; p
   zsh: { login: true, posix: true },
 }
 
+// 只返回子进程覆盖项，不修改 process.env，也不改变非 Windows 环境。
+export const utf8Environment = (env: Readonly<Record<string, string | undefined>> = process.env, platform: string = process.platform) => {
+  if (platform !== "win32") return {}
+  return {
+    // Python 管道编码与 UTF-8 模式分别控制输出编码和解释器默认编码。
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUTF8: "1",
+    // 追加而非替换已有 Java/Ruby 参数，保留用户的内存、代理与加载选项。
+    JAVA_TOOL_OPTIONS: `${env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
+    RUBYOPT: `${env.RUBYOPT || ""} -Eutf-8`.trim(),
+  }
+}
+
 export type Item = {
   path: string
   name: string
