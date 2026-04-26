@@ -128,6 +128,26 @@ export const Plugin = define({
         )
       })
 
+      // 注册归属现有 transform 的作用域，卸载或重载不留下第二份代理状态。
+      for (const id of ["interactive", "review"]) {
+        draft.update(AgentV2.ID.make(id), (item) => {
+          item.description = "The default agent. Executes tools based on configured permissions."
+          // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
+          item.mode = "primary"
+          // 配置插件随后追加全局和代理专属规则，保留用户最后覆盖的优先级。
+          item.permissions.push(
+            ...PermissionV2.merge(defaults, [
+              { action: "question", resource: "*", effect: "allow" },
+              { action: "plan_enter", resource: "*", effect: "allow" },
+              // ask 触发原生审批；持久授权和拒绝仍由 PermissionV2 判定。
+              { action: "bash", resource: "*", effect: "ask" },
+              // V2 的 edit/write/apply_patch 共用 edit 动作，不能只按工具名设审批。
+              ...(id === "review" ? [{ action: "edit", resource: "*", effect: "ask" as const }] : []),
+            ]),
+          )
+        })
+      }
+
       draft.update(AgentV2.ID.make("plan"), (item) => {
         item.description = "Plan mode. Disallows all edit tools."
         item.mode = "primary"
