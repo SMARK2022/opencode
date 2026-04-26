@@ -53,7 +53,8 @@ jobs:
           tar -czf ../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
 
       - name: Package Linux .deb
-        run: |
+        # |2 指定相对 run 键两空格的内容缩进，字段和 EOF 在 shell 中顶格，YAML 中保留公共缩进
+        run: |2
           # Actions 先替换表达式，再由 shell 展开 VERSION，让 control 与 deb 文件名共享回退值
           VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
           DEB_DIR="/tmp/deb_build"
@@ -68,7 +69,7 @@ jobs:
           # 复制后显式赋予执行位，避免归档或 runner 文件权限影响安装后的 CLI 启动
           chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
 
-          # YAML 剥离十空格后字段与 EOF 顶格；Description 续行多一空格才是合法 deb 描述
+          # Description 续行保留第十一空格，剥离公共缩进后仍是 Debian 必需的单空格续行
           # Linux deb 的 amd64 元数据只对应 x64 二进制，不能把 arm64 混入同一包
           cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
           Package: opencode
@@ -127,6 +128,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # setup-bun 已提供 Node 24；Python 必须先就绪，供其安装阶段的 node-gyp 使用
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # MSBuild 先于 setup-bun 的依赖安装，保留 Windows 原生 addon 的编译工具链入口
+      - uses: microsoft/setup-msbuild@v2
 
       - uses: ./.github/actions/setup-bun
 
