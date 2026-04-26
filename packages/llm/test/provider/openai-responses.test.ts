@@ -8,6 +8,8 @@ import * as OpenAI from "../../src/providers/openai"
 import * as OpenAIResponses from "../../src/protocols/openai-responses"
 import * as ProviderShared from "../../src/protocols/shared"
 import { continuationRequest, nativeOpenAIResponsesContinuation } from "../continuation-scenarios"
+import { provider } from "../../src/providers/github-copilot"
+import { matchOpenAIParallelDefaults } from "../recorded-openai-options"
 import { it } from "../lib/effect"
 import { dynamicResponse, fixedResponse } from "../lib/http"
 import { sseEvents } from "../lib/sse"
@@ -66,6 +68,26 @@ describe("OpenAI Responses route", () => {
 
       expect(prepared.body).toMatchObject({ service_tier: "priority" })
       expect(prepared.body).not.toHaveProperty("serviceTier")
+      // 源补丁的三个 facade 均走真实 Responses lowering，不用复制 options 逻辑自证。
+      const models = [
+        OpenAI.configure({ apiKey: "test" }).responses("gpt-4o-mini"),
+        Azure.configure({ baseURL: "https://azure.test/openai/v1", apiKey: "test" }).responses("deployment"),
+        provider.configure({ baseURL: "https://copilot.test", apiKey: "test" }).responses("gpt-5"),
+        OpenAI.configure({ apiKey: "test" }).responsesWebSocket("gpt-4o-mini"),
+      ]
+      yield* Effect.forEach(models, (model) => Effect.gen(function* () {
+        expect((yield* LLMClient.prepare(LLM.request({ model, prompt: "Hello" }))).body).toHaveProperty("parallel_tool_calls", true)
+        // HTTP 与 WebSocket 的显式 request false 同样覆盖 facade 默认。
+        expect((yield* LLMClient.prepare(LLM.request({ model, prompt: "Hello",
+          providerOptions: { openai: { parallelToolCalls: false } },
+        }))).body).toHaveProperty("parallel_tool_calls", false)
+      }))
+      const recorded = { method: "POST", url: "https://api.openai.test/v1/responses", headers: {}, body: '{"model":"gpt-4.1-mini"}' }
+      // 仅升级旧录制期望；省略真实字段、错误false或其他body变化仍须失败。
+      expect(matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"gpt-4.1-mini","parallel_tool_calls":true}' }, recorded)).toBe(true)
+      expect(matchOpenAIParallelDefaults(recorded, recorded)).toBe(false)
+      expect(matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"gpt-4.1-mini","parallel_tool_calls":false}' }, recorded)).toBe(false)
+      expect(matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"other","parallel_tool_calls":true}' }, recorded)).toBe(false)
     }),
   )
 
@@ -225,6 +247,8 @@ describe("OpenAI Responses route", () => {
         type: "response.create",
         model: "gpt-4.1-mini",
         input: [{ role: "user", content: [{ type: "input_text", text: "Say hello." }] }],
+        // facade 默认经共用 Responses Schema 发到 WS；仍保留整个 wire 对象精确比较。
+        parallel_tool_calls: true,
         store: false,
       })
     }),

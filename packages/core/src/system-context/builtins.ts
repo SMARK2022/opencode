@@ -45,11 +45,17 @@ export const toolUsage = (ids: readonly string[]) => {
     // 分段分隔是格式契约，避免指引紧贴前面的能力列表。
     "",
     "PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.",
-    "Issue independent tool calls in the same response so they can run in parallel.",
+    "THINK FIRST before using tools. Decide the FULL first batch of independent reads, searches, directory listings, and status checks you already know you need.",
+    // 当前广告包含包装工具时才点名；原生多调用仍可直接表达并行。
+    ...(ids.includes("multi_tool_use.parallel") ? ["Use multi_tool_use.parallel for independent tool calls."] : []),
+    "BATCH independent calls in the SAME response. Do not issue one discovery call at a time when several are already obvious.",
+    // 示例必须受实际 glob 能力控制，不能让权限过滤后的请求虚构工具。
+    ...(ids.includes("glob") ? ['For directory surveys, use a wide first wave: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*"). BAD: one glob -> wait -> next glob. GOOD: one independent batch -> inspect results -> next independent batch.'] : []),
+    "After the first batch returns, identify newly relevant files and directories and issue the next independent batch together.",
     "Never chain bash commands with separators like `echo \"====\";` to simulate grouped output, because it renders poorly for the user.",
     "Parallel writes are only appropriate when target files or edit ranges cannot conflict.",
     "For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.",
-    "Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.",
+    "Sequential calls are ONLY for true dependencies, conflicts, or when the next target cannot be known without the previous result. Use bash only when dedicated tools are insufficient or real terminal execution is required.",
   ].join("\n")
 }
 

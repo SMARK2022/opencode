@@ -276,7 +276,11 @@ const layer = Layer.effect(
             ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
           },
         },
-        providerOptions: { openai: { promptCacheKey } },
+        // Agent 的显式开关覆盖 model/variant 默认值，false 不能被真值判断吞掉。
+        providerOptions: { openai: { promptCacheKey,
+          ...(agent.info?.request.body.parallelToolCalls !== undefined || agent.info?.request.body.parallel_tool_calls !== undefined
+            ? { parallelToolCalls: agent.info.request.body.parallelToolCalls ?? agent.info.request.body.parallel_tool_calls } : {}),
+        } },
         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
         system: [agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline, toolGuidance,
           `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]

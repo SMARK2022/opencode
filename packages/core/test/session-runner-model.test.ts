@@ -58,6 +58,15 @@ describe("SessionRunnerModel", () => {
           http: { body: { custom_extension: { enabled: true } } },
         },
       })
+      // 不止断言 route defaults；真实 prepare 必须经过协议 Schema 发出 snake_case 字段。
+      const prepared = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello" }))
+      expect(prepared.body).toHaveProperty("parallel_tool_calls", true)
+      // request 的显式 false 位于 model 默认之后，不能被默认 true 再次覆盖。
+      const serial = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello",
+        providerOptions: { openai: { parallelToolCalls: false } },
+      }))
+      expect(serial.body).toHaveProperty("parallel_tool_calls", false)
+      expect(serial.body).not.toHaveProperty("parallelToolCalls")
     }),
   )
 
@@ -108,6 +117,8 @@ describe("SessionRunnerModel", () => {
           headers: { "x-variant": "high" },
           body: {
             store: false,
+            // variant 在模型解析前合并；关闭并行不能停留在 HTTP overlay。
+            parallel_tool_calls: false,
             service_tier: "priority",
             temperature: 0.2,
             reasoning: { effort: "high" },
@@ -139,6 +150,25 @@ describe("SessionRunnerModel", () => {
         temperature: 0.2,
         reasoning: { effort: "high" },
       })
+      // 既有 HTTP body 全量断言保持，parallel 字段由新的 typed owner 负责发送。
+      expect(resolved.route.defaults.providerOptions?.openai?.parallelToolCalls).toBe(false)
+      expect(resolved.route.defaults.http?.body).not.toHaveProperty("parallel_tool_calls")
+      // 原 fixture 仅保证 body 合并；执行时 temperature overlay 必须仍被 transport 拒绝。
+      const rejected = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello" })).pipe(Effect.flip)
+      expect(rejected.reason).toMatchObject({ _tag: "InvalidRequest", message: "http.body cannot overlay protocol-owned field(s): temperature" })
+      // 并行测试使用合法 variant；已知协议的温度改从 typed Generation 输入，不改生产解析器。
+      const executable = yield* SessionRunnerModel.resolve(session,
+        ModelV2.Info.make({ ...catalog,
+          variants: catalog.variants.map((variant) => ({
+            ...variant, body: Object.fromEntries(Object.entries(variant.body).filter(([key]) => key !== "temperature")),
+          })),
+        }),
+      )
+      const prepared = yield* LLMClient.prepare(LLM.request({
+        model: executable, prompt: "Hello", generation: { temperature: 0.2 },
+      }))
+      expect(prepared.body).toHaveProperty("parallel_tool_calls", false)
+      expect(prepared.body).toHaveProperty("temperature", 0.2)
     }),
   )
 
