@@ -153,6 +153,48 @@ const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
+          // 继承默认规则，避免新增代理绕过敏感文件和外部目录审批。
+          interactive: {
+            name: "interactive",
+            description: "The default agent. Executes tools based on configured permissions.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_enter: "allow",
+                // 未获授权的命令需确认；已有持久授权仍由权限服务处理。
+                bash: "ask",
+              }),
+              // 全局用户规则后合并，允许显式放行或禁止命令。
+              user,
+            ),
+            // 保持可选的内置主代理身份，不改变 build 的默认选择。
+            mode: "primary",
+            native: true,
+          },
+          // 审查仍允许读取代码；只有命令与文件变更收紧为审批。
+          review: {
+            name: "review",
+            description: "The default agent. Executes tools based on configured permissions.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_enter: "allow",
+                bash: "ask",
+                // 保留编辑审批及原始工具规则，覆盖 V1 的文件修改入口。
+                edit: "ask",
+                write: "ask",
+                apply_patch: "ask",
+              }),
+              // 同名代理的专属配置还会在注册表构建后覆盖这些规则。
+              user,
+            ),
+            mode: "primary",
+            native: true,
+          },
           plan: {
             name: "plan",
             description: "Plan mode. Disallows all edit tools.",

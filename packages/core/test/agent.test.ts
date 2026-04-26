@@ -3,6 +3,7 @@ import { Effect, Exit, Scope } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Location } from "@opencode-ai/core/location"
+import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AgentPlugin } from "@opencode-ai/core/plugin/agent"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { location } from "./fixture/location"
@@ -99,14 +100,17 @@ describe("AgentV2", () => {
     }),
   )
 
-  it.effect("does not ambiently opt built-in agents into bash", () =>
+  it.effect("registers approval agents without changing other built-in bash policies", () =>
     Effect.gen(function* () {
       const agent = yield* AgentV2.Service
+      // 单独持有插件作用域，验证新增代理不会在插件卸载后残留。
+      const scope = yield* Scope.make()
       yield* AgentPlugin.Plugin.effect(
         host({
           agent: agentHost(agent),
         }),
       ).pipe(
+        Scope.provide(scope),
         Effect.provideService(
           Location.Service,
           Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
@@ -119,13 +123,50 @@ describe("AgentV2", () => {
         "compaction",
         "explore",
         "general",
+        "interactive",
         "plan",
+        "review",
         "summary",
         "title",
       ])
+      // 新增审批代理是唯一例外，既有内置代理仍沿用原来的 bash 策略。
       for (const item of agents) {
+        if (item.id === "interactive" || item.id === "review") continue
         expect(item.permissions.some((rule) => rule.action === "bash" && rule.effect !== "deny")).toBe(false)
       }
+      // 从实际注册表 resolve 后求值，缺失注册或错误动作会直接使断言失败。
+      for (const id of ["interactive", "review"]) {
+        const item = yield* agent.resolve(id)
+        if (!item) throw new Error(`expected registered ${id} agent`)
+        expect(item).toMatchObject({ id, mode: "primary", hidden: false })
+        expect(item.system).toBe((yield* agent.resolve("build"))?.system)
+        expect(item.system).toBeUndefined()
+        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe("ask")
+        // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
+        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(
+          id === "review" ? "ask" : "allow",
+        )
+        expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
+        expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
+        // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
+        expect(PermissionV2.evaluate("read", ".env", item.permissions).effect).toBe("ask")
+        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe("ask")
+      }
+      // 后注册规则覆盖内置 ask，验证配置插件依赖的最后匹配契约。
+      const override = yield* agent.transform((draft) =>
+        draft.update(AgentV2.ID.make("review"), (item) => {
+          item.permissions.push({ action: "edit", resource: "*", effect: "deny" })
+          item.permissions.push({ action: "edit", resource: "src/*", effect: "allow" })
+        }),
+      )
+      const review = yield* agent.resolve("review")
+      if (!review) throw new Error("expected configured review agent")
+      expect(PermissionV2.evaluate("edit", "src/index.ts", review.permissions).effect).toBe("allow")
+      expect(PermissionV2.evaluate("edit", "README.md", review.permissions).effect).toBe("deny")
+      // 先撤销覆盖注册，插件 scope 关闭后注册表应完全回到空状态。
+      yield* override.dispose
+      yield* Scope.close(scope, Exit.void)
+      expect(yield* agent.all()).toEqual([])
     }),
   )
 })
