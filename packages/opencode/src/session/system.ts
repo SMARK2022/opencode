@@ -9,6 +9,8 @@ import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_GPT from "./prompt/gpt.txt"
 import PROMPT_KIMI from "./prompt/kimi.txt"
+import PROMPT_MINIMAX from "./prompt/minimax.txt"
+import PROMPT_DEEPSEEK from "./prompt/deepseek.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
@@ -37,6 +39,10 @@ export function provider(model: Provider.Model) {
   if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
   if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
   if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
+  if (model.api.id.toLowerCase().includes("kimi")) return [PROMPT_KIMI]
+  if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
+  if (model.api.id.toLowerCase().includes("minimax") || model.api.id.toLowerCase().includes("mini-max")) return [PROMPT_MINIMAX]
+  if (model.api.id.toLowerCase().includes("deepseek")) return [PROMPT_DEEPSEEK]
   if (model.api.id.toLowerCase().includes("kimi")) return [PROMPT_KIMI]
   return [PROMPT_DEFAULT]
 }
@@ -133,12 +139,17 @@ export const layer = Layer.effect(
       items.push(
         ` - Reserve bash for system commands and terminal operations requiring shell execution`,
         ``,
-        `PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.`,
-        `Issue independent tool calls in the same response so they can run in parallel.`,
-        `Never chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.`,
-        `Parallel writes are only appropriate when target files or edit ranges cannot conflict.`,
+        `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
+        `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
+        `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*").`,
+        `After the first batch returns, identify all newly relevant directories/files and issue the next independent batch together.`,
+        `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
+        `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch for important discovered roots.`,
+        `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
+        `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
+        `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
+        `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
         `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
-        `Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`,
       )
 
       if (has("todo")) {

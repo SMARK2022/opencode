@@ -818,6 +818,17 @@ export function options(input: {
     result["promptCacheKey"] = input.sessionID
   }
 
+  // Send the OpenAI default explicitly so SDK layers that do not apply a
+  // default still receive parallel tool calls enabled.
+  if (
+    input.model.providerID === "openai" ||
+    input.model.api.npm === "@ai-sdk/openai" ||
+    input.model.api.npm === "@ai-sdk/azure" ||
+    input.model.api.npm === "@ai-sdk/github-copilot"
+  ) {
+    result["parallelToolCalls"] = true
+  }
+
   if (input.model.api.npm === "@openrouter/ai-sdk-provider" || input.model.api.npm === "@llmgateway/ai-sdk-provider") {
     result["usage"] = {
       include: true,
