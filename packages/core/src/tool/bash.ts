@@ -60,6 +60,10 @@ const StructuredOutput = Schema.Struct({
     compressionRepeatedBlockGroups: Schema.Number,
     compressionRepeatedLineGroups: Schema.Number,
     compressionInlinePatternGroups: Schema.Number,
+    // typed transcript 接住共享 owner 的新统计，不能在 schema 投影时丢掉。
+    compressionTemplateGroups: Schema.Number,
+    compressionHighEntropyLines: Schema.Number,
+    compressionSecretsRedacted: Schema.Number,
   }).pipe(Schema.optional),
   durationMs: Schema.Number.pipe(Schema.optional),
   diagnosticErrorLikeLines: Schema.Number.pipe(Schema.optional),
@@ -234,7 +238,8 @@ const layer = Layer.effectDiscard(
               // leaf 消费同一配置快照中的单次覆盖，全局 false 优先于单次 true，通用 store 不读取 Bash 开关。
               const configured = Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info.tool_output ?? {}] : []))
               const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
-              const diag = new BashDiagnosticCollector()
+              // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
+              const diag = new BashDiagnosticCollector({ enabled })
               const decoder = new TextDecoder()
               const parts: string[] = []
               let captured = 0
@@ -300,19 +305,20 @@ const layer = Layer.effectDiscard(
               const truncated = cut || result?.outputTruncated === true
               const outcome = result ? { exit: result.exitCode } : { timeout: true }
               const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
-              const compressed = compressVisibleOutput(output, { enabled })
+              // 传真实调用 command，不使用描述或重新解析执行命令。
+              const compressed = compressVisibleOutput(output, { enabled }, input.command)
               // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
-              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "" })
+              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "", config: { enabled } })
               const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
               // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
               const visible = !compressed.stats.applied && !truncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
-              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible })
+              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible, config: { enabled } })
               const notice = truncated
                 ? "[output capture truncated at the in-memory safety limit]"
                 : undefined
               return {
-                // 采样损失即使未压缩也保留原文；压缩不能被混记成进程 capture 截断。
-                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || diagnostic.discardedChars > 0,
+                // 脱敏即使未压缩也要求原文；既有 capture 的 lazy flush 与失败传播不变。
+                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0,
                 value: {
                 ...outcome,
                 output: [output, notice, timeoutNotice].filter(Boolean).join("\n\n"),
