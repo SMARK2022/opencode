@@ -7,16 +7,21 @@
   align-items: flex-start;
   justify-content: flex-start;
 
+  /* 两种容器共用尺寸；ScrollView 的滚动所有权留在内部 viewport。 */
   [data-slot="session-turn-content"] {
     flex-grow: 1;
     width: 100%;
     height: 100%;
     min-width: 0;
+  }
+
+  /* 普通 div 仍需原生滚动，不能继承 ScrollView 根容器的 overflow: hidden。 */
+  [data-slot="session-turn-content"]:not(.scroll-view) {
     overflow-y: auto;
     scrollbar-width: none;
   }
 
-  [data-slot="session-turn-content"]::-webkit-scrollbar {
+  [data-slot="session-turn-content"]:not(.scroll-view)::-webkit-scrollbar {
     display: none;
   }
 

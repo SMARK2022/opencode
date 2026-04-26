@@ -23,4 +23,6 @@ export function partDefaultOpen(part: PartType, shell = false, edit = false) {
     if (!edit) return false
     return !deletionOnly(part)
   }
+  // 未列出的工具不强制默认值，交由 renderer 的既有策略决定。
+  return undefined
 }

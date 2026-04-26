@@ -268,7 +268,8 @@ export function Session() {
   const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
-  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", false)
+  // 使用新偏好键启用滚动条，避免旧键的默认 false 抵消本次默认值迁移。
+  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_enabled", true)
   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
   const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
   const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
@@ -1118,7 +1119,7 @@ export function Session() {
         }}
       >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
-          <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
+          <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={1} gap={1}>
             <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
@@ -1126,11 +1127,11 @@ export function Session() {
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}
                 verticalScrollbarOptions={{
-                  paddingLeft: 1,
+                  paddingLeft: 0, // viewport 已预留一列，轨道不再重复挤占内容宽度。
                   visible: showScrollbar(),
                   trackOptions: {
                     backgroundColor: theme.backgroundElement,
-                    foregroundColor: theme.border,
+                    foregroundColor: theme.textMuted, // 跟随终端主题，避免固定颜色在深浅背景上失去对比度。
                   },
                 }}
                 stickyScroll={true}
@@ -2087,23 +2088,41 @@ function Shell(props: ToolProps) {
 function Write(props: ToolProps) {
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  const ctx = use()
+  // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
+  const [expanded, setExpanded] = createSignal(false)
   const code = createMemo(() => {
     return stringValue(props.input.content) ?? ""
+  })
+  const maxLines = 20
+  // 同时限制字符预算，单行长内容也不能挤满窄终端。
+  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars()))
+  const limited = createMemo(() => {
+    if (expanded() || !collapsed().overflow) return code()
+    return collapsed().output
   })
 
   return (
     <Switch>
       <Match when={props.metadata.diagnostics !== undefined}>
-        <BlockTool title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
+        <BlockTool
+          title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
+          part={props.part}
+          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+        >
           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
             <code
               conceal={false}
               fg={theme.text}
               filetype={filetype(stringValue(props.input.filePath))}
               syntaxStyle={syntax()}
-              content={code()}
+              content={limited()}
             />
           </line_number>
+          <Show when={collapsed().overflow}>
+            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+          </Show>
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
         </BlockTool>
       </Match>
@@ -2373,6 +2392,8 @@ function Edit(props: ToolProps) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  // diff 内容展开/收缩：超过 20 行时默认收缩，避免长 diff 占满终端
+  const [expanded, setExpanded] = createSignal(false)
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2384,12 +2405,19 @@ function Edit(props: ToolProps) {
   const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
 
   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
+  const diffLines = createMemo(() => diffContent().split("\n"))
+  const diffOverflow = createMemo(() => diffLines().length > 20)
 
   return (
     <Switch>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
-        <BlockTool title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
-          <box paddingLeft={1}>
+        <BlockTool
+          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))}
+          part={props.part}
+          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+        >
+          {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
+          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 15 : undefined}>
             <diff
               diff={diffContent()}
               view={view()}
@@ -2410,6 +2438,9 @@ function Edit(props: ToolProps) {
               removedLineNumberBg={theme.diffRemovedLineNumberBg}
             />
           </box>
+          <Show when={diffOverflow()}>
+            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+          </Show>
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
         </BlockTool>
       </Match>
@@ -2472,8 +2503,18 @@ function ApplyPatch(props: ToolProps) {
     <Switch>
       <Match when={files().length > 0}>
         <For each={files()}>
-          {(file) => (
-            <BlockTool title={title(file)} part={props.part}>
+          {(file) => {
+            // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
+            const [patchExpanded, setPatchExpanded] = createSignal(false)
+            const patchLines = createMemo(() => (file.patch || "").split("\n"))
+            const patchOverflow = createMemo(() => patchLines().length > 20)
+
+            return (
+            <BlockTool
+              title={title(file)}
+              part={props.part}
+              onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
+            >
               <Show
                 when={file.type !== "delete"}
                 fallback={
@@ -2482,11 +2523,18 @@ function ApplyPatch(props: ToolProps) {
                   </text>
                 }
               >
-                <Diff diff={file.patch} filePath={file.filePath} />
-                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+                {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
+                <box maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
+                  <Diff diff={file.patch} filePath={file.filePath} />
+                </box>
+                <Show when={patchOverflow()}>
+                  <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
+                </Show>
               </Show>
+              <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
             </BlockTool>
-          )}
+            )
+          }}
         </For>
       </Match>
       <Match when={true}>

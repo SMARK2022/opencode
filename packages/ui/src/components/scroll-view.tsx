@@ -276,12 +276,13 @@ export function ScrollView(props: ScrollViewProps) {
       }}
       onPointerDown={onThumbPointerDown}
       class="scroll-view__thumb"
-      data-visible={thumbVisible()}
-      data-dragging={isDragging()}
+      // 显式字符串匹配 CSS，可见态同时决定拖拽命中范围。
+      data-visible={thumbVisible() ? "true" : undefined}
+      data-dragging={isDragging() ? "true" : undefined}
       style={{
         height: `${thumbHeight()}px`,
         transform: `translateY(${thumbTop()}px)`,
-        "z-index": 100, // ensure it displays over content
+        // 层级和可见态交互由 CSS 管理，隐藏 thumb 不得用内联 auto 覆盖它。
       }}
     />
   )
