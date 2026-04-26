@@ -51,15 +51,15 @@ jobs:
           chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
           
           cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
-          Package: opencode
-          Version: ${VERSION}
-          Section: utils
-          Priority: optional
-          Architecture: amd64
-          Maintainer: smark <smark@local>
-          Description: opencode AI-powered development tool (smark build)
-           A standalone AI coding assistant with TUI, version ${VERSION}.
-          EOF
+Package: opencode
+Version: ${VERSION}
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: smark <smark@local>
+Description: opencode AI-powered development tool (smark build)
+ A standalone AI coding assistant with TUI, version ${VERSION}.
+EOF
           
           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
 
@@ -101,6 +101,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: microsoft/setup-msbuild@v2
 
       - uses: ./.github/actions/setup-bun
 
