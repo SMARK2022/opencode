@@ -2102,33 +2102,36 @@ function Edit(props: ToolProps<typeof EditTool>) {
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
     if (diffStyle === "stacked") return "unified"
-    // Default to "auto" behavior
     return ctx.width > 120 ? "split" : "unified"
   })
 
   const ft = createMemo(() => filetype(props.input.filePath))
-
   const diffContent = createMemo(() => props.metadata.diff || "")
   
-  const lines = createMemo(() => diffContent().split("\n"))
-  const overflow = createMemo(() => lines().length > 20)
-  const limitedDiff = createMemo(() => {
-    if (expanded() || !overflow()) return diffContent()
-    return [...lines().slice(0, 10), "…"].join("\n")
+  const stats = createMemo(() => {
+    const lines = diffContent().split("\n")
+    let added = 0, removed = 0
+    for (const line of lines) {
+      if (line.startsWith("+") && !line.startsWith("+++")) added++
+      if (line.startsWith("-") && !line.startsWith("---")) removed++
+    }
+    return { added, removed, total: lines.length }
   })
+
+  const overflow = createMemo(() => stats().total > 20)
 
   return (
     <Switch>
       <Match when={props.metadata.diff !== undefined}>
         <BlockTool 
-          title={"← Edit " + normalizePath(props.input.filePath!)} 
+          title={"← Edit " + normalizePath(props.input.filePath!) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
         >
           <box gap={1} flexDirection="column">
-            <box paddingLeft={1}>
+            <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
               <diff
-                diff={limitedDiff()}
+                diff={diffContent()}
                 view={view()}
                 filetype={ft()}
                 syntaxStyle={syntax()}
@@ -2175,37 +2178,25 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  function Diff(p: { diff: string; filePath: string }) {
-    return (
-      <box paddingLeft={1}>
-        <diff
-          diff={p.diff}
-          view={view()}
-          filetype={filetype(p.filePath)}
-          syntaxStyle={syntax()}
-          showLineNumbers={true}
-          width="100%"
-          wrapMode={ctx.diffWrapMode()}
-          fg={theme.text}
-          addedBg={theme.diffAddedBg}
-          removedBg={theme.diffRemovedBg}
-          contextBg={theme.diffContextBg}
-          addedSignColor={theme.diffHighlightAdded}
-          removedSignColor={theme.diffHighlightRemoved}
-          lineNumberFg={theme.diffLineNumber}
-          lineNumberBg={theme.diffContextBg}
-          addedLineNumberBg={theme.diffAddedLineNumberBg}
-          removedLineNumberBg={theme.diffRemovedLineNumberBg}
-        />
-      </box>
-    )
-  }
+  function title(file: { type: string; relativePath: string; filePath: string; deletions: number; patch?: string }) {
+    const baseTitle = (() => {
+      if (file.type === "delete") return "# Deleted " + file.relativePath
+      if (file.type === "add") return "# Created " + file.relativePath
+      if (file.type === "move") return "# Moved " + normalizePath(file.filePath) + " → " + file.relativePath
+      return "← Patched " + file.relativePath
+    })()
 
-  function title(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
-    if (file.type === "delete") return "# Deleted " + file.relativePath
-    if (file.type === "add") return "# Created " + file.relativePath
-    if (file.type === "move") return "# Moved " + normalizePath(file.filePath) + " → " + file.relativePath
-    return "← Patched " + file.relativePath
+    if (file.type === "delete" || !file.patch) return baseTitle
+
+    const lines = file.patch.split("\n")
+    let added = 0, removed = 0
+    for (const line of lines) {
+      if (line.startsWith("+") && !line.startsWith("+++")) added++
+      if (line.startsWith("-") && !line.startsWith("---")) removed++
+    }
+
+    if (added === 0 && removed === 0) return baseTitle
+    return `${baseTitle} +${added} -${removed}`
   }
 
   return (
@@ -2217,10 +2208,6 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
 
             const patchLines = createMemo(() => (file.patch || "").split("\n"))
             const overflow = createMemo(() => patchLines().length > 20)
-            const limitedPatch = createMemo(() => {
-              if (expanded() || !overflow()) return file.patch
-              return [...patchLines().slice(0, 10), "…"].join("\n")
-            })
 
             return (
               <BlockTool 
@@ -2232,12 +2219,32 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                   <Show
                     when={file.type !== "delete"}
                     fallback={
-                      <text fg={theme.diffRemoved}>
+                      <text fg={theme.diffRemoved} paddingLeft={1}>
                         -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
                       </text>
                     }
                   >
-                    <Diff diff={limitedPatch()} filePath={file.filePath} />
+                    <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+                      <diff
+                        diff={file.patch || ""}
+                        view={view()}
+                        filetype={filetype(file.filePath)}
+                        syntaxStyle={syntax()}
+                        showLineNumbers={true}
+                        width="100%"
+                        wrapMode={ctx.diffWrapMode()}
+                        fg={theme.text}
+                        addedBg={theme.diffAddedBg}
+                        removedBg={theme.diffRemovedBg}
+                        contextBg={theme.diffContextBg}
+                        addedSignColor={theme.diffHighlightAdded}
+                        removedSignColor={theme.diffHighlightRemoved}
+                        lineNumberFg={theme.diffLineNumber}
+                        lineNumberBg={theme.diffContextBg}
+                        addedLineNumberBg={theme.diffAddedLineNumberBg}
+                        removedLineNumberBg={theme.diffRemovedLineNumberBg}
+                      />
+                    </box>
                   </Show>
                   <Show when={overflow() && file.type !== "delete"}>
                     <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
