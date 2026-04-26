@@ -1,12 +1,16 @@
 /**
- * 用于优化大模型上下文的 Bash 输出压缩器。
+ * 用于优化大模型上下文的 Bash 输出压缩器（增强版）。
  *
  * 设计思路:
- *   1. 折叠回车（Carriage-Return, \r）产生的进度条帧，避免类似 npm install 时的全屏刷新。
- *   2. 压缩重复的多行块，比如无限循环打印相同的几行日志。
- *   3. 压缩连续的相同行，比如连续打印 100 行 "ping timeout"。
- *   4. 压缩单行内明显的重复模式，比如某些进度条中的 "...." 或者 "######"。
- *   5. 单独收集高信号的诊断信息，例如带有 error, exception 的上下文，确保最后的 tail() 回退不会意外截断提取到的错误。
+ *   1. Secret Redaction - 脱敏敏感信息（API key、JWT、密码等）
+ *   2. 虚拟终端渲染 - 处理 ANSI 控制序列和回车进度条
+ *   3. 模板化近重复压缩 - 压缩时间戳/UUID/哈希不同但模式相同的行
+ *   4. 多行块重复压缩 - 压缩循环打印的多行日志块
+ *   5. 单行重复压缩 - 压缩连续相同的行
+ *   6. 高熵长行压缩 - 压缩 base64/JWT/minified JSON 等高熵内容
+ *   7. 行内模式压缩 - 压缩进度条、长列表等行内重复
+ *   8. 命令适配器 - 针对 npm/pytest/docker/tsc 等工具的特定优化
+ *   9. 双队列诊断收集 - 保留 first/fatal/recent 错误上下文
  *
  * 安全性:
  *   - 每次替换必须证明它节省了足够的字节，避免为了压缩而压缩，导致信息丢失却没省下空间。
@@ -14,6 +18,29 @@
  *   - 跨行压缩在行内压缩之前运行，保证大块的重复优先被处理。
  *   - BashTool 的截断文件路径应当仍然保留完整的原始输出，以便用户或模型后续可以查看完整日志。
  */
+
+// ==================== 命令适配器接口 ====================
+
+/**
+ * 命令适配器接口
+ * 用于针对特定工具（npm、pytest、docker 等）进行输出优化
+ */
+export interface CommandAdapter {
+  // 检测命令是否匹配此适配器
+  detect(command: string): boolean
+  
+  // 后处理压缩后的输出（可选）
+  postCompress?(output: string, config: CompressionConfig): string
+}
+
+/**
+ * 命令适配器上下文
+ */
+export type CommandAdapterContext = {
+  command: string
+  exitCode: number | null
+  durationMs: number
+}
 
 // 定义压缩配置的接口，用于控制各个压缩策略的阈值
 export type CompressionConfig = {
@@ -65,6 +92,30 @@ export type CompressionConfig = {
   minCarriageReturnFrames: number
 
   /**
+   * 高熵/长行压缩设置。
+   * minHighEntropyLineLength: 触发高熵检测的最小行长度。
+   * minEntropy: 最小熵值阈值（信息熵）。
+   * maxWhitespaceRatio: 最大空白字符比例。
+   */
+  minHighEntropyLineLength: number
+  minEntropy: number
+  maxWhitespaceRatio: number
+  
+  /**
+   * 模板化近重复压缩设置。
+   * minTemplateRepeats: 模板重复的最少次数。
+   * templateNormalizationLevel: 归一化级别 ('safe' | 'aggressive' | 'off')
+   */
+  minTemplateRepeats: number
+  templateNormalizationLevel: string
+  
+  /**
+   * 命令适配器设置。
+   * enableCommandAdapters: 是否启用命令适配器。
+   */
+  enableCommandAdapters: boolean
+  
+  /**
    * 诊断信息提取设置。
    * diagnosticMinRuntimeMs: 命令执行时间超过此时长才提取诊断（太短的命令报错通常很直接，不需要专门提取）。
    * diagnosticContextRadius: 错误行前后保留的上下文行数（半径）。
@@ -87,7 +138,10 @@ export type CompressionStats = {
   carriageReturnGroups: number // 命中的回车折叠次数
   repeatedBlockGroups: number  // 命中的多行块重复压缩次数
   repeatedLineGroups: number   // 命中的单行重复压缩次数
+  templateGroups: number       // 命中的模板化近重复压缩次数
   inlinePatternGroups: number  // 命中的行内模式压缩次数
+  highEntropyLines: number     // 命中的高熵长行压缩次数
+  secretsRedacted: number      // 被脱敏的敏感信息数量
 
   applied: boolean             // 是否真正应用了任何压缩（即节省了空间）
 }
@@ -126,6 +180,7 @@ type LineRecord = {
 export type DiagnosticContext = {
   centerLine: number           // 触发这个上下文的中心错误行号
   lines: LineRecord[]          // 包含上下文的所有行
+  priority: 'first' | 'fatal' | 'recent'  // 上下文优先级
 }
 
 // 命令执行完毕后的诊断快照，汇总了各项异常指标
@@ -135,6 +190,9 @@ export type DiagnosticSnapshot = {
   warningLikeLines: number     // 包含警告关键词的行数
   fatalLikeLines: number       // 包含致命错误关键词的行数
   contexts: DiagnosticContext[]// 合并整理后的所有诊断上下文块
+  firstErrorContexts: DiagnosticContext[]  // 最早的错误上下文
+  fatalContexts: DiagnosticContext[]       // 致命错误上下文
+  recentErrorContexts: DiagnosticContext[] // 最近的错误上下文
 }
 
 // 渲染诊断附录信息的选项
@@ -175,6 +233,18 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   // 至少 4 次回车更新才折叠
   minCarriageReturnFrames: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_CR_FRAMES ?? 4),
 
+  // 高熵长行压缩配置
+  minHighEntropyLineLength: Number(process.env.OPENCODE_BASH_MIN_HIGH_ENTROPY_LINE_LENGTH ?? 512),
+  minEntropy: Number(process.env.OPENCODE_BASH_MIN_ENTROPY ?? 4.5),
+  maxWhitespaceRatio: Number(process.env.OPENCODE_BASH_MAX_WHITESPACE_RATIO ?? 0.1),
+  
+  // 模板化近重复压缩配置
+  minTemplateRepeats: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_TEMPLATE_REPEATS ?? 3),
+  templateNormalizationLevel: process.env.OPENCODE_BASH_TEMPLATE_NORMALIZATION ?? 'safe',
+  
+  // 命令适配器配置
+  enableCommandAdapters: process.env.OPENCODE_BASH_ENABLE_COMMAND_ADAPTERS !== '0',
+
   // 命令运行超 2000ms 才提取错误上下文
   diagnosticMinRuntimeMs: Number(process.env.OPENCODE_BASH_DIAGNOSTIC_MIN_RUNTIME_MS ?? 2000),
   // 上下文半径为 3 行 (上3下3)
@@ -196,11 +266,225 @@ const WARNING_LIKE_RE = /\b(?:warn|warning|warnings|deprecated|deprecation)\b/i
 const FATAL_LIKE_RE =
   /\b(?:exception|traceback|fatal|panic|segmentation fault|assertionerror|typeerror|valueerror|referenceerror|syntaxerror|module not found|cannot find module)\b/i
 
+// 匹配编译/类型错误
+const COMPILE_ERROR_RE = /\b(?:TS\d+|error\[E\d+\]|SyntaxError|TypeError|ModuleNotFoundError|cannot find module)\b/i
+
+// 匹配基础设施错误
+const INFRA_ERROR_RE = /\b(?:ENOENT|EACCES|ECONNREFUSED|EADDRINUSE|timeout|permission denied|connection refused)\b/i
+
 // 用于排除 "0 errors", "0 warnings" 这种健康指标行
 const ZERO_PROBLEM_RE = /\b0\s+(?:errors?|failures?|warnings?)\b/i
+
+// 扩展的健康指标正则（False Positive 过滤）
+const HEALTHY_INDICATOR_RE = /\b(?:no\s+errors?|without\s+errors?|0\s+failed|failed\s*=\s*0|errors?\s*:\s*0|warnings?\s*:\s*0|no\s+vulnerabilities\s+found|found\s+0\s+vulnerabilities|all\s+tests?\s+passed?|\d+\s+passed?,\s+0\s+failed|build\s+successful|compilation\s+successful|no\s+issues?\s+found)\b/i
 // 匹配 ANSI 控制字符（颜色、清屏等），含有 ANSI 的行在行内压缩时被跳过
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/
 const ANSI_GLOBAL_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
+
+// Secret 检测模式
+const SECRET_PATTERNS = [
+  // API Keys (sk-xxx 格式，常见于 OpenAI、Anthropic 等)
+  { regex: /\bsk-[A-Za-z0-9_-]{20,}\b/g, name: 'api-key', confidence: 1.0 },
+  { regex: /\bsk-[A-Za-z0-9_-]+-[A-Za-z0-9_-]{20,}\b/g, name: 'api-key', confidence: 1.0 },
+  
+  // JWT
+  { regex: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, name: 'jwt', confidence: 0.9 },
+  
+  // AWS Keys
+  { regex: /\bAKIA[0-9A-Z]{16}\b/g, name: 'aws-access-key', confidence: 1.0 },
+  
+  // GitHub Token
+  { regex: /\bgh[ps]_[A-Za-z0-9]{36,}\b/g, name: 'github-token', confidence: 1.0 },
+  
+  // Generic secrets (password=xxx, token=xxx)
+  { regex: /(?:password|passwd|pwd|secret|token|key|api[_-]?key)\s*[:=]\s*['"]?([^'"\s]{8,})['"]?/gi, name: 'credential', confidence: 0.7 },
+  
+  // Private keys
+  { regex: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, name: 'private-key', confidence: 1.0 },
+]
+
+// Secret Redaction（敏感信息脱敏）
+function redactSecrets(text: string): { text: string; redacted: number } {
+  let redacted = 0
+  let result = text
+  
+  for (const { regex, name, confidence } of SECRET_PATTERNS) {
+    // 只 redact 高置信度的匹配
+    if (confidence >= 0.7) {
+      const matches = result.match(regex)
+      if (matches) {
+        for (const match of matches) {
+          const replacement = `<REDACTED_${name.toUpperCase()}>`
+          result = result.replace(match, replacement)
+          redacted++
+        }
+      }
+    }
+  }
+  
+  return { text: result, redacted }
+}
+
+/**
+ * 虚拟终端渲染器 - 处理 ANSI 控制序列
+ * 支持光标移动、清屏、清行等操作，将终端重绘输出转换为稳定的文本
+ */
+class VirtualTerminal {
+  private lines: string[] = []
+  private cursorRow = 0
+  private cursorCol = 0
+  private frameCount = 0
+  
+  // ANSI CSI 序列解析正则
+  private readonly CSI_REGEX = /\x1b\[([0-9;?]*)([A-Za-z])/g
+  
+  processChunk(chunk: string): void {
+    let pos = 0
+    
+    while (pos < chunk.length) {
+      // 查找下一个 ANSI 控制序列
+      this.CSI_REGEX.lastIndex = pos
+      const match = this.CSI_REGEX.exec(chunk)
+      
+      if (!match) {
+        // 没有更多控制序列，处理剩余文本
+        this.writeText(chunk.slice(pos))
+        break
+      }
+      
+      // 写入控制序列前的文本
+      if (match.index > pos) {
+        this.writeText(chunk.slice(pos, match.index))
+      }
+      
+      // 处理控制序列
+      const params = match[1]
+      const command = match[2]
+      this.handleCSI(params, command)
+      
+      pos = this.CSI_REGEX.lastIndex
+    }
+  }
+  
+  private handleCSI(params: string, command: string): void {
+    const nums = params.split(';').map(n => parseInt(n) || 0)
+    
+    switch (command) {
+      case 'A': // Cursor Up
+        this.cursorRow = Math.max(0, this.cursorRow - (nums[0] || 1))
+        this.frameCount++
+        break
+      case 'B': // Cursor Down
+        this.cursorRow += nums[0] || 1
+        this.frameCount++
+        break
+      case 'C': // Cursor Forward
+        this.cursorCol += nums[0] || 1
+        break
+      case 'D': // Cursor Back
+        this.cursorCol = Math.max(0, this.cursorCol - (nums[0] || 1))
+        break
+      case 'G': // Cursor Horizontal Absolute
+        this.cursorCol = (nums[0] || 1) - 1
+        this.frameCount++
+        break
+      case 'H': // Cursor Position
+      case 'f': // Horizontal Vertical Position
+        this.cursorRow = Math.max(0, (nums[0] || 1) - 1)
+        this.cursorCol = Math.max(0, (nums[1] || 1) - 1)
+        this.frameCount++
+        break
+      case 'K': // Erase in Line
+        this.ensureLine(this.cursorRow)
+        if (nums[0] === 0 || !nums[0]) {
+          // 清除从光标到行尾
+          this.lines[this.cursorRow] = this.lines[this.cursorRow].slice(0, this.cursorCol)
+        } else if (nums[0] === 1) {
+          // 清除从行首到光标
+          this.lines[this.cursorRow] = ' '.repeat(this.cursorCol) + this.lines[this.cursorRow].slice(this.cursorCol)
+        } else if (nums[0] === 2) {
+          // 清除整行
+          this.lines[this.cursorRow] = ''
+        }
+        this.frameCount++
+        break
+      case 'J': // Erase in Display
+        if (nums[0] === 2 || nums[0] === 3) {
+          // 清屏
+          this.lines = []
+          this.cursorRow = 0
+          this.cursorCol = 0
+          this.frameCount++
+        }
+        break
+    }
+  }
+  
+  private writeText(text: string): void {
+    for (const char of text) {
+      if (char === '\r') {
+        this.cursorCol = 0
+        this.frameCount++
+      } else if (char === '\n') {
+        this.cursorRow++
+        this.cursorCol = 0
+      } else if (char === '\b') {
+        this.cursorCol = Math.max(0, this.cursorCol - 1)
+      } else {
+        // 确保行存在
+        this.ensureLine(this.cursorRow)
+        
+        // 扩展行到光标位置
+        while (this.lines[this.cursorRow].length < this.cursorCol) {
+          this.lines[this.cursorRow] += ' '
+        }
+        
+        // 写入字符
+        const line = this.lines[this.cursorRow]
+        this.lines[this.cursorRow] = 
+          line.slice(0, this.cursorCol) + char + line.slice(this.cursorCol + 1)
+        this.cursorCol++
+      }
+    }
+  }
+  
+  private ensureLine(row: number): void {
+    while (this.lines.length <= row) {
+      this.lines.push('')
+    }
+  }
+  
+  getStableOutput(): string {
+    return this.lines.filter(line => line.trim().length > 0).join('\n')
+  }
+  
+  getFrameCount(): number {
+    return this.frameCount
+  }
+}
+
+// 使用虚拟终端渲染器替代简单的回车折叠
+function normalizeTerminalOutput(text: string, config: CompressionConfig): { text: string; frames: number } {
+  // 如果没有 ANSI 控制字符和回车，直接返回
+  if (!text.includes('\r') && !text.includes('\x1b[')) {
+    return { text, frames: 0 }
+  }
+  
+  const vt = new VirtualTerminal()
+  vt.processChunk(text)
+  
+  const stable = vt.getStableOutput()
+  const frames = vt.getFrameCount()
+  
+  if (frames >= config.minCarriageReturnFrames) {
+    return {
+      text: `... [terminal progress collapsed: ${frames} frames]\n${stable}`,
+      frames
+    }
+  }
+  
+  return { text: stable, frames }
+}
 
 // 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
 function stripAnsi(text: string) {
@@ -307,45 +591,310 @@ function sameBlock(lines: string[], a: number, b: number, width: number) {
 }
 
 /**
- * 折叠回车符（CR \r）。
- * 进度条通常使用回车（CR）来重绘同一行。
- * 我们通过按行拆分后找 \r，将前面的绘制帧丢弃，只保留最后一帧，并记录折叠了多少次重绘。
+ * 折叠终端重绘输出（增强版：支持 ANSI 控制序列）
+ * 优先使用虚拟终端渲染器，如果没有 ANSI 控制序列则回退到简单的回车折叠
  */
 function collapseCarriageReturns(text: string, config: CompressionConfig): { text: string; groups: number } {
-  // 如果没有回车符直接短路返回
-  if (!text.includes("\r")) return { text, groups: 0 }
+  // 如果包含 ANSI 控制序列或回车，使用虚拟终端渲染器
+  if (text.includes('\x1b[') || text.includes('\r')) {
+    const result = normalizeTerminalOutput(text, config)
+    return { text: result.text, groups: result.frames > 0 ? 1 : 0 }
+  }
 
-  const lines = text.split("\n")
-  let groups = 0
-  let changed = false
-
-  const next = lines.map((line) => {
-    if (!line.includes("\r")) return line
-
-    // 以 \r 为分隔符拆分每一帧，忽略空帧
-    const frames = line.split("\r").filter((frame) => frame.length > 0)
-    // 帧数不够阈值就不折叠
-    if (frames.length < config.minCarriageReturnFrames) return line
-
-    const last = frames[frames.length - 1] ?? ""
-    // 插入一条说明，告诉 LLM 这里折叠了多少帧
-    const replacement = `... [carriage-return progress updates collapsed: ${frames.length - 1} frames]\n${last}`
-    
-    // 检查这个替换操作是否划算（有些短帧折叠后可能反而体积变大）
-    const score = scoreReplacement(line, replacement, config)
-    if (!score.profitable) return line
-
-    groups++
-    changed = true
-    return replacement
-  })
-
-  // 如果有改变则拼接回去
-  return { text: changed ? next.join("\n") : text, groups }
+  return { text, groups: 0 }
 }
 
-// 在给定的起始索引处寻找最划算的连续重复多行块
-function findRepeatedBlockAt(lines: string[], start: number, config: CompressionConfig): BlockCandidate | undefined {
+// ==================== Phase 3: 命令适配器实现 ====================
+
+/**
+ * npm/pnpm 适配器
+ * 优化 npm install、pnpm install 等包管理器输出
+ */
+class NpmPnpmAdapter implements CommandAdapter {
+  detect(command: string): boolean {
+    return /^(npm|pnpm|yarn)\s+(i|install|ci|add)\b/.test(command)
+  }
+  
+  postCompress(output: string, config: CompressionConfig): string {
+    const lines = output.split('\n')
+    
+    // 1. 折叠 audit banner
+    const auditStart = lines.findIndex(l => /found \d+ vulnerabilities/.test(l))
+    if (auditStart >= 0) {
+      const auditEnd = lines.findIndex((l, i) => i > auditStart && l.trim() === '')
+      if (auditEnd > auditStart) {
+        const auditSummary = lines[auditStart]
+        lines.splice(auditStart, auditEnd - auditStart, 
+          `... [npm audit summary collapsed]`,
+          auditSummary
+        )
+      }
+    }
+    
+    // 2. 聚合 peer dependency warnings
+    const peerWarnings = lines.filter(l => /WARN.*peer dep/i.test(l))
+    if (peerWarnings.length >= 3) {
+      const grouped = new Map<string, number>()
+      for (const warn of peerWarnings) {
+        const match = /peer dep.*?(\S+)/.exec(warn)
+        if (match) {
+          grouped.set(match[1], (grouped.get(match[1]) || 0) + 1)
+        }
+      }
+      
+      const summary = Array.from(grouped.entries())
+        .map(([pkg, count]) => `  - ${pkg} (${count}×)`)
+        .join('\n')
+      
+      // 移除原始 warnings，插入摘要
+      const filtered = lines.filter(l => !/WARN.*peer dep/i.test(l))
+      filtered.push(`\n... [peer dependency warnings grouped]:\n${summary}`)
+      
+      return filtered.join('\n')
+    }
+    
+    return lines.join('\n')
+  }
+}
+
+/**
+ * pytest 适配器
+ * 优化 pytest 测试输出
+ */
+class PytestAdapter implements CommandAdapter {
+  detect(command: string): boolean {
+    return /^pytest\b/.test(command)
+  }
+  
+  postCompress(output: string, config: CompressionConfig): string {
+    const lines = output.split('\n')
+    
+    // 1. 提取 short test summary
+    const summaryStart = lines.findIndex(l => /^=+ short test summary/i.test(l))
+    if (summaryStart >= 0) {
+      const summaryEnd = lines.findIndex((l, i) => i > summaryStart && /^=+/.test(l))
+      if (summaryEnd > summaryStart) {
+        const summary = lines.slice(summaryStart, summaryEnd)
+        
+        // 提取失败测试列表
+        const failedTests = summary
+          .filter(l => /^FAILED/i.test(l))
+          .map(l => l.replace(/^FAILED\s+/i, ''))
+        
+        if (failedTests.length > 0) {
+          const summaryText = `<pytest_summary>
+failed=${failedTests.length}
+${failedTests.map(t => `- ${t}`).join('\n')}
+</pytest_summary>`
+          
+          // 在输出开头插入摘要
+          lines.unshift(summaryText, '')
+        }
+      }
+    }
+    
+    // 2. 折叠过长的 captured output
+    let i = 0
+    while (i < lines.length) {
+      if (/^-+ Captured (stdout|stderr) call -+$/i.test(lines[i])) {
+        const start = i
+        i++
+        while (i < lines.length && !/^=+/.test(lines[i]) && !/^-+ Captured/i.test(lines[i])) {
+          i++
+        }
+        const capturedLines = i - start - 1
+        if (capturedLines > 50) {
+          // 保留前 10 行和后 10 行
+          const kept = 10
+          lines.splice(
+            start + kept + 1,
+            capturedLines - kept * 2,
+            `... [${capturedLines - kept * 2} lines of captured output omitted]`
+          )
+          i = start + kept * 2 + 2
+        }
+      }
+      i++
+    }
+    
+    return lines.join('\n')
+  }
+}
+
+/**
+ * Docker 适配器
+ * 优化 docker build 输出
+ */
+class DockerAdapter implements CommandAdapter {
+  detect(command: string): boolean {
+    return /^docker\s+(build|buildx)/.test(command)
+  }
+  
+  postCompress(output: string, config: CompressionConfig): string {
+    const lines = output.split('\n')
+    const steps: Array<{ num: number; name: string; status: string; lines: string[] }> = []
+    
+    let currentStep: typeof steps[0] | null = null
+    
+    for (const line of lines) {
+      const stepMatch = /^#(\d+) \[(.+?)\]/.exec(line)
+      if (stepMatch) {
+        if (currentStep) steps.push(currentStep)
+        currentStep = {
+          num: parseInt(stepMatch[1]),
+          name: stepMatch[2],
+          status: 'running',
+          lines: [line]
+        }
+        continue
+      }
+      
+      if (currentStep) {
+        currentStep.lines.push(line)
+        if (/DONE|CACHED|ERROR/i.test(line)) {
+          currentStep.status = /ERROR/i.test(line) ? 'failed' : 
+                               /CACHED/i.test(line) ? 'cached' : 'done'
+        }
+      }
+    }
+    
+    if (currentStep) steps.push(currentStep)
+    
+    // 生成摘要
+    const summary = steps.map(s => 
+      `#${s.num} ${s.name}: ${s.status.toUpperCase()}`
+    ).join('\n')
+    
+    // 只保留失败步骤的详细输出
+    const failedStep = steps.find(s => s.status === 'failed')
+    if (failedStep) {
+      return `<docker_build_summary>
+${summary}
+</docker_build_summary>
+
+<docker_failed_step step="#${failedStep.num}">
+${failedStep.lines.join('\n')}
+</docker_failed_step>`
+    }
+    
+    return `<docker_build_summary>
+${summary}
+</docker_build_summary>`
+  }
+}
+
+/**
+ * TypeScript 适配器
+ * 优化 tsc 编译输出
+ */
+class TypeScriptAdapter implements CommandAdapter {
+  detect(command: string): boolean {
+    return /^(tsc|npx tsc|bun tsc)\b/.test(command)
+  }
+  
+  postCompress(output: string, config: CompressionConfig): string {
+    const lines = output.split('\n')
+    
+    // 按错误码分组
+    const errorGroups = new Map<string, Array<{ file: string; line: string }>>()
+    
+    for (const line of lines) {
+      const match = /^(.+?)\((\d+),(\d+)\): error (TS\d+):/.exec(line)
+      if (match) {
+        const [, file, row, col, code] = match
+        if (!errorGroups.has(code)) {
+          errorGroups.set(code, [])
+        }
+        errorGroups.get(code)!.push({ file, line })
+      }
+    }
+    
+    if (errorGroups.size === 0) return output
+    
+    // 生成摘要
+    const summary = Array.from(errorGroups.entries())
+      .map(([code, errors]) => `${code} × ${errors.length}`)
+      .join(', ')
+    
+    // 保留每个错误码的前 3 个实例
+    const kept = new Set<string>()
+    for (const [code, errors] of errorGroups) {
+      errors.slice(0, 3).forEach(e => kept.add(e.line))
+    }
+    
+    const filtered = lines.filter(line => {
+      if (!/error TS\d+:/i.test(line)) return true
+      return kept.has(line)
+    })
+    
+    return `<tsc_diagnostics_summary>
+${summary}
+first errors shown below (${kept.size} of ${lines.length} total)
+</tsc_diagnostics_summary>
+${filtered.join('\n')}`
+  }
+}
+
+// 适配器注册表
+const COMMAND_ADAPTERS: CommandAdapter[] = [
+  new NpmPnpmAdapter(),
+  new PytestAdapter(),
+  new DockerAdapter(),
+  new TypeScriptAdapter(),
+]
+
+/**
+ * 检测并返回匹配的命令适配器
+ */
+export function detectCommandAdapter(command: string): CommandAdapter | undefined {
+  return COMMAND_ADAPTERS.find(adapter => adapter.detect(command))
+}
+
+/**
+ * 应用命令适配器的后处理
+ */
+export function applyCommandAdapter(
+  command: string,
+  output: string,
+  config: CompressionConfig
+): string {
+  if (!config.enableCommandAdapters) return output
+  
+  const adapter = detectCommandAdapter(command)
+  if (!adapter || !adapter.postCompress) return output
+  
+  return adapter.postCompress(output, config)
+}
+
+// 计算行哈希（用于加速块比较）
+function computeLineHashes(lines: string[]): number[] {
+  return lines.map(line => {
+    let hash = 0
+    for (let i = 0; i < line.length; i++) {
+      hash = ((hash << 5) - hash) + line.charCodeAt(i)
+      hash = hash & hash  // Convert to 32bit integer
+    }
+    return hash
+  })
+}
+
+// 计算块哈希（rolling hash）
+function computeBlockHash(lineHashes: number[], start: number, width: number): number {
+  let hash = 0
+  for (let i = 0; i < width; i++) {
+    hash = ((hash << 5) - hash) + lineHashes[start + i]
+    hash = hash & hash
+  }
+  return hash
+}
+
+// 在给定的起始索引处寻找最划算的连续重复多行块（优化版：使用 rolling hash）
+function findRepeatedBlockAt(
+  lines: string[], 
+  lineHashes: number[], 
+  start: number, 
+  config: CompressionConfig
+): BlockCandidate | undefined {
   const remaining = lines.length - start
   let best: BlockCandidate | undefined
 
@@ -362,11 +911,20 @@ function findRepeatedBlockAt(lines: string[], start: number, config: Compression
     // 忽略本身具有更小重复周期的块
     if (hasSmallerLinePeriod(block)) continue
 
+    // 计算当前块的哈希
+    const blockHash = computeBlockHash(lineHashes, start, width)
+    
     let repeats = 1
     let cursor = start + width
 
-    // 向下探查看这个块重复了多少次
-    while (cursor + width <= lines.length && sameBlock(lines, start, cursor, width)) {
+    // 向下探查看这个块重复了多少次（优化：先比较哈希，再比较字符串）
+    while (cursor + width <= lines.length) {
+      const nextHash = computeBlockHash(lineHashes, cursor, width)
+      if (nextHash !== blockHash) break
+      
+      // Hash 相同，再做精确比较
+      if (!sameBlock(lines, start, cursor, width)) break
+      
       repeats++
       cursor += width
     }
@@ -402,15 +960,18 @@ function findRepeatedBlockAt(lines: string[], start: number, config: Compression
   return best
 }
 
-// 从上到下扫描所有行，应用多行块压缩
+// 从上到下扫描所有行，应用多行块压缩（优化版：预计算行哈希）
 function compressRepeatedBlocks(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
   const out: string[] = []
   let groups = 0
   let i = 0
+  
+  // 预计算所有行的哈希值，加速后续比较
+  const lineHashes = computeLineHashes(lines)
 
   while (i < lines.length) {
     // 尝试在当前 i 位置找到一个可折叠的多行块
-    const candidate = findRepeatedBlockAt(lines, i, config)
+    const candidate = findRepeatedBlockAt(lines, lineHashes, i, config)
     if (!candidate) {
       out.push(lines[i])
       i++
@@ -537,11 +1098,243 @@ function compressInlineLine(line: string, config: CompressionConfig): { line: st
   }
 }
 
-// 遍历每一行执行行内压缩
+// 计算文本熵值
+function calculateEntropy(text: string): number {
+  const freq = new Map<string, number>()
+  for (const char of text) {
+    freq.set(char, (freq.get(char) || 0) + 1)
+  }
+  
+  let entropy = 0
+  const len = text.length
+  for (const count of freq.values()) {
+    const p = count / len
+    entropy -= p * Math.log2(p)
+  }
+  
+  return entropy
+}
+
+// 高熵行检测
+function isHighEntropyLine(line: string, config: CompressionConfig): boolean {
+  if (line.length < config.minHighEntropyLineLength) return false
+  
+  const entropy = calculateEntropy(line)
+  const whitespaceCount = (line.match(/\s/g) || []).length
+  const noWhitespaceRatio = 1 - (whitespaceCount / line.length)
+  
+  return entropy > config.minEntropy && noWhitespaceRatio > (1 - config.maxWhitespaceRatio)
+}
+
+// 内容类型检测
+function detectHighEntropyType(line: string): string {
+  if (/^[A-Za-z0-9+/]+=*$/.test(line.trim())) return 'base64'
+  if (/^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(line.trim())) return 'jwt'
+  if (/^data:image\/[^;]+;base64,/.test(line)) return 'data-uri'
+  if (/^[{[].*[}\]]$/.test(line.trim()) && line.length > 1000) return 'minified-json'
+  if (/^[0-9a-f]{64,}$/i.test(line.trim())) return 'hex-dump'
+  return 'unknown'
+}
+
+// 计算简单哈希（用于摘要）
+function simpleHash(text: string): string {
+  let hash = 0
+  for (let i = 0; i < text.length; i++) {
+    const char = text.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0')
+}
+
+// 归一化函数（用于模板化压缩）
+function normalizeLineForGrouping(line: string, level: string): string {
+  if (level === 'off') return line
+  
+  let normalized = line
+  
+  // Safe 级别：只替换时间/UUID/哈希
+  // ISO 时间戳
+  normalized = normalized.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?/g, '<ISO_TIME>')
+  // 时间格式 HH:MM:SS
+  normalized = normalized.replace(/\b\d{2}:\d{2}:\d{2}(\.\d{3})?\b/g, '<TIME>')
+  // UUID
+  normalized = normalized.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<UUID>')
+  // 长哈希（8位以上）
+  normalized = normalized.replace(/\b[0-9a-f]{8,}\b/gi, '<HEX>')
+  
+  if (level === 'aggressive') {
+    // Aggressive 级别：还替换数字/路径/端口/大小
+    // 端口号
+    normalized = normalized.replace(/:\d{2,5}\b/g, ':<PORT>')
+    // 文件大小
+    normalized = normalized.replace(/\b\d+(\.\d+)?\s*(B|KB|MB|GB|TB|bytes?)\b/gi, '<SIZE>')
+    // 持续时间
+    normalized = normalized.replace(/\b\d+(\.\d+)?\s*(ms|s|sec|min|h|hours?|minutes?|seconds?)\b/gi, '<DURATION>')
+    // 数字（只替换 4 位以上，保留错误码）
+    normalized = normalized.replace(/\b\d{4,}\b/g, '<NUM>')
+    // 临时路径
+    normalized = normalized.replace(/\/tmp\/[^\s]+/g, '<TMPPATH>')
+    normalized = normalized.replace(/C:\\Users\\[^\\]+\\AppData\\Local\\Temp\\[^\s]+/gi, '<TMPPATH>')
+  }
+  
+  return normalized
+}
+
+// 模板化近重复压缩
+function compressTemplateRuns(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
+  if (config.templateNormalizationLevel === 'off') {
+    return { lines, groups: 0 }
+  }
+  
+  const out: string[] = []
+  let groups = 0
+  let i = 0
+  
+  while (i < lines.length) {
+    const line = lines[i]
+    const template = normalizeLineForGrouping(line, config.templateNormalizationLevel)
+    
+    // 向后扫描相同模板
+    let j = i + 1
+    while (j < lines.length && normalizeLineForGrouping(lines[j], config.templateNormalizationLevel) === template) {
+      j++
+    }
+    
+    const count = j - i
+    
+    // 达到阈值且模板化后确实有变化（不是完全相同）
+    // 同时不压缩包含错误关键词的行
+    const hasErrorKeywords = /error|failed|assert|exception/i.test(line)
+    if (count >= config.minTemplateRepeats && template !== line && !hasErrorKeywords) {
+      const originalLines = lines.slice(i, j)
+      const replacementLines = [
+        `... [template repeated ${count} times: ${quotePattern(template, 60)}]`,
+        `    first: ${lines[i]}`,
+        `    last:  ${lines[j - 1]}`
+      ]
+      
+      const score = scoreReplacement(
+        serializeLines(originalLines),
+        serializeLines(replacementLines),
+        config
+      )
+      
+      if (score.profitable) {
+        out.push(...replacementLines)
+        groups++
+        i = j
+        continue
+      }
+    }
+    
+    out.push(line)
+    i++
+  }
+  
+  return { lines: out, groups }
+}
+
+// 高熵长行压缩
+function compressHighEntropyLines(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
+  let groups = 0
+  
+  const next = lines.map(line => {
+    if (!isHighEntropyLine(line, config)) return line
+    
+    const type = detectHighEntropyType(line)
+    const hash = simpleHash(line)
+    const prefix = line.slice(0, 20)
+    const suffix = line.slice(-20)
+    const bytes = byteLen(line)
+    
+    const replacement = `<high-entropy ${type} omitted: ${bytes} bytes, hash=${hash}, prefix="${prefix}...", suffix="...${suffix}">`
+    
+    const score = scoreReplacement(line, replacement, config)
+    if (score.profitable) {
+      groups++
+      return replacement
+    }
+    
+    return line
+  })
+  
+  return { lines: next, groups }
+}
+
+// ==================== Phase 4: 行内压缩增强 ====================
+
+// 压缩进度条
+function compressProgressBars(line: string, config: CompressionConfig): { line: string; applied: boolean } {
+  // 检测常见进度条模式
+  const patterns = [
+    { regex: /([=\-#█▓▒░])\1{20,}/, name: 'bar' },
+    { regex: /(\.)\1{20,}/, name: 'dots' },
+    { regex: /([▁▂▃▄▅▆▇█])\1{10,}/, name: 'blocks' },
+  ]
+  
+  for (const { regex, name } of patterns) {
+    const match = regex.exec(line)
+    if (match) {
+      const char = match[1]
+      const count = match[0].length
+      const replacement = `[${name} ${count}×"${char}"]`
+      
+      const score = scoreReplacement(match[0], replacement, config)
+      if (score.profitable) {
+        return {
+          line: line.replace(match[0], replacement),
+          applied: true
+        }
+      }
+    }
+  }
+  
+  return { line, applied: false }
+}
+
+// 压缩长分隔列表
+function compressLongLists(line: string, config: CompressionConfig): { line: string; applied: boolean } {
+  // 检测逗号分隔的长列表
+  const items = line.split(/,\s*/)
+  if (items.length < 10) return { line, applied: false }
+  
+  const totalBytes = byteLen(line)
+  if (totalBytes < 200) return { line, applied: false }
+  
+  // 保留前 3 个和后 3 个
+  const kept = [...items.slice(0, 3), `... (${items.length - 6} more)`, ...items.slice(-3)]
+  const replacement = kept.join(', ')
+  
+  const score = scoreReplacement(line, replacement, config)
+  if (score.profitable) {
+    return { line: replacement, applied: true }
+  }
+  
+  return { line, applied: false }
+}
+
+// 遍历每一行执行行内压缩（增强版：进度条 + 长列表 + 通用模式）
 function compressInlinePatterns(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
   let groups = 0
-  const next = lines.map((line) => {
-    const result = compressInlineLine(line, config)
+  
+  const next = lines.map(line => {
+    // 1. 先尝试进度条压缩
+    let result = compressProgressBars(line, config)
+    if (result.applied) {
+      groups++
+      return result.line
+    }
+    
+    // 2. 再尝试长列表压缩
+    result = compressLongLists(line, config)
+    if (result.applied) {
+      groups++
+      return result.line
+    }
+    
+    // 3. 最后尝试通用行内模式压缩
+    result = compressInlineLine(line, config)
     if (result.applied) groups++
     return result.line
   })
@@ -570,6 +1363,7 @@ export function shouldCompressOutput(text: string) {
 
 /**
  * 主入口：压缩传入的可见文本，返回压缩后的文本以及详细的统计信息
+ * 优化后的流水线顺序：Secret redaction → 虚拟终端渲染 → 模板化压缩 → 多行块 → 单行重复 → 高熵长行 → 行内模式
  */
 export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>): CompressResult {
   const config = configOf(configInput)
@@ -583,7 +1377,10 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     carriageReturnGroups: 0,
     repeatedBlockGroups: 0,
     repeatedLineGroups: 0,
+    templateGroups: 0,
     inlinePatternGroups: 0,
+    highEntropyLines: 0,
+    secretsRedacted: 0,
     applied: false,
   }
 
@@ -592,19 +1389,30 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     return { text, stats: emptyStats }
   }
 
-  // 第一步：清理和折叠回车符刷新
-  const cr = collapseCarriageReturns(text, config)
+  // 第零步：Secret redaction（最早执行，避免敏感信息进入后续流程）
+  const { text: redactedText, redacted: secretsRedacted } = redactSecrets(text)
+
+  // 第一步：虚拟终端渲染（处理 ANSI 控制序列和回车）
+  const cr = collapseCarriageReturns(redactedText, config)
   let lines = cr.text.split("\n")
 
-  // 第二步：压缩大块多行重复
+  // 第二步：模板化近重复压缩（在精确重复之前，避免模板被误判为不重复）
+  const template = compressTemplateRuns(lines, config)
+  lines = template.lines
+
+  // 第三步：压缩大块多行重复
   const blocks = compressRepeatedBlocks(lines, config)
   lines = blocks.lines
 
-  // 第三步：压缩单行连续重复
+  // 第四步：压缩单行连续重复
   const same = compressSameLines(lines, config)
   lines = same.lines
 
-  // 第四步：压缩行内重复字符
+  // 第五步：压缩高熵长行（在行内模式之前，避免对 base64 做无效扫描）
+  const highEntropy = compressHighEntropyLines(lines, config)
+  lines = highEntropy.lines
+
+  // 第六步：压缩行内重复字符
   const inline = compressInlinePatterns(lines, config)
   lines = inline.lines
 
@@ -622,10 +1430,13 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     carriageReturnGroups: cr.groups,
     repeatedBlockGroups: blocks.groups,
     repeatedLineGroups: same.groups,
+    templateGroups: template.groups,
     inlinePatternGroups: inline.groups,
+    highEntropyLines: highEntropy.groups,
+    secretsRedacted,
     applied:
       compressedBytes < originalBytes &&
-      (cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || inline.groups > 0),
+      (cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || inline.groups > 0 || highEntropy.groups > 0),
   }
 
   return {
@@ -665,15 +1476,32 @@ type ActiveContext = {
   remainingAfter: number      // 还需要收集多少后文行才算完成
 }
 
-// 判定是否是类似报错行
-function isErrorLike(line: string) {
+// 判定是否是类似报错行（增强版，带上下文感知）
+function isErrorLike(line: string, prevLine?: string, nextLine?: string) {
+  // 先检查是否是健康指标
+  if (HEALTHY_INDICATOR_RE.test(line)) return false
+  
   // 如果是 "0 errors" 等不视为报错
   if (ZERO_PROBLEM_RE.test(line) && !FATAL_LIKE_RE.test(line)) return false
+  
+  // 检查是否是注释中的 "error"
+  if (/^\s*(#|\/\/|\/\*|\*).*error/i.test(line)) return false
+  
+  // 检查是否是文档/示例中的 "error"
+  if (/example|sample|demo|test.*should.*error/i.test(line)) return false
+  
+  // 检查是否是日志级别配置
+  if (/log.*level.*error|error.*level/i.test(line)) return false
+  
+  // 检查前后文是否表明这是预期行为
+  if (prevLine && /expect|should|test/i.test(prevLine)) return false
+  
   return ERROR_LIKE_RE.test(line)
 }
 
 // 判定是否是类似警告行
 function isWarningLike(line: string) {
+  if (HEALTHY_INDICATOR_RE.test(line)) return false
   if (ZERO_PROBLEM_RE.test(line) && !FATAL_LIKE_RE.test(line)) return false
   return WARNING_LIKE_RE.test(line)
 }
@@ -683,13 +1511,23 @@ function isFatalLike(line: string) {
   return FATAL_LIKE_RE.test(line)
 }
 
+// 错误分级评分系统
+function scoreErrorLine(text: string): number {
+  if (FATAL_LIKE_RE.test(text)) return 100
+  if (COMPILE_ERROR_RE.test(text)) return 80
+  if (INFRA_ERROR_RE.test(text)) return 70
+  if (ERROR_LIKE_RE.test(text)) return 60
+  if (WARNING_LIKE_RE.test(text)) return 30
+  return 0
+}
+
 /**
- * 流式诊断信息收集器。
+ * 流式诊断信息收集器（增强版：三队列机制）。
  *
  * 它以极小的内存占用模式工作：
  *   - 前几行信息的一个小型环形缓冲区 (prev)
  *   - 少数处于活跃状态、正在等待后续错误上下文的块 (active)
- *   - 最终提取完的 N 个报错上下文 (contexts)
+ *   - 三个独立队列：first（最早错误）、fatal（致命错误）、recent（最近错误）
  *
  * 它不需要把整个几十兆的文件都放到内存，而是顺着 chunk 分片一边看一边丢掉正常日志。
  */
@@ -697,8 +1535,13 @@ export class BashDiagnosticCollector {
   private pending = ""        // 分片读取拼接用的残余文本缓冲
   private lineNo = 0          // 绝对行号计数器
   private prev: Ring<LineRecord>  // 保存最近遍历过的上文（比如当前行的前 3 行）
-  private contexts: Ring<DiagnosticContext> // 保存提取好的独立上下文块
-  private active: ActiveContext[] = [] // 当前正在等待“后文”的上下文列表
+  
+  // 三个独立队列
+  private contextsFirst: Ring<DiagnosticContext>   // 最早的 3 个错误
+  private contextsFatal: Ring<DiagnosticContext>   // 所有 fatal/panic
+  private contextsRecent: Ring<DiagnosticContext>  // 最近的 5 个错误
+  
+  private active: ActiveContext[] = [] // 当前正在等待"后文"的上下文列表
 
   private errorCount = 0      // 出现报错关键词的行数
   private warningCount = 0    // 出现警告关键词的行数
@@ -710,8 +1553,11 @@ export class BashDiagnosticCollector {
     this.config = configOf(configInput)
     // 上文环形队列的长度为配置的半径
     this.prev = new Ring<LineRecord>(this.config.diagnosticContextRadius)
-    // 保存最终诊断上下文的环形缓冲，预留足够多的空位便于之后去重合并
-    this.contexts = new Ring<DiagnosticContext>(Math.max(this.config.maxDiagnosticContexts * 3, this.config.maxDiagnosticContexts))
+    
+    // 初始化三个独立队列
+    this.contextsFirst = new Ring<DiagnosticContext>(3)
+    this.contextsFatal = new Ring<DiagnosticContext>(5)  // Fatal 错误最多保留 5 个
+    this.contextsRecent = new Ring<DiagnosticContext>(Math.max(this.config.maxDiagnosticContexts, 5))
   }
 
   // 接收从控制台流中涌来的 chunk 字符串
@@ -743,19 +1589,29 @@ export class BashDiagnosticCollector {
     this.active = []
   }
 
-  // 生成最终快照，返回合并、去重之后的最近 N 个诊断上下文块
+  // 生成最终快照，返回合并、去重之后的诊断上下文
   snapshot(): DiagnosticSnapshot {
+    const firstContexts = this.mergeContexts(this.contextsFirst.values())
+    const fatalContexts = this.mergeContexts(this.contextsFatal.values())
+    const recentContexts = this.mergeContexts(this.contextsRecent.values())
+    
+    // 合并所有上下文并去重
+    const allContexts = [...firstContexts, ...fatalContexts, ...recentContexts]
+    const merged = this.mergeContexts(allContexts).slice(-this.config.maxDiagnosticContexts)
+    
     return {
       totalLines: this.lineNo,
       errorLikeLines: this.errorCount,
       warningLikeLines: this.warningCount,
       fatalLikeLines: this.fatalCount,
-      // 合并可能有重叠行号的上下文，然后取最后的 N 个
-      contexts: this.mergeContexts(this.contexts.values()).slice(-this.config.maxDiagnosticContexts),
+      contexts: merged,
+      firstErrorContexts: firstContexts,
+      fatalContexts: fatalContexts,
+      recentErrorContexts: recentContexts,
     }
   }
 
-  // 核心处理单行的逻辑
+  // 核心处理单行的逻辑（增强版：三队列 + 错误评分）
   private observeLine(text: string) {
     const record: LineRecord = { no: this.lineNo + 1, text }
 
@@ -775,12 +1631,17 @@ export class BashDiagnosticCollector {
     }
     this.active = stillActive
 
+    // 获取前一行用于上下文感知
+    const prevLine = this.prev.values()[this.prev.values().length - 1]?.text
+
     // 统计各种警示关键词出现的频率
     if (isWarningLike(text)) this.warningCount++
 
-    if (isErrorLike(text)) {
+    const score = scoreErrorLine(text)
+    
+    if (score >= 60 || isErrorLike(text, prevLine)) {
       this.errorCount++
-      if (isFatalLike(text)) this.fatalCount++
+      if (score >= 100 || isFatalLike(text)) this.fatalCount++
 
       // 当前行是一个报错，新建一个等待捕获后文的活跃上下文
       const ctx: ActiveContext = {
@@ -792,24 +1653,48 @@ export class BashDiagnosticCollector {
       }
 
       // 特殊情况：半径配了 0，直接结束收集
-      if (ctx.remainingAfter <= 0) this.finalizeContext(ctx)
-      else this.active.push(ctx)
+      if (ctx.remainingAfter <= 0) {
+        this.finalizeContextWithPriority(ctx, score)
+      } else {
+        this.active.push(ctx)
+      }
     } else if (isFatalLike(text)) {
       // 即使没明确报 Error 关键词，如果有致命错误也进行统计
       this.fatalCount++
     }
 
-    // 把当前行压入“前文环形缓冲区”，为未来的报错作铺垫
+    // 把当前行压入"前文环形缓冲区"，为未来的报错作铺垫
     this.prev.push(record)
     this.lineNo++
   }
 
-  // 将收集完上文下文的活跃块封存到结果池中
+  // 将收集完上文下文的活跃块封存到结果池中（增强版：根据优先级分配队列）
   private finalizeContext(ctx: ActiveContext) {
-    this.contexts.push({
+    const centerText = ctx.lines.find(l => l.no === ctx.centerLine)?.text || ''
+    const score = scoreErrorLine(centerText)
+    this.finalizeContextWithPriority(ctx, score)
+  }
+  
+  private finalizeContextWithPriority(ctx: ActiveContext, score: number) {
+    const diagnosticCtx: DiagnosticContext = {
       centerLine: ctx.centerLine,
       lines: ctx.lines,
-    })
+      priority: score >= 100 ? 'fatal' : this.errorCount <= 3 ? 'first' : 'recent',
+    }
+    
+    // 根据优先级分配到不同队列
+    if (score >= 100) {
+      // Fatal 错误单独保存
+      this.contextsFatal.push(diagnosticCtx)
+    }
+    
+    if (this.errorCount <= 3) {
+      // 前 3 个错误保存到 first 队列
+      this.contextsFirst.push(diagnosticCtx)
+    }
+    
+    // 所有错误都进 recent 队列
+    this.contextsRecent.push(diagnosticCtx)
   }
 
   // 合并重叠上下文：比如行号 10 报错，保留了 7~13；紧接着 12 又报错，保留了 9~15，
@@ -879,17 +1764,19 @@ function contextAlreadyVisible(ctx: DiagnosticContext, visibleOutput: string, co
   )
 }
 
-// 将错误上下文集合格式化为字符串，方便追加到最后的 Bash 输出中
+// 将错误上下文集合格式化为字符串，方便追加到最后的 Bash 输出中（增强版：带优先级标签）
 function renderDiagnosticContexts(contexts: DiagnosticContext[], config: CompressionConfig) {
   const out: string[] = []
   out.push("<bash_high_signal_excerpt>")
-  out.push("Recent error-like contexts not fully visible above:")
+  out.push("Error contexts not fully visible above:")
 
   for (const ctx of contexts) {
     const first = ctx.lines[0]?.no ?? ctx.centerLine
     const last = ctx.lines[ctx.lines.length - 1]?.no ?? ctx.centerLine
+    const priorityLabel = ctx.priority === 'first' ? ' (root cause)' : 
+                         ctx.priority === 'fatal' ? ' (fatal)' : ''
     out.push("")
-    out.push(`[L${first}-L${last}]`) // 打印行号区间，比如 [L500-L506]
+    out.push(`[L${first}-L${last}]${priorityLabel}`)
 
     for (const line of ctx.lines) {
       // 对于命中的那一核心行，使用 > 进行强调
@@ -905,6 +1792,7 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
 /**
  * 组装并渲染完整的诊断附录（Appendix），作为 Bash 输出结尾的后缀。
  * 只返回当前可见输出中没有出现的高信号错误上下文。
+ * 优化：只在命令失败或有致命错误时才输出诊断信息，避免成功时的 token 浪费。
  */
 export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
   const config = configOf(options.config)
@@ -914,19 +1802,48 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
   const abnormalExit = options.exitCode !== 0
   const hasStrongSignal = snapshot.fatalLikeLines > 0 || snapshot.errorLikeLines > 0
 
+  // 关键优化：只在命令失败或有致命错误时才输出诊断
   const shouldShowDiagnostics = longEnough && hasStrongSignal && (abnormalExit || snapshot.fatalLikeLines > 0)
 
-  // 过滤掉在可见输出（经历过 tail 截断后的内容）中已有的上下文，避免给模型提供重复冗余的阅读负担
-  const hiddenContexts = shouldShowDiagnostics
-    ? snapshot.contexts.filter((ctx) => !contextAlreadyVisible(ctx, options.visibleOutput, config)).slice(-config.maxDiagnosticContexts)
-    : []
+  if (!shouldShowDiagnostics) {
+    return '' // 成功时不输出诊断附录，节省 token
+  }
+
+  // 优先级排序：first > fatal > recent
+  const priorityContexts: DiagnosticContext[] = []
+  
+  // 添加 first error contexts（最早的错误，通常是 root cause）
+  for (const ctx of snapshot.firstErrorContexts) {
+    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
+      priorityContexts.push(ctx)
+    }
+  }
+  
+  // 添加 fatal contexts（致命错误）
+  for (const ctx of snapshot.fatalContexts) {
+    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
+      priorityContexts.push(ctx)
+    }
+  }
+  
+  // 添加 recent contexts（最近的错误）
+  for (const ctx of snapshot.recentErrorContexts) {
+    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
+      priorityContexts.push(ctx)
+    }
+  }
+
+  // 去重并限制数量
+  const uniqueContexts = Array.from(
+    new Map(priorityContexts.map(ctx => [ctx.centerLine, ctx])).values()
+  ).slice(0, config.maxDiagnosticContexts)
+
+  if (uniqueContexts.length === 0) {
+    return ''
+  }
 
   const parts: string[] = []
-
-  // 拼接筛选后有效的报错上下文
-  if (hiddenContexts.length > 0) {
-    parts.push(renderDiagnosticContexts(hiddenContexts, config))
-  }
+  parts.push(renderDiagnosticContexts(uniqueContexts, config))
 
   return parts.join("\n\n")
 }
@@ -944,6 +1861,9 @@ export function bashCompressionMetadata(stats: CompressionStats) {
     compressionCarriageReturnGroups: stats.carriageReturnGroups,
     compressionRepeatedBlockGroups: stats.repeatedBlockGroups,
     compressionRepeatedLineGroups: stats.repeatedLineGroups,
+    compressionTemplateGroups: stats.templateGroups,
     compressionInlinePatternGroups: stats.inlinePatternGroups,
+    compressionHighEntropyLines: stats.highEntropyLines,
+    compressionSecretsRedacted: stats.secretsRedacted,
   }
 }
