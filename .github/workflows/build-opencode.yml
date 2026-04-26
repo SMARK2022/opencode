@@ -31,7 +31,7 @@ jobs:
         run: |
           cd packages/opencode
           bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=linux --skip-embed-web-ui
-        
+
       - name: Package Linux tar.gz
         run: |
           cd packages/opencode/dist/opencode-linux-x64/bin
@@ -43,24 +43,24 @@ jobs:
           DEB_DIR="/tmp/deb_build"
           PKG_NAME="opencode_${VERSION}_amd64"
           BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
-          
+
           mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
           mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
-          
+
           cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
           chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
-          
+
           cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
-Package: opencode
-Version: ${VERSION}
-Section: utils
-Priority: optional
-Architecture: amd64
-Maintainer: smark <smark@local>
-Description: opencode AI-powered development tool (smark build)
- A standalone AI coding assistant with TUI, version ${VERSION}.
-EOF
-          
+          Package: opencode
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: smark <smark@local>
+          Description: opencode AI-powered development tool (smark build)
+          A standalone AI coding assistant with TUI, version ${VERSION}.
+          EOF
+
           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
 
       - uses: actions/upload-artifact@v4
@@ -81,7 +81,7 @@ EOF
         run: |
           cd packages/opencode
           bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=darwin --skip-embed-web-ui
-        
+
       - name: Package macOS tar.gz
         run: |
           VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
@@ -119,7 +119,7 @@ EOF
         run: |
           cd packages/opencode
           bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --skip-embed-web-ui
-        
+
       - name: Package Windows zip
         shell: pwsh
         run: |
