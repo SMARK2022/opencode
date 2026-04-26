@@ -35,6 +35,8 @@ const runs: Array<{
   readonly cwd?: string
   readonly shell?: string | boolean
   readonly args?: readonly string[]
+  readonly env?: ChildProcess.CommandOptions["env"]
+  readonly extendEnv?: boolean
   readonly options?: AppProcess.RunOptions
 }> = []
 let denyAction: string | undefined
@@ -75,7 +77,9 @@ const appProcess = Layer.succeed(
       Effect.suspend(() => {
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
         // 显式PowerShell argv也记录原命令和实际可执行文件，同时保留完整argv供启动边界断言。
-        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell, args: command.args, options })
+        // 在既有 process 观察边界记录真正交给 spawner 的环境，不重复执行命令。
+        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
+          args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
         // 原有 process 替身必须履行新的观察回调契约，不能让 settlement 测试得到空原文。
         return (options?.onOutput ? options.onOutput(result.output ?? result.stdout) : Effect.void).pipe(
             Effect.andThen(runFailure ? Effect.fail(runFailure) : Effect.succeed(result)),
@@ -208,6 +212,15 @@ describe("BashTool", () => {
               maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
             })
             expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
+            // 真实 leaf 的环境必须继承宿主，四项 Windows 覆盖与已有 options 精确对应。
+            expect(runs[0]?.extendEnv).toBe(true)
+            expect(runs[0]?.env).toEqual(process.platform === "win32" ? {
+              PYTHONIOENCODING: "utf-8",
+              PYTHONUTF8: "1",
+              JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
+              RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim(),
+            } : {})
+            expect(runs).toHaveLength(1)
             // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
             const contexts = yield* SystemContextRegistry.Service
             const initialized = yield* SystemContext.initialize(yield* contexts.load())

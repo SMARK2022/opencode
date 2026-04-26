@@ -265,6 +265,10 @@ const layer = Layer.effectDiscard(
                 powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", input.command] : [], {
                 cwd: target.canonical,
                 shell: powershell ? false : shell,
+                // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
+                extendEnv: true,
+                // V2 尚无插件 shell.env owner；这里只叠加源编码设置，不能恢复 legacy hook。
+                env: Shell.utf8Environment(),
                 stdin: "ignore",
                 detached: process.platform !== "win32",
                 forceKillAfter: Duration.seconds(3),

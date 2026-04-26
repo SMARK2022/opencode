@@ -21,6 +21,23 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
 }
 
 describe("shell", () => {
+  test("builds Windows UTF-8 overlays without mutating the inherited environment", () => {
+    const env = { PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" }
+    // 平台作为纯输入覆盖两支，不写全局环境或伪造 process.platform。
+    expect(Shell.utf8Environment(env, "linux")).toEqual({})
+    expect(Shell.utf8Environment(env, "darwin")).toEqual({})
+    expect(Shell.utf8Environment(env, "win32")).toEqual({
+      PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
+      JAVA_TOOL_OPTIONS: "-Xmx1g -Dfile.encoding=UTF-8", RUBYOPT: "-w -Eutf-8",
+    })
+    // 空值必须 trim 掉前导空格；任意非编码变量仍由 process 环境继承。
+    expect(Shell.utf8Environment({}, "win32")).toEqual({
+      PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
+      JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8", RUBYOPT: "-Eutf-8",
+    })
+    expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
+  })
+
   test("normalizes shell names", () => {
     expect(Shell.name("/bin/bash")).toBe("bash")
     if (process.platform === "win32") {
