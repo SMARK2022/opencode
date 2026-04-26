@@ -223,12 +223,12 @@ export function ScrollView(props: ScrollViewProps) {
           ref={thumbRef}
           onPointerDown={onThumbPointerDown}
           class="scroll-view__thumb"
-          data-visible={isHovered() || isDragging()}
-          data-dragging={isDragging()}
+          data-visible={isHovered() || isDragging() ? "true" : undefined}
+          data-dragging={isDragging() ? "true" : undefined}
           style={{
             height: `${thumbHeight()}px`,
             transform: `translateY(${thumbTop()}px)`,
-            "z-index": 100, // ensure it displays over content
+            "pointer-events": "auto",
           }}
         />
       </Show>

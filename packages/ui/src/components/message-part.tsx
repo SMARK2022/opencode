@@ -583,11 +583,13 @@ function renderable(part: PartType, showReasoningSummaries = true) {
 
 function toolDefaultOpen(tool: string, shell = false, edit = false) {
   if (tool === "bash") return shell
+  // edit/write/apply_patch 默认收缩（类似 bash 工具）
   if (tool === "edit" || tool === "write" || tool === "apply_patch") return edit
+  return undefined
 }
 
 function partDefaultOpen(part: PartType, shell = false, edit = false) {
-  if (part.type !== "tool") return
+  if (part.type !== "tool") return undefined
   return toolDefaultOpen(part.tool, shell, edit)
 }
 
@@ -1895,9 +1897,11 @@ ToolRegistry.register({
     return (
       <div data-component="edit-tool">
         <BasicTool
-          {...props}
           icon="code-lines"
           defer
+          status={props.status}
+          hideDetails={props.hideDetails}
+          defaultOpen={props.defaultOpen}
           trigger={
             <div data-component="edit-trigger">
               <div data-slot="message-part-title-area">
@@ -1967,9 +1971,11 @@ ToolRegistry.register({
     return (
       <div data-component="write-tool">
         <BasicTool
-          {...props}
           icon="code-lines"
           defer
+          status={props.status}
+          hideDetails={props.hideDetails}
+          defaultOpen={props.defaultOpen}
           trigger={
             <div data-component="write-trigger">
               <div data-slot="message-part-title-area">
@@ -2049,9 +2055,11 @@ ToolRegistry.register({
         fallback={
           <div data-component="apply-patch-tool">
             <BasicTool
-              {...props}
               icon="code-lines"
               defer
+              status={props.status}
+              hideDetails={props.hideDetails}
+              defaultOpen={props.defaultOpen}
               trigger={{
                 title: i18n.t("ui.tool.patch"),
                 subtitle: subtitle(),

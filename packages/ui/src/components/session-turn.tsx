@@ -25,6 +25,7 @@ import { TextReveal } from "./text-reveal"
 import { createAutoScroll } from "../hooks"
 import { useI18n } from "../context/i18n"
 import { normalize } from "./session-diff"
+import { ScrollView } from "./scroll-view"
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
@@ -376,8 +377,8 @@ export function SessionTurn(
 
   return (
     <div data-component="session-turn" class={props.classes?.root}>
-      <div
-        ref={autoScroll.scrollRef}
+      <ScrollView
+        viewportRef={autoScroll.scrollRef}
         onScroll={autoScroll.handleScroll}
         data-slot="session-turn-content"
         class={props.classes?.content}
@@ -527,7 +528,7 @@ export function SessionTurn(
           </Show>
           {props.children}
         </div>
-      </div>
+      </ScrollView>
     </div>
   )
 }
