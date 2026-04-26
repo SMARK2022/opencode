@@ -153,10 +153,15 @@ export function computeFinalTokens(
     !hasInFlightTail && lastStepFinish
       ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
       : 0
-  const promptInputEstimate = requestConfirmed.input === 0 ? bootstrapInputTokens : 0
+  
+  // 修复：currentInput 应该反映当前步骤的真实输入（包括 bootstrap 或确认值）
   const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
   const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
-  const totalInput = requestConfirmed.input + pendingInputTokens + promptInputEstimate
+  
+  // 修复：totalInput 应该始终包含当前步骤的完整上下文
+  // 如果当前步骤已确认（有 step-finish），使用确认值；否则使用 bootstrap 估算
+  const currentStepTotalInput = currentStepInputConfirmed > 0 ? currentStepInputConfirmed : bootstrapInputTokens
+  const totalInput = requestConfirmed.input + currentStepTotalInput + pendingInputTokens
   const totalOutput = requestConfirmed.output + pendingOutputTokens
 
   return {
