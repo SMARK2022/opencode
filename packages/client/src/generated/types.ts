@@ -247,6 +247,7 @@ export type SessionsListOutput = {
       readonly assistantID?: string
       readonly stepInput: number
       readonly stepOutput: number
+      readonly pendingInput?: number
       readonly model?: { readonly providerID: string; readonly modelID: string }
     }
     readonly tokens: {
@@ -319,6 +320,7 @@ export type SessionsCreateOutput = {
       readonly assistantID?: string
       readonly stepInput: number
       readonly stepOutput: number
+      readonly pendingInput?: number
       readonly model?: { readonly providerID: string; readonly modelID: string }
     }
     readonly tokens: {
@@ -367,6 +369,7 @@ export type SessionsGetOutput = {
       readonly assistantID?: string
       readonly stepInput: number
       readonly stepOutput: number
+      readonly pendingInput?: number
       readonly model?: { readonly providerID: string; readonly modelID: string }
     }
     readonly tokens: {

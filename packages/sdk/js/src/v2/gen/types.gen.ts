@@ -3143,6 +3143,7 @@ export type SessionRequestUsage = {
   assistantID?: string
   stepInput: number
   stepOutput: number
+  pendingInput?: number
   model?: {
     providerID: string
     modelID: string

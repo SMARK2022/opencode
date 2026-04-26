@@ -28,6 +28,8 @@ export const RequestUsage = Schema.Struct({
   // 这两项来自最后一步确认值，不是从请求累计或会话累计反推。
   stepInput: Schema.Finite,
   stepOutput: Schema.Finite,
+  // 未确认下一轮的上下文基数；缺省表示无在途估算，零表示已确认的零基数。
+  pendingInput: Schema.Finite.pipe(optional),
   model: Schema.Struct({
     providerID: Schema.String,
     modelID: Schema.String,
