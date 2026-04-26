@@ -2405,19 +2405,29 @@ function Edit(props: ToolProps) {
   const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
 
   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
-  const diffLines = createMemo(() => diffContent().split("\n"))
-  const diffOverflow = createMemo(() => diffLines().length > 20)
+  // 复用已有 parsePatch 路径，仅统计 hunk 内容；+++ 与 --- 开头的代码不是文件头。
+  const stats = createMemo(() => {
+    const changes = getRevertDiffFiles(diffContent()).reduce(
+      (sum, file) => ({ added: sum.added + file.additions, removed: sum.removed + file.deletions }),
+      { added: 0, removed: 0 },
+    )
+    // 收缩阈值仍按完整展示行数判断，不能用变更行数忽略上下文和文件头。
+    return { ...changes, total: diffContent().split("\n").length }
+  })
+  // 20 行是展开阈值，15 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
+  const overflow = createMemo(() => stats().total > 20)
 
   return (
     <Switch>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
         <BlockTool
-          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))}
+          // 保留路径格式化与 unknown 解码，只给真实变更附加统计后缀。
+          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
-          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
         >
           {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
-          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 15 : undefined}>
+          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
             <diff
               diff={diffContent()}
               view={view()}
@@ -2438,7 +2448,7 @@ function Edit(props: ToolProps) {
               removedLineNumberBg={theme.diffRemovedLineNumberBg}
             />
           </box>
-          <Show when={diffOverflow()}>
+          <Show when={overflow()}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
@@ -2466,37 +2476,27 @@ function ApplyPatch(props: ToolProps) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  function Diff(p: { diff: string; filePath: string }) {
-    return (
-      <box paddingLeft={1}>
-        <diff
-          diff={p.diff}
-          view={view()}
-          filetype={filetype(p.filePath)}
-          syntaxStyle={syntax()}
-          showLineNumbers={true}
-          width="100%"
-          wrapMode={ctx.diffWrapMode()}
-          fg={theme.text}
-          addedBg={theme.diffAddedBg}
-          removedBg={theme.diffRemovedBg}
-          contextBg={theme.diffContextBg}
-          addedSignColor={theme.diffHighlightAdded}
-          removedSignColor={theme.diffHighlightRemoved}
-          lineNumberFg={theme.diffLineNumber}
-          lineNumberBg={theme.diffContextBg}
-          addedLineNumberBg={theme.diffAddedLineNumberBg}
-          removedLineNumberBg={theme.diffRemovedLineNumberBg}
-        />
-      </box>
-    )
-  }
+  // 文件动作标题保留上游 add/delete/move 语义，行统计不能覆盖路径或动作。
+  function title(file: { type: string; relativePath: string; filePath: string; deletions: number; patch?: string }) {
+    const baseTitle = (() => {
+      if (file.type === "delete") return "# Deleted " + file.relativePath
+      if (file.type === "add") return "# Created " + file.relativePath
+      if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
+      return "← Patched " + file.relativePath
+    })()
 
-  function title(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
-    if (file.type === "delete") return "# Deleted " + file.relativePath
-    if (file.type === "add") return "# Created " + file.relativePath
-    if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
-    return "← Patched " + file.relativePath
+    // 删除计数仍由 delete 分支展示，不重复从空 patch 推导统计。
+    if (file.type === "delete" || !file.patch) return baseTitle
+
+    // 与 Edit 共享按 hunk 解析的统计，包含多文件与 ++counter/--counter 内容。
+    const stats = getRevertDiffFiles(file.patch).reduce(
+      (sum, item) => ({ added: sum.added + item.additions, removed: sum.removed + item.deletions }),
+      { added: 0, removed: 0 },
+    )
+
+    // 仅重命名或模式变更不显示 +0 -0，保持原动作标题可读。
+    if (stats.added === 0 && stats.removed === 0) return baseTitle
+    return `${baseTitle} +${stats.added} -${stats.removed}`
   }
 
   return (
@@ -2518,14 +2518,33 @@ function ApplyPatch(props: ToolProps) {
               <Show
                 when={file.type !== "delete"}
                 fallback={
-                  <text fg={theme.diffRemoved}>
+                  // 删除文件仍显示权威 deletions，缩进与普通 diff 的内容列一致。
+                  <text fg={theme.diffRemoved} paddingLeft={1}>
                     -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
                   </text>
                 }
               >
                 {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
-                <box maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
-                  <Diff diff={file.patch} filePath={file.filePath} />
+                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
+                  <diff
+                    diff={file.patch || ""}
+                    view={view()}
+                    filetype={filetype(file.filePath)}
+                    syntaxStyle={syntax()}
+                    showLineNumbers={true}
+                    width="100%"
+                    wrapMode={ctx.diffWrapMode()}
+                    fg={theme.text}
+                    addedBg={theme.diffAddedBg}
+                    removedBg={theme.diffRemovedBg}
+                    contextBg={theme.diffContextBg}
+                    addedSignColor={theme.diffHighlightAdded}
+                    removedSignColor={theme.diffHighlightRemoved}
+                    lineNumberFg={theme.diffLineNumber}
+                    lineNumberBg={theme.diffContextBg}
+                    addedLineNumberBg={theme.diffAddedLineNumberBg}
+                    removedLineNumberBg={theme.diffRemovedLineNumberBg}
+                  />
                 </box>
                 <Show when={patchOverflow()}>
                   <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
