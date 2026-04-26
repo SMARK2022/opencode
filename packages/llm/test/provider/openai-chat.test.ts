@@ -104,6 +104,15 @@ describe("OpenAI Chat route", () => {
 
       expect(prepared.body.store).toBe(false)
       expect(prepared.body.reasoning_effort).toBe("low")
+      // 沿用真实 Chat prepare，普通 raw route 的既有精确 body 期望继续要求无默认字段。
+      expect(prepared.body.parallel_tool_calls).toBe(true)
+      const serial = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(LLM.request({
+        model: OpenAI.configure({ baseURL: "https://api.openai.test/v1/", apiKey: "test",
+          providerOptions: { openai: { parallelToolCalls: false } },
+        }).chat("gpt-4o-mini"), prompt: "think",
+      }))
+      // facade 上的 false 与 request 上的 false 都必须穿过合并及 Schema 校验。
+      expect(serial.body.parallel_tool_calls).toBe(false)
     }),
   )
 

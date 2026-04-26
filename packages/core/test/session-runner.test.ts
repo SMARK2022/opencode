@@ -62,6 +62,13 @@ import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, 
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import PROMPT_DEFAULT from "../src/system-context/prompt/default.txt"
+import PROMPT_MINIMAX from "../src/system-context/prompt/minimax.txt"
+import PROMPT_DEEPSEEK from "../src/system-context/prompt/deepseek.txt"
+import PROMPT_ANTHROPIC from "../src/system-context/prompt/anthropic.txt"
+import PROMPT_CODEX from "../src/system-context/prompt/codex.txt"
+import PROMPT_META from "../src/system-context/prompt/meta.txt"
+import PROMPT_TRINITY from "../src/system-context/prompt/trinity.txt"
+import PROMPT_KIMI from "../src/system-context/prompt/kimi.txt"
 import { TaskTool } from "@opencode-ai/core/tool/task"
 import { BackgroundJob } from "@opencode-ai/core/background-job"
 import { Global } from "@opencode-ai/core/global"
@@ -125,11 +132,13 @@ Using dedicated tools lets the user review and track your work:
  - Reserve bash for system commands and terminal operations requiring shell execution
 
 PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.
-Issue independent tool calls in the same response so they can run in parallel.
+THINK FIRST before using tools. Decide the FULL first batch of independent reads, searches, directory listings, and status checks you already know you need.
+BATCH independent calls in the SAME response. Do not issue one discovery call at a time when several are already obvious.
+After the first batch returns, identify newly relevant files and directories and issue the next independent batch together.
 Never chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.
 Parallel writes are only appropriate when target files or edit ranges cannot conflict.
 For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.
-Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`
+Sequential calls are ONLY for true dependencies, conflicts, or when the next target cannot be known without the previous result. Use bash only when dedicated tools are insufficient or real terminal execution is required.`
 // 全文期望检查真实 request.system，echo-only fixture 的空文件能力不能因公共指引扩展而获得 read/edit/write 广告。
 // 身份固定到 fixture 的真实 provider/id；未知型号没有 cutoff，不能从持久 baseline 或显示名拼造。
 const expectedModelIdentity = "You are powered by the model named fake-model. The exact model ID is fake/fake-model"
@@ -1036,6 +1045,8 @@ describe("SessionRunnerLLM", () => {
       yield* agent.transform((editor) =>
         editor.update(AgentV2.ID.make("build"), (agent) => {
           agent.system = "Build agent instructions"
+          // 使用真实选中的 agent 验证覆盖，不能只检查 defaults 里有一个字段。
+          agent.request.body.parallelToolCalls = false
           agent.mode = "primary"
         }),
       )
@@ -1047,6 +1058,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+      // false 必须进入实际 provider turn；自定义 system 仍是第一块且没有族提示重复。
+      expect(requests.at(-1)?.providerOptions?.openai?.parallelToolCalls).toBe(false)
       const db = (yield* Database.Service).db
       const row = yield* db.select({ created: SessionTable.time_created, slug: SessionTable.slug }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
       if (!row) throw new Error("expected persisted Session")
@@ -1095,6 +1108,40 @@ describe("SessionRunnerLLM", () => {
       expect(requests).toHaveLength(8)
       const repeated = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
       expect(repeated).toHaveLength(7)
+    }),
+  )
+
+  it.effect("refreshes model-family guidance without changing the durable context or inventing tools", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      // 同一 Session 的多次真实 resume 检验 per-turn 生成，不能只调用 formatter。
+      const samples = [
+        ["MiniMax-M2", "moonshotai", PROMPT_MINIMAX],
+        ["mini-max-M2", "gateway", PROMPT_MINIMAX],
+        ["deepseek-v4", "gateway", PROMPT_DEEPSEEK],
+        ["claude-opus-4-6", "anthropic", PROMPT_ANTHROPIC],
+        ["gpt-5-codex", "openai", PROMPT_CODEX],
+        ["muse-deepseek", "meta", PROMPT_META.replaceAll("{{MODEL_NAME}}", "Muse Spark")],
+        ["trinity-deepseek", "gateway", PROMPT_TRINITY],
+        ["other-model", "moonshotai", PROMPT_KIMI],
+        ["other-model", "gateway", PROMPT_DEFAULT],
+      ] as const
+      yield* Effect.forEach(samples, ([id, provider, prompt]) => Effect.gen(function* () {
+        currentModel = Model.make({ id, provider, route: OpenAIChat.route })
+        response = []
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: id }), resume: false })
+        yield* session.resume(sessionID)
+        const parts = requests.at(-1)?.system.map((part) => part.text) ?? []
+        // 稳定 baseline 仍仅出现一次；族提示与真实模型身份都不进入持久 source。
+        expect(parts.filter((part) => part === "Initial context")).toHaveLength(1)
+        // 正文逐字比较独立资产，不能用生产selector同时生成期望来隐藏选错族。
+        expect(parts).toEqual([prompt, "Initial context", expectedToolGuidance,
+          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
+        // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
+        expect(parts[2]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
+        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+      }))
     }),
   )
 

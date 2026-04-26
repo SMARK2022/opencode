@@ -93,6 +93,8 @@ export const bodyFields = {
   messages: Schema.Array(OpenAIChatMessage),
   tools: optionalArray(OpenAIChatTool),
   tool_choice: Schema.optional(OpenAIChatToolChoice),
+  // wire 字段归协议 Schema，不能靠 HTTP overlay 绕过目标形状。
+  parallel_tool_calls: Schema.optional(Schema.Boolean),
   stream: Schema.Literal(true),
   stream_options: Schema.optional(Schema.Struct({ include_usage: Schema.Boolean })),
   store: Schema.optional(Schema.Boolean),
@@ -332,11 +334,14 @@ const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: 
 
 const lowerOptions = Effect.fn("OpenAIChat.lowerOptions")(function* (request: LLMRequest) {
   const store = OpenAIOptions.store(request)
+  const parallelToolCalls = OpenAIOptions.parallelToolCalls(request)
   const reasoningEffort = OpenAIOptions.reasoningEffort(request)
   if (reasoningEffort && !OpenAIOptions.isReasoningEffort(reasoningEffort))
     return yield* invalid(`OpenAI Chat does not support reasoning effort ${reasoningEffort}`)
   return {
     ...(store !== undefined ? { store } : {}),
+    // 不把 false 当缺失；无选项的 DeepSeek 等兼容协议保持旧请求体。
+    ...(parallelToolCalls !== undefined ? { parallel_tool_calls: parallelToolCalls } : {}),
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
   }
 })

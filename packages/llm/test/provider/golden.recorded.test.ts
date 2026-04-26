@@ -6,6 +6,7 @@ import * as OpenAICompatible from "../../src/providers/openai-compatible"
 import * as OpenRouter from "../../src/providers/openrouter"
 import * as XAI from "../../src/providers/xai"
 import { describeRecordedGoldenScenarios } from "../recorded-golden"
+import { matchOpenAIParallelDefaults } from "../recorded-openai-options"
 
 const openAI = OpenAI.configure({
   apiKey: process.env.OPENAI_API_KEY ?? "fixture",
@@ -78,6 +79,7 @@ describeRecordedGoldenScenarios([
     name: "OpenAI Responses gpt-5.5",
     prefix: "openai-responses",
     model: openAIResponses,
+    options: { match: matchOpenAIParallelDefaults },
     requires: ["OPENAI_API_KEY"],
     tags: ["flagship"],
     scenarios: [

@@ -50,6 +50,12 @@ export const store = (request: LLMRequest): boolean | undefined => {
   return typeof value === "boolean" ? value : undefined
 }
 
+export const parallelToolCalls = (request: LLMRequest): boolean | undefined => {
+  const value = options(request)?.parallelToolCalls
+  // 只投影显式布尔值并保留 false，普通兼容路由缺省时省略字段，不能用 value || true 重新开启并行。
+  return typeof value === "boolean" ? value : undefined
+}
+
 export const reasoningEffort = (request: LLMRequest): ReasoningEffort | undefined => {
   const value = options(request)?.reasoningEffort
   return isAnyReasoningEffort(value) ? value : undefined

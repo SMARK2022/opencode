@@ -7,6 +7,8 @@ export type { OpenAIResponseIncludable, OpenAIServiceTier } from "../protocols/u
 export interface OpenAIOptionsInput {
   readonly [key: string]: unknown
   readonly store?: boolean
+  // Provider facade 暴露同一布尔选项，调用方不必绕过协议直接写 HTTP body。
+  readonly parallelToolCalls?: boolean
   readonly promptCacheKey?: string
   readonly reasoningEffort?: ReasoningEffort
   readonly reasoningSummary?: "auto"
@@ -29,6 +31,8 @@ const openAIProviderOptions = (options: OpenAIOptionsInput | undefined): Provide
   const openai = Object.fromEntries(
     definedEntries({
       store: options?.store,
+      // definedEntries 保留 false，只删除 undefined。
+      parallelToolCalls: options?.parallelToolCalls,
       promptCacheKey: options?.promptCacheKey,
       reasoningEffort: options?.reasoningEffort,
       reasoningSummary: options?.reasoningSummary,
@@ -67,7 +71,8 @@ export const openAIDefaultOptions = (
   modelID: string,
   options: { readonly textVerbosity?: boolean } = {},
 ): ProviderOptions | undefined =>
-  mergeProviderOptions(openAIProviderOptions({ store: false }), gpt5DefaultOptions(modelID, options))
+  // OpenAI、Azure、Copilot facade 共享源默认；外部显式选项仍在 withOpenAIOptions 最后合并。
+  mergeProviderOptions(openAIProviderOptions({ store: false, parallelToolCalls: true }), gpt5DefaultOptions(modelID, options))
 
 export const withOpenAIOptions = <Options extends { readonly providerOptions?: OpenAIProviderOptionsInput }>(
   modelID: string,

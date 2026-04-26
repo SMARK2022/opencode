@@ -323,14 +323,15 @@ test("uses actual tool names and preserves parallel write boundaries", () => {
   expect(guidance).not.toContain("TodoWrite")
   // 独立读取、同响应分组和写入冲突边界都属于实际 formatter 契约。
   expect(guidance).toContain("independent file reads, searches, and status checks")
-  expect(guidance).toContain("Issue independent tool calls in the same response")
+  // 29 扩展批次措辞；精确验证同响应与禁止逐次发现，其他写冲突断言完整保留。
+  expect(guidance).toContain("BATCH independent calls in the SAME response. Do not issue one discovery call at a time when several are already obvious.")
   expect(guidance).toContain('Never chain bash commands with separators like `echo "====";`')
   expect(guidance).toContain("target files or edit ranges cannot conflict")
   expect(guidance).toContain("one edit/patch containing all non-overlapping changes")
   expect(SystemContextBuiltIns.toolUsage(["read"])).not.toContain("todowrite")
   // 共享的是完整正文，而非摘要；V2族选择与V1的实际模型ID规则相同。
-  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("# Task Management")
-  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("Parallel writes are only appropriate")
+  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("<task_management>")
+  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("Parallel writes are ONLY appropriate when target files or edit ranges cannot conflict.")
   expect(SessionPrompts.provider("unknown", "kimi-for-coding")).toContain("newly created subagent")
   expect(SessionPrompts.provider("muse-glimmer", "meta")).toContain("Muse Glimmer")
   expect(SessionPrompts.reminders("plan", false)).toEqual([SessionPrompts.plan])

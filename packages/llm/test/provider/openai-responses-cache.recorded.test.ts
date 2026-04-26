@@ -5,6 +5,7 @@ import { LLMClient } from "../../src/route"
 import * as OpenAI from "../../src/providers/openai"
 import { LARGE_CACHEABLE_SYSTEM } from "../recorded-scenarios"
 import { recordedTests } from "../recorded-test"
+import { matchOpenAIParallelDefaults } from "../recorded-openai-options"
 
 const model = OpenAI.configure({
   apiKey: process.env.OPENAI_API_KEY ?? "fixture",
@@ -27,6 +28,7 @@ const recorded = recordedTests({
   prefix: "openai-responses-cache",
   provider: "openai",
   protocol: "openai-responses",
+  options: { match: matchOpenAIParallelDefaults },
   requires: ["OPENAI_API_KEY"],
   // Two identical requests in one cassette — replay walks the cassette in
   // recording order so the second call replays the cached-hit interaction,

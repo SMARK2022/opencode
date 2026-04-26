@@ -116,9 +116,12 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
   const body = model.request.body
   // 只有专用 Anthropic 路由消费这些字段；其他协议的 body 投影不扩大本补丁范围。
   const claudecode = model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic"
-  const httpBody = Object.hasOwn(body, "apiKey")
-    ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey"))
-    : body
+  // 源补丁按 provider ID 或 SDK package 识别 OpenAI 系列，不扩大普通兼容服务默认值。
+  const parallel = model.providerID === "openai" || (model.api.type === "aisdk" &&
+    ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/github-copilot"].includes(model.api.package))
+  // model/variant 的并行参数进入 typed provider options，禁止 HTTP 后置 overlay 抢占协议字段。
+  const httpBody = Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey" &&
+    (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key))))
   return route.with({
     provider: model.providerID,
     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
@@ -136,6 +139,10 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
       system: body.system,
       metadata: body.metadata,
       output_config: body.output_config,
+    } } } : {}),
+    // 空值采用源默认 true；显式 false 与已合并的 variant 配置完整保留。
+    ...(parallel ? { providerOptions: { openai: {
+      parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
     } } } : {}),
     limits: { context: model.limit.context, output: model.limit.output },
   })

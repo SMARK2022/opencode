@@ -129,6 +129,8 @@ const OpenAIResponsesCoreFields = {
   instructions: Schema.optional(Schema.String),
   tools: optionalArray(OpenAIResponsesTool),
   tool_choice: Schema.optional(OpenAIResponsesToolChoice),
+  // HTTP 与 WebSocket 共用此 Schema，不能仅修复其中一种 transport。
+  parallel_tool_calls: Schema.optional(Schema.Boolean),
   store: Schema.optional(Schema.Boolean),
   service_tier: Schema.optional(OpenAIOptions.OpenAIServiceTier),
   prompt_cache_key: Schema.optional(Schema.String),
@@ -455,6 +457,7 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
 
 const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (request: LLMRequest) {
   const store = OpenAIOptions.store(request)
+  const parallelToolCalls = OpenAIOptions.parallelToolCalls(request)
   const promptCacheKey = OpenAIOptions.promptCacheKey(request)
   const effort = OpenAIOptions.reasoningEffort(request)
   if (effort && !OpenAIOptions.isReasoningEffort(effort))
@@ -467,6 +470,8 @@ const lowerOptions = Effect.fn("OpenAIResponses.lowerOptions")(function* (reques
   return {
     ...(instructions ? { instructions } : {}),
     ...(store !== undefined ? { store } : {}),
+    // 原生 lowering 显式发送源默认，并保留 request/model 上的 false 覆盖。
+    ...(parallelToolCalls !== undefined ? { parallel_tool_calls: parallelToolCalls } : {}),
     ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     ...(include ? { include } : {}),
     ...(effort || summary ? { reasoning: { effort, summary } } : {}),
