@@ -120,6 +120,41 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
+          interactive: {
+            name: "interactive",
+            description: "The default agent. Executes tools based on configured permissions.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_enter: "allow",
+                bash: "ask",
+              }),
+              user,
+            ),
+            mode: "primary",
+            native: true,
+          },
+          review: {
+            name: "review",
+            description: "The default agent. Executes tools based on configured permissions.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_enter: "allow",
+                bash: "ask",
+                edit: "ask",
+                write: "ask",
+                apply_patch: "ask",
+              }),
+              user,
+            ),
+            mode: "primary",
+            native: true,
+          },
           plan: {
             name: "plan",
             description: "Plan mode. Disallows all edit tools.",
