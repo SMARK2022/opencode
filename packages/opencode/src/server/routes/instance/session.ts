@@ -26,7 +26,7 @@ import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
 import { zodObject } from "@/util/effect-zod"
 import { Bus } from "@/bus"
-import { NamedError } from "@opencode-ai/shared/util/error"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { NotFoundError } from "@/storage"
 import { jsonRequest, runRequest } from "./trace"
 

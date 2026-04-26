@@ -9,9 +9,9 @@ import { Instance } from "../project/instance"
 import { lazy } from "@/util/lazy"
 import { Language, type Node } from "web-tree-sitter"
 
-import { AppFileSystem } from "@opencode-ai/shared/filesystem"
+import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { fileURLToPath } from "url"
-import { Flag } from "@/flag/flag"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Shell } from "@/shell/shell"
 
 import { BashArity } from "@/permission/arity"
@@ -26,6 +26,7 @@ import {
   compressVisibleOutput,
   renderDiagnosticAppendix,
 } from "./bash-compress"
+import { InstanceState } from "@/effect"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
@@ -716,6 +717,7 @@ export const BashTool = Tool.define(
         log.info("bash tool using shell", { shell })
 
         const limits = yield* trunc.limits()
+        const instance = yield* InstanceState.context
         const configSvc = yield* Effect.serviceOption(Config.Service)
         const config = Option.isSome(configSvc)
           ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
@@ -729,7 +731,7 @@ export const BashTool = Tool.define(
           : ""
 
         return {
-          description: DESCRIPTION.replaceAll("${directory}", Instance.directory)
+          description: DESCRIPTION.replaceAll("${directory}", instance.directory)
             .replaceAll("${os}", process.platform)
             .replaceAll("${shell}", name)
             .replaceAll("${chaining}", chain)
