@@ -62,10 +62,15 @@ export const selection = {
     ), settled AS (
       -- V1 所有 step-finish 与 native 每步助手结算互斥，避免重复累计。
       -- 从已选助手点查步骤，不能让规划器改为扫描整个会话的 Part。
-      SELECT p.data FROM assistants a CROSS JOIN part p INDEXED BY part_message_id_id_idx ON a.kind = 'v1' AND a.id = p.message_id
+      SELECT p.id, p.data, a.position, a.id AS assistant_id FROM assistants a CROSS JOIN part p INDEXED BY part_message_id_id_idx ON a.kind = 'v1' AND a.id = p.message_id
       WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
       UNION ALL
-      SELECT data FROM assistants WHERE kind = 'native'
+      SELECT id, data, position, id FROM assistants
+      WHERE kind = 'native' AND json_extract(data, '$.tokens') IS NOT NULL
+    ), last_usage AS (
+      -- 请求已按 parentID 或 promotion 划界；只取末次确认上下文，未结算 native 行不能覆盖它。
+      SELECT data FROM settled
+      ORDER BY position DESC, assistant_id DESC, id DESC LIMIT 1
     ), last_assistant AS (
       -- 最后助手与模型随请求读出，用户被窗口淘汰后仍能锁定同一请求尾部。
       SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
@@ -98,6 +103,14 @@ export const selection = {
         + coalesce(json_extract(data, '$.tokens.cache.write'), 0) FROM step), 0),
       'stepOutput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.output'), 0)
         + coalesce(json_extract(data, '$.tokens.reasoning'), 0) FROM step), 0),
+      -- 未确认条件复用当前 step 投影；完成或零确认后不得补入上一轮上下文。
+      'pendingInput', (SELECT coalesce(json_extract(u.data, '$.tokens.input'), 0)
+        + coalesce(json_extract(u.data, '$.tokens.cache.read'), 0)
+        + coalesce(json_extract(u.data, '$.tokens.cache.write'), 0)
+        + coalesce(json_extract(u.data, '$.tokens.output'), 0) + coalesce(json_extract(u.data, '$.tokens.reasoning'), 0)
+        FROM last_usage u, last_assistant a, step s
+        WHERE json_extract(a.data, '$.time.completed') IS NULL
+          AND json_extract(s.data, '$.tokens') IS NULL),
       -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
       'model', json((SELECT json_object(
         'providerID', coalesce(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')),
@@ -113,11 +126,13 @@ export const selection = {
       messageID: Schema.String, input: Schema.Finite, output: Schema.Finite, cost: Schema.Finite,
       assistantID: Schema.NullOr(Schema.String),
       stepInput: Schema.Finite, stepOutput: Schema.Finite,
+      pendingInput: Schema.NullOr(Schema.Finite),
       model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
     }))(parsed)
     return Session.RequestUsage.make({
       ...fields,
       assistantID: fields.assistantID ?? undefined,
+      pendingInput: fields.pendingInput ?? undefined,
       model: fields.model ?? undefined,
     })
   }),

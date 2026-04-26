@@ -156,23 +156,22 @@ export function computeFinalTokens(
   // 可见尾部可能先于 Session 快照到达；立即遮掉旧 step，保留请求历史累计。
   const hasInFlightTail = !!lastAssistant && lastAssistant.time.completed === undefined && lastParts.some((_, i) => i > lastSFIdx)
   // input 为零不足以判定未确认，还须检查 output、step-finish 与完成时间；assistantID 存在而缓存缺失时相信投影。
-  const unconfirmed = request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
+  const unconfirmed = request.pendingInput === undefined && request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
     && lastSFIdx < 0 && (!request.assistantID || (!!lastAssistant && lastAssistant.time.completed === undefined))
-  // bootstrap 只属于首轮尚未确认的请求，确认零也必须退出引导估算。
-  const promptInputEstimate = unconfirmed ? bootstrapInputTokens : 0
   const lastStepFinish = lastParts[lastSFIdx]
-  // 未确认续轮保留源 bootstrap；完成态和明确零确认继续服从真实投影。
-  const currentPromptInputEstimate = !!lastAssistant && lastAssistant.time.completed === undefined
-    && ((lastSFIdx < 0 && request.stepInput === 0 && request.stepOutput === 0)
-      || (hasInFlightTail && lastStepFinish?.type === "step-finish"
-        && lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-          + lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning > 0))
-    ? bootstrapInputTokens : promptInputEstimate
-  // step 确认来自完整投影，native 无 V1 parts 或助手被淘汰仍保留真实值，不以粗略系统开销抬高它。
-  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + currentPromptInputEstimate
+  // 最新助手可以没有 parts，投影仍提供末步基数；可见零确认或完成先到时立即遮掉旧估算。
+  const projectedPendingInput = !lastAssistant || (lastAssistant.time.completed === undefined && (lastSFIdx < 0 || hasInFlightTail))
+    ? request.pendingInput : undefined
+  // 下一步继承末步完整上下文，输出、reasoning 和缓存输入均进入历史，不能用全部请求累计替代。
+  const pendingStepInput = hasInFlightTail && lastStepFinish?.type === "step-finish"
+    ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+      + lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+    : projectedPendingInput ?? (unconfirmed ? bootstrapInputTokens : 0)
+  // 完成态确认值包括零均有权威性，不用 bootstrap 作下限或重新补一轮输入。
+  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + pendingStepInput
   const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + pendingOutputTokens
-  // step 与 request 两种范围各加一次尾部；请求累计永远不由有限 transcript 求和。
-  const totalInput = request.input + pendingInputTokens + promptInputEstimate
+  // durable 累计已含末步确认，只能再加尚未结算的下一步估算，避免 100 变 200。
+  const totalInput = request.input + pendingInputTokens + pendingStepInput
   const totalOutput = request.output + pendingOutputTokens
 
   return {

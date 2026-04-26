@@ -166,6 +166,9 @@ describe("SessionProjector", () => {
         yield* events.publish(SessionEvent.Step.Started, {
           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
         })
+        // 第二个原生助手没有 tokens；首轮 14 输入和 4 输出仍是本请求的在途基数。
+        expect((yield* sessions.get(sessionID)).request).toMatchObject({ assistantID: assistantMessageID, stepInput: 0, stepOutput: 0 })
+        expect((yield* sessions.get(sessionID)).request?.pendingInput).toBe(factor === 1 ? undefined : 18)
         const ended = yield* events.publish(SessionEvent.Step.Ended, {
           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor + 1), finish: "stop", cost: factor / 4,
           tokens: { input: factor * 2, output: factor * 3, reasoning: factor, cache: { read: factor * 5, write: factor * 7 } },
@@ -190,6 +193,7 @@ describe("SessionProjector", () => {
         stepInput: 28, stepOutput: 8,
         // 此确认值不依赖任何 V1 step-finish，也不依赖 TUI 消息窗口。
       })
+      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
       // 这里检查公开 get 的投影，不在断言里重复实现事件到请求的归属计算。
       // 重放已经落盘的两次结算，保留现有 sequencer 的去重边界，不在投影中另建标记。
       for (const record of records) yield* events.replay(record)
@@ -255,6 +259,48 @@ describe("SessionProjector", () => {
       expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
       expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
+      // 真实 V1 turn 更换助手；旧 native 的确认不得混入新 V1 请求的上下文。
+      const userID = SessionV1.MessageID.ascending()
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
+        id: userID, sessionID, role: "user", time: { created: 8 }, agent: "build",
+        model: { providerID: model.providerID, modelID: model.id },
+      } })
+      const legacy: SessionV1.Assistant = { id: SessionV1.MessageID.ascending(), sessionID, role: "assistant", parentID: userID,
+        agent: "build", mode: "build", modelID: model.id, providerID: model.providerID,
+        path: { cwd: "/project", root: "/project" }, cost: 0,
+        tokens: { input: 2, output: 3, reasoning: 1, cache: { read: 5, write: 7 } }, time: { created: 9, completed: 10 } }
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: legacy })
+      const finish: SessionV1.StepFinishPart = { id: SessionV1.PartID.ascending(), sessionID, messageID: legacy.id,
+        type: "step-finish", reason: "stop", cost: 0, tokens: legacy.tokens }
+      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: finish,
+        time: 10 })
+      // 第二次确认改变上下文基数，下一轮不能使用请求累计 54 或最早一轮 18。
+      const prior = { ...legacy, id: SessionV1.MessageID.ascending(), tokens: { input: 4, output: 6, reasoning: 2, cache: { read: 10, write: 14 } }, time: { created: 10, completed: 11 } }
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: prior })
+      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: { ...finish, id: SessionV1.PartID.ascending(), messageID: prior.id, tokens: prior.tokens },
+        time: 11 })
+      const next = { ...legacy, id: SessionV1.MessageID.ascending(), tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 12 } }
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: next })
+      // 新助手无 parts 时也必须得到上一轮 36，不能借用其他请求或全部轮次。
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({
+        messageID: userID, assistantID: next.id, input: 42, output: 12, stepInput: 0, stepOutput: 0, pendingInput: 36,
+      })
+      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
+      // 零 step-finish 是确认边界，不得因为累计仍非零就保留上一轮估算。
+      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: { ...finish, id: SessionV1.PartID.ascending(), messageID: next.id, tokens: next.tokens },
+        time: 12 })
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, stepInput: 0, stepOutput: 0 })
+      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+      // completed=0 同样是终态；展示输入不能恢复到先前非零上下文。
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next, time: { created: 12, completed: 0 } } })
+      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+      // 新用户立即换请求范围，上一请求的确认不得成为它的在途基数。
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
+        id: SessionV1.MessageID.ascending(), sessionID, role: "user", time: { created: 13 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
+      } })
+      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
+      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
     }).pipe(Effect.provide(sessionsLayer)),
   )
 
