@@ -58,7 +58,8 @@ export function retryable(error: Err) {
     const status = error.data.statusCode
     // 5xx errors are transient server failures and should always be retried,
     // even when the provider SDK doesn't explicitly mark them as retryable.
-    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
+    // Underlying network exceptions (where statusCode is undefined) should also be retried.
+    if (!error.data.isRetryable && !(status !== undefined && status >= 500) && status !== undefined) return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
     return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
   }

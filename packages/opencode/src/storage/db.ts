@@ -9,7 +9,7 @@ import { Log } from "../util"
 import { NamedError } from "@opencode-ai/core/util/error"
 import z from "zod"
 import path from "path"
-import { readFileSync, readdirSync, existsSync } from "fs"
+import { readFileSync, readdirSync, existsSync, statSync } from "fs"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { InstanceState } from "@/effect"
@@ -86,12 +86,31 @@ export const Client = lazy(() => {
 
   const db = init(Path)
 
+  // busy_timeout must be set FIRST so subsequent PRAGMAs can wait if another
+  // process holds a lock during startup or migration.
+  db.run("PRAGMA busy_timeout = 30000")
   db.run("PRAGMA journal_mode = WAL")
-  db.run("PRAGMA synchronous = NORMAL")
-  db.run("PRAGMA busy_timeout = 5000")
+  db.run("PRAGMA synchronous = " + (Flag.OPENCODE_DB_DURABLE ? "FULL" : "NORMAL"))
   db.run("PRAGMA cache_size = -64000")
   db.run("PRAGMA foreign_keys = ON")
-  db.run("PRAGMA wal_checkpoint(PASSIVE)")
+  try {
+    db.run("PRAGMA wal_checkpoint(PASSIVE)")
+  } catch (e) {
+    log.warn("wal_checkpoint on open failed (another process may be active)", { error: String(e) })
+  }
+
+  // Warn if a large WAL file is present — indicates prior crash without checkpoint.
+  try {
+    const walStat = statSync(Path + "-wal")
+    if (walStat.size > 1024 * 1024) {
+      log.warn("large WAL file detected — recovering uncommitted data", {
+        path: Path + "-wal",
+        bytes: walStat.size,
+      })
+    }
+  } catch {
+    // WAL file absent — normal case
+  }
 
   // Apply schema migrations
   const entries =
@@ -115,6 +134,11 @@ export const Client = lazy(() => {
 })
 
 export function close() {
+  try {
+    Client().$client.run("PRAGMA wal_checkpoint(TRUNCATE)")
+  } catch (e) {
+    log.warn("wal_checkpoint on close failed", { error: String(e) })
+  }
   Client().$client.close()
   Client.reset()
 }

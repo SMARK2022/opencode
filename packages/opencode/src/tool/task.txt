@@ -28,6 +28,7 @@ Usage notes:
 - Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
 - Reuse task_id only when continuing the same subagent context is useful.
 - The agent result is returned to you, not directly to the user; summarize relevant results yourself.
+
 Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
 
 <example_agent_descriptions>

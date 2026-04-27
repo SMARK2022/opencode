@@ -12,6 +12,7 @@ import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
 import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
+import * as Database from "@/storage/db"
 
 ensureProcessMetadata("worker")
 
@@ -91,6 +92,7 @@ export const rpc = {
 
     await Instance.disposeAll()
     if (server) await server.stop(true)
+    Database.close()
   },
 }
 

@@ -66,6 +66,7 @@ type ToolCall = {
 
 interface ProcessorContext extends Input {
   toolcalls: Record<string, ToolCall>
+  toolInputBuffer: Record<string, string>
   shouldBreak: boolean
   snapshot: string | undefined
   blocked: boolean
@@ -116,6 +117,7 @@ export const layer: Layer.Layer<
         sessionID: input.sessionID,
         model: input.model,
         toolcalls: {},
+        toolInputBuffer: {},
         shouldBreak: false,
         snapshot: initialSnapshot,
         blocked: false,
@@ -280,25 +282,40 @@ export const layer: Layer.Layer<
             return
 
           case "tool-input-delta":
-            yield* updateToolCall(value.id, (match) => {
-              if (match.state.status !== "pending") return match
-              return {
-                ...match,
-                state: {
-                  ...match.state,
-                  raw: match.state.raw + value.delta,
-                },
-              }
-            })
+            // Accumulate raw in memory — no DB write per token.
+            ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.delta
+            // Publish a bus-only delta so the UI stays real-time.
+            const tcall = ctx.toolcalls[value.id]
+            if (tcall)
+              yield* session.updatePartDelta({
+                sessionID: tcall.sessionID,
+                messageID: tcall.messageID,
+                partID: tcall.partID,
+                field: "raw",
+                delta: value.delta,
+              })
             return
 
-          case "tool-input-end":
+          case "tool-input-end": {
+            // Flush the accumulated raw string to DB in a single write.
+            const buffered = ctx.toolInputBuffer[value.id]
+            if (buffered) {
+              delete ctx.toolInputBuffer[value.id]
+              yield* updateToolCall(value.id, (match) => {
+                if (match.state.status !== "pending") return match
+                return { ...match, state: { ...match.state, raw: match.state.raw + buffered } }
+              })
+            }
             return
+          }
 
           case "tool-call": {
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }
+            // Flush any remaining buffer that wasn't flushed by tool-input-end.
+            const pendingRaw = ctx.toolInputBuffer[value.toolCallId]
+            if (pendingRaw) delete ctx.toolInputBuffer[value.toolCallId]
             yield* updateToolCall(value.toolCallId, (match) => ({
               ...match,
               tool: value.toolName,
@@ -522,10 +539,16 @@ export const layer: Layer.Layer<
           const part = match.part
           const end = Date.now()
           const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+          // Merge any un-flushed raw buffer into the part before writing error state.
+          const pendingRaw = ctx.toolInputBuffer[toolCallID]
+          if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
           yield* session.updatePart({
             ...part,
             state: {
               ...part.state,
+              ...(part.state.status === "pending" && pendingRaw
+                ? { raw: part.state.raw + pendingRaw }
+                : {}),
               status: "error",
               error: "Tool execution aborted",
               metadata: { ...metadata, interrupted: true },
@@ -534,6 +557,7 @@ export const layer: Layer.Layer<
           })
         }
         ctx.toolcalls = {}
+        ctx.toolInputBuffer = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
         const reqUsage2 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
