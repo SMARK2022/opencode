@@ -533,7 +533,7 @@ export function Session() {
         name: "compact",
         aliases: ["summarize"],
       },
-      run: () => {
+      run: async () => {
         const selectedModel = local.model.current()
         if (!selectedModel) {
           toast.show({
@@ -543,12 +543,32 @@ export function Session() {
           })
           return
         }
-        void sdk.client.session.summarize({
-          sessionID: route.sessionID,
-          modelID: selectedModel.modelID,
-          providerID: selectedModel.providerID,
-        })
+        // 请求前退出面板；这不构成并发锁，跨入口的重复提交仍由会话执行 owner 协调。
         dialog.clear()
+        // 此提示只表示请求已发起；durable admission 与模型执行分离，不在这里显示成功。
+        toast.show({
+          variant: "info",
+          message: "Starting session compaction...",
+          duration: 3000,
+        })
+        try {
+          // SDK 默认返回 error 对象；显式抛错才能让非 2xx 响应进入同一可见错误出口。
+          await sdk.client.session.summarize(
+            {
+              sessionID: route.sessionID,
+              modelID: selectedModel.modelID,
+              providerID: selectedModel.providerID,
+            },
+            { throwOnError: true },
+          )
+          // await 只捕获请求失败；已接纳压缩的异步终态由事件通道通知。
+        } catch (error) {
+          toast.show({
+            variant: "error",
+            message: errorMessage(error),
+            duration: 8000,
+          })
+        }
       },
     },
     {
