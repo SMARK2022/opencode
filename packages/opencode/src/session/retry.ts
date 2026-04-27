@@ -92,6 +92,8 @@ export function retryable(error: Err, provider: string) {
     if (
       !error.data.isRetryable &&
       !(status !== undefined && status >= 500) &&
+      // 网络异常（statusCode 为 undefined）也应重试，避免瞬时网络故障直接失败
+      status !== undefined &&
       !matchesRetryableMessage(error.data.message) &&
       !matchesRetryableMessage(error.data.responseBody)
     )

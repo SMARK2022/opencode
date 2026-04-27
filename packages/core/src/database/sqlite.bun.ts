@@ -161,6 +161,8 @@ const nativeLayer = (config: Config) =>
         create: config.create ?? true,
       })
       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
+      // Native Layer 早于 Database Layer 设置 WAL，锁等待必须在这个最早的 PRAGMA 前生效。
+      native.run("PRAGMA busy_timeout = 30000")
       if (config.disableWAL !== true) native.run("PRAGMA journal_mode = WAL;")
       return native
     }),

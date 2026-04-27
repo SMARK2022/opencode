@@ -476,6 +476,13 @@ export const {
             event.properties.messageID,
             produce((draft) => {
               const part = draft[result.index]
+              // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
+              if (event.properties.field === "raw") {
+                if (part.type === "tool" && part.state.status === "pending")
+                  part.state.raw += event.properties.delta
+                // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
+                return
+              }
               const field = event.properties.field as keyof typeof part
               const existing = part[field] as string | undefined
               ;(part[field] as string) = (existing ?? "") + event.properties.delta

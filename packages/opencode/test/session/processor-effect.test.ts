@@ -4,7 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -889,6 +889,20 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           model: mdl,
         })
 
+        // 在真实 event owner 观察 raw；此时数据库仍是初始 pending，不允许每片都写 PartUpdated。
+        let observedRaw = ""
+        let durableRaw: string | undefined
+        const events = yield* EventV2Bridge.Service
+        const unsubscribe = yield* events.listen((event) => Effect.gen(function* () {
+          if (event.type !== MessageV2.Event.PartDelta.type) return
+          const data = Schema.decodeUnknownSync(MessageV2.Event.PartDelta.data)(event.data)
+          if (data.messageID !== msg.id || data.field !== "raw") return
+          const part = yield* session.getPart({ sessionID: chat.id, messageID: msg.id, partID: data.partID })
+          if (part?.type === "tool" && part.state.status === "pending") durableRaw = part.state.raw
+          observedRaw += data.delta
+        }))
+        yield* Effect.addFinalizer(() => unsubscribe)
+
         const run = yield* handle
           .process({
             user: {
@@ -916,6 +930,11 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           ),
           "timed out waiting for tool part",
         )
+        // fixture 发送半段参数后挂起；等待真实 delta 再取消，避免只测到空 pending 的 cleanup。
+        yield* waitFor(Effect.sync(() => observedRaw === '{"cmd"' ? true : undefined), "tool input delta not observed")
+        expect(observedRaw).toBe('{"cmd"')
+        expect(durableRaw).toBe("")
+
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
@@ -931,6 +950,8 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         if (call?.state.status === "error") {
           expect(call.state.error).toBe("Tool execution aborted")
           expect(call.state.metadata?.interrupted).toBe(true)
+          // 查询编码后的持久化 error，而非 callback 内存对象；raw 必须跨 schema 边界保留。
+          expect(call.state.metadata?.raw).toBe('{"cmd"')
           expect(call.state.time.end).toBeDefined()
         }
       }),
