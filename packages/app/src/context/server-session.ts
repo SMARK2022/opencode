@@ -1209,6 +1209,18 @@ export function createServerSession(
           carried?.delete(props.partID)
           if (carried?.size === 0) load.carriedDeltaParts.delete(props.messageID)
         }
+        // 保留上方 hydration 变化标记；raw 不参与仅适用于文字的 deltaBases/accumulator。
+        if (props.field === "raw") {
+          setData("part", props.messageID, produce((draft) => {
+            if (!draft) return
+            const part = draft[result.index]
+            // Server session 与 global reducer 使用同一 pending/raw 语义，终态不接受迟到片段。
+            if (part.type === "tool" && part.state.status === "pending")
+              part.state.raw += props.delta
+          }))
+          return
+        }
+
         const field = props.field as keyof (typeof parts)[number]
         const current = parts[result.index]?.[field]
         if (!deltaBases.has(props.partID) && typeof current === "string")

@@ -367,6 +367,17 @@ export function applyDirectoryEvent(input: {
       if (!parts) break
       const result = Binary.search(parts, props.partID, (part) => part.id)
       if (!result.found) break
+      // V1 工具参数与 text accumulator 分离，不能把 raw 片段写进 part 顶层或文字恢复缓存。
+      if (props.field === "raw") {
+        input.setStore("part", props.messageID, produce((draft) => {
+          const part = draft[result.index]
+          // 状态已经解析或终结时忽略迟到参数，保留当前 input 与工具终态。
+          if (part.type === "tool" && part.state.status === "pending")
+            part.state.raw += props.delta
+        }))
+        break
+      }
+
       const field = props.field as keyof (typeof parts)[number]
       const current = parts[result.index]?.[field]
       input.setStore(

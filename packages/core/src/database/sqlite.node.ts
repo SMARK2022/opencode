@@ -156,6 +156,8 @@ const nativeLayer = (config: Config) =>
         open: true,
       })
       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
+      // Node 与 Bun 的打开顺序一致，不能等 WAL 切换已经失败后才设置锁等待。
+      native.exec("PRAGMA busy_timeout = 30000")
       if (config.disableWAL !== true && config.readonly !== true) native.exec("PRAGMA journal_mode = WAL;")
       return native
     }),

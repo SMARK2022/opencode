@@ -113,6 +113,8 @@ type ToolCall = {
 
 interface ProcessorContext extends Input {
   toolcalls: Record<string, ToolCall>
+  // 工具输入缓冲：累积原始输入避免逐 token 写入数据库
+  toolInputBuffer: Record<string, string>
   shouldBreak: boolean
   snapshot: string | undefined
   blocked: boolean
@@ -152,6 +154,7 @@ const layer = Layer.effect(
         sessionID: input.sessionID,
         model: input.model,
         toolcalls: {},
+        toolInputBuffer: {},
         shouldBreak: false,
         snapshot: initialSnapshot,
         blocked: false,
@@ -366,26 +369,34 @@ const layer = Layer.effect(
             yield* ensureToolCall(value)
             return
 
-          case "tool-input-delta":
-            // delta 可先于 start 到达，保留上游 ensureToolCall 才不会丢失首片参数。
-            yield* ensureToolCall(value)
-            yield* updateToolCall(value.id, (match) => {
-              // 已解析的 input 属于 running/completed；迟到片段不能覆盖这种状态。
-              if (match.state.status !== "pending") return match
-              return {
-                // 增量只更新参数缓存，保留原 part 的工具身份和 provider metadata 供执行协调。
-                ...match,
-                state: {
-                  ...match.state,
-                  // ToolInputDelta 的文本字段是 value.text；累积到 raw 供实时输出 token 估算。
-                  raw: match.state.raw + value.text,
-                },
-              }
+          case "tool-input-delta": {
+            // ensureToolCall 保留 delta-before-start；已运行工具必须在缓冲及 fanout 前排除迟到片段。
+            const pending = yield* ensureToolCall(value)
+            if (!pending || pending.part.state.status !== "pending") return
+            // 上游 LLMEvent 使用 text；仅累积内存，不能恢复逐 token 的 durable PartUpdated 写入。
+            ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.text
+            // raw 是既有 V1 wire 字段；consumer 在 pending state 内应用，不创造顶层 part.raw。
+            yield* session.updatePartDelta({
+              sessionID: pending.call.sessionID,
+              messageID: pending.call.messageID,
+              partID: pending.call.partID,
+              field: "raw",
+              delta: value.text,
             })
             return
+          }
 
           case "tool-input-end": {
             yield* ensureToolCall(value)
+            // end 是可重放的输入边界；提交成功才删除缓冲，写入失败仍可在 cleanup 保留。
+            const buffered = ctx.toolInputBuffer[value.id]
+            if (buffered) {
+              yield* updateToolCall(value.id, (match) => {
+                if (match.state.status !== "pending") return match
+                return { ...match, state: { ...match.state, raw: match.state.raw + buffered } }
+              })
+              delete ctx.toolInputBuffer[value.id]
+            }
             return
           }
 
@@ -394,6 +405,15 @@ const layer = Layer.effect(
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
             yield* ensureToolCall(value)
+            // 某些 provider 省略 end；先持久化 pending 原文，再转换为解析后的 running input。
+            const pendingRaw = ctx.toolInputBuffer[value.id]
+            if (pendingRaw) {
+              yield* updateToolCall(value.id, (match) => {
+                if (match.state.status !== "pending") return match
+                return { ...match, state: { ...match.state, raw: match.state.raw + pendingRaw } }
+              })
+              delete ctx.toolInputBuffer[value.id]
+            }
             const input = isRecord(value.input) ? value.input : { value: value.input }
             yield* updateToolCall(value.id, (match) => ({
               ...match,
@@ -658,21 +678,30 @@ const layer = Layer.effect(
           const part = match.part
           const end = Date.now()
           const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+          // 协调信号唤醒后仍须先提交工具终态；error schema 不保留 state.raw，残余原文存入 metadata。
+          const pendingRaw = ctx.toolInputBuffer[toolCallID]
           yield* session.updatePart({
             ...part,
             state: {
               ...part.state,
               status: "error",
               error: "Tool execution aborted",
-              metadata: { ...metadata, interrupted: true },
+              metadata: { ...metadata, interrupted: true,
+                ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
+              },
               time: { start: "time" in part.state ? part.state.time.start : end, end },
             },
           })
         }
         ctx.toolcalls = {}
+        // cleanup 终态提交后清空，重试与下一次 process 不继承上次工具的残片。
+        ctx.toolInputBuffer = {}
         ctx.assistantMessage.time.completed = Date.now()
-        // cleanup 的通知恢复可中断；若提交前被取消，已安装 owner 负责闭合持久化未完成助手。
-        yield* Effect.interruptible(publishAssistant(ctx.assistantMessage, events))
+        // 工具终态及 raw 提交后再发布助手；中断继承 ensuring 保护，error/completed 与账本同事务提交后才通知。
+        // 普通完成仍允许取消阻塞 callback；prompt caller 的 ownAssistant 继续负责其已注册的归属。
+        yield* (aborted
+          ? publishAssistant(ctx.assistantMessage, events, true)
+          : Effect.interruptible(publishAssistant(ctx.assistantMessage, events)))
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {

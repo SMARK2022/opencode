@@ -45,6 +45,10 @@ export const Flag = {
   OPENCODE_MODELS_URL: process.env["OPENCODE_MODELS_URL"],
   OPENCODE_MODELS_PATH: process.env["OPENCODE_MODELS_PATH"],
   OPENCODE_DB: process.env["OPENCODE_DB"],
+  // 数据库持久化标志：启用后 PRAGMA synchronous=FULL，加强落盘
+  get OPENCODE_DB_DURABLE() {
+    return truthy("OPENCODE_DB_DURABLE")
+  },
 
   OPENCODE_WORKSPACE_ID: process.env["OPENCODE_WORKSPACE_ID"],
   OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),

@@ -10,6 +10,7 @@ import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Effect } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+import { Database } from "@opencode-ai/core/database/database"
 
 Heap.start()
 
@@ -72,6 +73,16 @@ export const rpc = {
   async shutdown() {
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)
+    // 先停止生产者再 checkpoint；server() 的监听重启不能释放进程级数据库。
+    try {
+      await AppRuntime.runPromise(Effect.gen(function* () {
+        const database = yield* Database.Service
+        yield* Database.checkpoint(database.db)
+      }))
+    } finally {
+      // checkpoint 剩余失败仍向 RPC 传播；释放不能被拒绝跳过，native close 仍由既有 Layer 负责。
+      await AppRuntime.dispose()
+    }
     process.off("unhandledRejection", onUnhandledRejection)
     process.off("uncaughtException", onUncaughtException)
   },
