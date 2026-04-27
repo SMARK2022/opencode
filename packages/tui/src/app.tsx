@@ -1043,6 +1043,19 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     }
   })
 
+  // 已接纳的压缩由 runner 异步执行；HTTP catch 看不到这些失败，沿用现有事件通道显示。
+  event.on("session.next.compaction.failed", (evt, { workspace }) => {
+    // 路由和 workspace 双重隔离，后台会话的失败不能覆盖当前会话的提示。
+    if (workspace !== project.workspace.current()) return
+    if (route.data.type !== "session" || route.data.sessionID !== evt.properties.sessionID) return
+    if (evt.properties.aborted) return
+    toast.show({
+      variant: "error",
+      message: evt.properties.error.message,
+      duration: 8000,
+    })
+  })
+
   event.on("session.error", (evt, { workspace }) => {
     if (workspace !== project.workspace.current()) return
     const error = evt.properties.error
