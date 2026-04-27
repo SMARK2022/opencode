@@ -1,4 +1,4 @@
-import { Effect, Option, Schema, Stream } from "effect"
+import { Effect, Schema, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -20,7 +20,6 @@ import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
-import { Config } from "@/config"
 import {
   BashDiagnosticCollector,
   bashCompressionMetadata,
@@ -424,11 +423,12 @@ function shellCompatibilityError(root: Node, shellName: string): string | undefi
 export const BashTool = Tool.define(
   "bash",
   Effect.gen(function* () {
-    const config = yield* Config.Service
+    const configService = yield* Config.Service
     const spawner = yield* ChildProcessSpawner
     const fs = yield* AppFileSystem.Service
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
+    const instance = yield* InstanceState.context
 
     const cygpath = Effect.fn("BashTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -703,7 +703,7 @@ export const BashTool = Tool.define(
 
     return () =>
       Effect.gen(function* () {
-        const cfg = yield* config.get()
+        const cfg = yield* configService.get()
         const shell = Shell.acceptable(cfg.shell)
         const name = Shell.name(shell)
         const chain =
@@ -717,12 +717,8 @@ export const BashTool = Tool.define(
         log.info("bash tool using shell", { shell })
 
         const limits = yield* trunc.limits()
-        const instance = yield* InstanceState.context
-        const configSvc = yield* Effect.serviceOption(Config.Service)
-        const config = Option.isSome(configSvc)
-          ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
-          : undefined
-        const userCompressionEnabled = bashCompressionEnabled(config)
+        const configInfo = yield* configService.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
+        const userCompressionEnabled = bashCompressionEnabled(configInfo)
         const compressionGuidance = userCompressionEnabled
           ? [
               "  - Bash output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
@@ -757,11 +753,8 @@ export const BashTool = Tool.define(
               const scan = yield* collect(root, cwd, ps, shell)
               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
               yield* ask(ctx, scan)
-              const configSvc = yield* Effect.serviceOption(Config.Service)
-              const config = Option.isSome(configSvc)
-                ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
-                : undefined
-              const compressOutput = bashCompressionEnabled(config) && (params.compress_output ?? true)
+              const configInfo = yield* configService.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
+              const compressOutput = bashCompressionEnabled(configInfo) && (params.compress_output ?? true)
 
               return yield* run(
                 {
