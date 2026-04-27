@@ -503,7 +503,7 @@ export function Session() {
         name: "compact",
         aliases: ["summarize"],
       },
-      onSelect: (dialog) => {
+      onSelect: async (dialog) => {
         const selectedModel = local.model.current()
         if (!selectedModel) {
           toast.show({
@@ -513,12 +513,28 @@ export function Session() {
           })
           return
         }
-        void sdk.client.session.summarize({
-          sessionID: route.sessionID,
-          modelID: selectedModel.modelID,
-          providerID: selectedModel.providerID,
-        })
         dialog.clear()
+        toast.show({
+          variant: "info",
+          message: "Starting session compaction...",
+          duration: 3000,
+        })
+        try {
+          await sdk.client.session.summarize(
+            {
+              sessionID: route.sessionID,
+              modelID: selectedModel.modelID,
+              providerID: selectedModel.providerID,
+            },
+            { throwOnError: true },
+          )
+        } catch (error) {
+          toast.show({
+            variant: "error",
+            message: errorMessage(error),
+            duration: 8000,
+          })
+        }
       },
     },
     {
