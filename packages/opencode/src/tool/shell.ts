@@ -308,7 +308,8 @@ function shellCompatibilityError(root: Node, shellName: string) {
 export const ShellTool = Tool.define(
   ShellID.ToolID,
   Effect.gen(function* () {
-    const config = yield* Config.Service
+    // 捕获当前 Layer 的必需配置服务；cfg 仍在工具初始化时读取，不恢复可选探测或吞错默认值。
+    const configService = yield* Config.Service
     const spawner = yield* ChildProcessSpawner
     const fs = yield* FSUtil.Service
     const trunc = yield* Truncate.Service
@@ -593,7 +594,7 @@ export const ShellTool = Tool.define(
 
     return () =>
       Effect.gen(function* () {
-        const cfg = yield* config.get()
+        const cfg = yield* configService.get()
         const shell = Shell.acceptable(cfg.shell)
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
