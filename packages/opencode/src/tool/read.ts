@@ -60,15 +60,13 @@ const TOKEN_BYTE_RATIOS: Record<string, number> = {
   default: 0.25,
 }
 
-// 文件去重缓存 - per-session
+// 文件去重缓存 - per-session，key = filepath::offset::limit
 type ReadCacheEntry = {
   content: string
   timestamp: number
-  offset: number
-  limit: number | undefined
-  isPartialView: boolean
 }
 const readFileState = new Map<string, ReadCacheEntry>()
+let cacheSeeded = false
 
 // Stub 文案
 export const FILE_UNCHANGED_STUB =
@@ -100,10 +98,12 @@ function estimateTokensForContent(content: string, ext: string): number {
   return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
 }
 
-// 检查当前上下文中是否有该文件的未被压缩的读取结果
+// 检查当前上下文中是否有该文件的未被压缩的读取结果（同范围）
 function findUnexpandedFileInContext(
   messages: MessageV2.WithParts[],
   filepath: string,
+  offset: number,
+  limit: number | undefined,
 ): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
@@ -112,14 +112,21 @@ function findUnexpandedFileInContext(
       if (part.type !== "tool") continue
       if (part.tool !== "read") continue
       if (part.state.status !== "completed") continue
-      const input = part.state.input as { filePath?: string }
+      const input = part.state.input as { filePath?: string; offset?: number; limit?: number }
       if (input.filePath !== filepath) continue
-      // 检查是否被压缩（compacted）
+      if ((input.offset ?? 1) !== offset) continue
+      if ((input.limit ?? DEFAULT_READ_LIMIT) !== (limit ?? DEFAULT_READ_LIMIT)) continue
       if (part.state.time.compacted) continue
+      // 跳过 stub 结果 — stub 本身不携带实际内容，不能作为去重的依据
+      if (part.state.output === FILE_UNCHANGED_STUB) continue
       return true
     }
   }
   return false
+}
+
+function cacheKey(filepath: string, offset: number, limit: number | undefined) {
+  return `${filepath}::${offset}::${limit ?? DEFAULT_READ_LIMIT}`
 }
 
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
@@ -298,20 +305,55 @@ export const ReadTool = Tool.define(
 
       if (!stat) return yield* miss(filepath)
 
+      // 首次读取时从会话历史中预热缓存 — 扫描已有的非 stub、未压缩的读取记录
+      if (!cacheSeeded) {
+        for (let i = ctx.messages.length - 1; i >= 0; i--) {
+          const msg = ctx.messages[i]
+          if (msg.info.role !== "assistant") continue
+          for (const part of msg.parts) {
+            if (part.type !== "tool") continue
+            if (part.tool !== "read") continue
+            if (part.state.status !== "completed") continue
+            if (part.state.time.compacted) continue
+            if (part.state.output === FILE_UNCHANGED_STUB) continue
+
+            const seedInput = part.state.input as { filePath?: string; offset?: number; limit?: number }
+            if (!seedInput.filePath) continue
+
+            const seedKey = cacheKey(seedInput.filePath, seedInput.offset ?? 1, seedInput.limit)
+            if (readFileState.has(seedKey)) continue
+
+            const seedStat = yield* fs.stat(seedInput.filePath).pipe(
+              Effect.catch(() => Effect.succeed(undefined)),
+            )
+            if (!seedStat || seedStat.type !== "File") continue
+
+            const seedMtime = Math.floor(Number(seedStat.mtime))
+            // 仅当文件在读取后未被修改时才加入缓存（mtime ≤ 读取时间表示无后续修改）
+            if (seedMtime <= part.state.time.end) {
+              readFileState.set(seedKey, {
+                content: part.state.output,
+                timestamp: seedMtime,
+              })
+            }
+          }
+        }
+        cacheSeeded = true
+      }
+
       // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
-      const existingState = readFileState.get(filepath)
-      if (existingState && !existingState.isPartialView) {
-        if (existingState.offset === (params.offset ?? 1) && existingState.limit === params.limit) {
-          const mtimeMs = Math.floor(Number(stat.mtime))
-          if (mtimeMs === existingState.timestamp) {
-            // 额外检查：当前上下文中是否有该文件的未被压缩的读取结果
-            const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath)
-            if (hasUnexpandedContent) {
-              return {
-                title,
-                output: FILE_UNCHANGED_STUB,
-                metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] },
-              }
+      const requestOffset = params.offset ?? 1
+      const requestLimit = params.limit
+      const existingState = readFileState.get(cacheKey(filepath, requestOffset, requestLimit))
+      if (existingState) {
+        const mtimeMs = Math.floor(Number(stat.mtime))
+        if (mtimeMs === existingState.timestamp) {
+          const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath, requestOffset, requestLimit)
+          if (hasUnexpandedContent) {
+            return {
+              title,
+              output: FILE_UNCHANGED_STUB,
+              metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] },
             }
           }
         }
@@ -423,12 +465,9 @@ export const ReadTool = Tool.define(
       }
 
       // 写入去重缓存
-      readFileState.set(filepath, {
+      readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
         content,
         timestamp: Math.floor(Number(stat.mtime)),
-        offset: params.offset ?? 1,
-        limit: params.limit,
-        isPartialView: file.more || file.cut,
       })
 
       let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")

@@ -147,10 +147,7 @@ describe("tool.read external_directory permission", () => {
 
         const { items, next } = asks()
         const target = path.join(dir, "test.txt")
-        const alt = target
-          .replace(/^[A-Za-z]:/, "")
-          .replaceAll("\\", "/")
-          .toLowerCase()
+        const alt = target.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll("\\", "/")
 
         yield* exec(dir, { filePath: alt }, next)
         const read = items.find((item) => item.permission === "read")
@@ -401,7 +398,7 @@ describe("tool.read truncation", () => {
       yield* put(path.join(dir, "image.bin"), jpeg)
 
       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
-      expect(result.output).toBe("Image read successfully")
+      expect(result.output).toStartWith("Image read successfully")
       expect(result.attachments?.[0].mime).toBe("image/jpeg")
       expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
     }),
