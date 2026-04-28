@@ -893,6 +893,8 @@ describe("SessionRunnerLLM", () => {
         [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
         [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
       ])
+      // echo/defect 的真实请求不广告 bash，完整 system 不能从宿主默认 shell 泄漏 Git 政策。
+      expect(requests[0]?.system.map((part) => part.text).join("\n")).not.toContain("# Git repository state changes")
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
       expect(yield* session.messages({ sessionID })).toHaveLength(3)

@@ -1,3 +1,4 @@
+# task 工具：禁止跨会话复用非法 task_id，须显式新建
 Launch a new agent to handle complex, multistep tasks autonomously.
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
@@ -5,16 +6,18 @@ When using the Task tool, you must specify a subagent_type parameter to select w
 <!-- 委派前先判断收益；已知路径的读取不应绕到另一个 agent。 -->
 Use task when:
 - The user invokes a custom slash command; pass the slash command invocation as the full prompt.
-- A broad codebase question requires multiple rounds of search/read synthesis.
+- A broad codebase question splits into 2+ independent search/read branches.
 - A non-blocking subtask can run in parallel while you continue useful local work.
 - A specialized agent clearly matches the task and can materially advance the request.
+- You need an isolated review/research pass and the user requested or accepted that workflow.
 
 Do NOT use task when:
 - You need to read a known file path; use read.
 - You need to find files by name; use glob.
-- You need to search known keywords or a small set of files; use grep/read.
-- The next local step is blocked on the result and you can answer it faster yourself.
-- The task is trivial or would duplicate work you are already doing.
+- You need to search known keywords, symbols, error text, or a small set of files; use grep/read.
+- The next local step is blocked on the result and you can search or read it yourself.
+- The task is trivial, would duplicate work you are already doing, or would only save context.
+- The task is normal debugging, implementation, or verification work in the current thread.
 
 <!-- 新 agent 没有当前上下文，明确所有权与验证要求才能避免重叠修改。 -->
 Prompting rules:
@@ -32,3 +35,26 @@ Usage notes:
 - Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
 - Reuse task_id only when continuing the same subagent context is useful.
 - The agent result is returned to you, not directly to the user; summarize relevant results yourself.
+
+Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
+
+<example_agent_descriptions>
+"explorer": use this agent for broad, independent codebase exploration across multiple unrelated areas
+"reviewer": use this agent for an isolated review pass after the user requested or accepted review
+</example_agent_description>
+
+<example>
+user: "Where is the database lock error thrown?"
+<commentary>
+The target is a known error string, so use grep/read directly instead of Task.
+</commentary>
+assistant: Uses grep for "database is locked", then reads the matching files.
+</example>
+
+<example>
+user: "Compare the server lifecycle, permission model, and streaming event flow."
+<commentary>
+This has 3 independent research branches and can run in parallel, so Task may be useful.
+</commentary>
+assistant: Uses Task to launch independent exploration for each non-overlapping branch.
+</example>

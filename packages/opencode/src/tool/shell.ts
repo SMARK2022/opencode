@@ -21,6 +21,50 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
 
+// 只有写操作失去 always 前缀建议；只读 Git 仍保留现有权限匹配路径。
+const GIT_WRITES = new Set(["add", "commit", "merge", "rebase", "cherry-pick", "revert", "pull", "push", "checkout", "switch", "restore", "reset", "clean"])
+// stash 的默认行为是 push，不能把消息文本误当成只读子命令。
+const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch", "save", "create", "store", "export", "import"])
+
+function riskyGit(tokens: string[]) {
+  // AST 直接命令的建议收窄不等于执行授权；alias/eval 与间接脚本仍由原权限链决定。
+  if (tokens[0]?.toLowerCase().replace(/\.exe$/, "") !== "git") return false
+  // -C 与 -c 都消费下一项；保留原 token 的大小写才能区分 Git 的短选项。
+  let i = 1
+  while (i < tokens.length) {
+    const token = tokens[i]
+    if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source"].includes(token)) {
+      i += 2
+      continue
+    }
+    // 附着值和无值全局选项整个跳过，不把路径或配置误识别为子命令。
+    if (token.startsWith("-")) {
+      i++
+      continue
+    }
+    break
+  }
+  const subcommand = tokens[i]?.toLowerCase()
+  if (subcommand !== "stash") return subcommand !== undefined && GIT_WRITES.has(subcommand)
+  // 从真实子命令位置继续，配置值含 stash 也不会改变扫描起点。
+  for (i++; i < tokens.length; i++) {
+    const token = tokens[i]
+    // 裸 stash 的 -m/--message 消费值，checkpoint/list 都不是动作。
+    if (token === "-m" || token === "--message") {
+      i++
+      return true
+    }
+    if (token.startsWith("-m") || token.startsWith("--message=")) return true
+    // -- 后是路径限定，仍然是默认 push，不应扩大为只读许可。
+    if (token === "--") return true
+    if (token.startsWith("-")) continue
+    const action = token.toLowerCase()
+    // list/show 是只读；未知位置参数可能是隐式 push 的路径，保守保留询问。
+    return GIT_STASH_WRITES.has(action) || !["list", "show"].includes(action)
+  }
+  return true
+}
+
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
@@ -377,8 +421,16 @@ export const ShellTool = Tool.define(
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          // 仍保留完整请求 pattern，只撤销危险写操作的自动前缀建议。
+          if (!riskyGit(tokens)) scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
         }
+      }
+
+      // PowerShell 错误恢复可能只留下命令前缀；权限必须审查完整输入，不能据残缺 AST 建议自动放行。
+      if (ps && root.hasError) {
+        scan.patterns.clear()
+        scan.patterns.add(root.text.trim())
+        scan.always.clear()
       }
 
       return scan

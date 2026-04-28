@@ -10,6 +10,8 @@ import { Flag } from "./flag/flag"
 import { FSUtil } from "./fs-util"
 import { lazy } from "./util/lazy"
 import { which } from "./util/which"
+// 共享纯文本沿既有 txt loader 内嵌；Core 不从 Opencode 的工具模板反向加载运行时。
+import GIT_SAFETY from "./git-safety.txt"
 
 const SIGKILL_TIMEOUT_MS = 200
 const META: Record<string, { deny?: boolean; login?: boolean; posix?: boolean; ps?: boolean }> = {
@@ -304,6 +306,10 @@ export function guidance(file: string, platform: NodeJS.Platform) {
     ] : []),
     // 两条执行路径都按 UTF-8 解码，非 ASCII 程序输出必须使用相同编码。
     "For non-ASCII output, configure the shell/native program to emit UTF-8; captured output is decoded as UTF-8.",
+    // BashTool 的 Location source 与 V1 description 都调用此入口，配置 refresh 仍由原 Context Epoch 去重。
+    // 输出压缩、cwd 或 shell 身份变化不授予 Git 写权限，这份授权协议不受这些执行选项改写。
+    "",
+    GIT_SAFETY,
   ].join("\n")
 }
 
