@@ -257,9 +257,9 @@ describe("context usage", () => {
       toolDefinitions: [],
     })
 
-    expect(data.details.usage).toMatchObject({ input: 100, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
+    expect(data.details.usage).toMatchObject({ input: 100, output: 40, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
     expect(contextUsageFooter(data, 100)).toContain("Session Totals")
-    expect(contextUsageFooter(data, 100)).toContain("Output 50")
+    expect(contextUsageFooter(data, 100)).toContain("Output 40")
     expect(contextUsageFooter(data, 100)).toContain("Cache W/R 5/20")
     expect(contextUsageFooter(data, 100).length).toBe(82)
   })

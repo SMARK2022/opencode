@@ -235,7 +235,7 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
       if (part.type !== "step-finish") continue
       confirmed = true
       usage.input += part.tokens.input
-      usage.output += part.tokens.output + part.tokens.reasoning
+      usage.output += part.tokens.output
       usage.reasoning += part.tokens.reasoning
       usage.cacheRead += part.tokens.cache.read
       usage.cacheWrite += part.tokens.cache.write
@@ -247,14 +247,14 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
     for (const msg of messages) {
       if (msg.info.role !== "assistant") continue
       usage.input += msg.info.tokens.input
-      usage.output += msg.info.tokens.output + msg.info.tokens.reasoning
+      usage.output += msg.info.tokens.output
       usage.reasoning += msg.info.tokens.reasoning
       usage.cacheRead += msg.info.tokens.cache.read
       usage.cacheWrite += msg.info.tokens.cache.write
       usage.cost += msg.info.cost
     }
   }
-  usage.total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
+  usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
   return usage
 }
 
@@ -666,7 +666,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const maxTokens = modelInfo.model?.limit.context ?? 0
 
   const msg = messageTokens(compacted)
-  const usage = usageTotals(compacted)
+  const usage = usageTotals(raw)
   const instructions = await gatherInstructionFiles(input)
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
   const messageText = msg.text.join("\n")
