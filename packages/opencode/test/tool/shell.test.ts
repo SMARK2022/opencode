@@ -967,15 +967,26 @@ describe("tool.shell permissions", () => {
         tmp,
         Effect.gen(function* () {
           const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-          yield* run(
-            {
-              command: "git log --oneline -5",
-            },
-            capture(requests),
-          )
-          expect(requests.length).toBe(1)
-          expect(requests[0].always.length).toBeGreaterThan(0)
-          expect(requests[0].always.some((item) => item.endsWith("*"))).toBe(true)
+          // 在权限边界停止，测试真实 scanner 而不执行 reset/stash 写操作。
+          for (const [command, write] of [
+            ["git log --oneline -5", false],
+            ["git -C repo reset --hard", true],
+            ["git -C repo stash -m checkpoint", true],
+            ["git -c key=stash stash -m list", true],
+            ["git -C repo stash -mcheckpoint list", true],
+            ["git --config-env key=ENV reset", true],
+            ["git --git-dir=repo -C repo stash --message=checkpoint", true],
+            ["git -C repo stash list", false],
+            ["git -c key=value stash show", false],
+          ] as const) {
+            requests.length = 0
+            const err = new Error("stop after permission")
+            yield* fail({ command }, capture(requests, err))
+            expect(requests.length).toBe(1)
+            expect(requests[0].patterns).toContain(command)
+            // 只读必须保留原 always 入口，不能通过把所有 Git 建议清空来使危险样例看似安全。
+            expect(requests[0].always.length > 0).toBe(!write)
+          }
         }),
       )
     }),

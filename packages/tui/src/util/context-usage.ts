@@ -9,6 +9,8 @@ import { ConfigProvider, Effect } from "effect"
 import { boolean, withDefault } from "effect/Config"
 import { estimateDataUrlInputTokens } from "./token-estimate"
 import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
+import GIT_SAFETY from "../../../core/src/git-safety.txt"
+import SHELL_DESCRIPTION from "../../../opencode/src/tool/shell/shell.txt"
 // 提示词文本资产由 Bun 内嵌，估算无需加载服务或依赖打包后的源码目录。
 import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
@@ -669,12 +671,77 @@ export function resolveToolDescriptions(paths: ContextUsagePaths, background = e
   return Object.entries(EMBEDDED_TOOL_CATALOG).map(([name, entry]) => {
     // TaskTool 默认广告 BaseParameters；后台开关开启才同时广告完整参数与后台运行说明。
     const parameters = name === "task" && !background ? EMBEDDED_TOOL_CATALOG.task.baseParameters : entry.parameters
-    const description = name === "task"
+    // V1 description 已从 Shell.guidance 消费共享 Git 文本；目录估算使用同一资产，旧 catalog 不再复制政策。
+    const description = name === "bash" ? [GIT_SAFETY, SHELL_DESCRIPTION].join("\n\n") : name === "task"
       ? [TaskPrompt.description, ...(background ? [EMBEDDED_TOOL_CATALOG.task.backgroundDescription] : [])].join("\n\n")
       : entry.description
     // 序列化必须保留 optional/required/default 与嵌套字段；这里只选择 owner 资产，不重建 Schema。
-    return { name, text: [`Tool: ${name}`, description.replaceAll("${cwd}", paths.cwd).replaceAll("${worktree}", paths.worktree ?? paths.cwd), JSON.stringify(parameters)].join("\n") }
+    // 参数文档不做 shell 占位符替换；字段说明中的特殊字符属于契约，不能在渲染时修改。
+    return { name, text: [`Tool: ${name}`, resolveTemplateVars(description, paths), `Parameters: ${JSON.stringify(parameters)}`].join("\n") }
   })
+}
+
+// 模板只在已有文本上替换；不扫描文件、动态导入工具模块或解析 schema。
+function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
+  if (!text.includes("${") && !text.includes("{{year}}")) return text
+  // 已配置 shell 优先于环境变量，路径末尾的 .exe 不影响 Windows 语法选择。
+  const shell = paths.shell ?? process.env.SHELL ?? (process.platform === "win32" ? "powershell" : "bash")
+  const shellName = path.basename(shell.replaceAll("\\", "/")).toLowerCase().replace(/\.exe$/, "")
+  // 5.1 不支持链式运算符；7+ 与 cmd 使用各自的条件执行语法。
+  const chain = shellName === "powershell"
+    ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
+    : shellName === "pwsh"
+      ? "If commands depend on each other, use `&&` when the second command should only run after the first succeeds. Use `;` only for unconditional sequencing."
+      : shellName === "cmd"
+        ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
+        : "If commands depend on each other, use a single shell call with '&&' to chain them together."
+  // Windows 文件操作提示必须跟随 shell，而非统一声称使用 PowerShell。
+  const shellGuidance = process.platform !== "win32" ? "" : shellName === "powershell" ? [
+    "PowerShell notes:",
+    "- This shell is Windows PowerShell 5.1 unless configured otherwise.",
+    "- Do NOT use Unix utilities such as tail, head, sed, awk, or grep.",
+    "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+    "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+    "- Do NOT use /dev/null. Use $null.",
+    "- Do NOT use && or ||. Use `A; if ($?) { B }` when B depends on A succeeding.",
+    "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+  ].join("\n") : shellName === "pwsh" ? [
+    "PowerShell notes:",
+    "- This shell is PowerShell 7+.",
+    "- Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may still be unavailable.",
+    "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+    "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+    "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+  ].join("\n") : shellName === "cmd" ? [
+    "Windows cmd notes:",
+    "- Use cmd.exe syntax, not Bash or PowerShell syntax.",
+    "- Use `dir` for directory listing and `type` for simple file output.",
+    "- Do NOT use Unix utilities such as ls, tail, head, sed, awk, or grep.",
+    "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+    "- Use `NUL` for the null device, not `/dev/null`.",
+  ].join("\n") : "Windows shell notes: prefer dedicated OpenCode tools for file operations."
+  // cwd 与 worktree 是调用方快照；不以本进程的工作目录覆盖它们。
+  return text
+    .replaceAll("${cwd}", paths.cwd)
+    .replaceAll("${worktree}", paths.worktree ?? paths.cwd)
+    .replaceAll("${intro}", "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.")
+    .replaceAll("${workdirSection}", "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory.")
+    .replaceAll("${commandSection}", "Before executing the command, please follow directory verification and quoting rules for paths with spaces.")
+    // 临时目录、操作系统和 shell 身份仍是估算文本，不参与工具执行。
+    .replaceAll("${tmp}", os.tmpdir())
+    .replaceAll("${os}", process.platform)
+    .replaceAll("${shell}", shellName)
+    .replaceAll("${directory}", paths.cwd)
+    .replaceAll("${chaining}", chain)
+    .replaceAll("${shellGuidance}", shellGuidance)
+    // 列目录示例使用 shell 原生命令，避免 Windows 出现 ls 示例。
+    .replaceAll("${listCommand}", process.platform !== "win32" ? "`ls`" : ["powershell", "pwsh"].includes(shellName) ? "`Get-ChildItem`" : shellName === "cmd" ? "`dir`" : "the shell-native directory listing command")
+    .replaceAll("${maxLines}", "2000")
+    .replaceAll("${maxBytes}", "51200")
+    // 压缩指引由运行时提供，此处没有虚构第二套配置。
+    .replaceAll("${compressionGuidance}", "")
+    // websearch 的年度提示也属于 catalog 文本渲染，不能留下未展开标记。
+    .replaceAll("{{year}}", String(new Date().getFullYear()))
 }
 
 // 用户 tools 映射与历史调用是两个既有输入来源，缺省映射不能被解释成已明确禁用所有工具。
@@ -705,19 +772,8 @@ function dynamicToolText(name: string, input: ComputeContextDataInput, skills: A
   return ""
 }
 
-// 历史调用样本只代表已观察参数形状，无法证明工具完整的参数契约。
-function observedToolShape(name: string, messages: WithParts[]) {
-  const samples: unknown[] = []
-  for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (part.type === "tool" && part.tool === name && samples.length < 3) samples.push(part.state.input)
-    }
-  }
-  return samples.length ? `Observed inputs:\n${stableJson(samples)}` : ""
-}
-
-// 注入定义是目录的完整覆盖；不能再叠加 embedded catalog，否则测试和自定义定义都会重复计数。
-async function toolDefinitionTokens(
+// 定义只计算 catalog 与动态描述；调用输入已经归类为消息，不能再次计入定义。
+function toolDefinitionTokens(
   input: ComputeContextDataInput,
   messages: WithParts[],
   skills: Array<{ name: string; description: string; path: string }>,
@@ -732,7 +788,7 @@ async function toolDefinitionTokens(
   const byName = new Map(scanned.map((item) => [item.name, item.text]))
   const details = [] as Array<{ name: string; tokens: number }>
   for (const name of active) {
-    const text = [byName.get(name), dynamicToolText(name, input, skills), observedToolShape(name, messages)]
+    const text = [byName.get(name), dynamicToolText(name, input, skills)]
       .filter(Boolean)
       .join("\n")
     details.push({ name, tokens: estimate(text || name) })

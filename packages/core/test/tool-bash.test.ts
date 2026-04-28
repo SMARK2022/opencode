@@ -226,6 +226,48 @@ describe("BashTool", () => {
             const initialized = yield* SystemContext.initialize(yield* contexts.load())
             expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
             expect(initialized.baseline).toContain("captured output is decoded as UTF-8")
+            // 在真实 BashTool 节点的完整 baseline 上检查独立政策文本，不能只测 Shell.guidance 自身。
+            expect(initialized.baseline).toContain([
+              // HEAD 作者与未推送状态是两个独立条件；完整 oracle 不能只留下“需显式请求”的摘要。
+              "# Git repository state changes", "",
+              "<!-- 授权对应操作类型并持续到撤回；后续调试消息不会自动授予写权限，也不会自动撤销既有授权。 -->",
+              "Read-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.", "",
+              "Do not run git commands that modify refs, history, the index, the working tree, stashes, or remotes",
+              "unless a verbatim user message has requested that kind of operation for the current task; that authorization remains valid unless the last user message withdraws it.",
+              "This includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`,",
+              "`git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`,",
+              "and `git stash push/pop/apply/drop/clear`.",
+              "Debugging, fixing tests, syncing a branch, resolving a blocker, or make-it-work is not authorization for these commands.",
+              "If such an operation seems necessary, explain why and ask first.", "",
+              "<!-- 三项 amend 前提共同成立才可执行；hook 拒绝仍要求新提交，不能用 amend 绕过失败记录。 -->",
+              "# Git Safety Protocol",
+              "- NEVER update the git config",
+              "- NEVER run destructive/irreversible git commands (force push, hard reset, etc) unless the user explicitly requests them",
+              "- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it",
+              "- NEVER run force push to main/master; warn the user if they request it",
+              "- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:",
+              "  (1) User explicitly requested amend",
+              "  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')",
+              '  (3) Commit has NOT been pushed to remote (verify: git status shows "Your branch is ahead")',
+              "- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit",
+              "- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)",
+              "- NEVER commit changes unless the user explicitly asks you to.",
+              "  Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.", "",
+              "<!-- commit 和 push 是独立授权；提交准备必须检查完整状态，不能把 stage 或测试成功视为可推送。 -->",
+              "# Committing changes with git",
+              "Only create commits when requested by the user. If unclear, ask first.",
+              "- Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.",
+              "- Write a concise commit message that matches the repo style.",
+              "- Do not use interactive `-i` or create empty commits unless explicitly requested.",
+              "- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.", "",
+              "# GitHub",
+              "- Only push or create PRs when explicitly requested by the user.",
+              "- Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.",
+              "- Review all commits included in the PR, not just the latest commit.",
+              "- Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.",
+            ].join("\n"))
+            // description 不再承载第二份政策；调用权仍来自 PermissionV2，提示文本不能授予执行权限。
+            expect(definitions[0]?.description).not.toContain("# Git repository state changes")
             // 同一配置 refresh 不重复注入，保留既有 Context Epoch 的比较边界。
             expect(yield* SystemContext.reconcile(yield* contexts.load(), initialized.snapshot)).toEqual({ _tag: "Unchanged" })
             expect(definitions[0]?.description).toContain("Use workdir instead of changing directories")

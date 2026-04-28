@@ -263,7 +263,7 @@ describe("context usage", () => {
         }
         const task = resolveToolDescriptions({ cwd: process.cwd() }).find((entry) => entry.name === "task")!
         // 完整文本检查同时约束参数选择、后台说明的有无和分隔符，非空 token 无法提供这个保证。
-        expect(task.text).toBe(["Tool: task", enabled ? [TaskPrompt.description, backgroundDescription].join("\n\n") : TaskPrompt.description, JSON.stringify(enabled ? full : base)].join("\n"))
+        expect(task.text).toBe(["Tool: task", enabled ? [TaskPrompt.description, backgroundDescription].join("\n\n") : TaskPrompt.description, `Parameters: ${JSON.stringify(enabled ? full : base)}`].join("\n"))
       }
     } finally {
       // 恢复缺失与显式值的区别，后续 provider/flag 测试不能继承本 case 的后台模式。
@@ -332,8 +332,8 @@ describe("context usage", () => {
     expect(data.details.messages.toolResults).toBe(4)
     // instructionFiles 是完整覆盖，真实 AGENTS.md 不应偷偷叠加进注入的 2 token。
     expect(data.details.instructions[0]?.tokens).toBe(2)
-    // 工具定义包含 schema + 观察到的输入，token > 4
-    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBeGreaterThan(4)
+    // 注入定义恰为 16 字符；历史调用输入不能放大这 4 个定义 token。
+    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
     // 自定义 schema 不关闭环境/系统载荷，不能通过减少分类项让整体占用看似更低。
     expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
     // 输入分类包含 synthetic 正文和工具结果，两者来自不同角色，不应按 message.role 粗分。
