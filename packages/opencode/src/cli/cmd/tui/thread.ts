@@ -1,17 +1,12 @@
 import { cmd } from "@/cli/cmd/cmd"
 import { tui } from "./app"
-import { Rpc } from "@/util"
-import { type rpc } from "./worker"
 import path from "path"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
 import { Log } from "@/util"
 import { errorMessage } from "@/util/error"
-import { withTimeout } from "@/util/timeout"
 import { withNetworkOptions, resolveNetworkOptionsNoConfig } from "@/cli/network"
 import { Filesystem } from "@/util"
-import type { GlobalEvent } from "@opencode-ai/sdk/v2"
-import type { EventSource } from "./context/sdk"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { writeHeapSnapshot } from "v8"
 import { TuiConfig } from "./config/tui"
@@ -22,46 +17,23 @@ import {
   sanitizedProcessEnv,
 } from "@opencode-ai/core/util/opencode-process"
 import { validateSession } from "./validate-session"
+import { ServerLock } from "@/cli/cmd/tui/server-lock"
+import { Flock } from "@opencode-ai/core/util/flock"
+import { Global } from "@opencode-ai/core/global"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
 }
 
-type RpcClient = ReturnType<typeof Rpc.client<typeof rpc>>
-
-function createWorkerFetch(client: RpcClient): typeof fetch {
-  const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const request = new Request(input, init)
-    const body = request.body ? await request.text() : undefined
-    const result = await client.call("fetch", {
-      url: request.url,
-      method: request.method,
-      headers: Object.fromEntries(request.headers.entries()),
-      body,
-    })
-    return new Response(result.body, {
-      status: result.status,
-      headers: result.headers,
-    })
-  }
-  return fn as typeof fetch
-}
-
-function createEventSource(client: RpcClient): EventSource {
-  return {
-    subscribe: async (handler) => {
-      return client.on<GlobalEvent>("global.event", (e) => {
-        handler(e)
-      })
-    },
-  }
-}
+// Exposed for testing only – do not call outside this module.
+export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) =>
+  Bun.spawn(cmd, opts)
 
 async function target() {
   if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
   const dist = new URL("./cli/cmd/tui/worker.js", import.meta.url)
-  if (await Filesystem.exists(fileURLToPath(dist))) return dist
-  return new URL("./worker.ts", import.meta.url)
+  if (await Filesystem.exists(fileURLToPath(dist))) return fileURLToPath(dist)
+  return fileURLToPath(new URL("./worker.ts", import.meta.url))
 }
 
 async function input(value?: string) {
@@ -111,6 +83,8 @@ export const TuiThreadCommand = cmd({
     // Keep ENABLE_PROCESSED_INPUT cleared even if other code flips it.
     // (Important when running under `bun run` wrappers on Windows.)
     const unguard = win32InstallCtrlCGuard()
+    let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
+    let fwdReload: (() => void) | undefined
     try {
       // Must be the very first thing — disables CTRL_C_EVENT before any Worker
       // spawn or async work so the OS cannot kill the process group.
@@ -128,7 +102,6 @@ export const TuiThreadCommand = cmd({
       const next = args.project
         ? Filesystem.resolve(path.isAbsolute(args.project) ? args.project : path.join(root, args.project))
         : Filesystem.resolve(process.cwd())
-      const file = await target()
       try {
         process.chdir(next)
       } catch {
@@ -141,79 +114,113 @@ export const TuiThreadCommand = cmd({
         [OPENCODE_RUN_ID]: ensureRunID(),
       })
 
-      const worker = new Worker(file, {
-        env,
-      })
-      worker.onerror = (e) => {
-        Log.Default.error("thread error", {
-          message: e.message,
-          filename: e.filename,
-          lineno: e.lineno,
-          colno: e.colno,
-          error: e.error,
-        })
-      }
-
-      const client = Rpc.client<typeof rpc>(worker)
-      const error = (e: unknown) => {
-        Log.Default.error("process error", { error: errorMessage(e) })
-      }
-      const reload = () => {
-        client.call("reload", undefined).catch((err) => {
-          Log.Default.warn("worker reload failed", {
-            error: errorMessage(err),
-          })
-        })
-      }
-      process.on("uncaughtException", error)
-      process.on("unhandledRejection", error)
-      process.on("SIGUSR2", reload)
-
-      let stopped = false
-      const stop = async () => {
-        if (stopped) return
-        stopped = true
-        process.off("uncaughtException", error)
-        process.off("unhandledRejection", error)
-        process.off("SIGUSR2", reload)
-        await withTimeout(client.call("shutdown", undefined), 5000).catch((error) => {
-          Log.Default.warn("worker shutdown failed", {
-            error: errorMessage(error),
-          })
-        })
-        worker.terminate()
-      }
-
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()
 
-      const network = resolveNetworkOptionsNoConfig(args)
-      const external =
-        process.argv.includes("--port") ||
-        process.argv.includes("--hostname") ||
-        process.argv.includes("--mdns") ||
-        network.mdns ||
-        network.port !== 0 ||
-        network.hostname !== "127.0.0.1"
+      // ── Server discovery ──────────────────────────────────────────────────
+      // Fast path: no election lock needed when a server is clearly alive.
+      const quickCheck = await ServerLock.read()
+      const quickAlive =
+        quickCheck && ServerLock.alive(quickCheck.pid) && (await ServerLock.ping(quickCheck.port))
+      let existingUrl: string | null = quickAlive ? `http://127.0.0.1:${quickCheck!.port}` : null
 
-      const transport = external
-        ? {
-            url: (await client.call("server", network)).url,
-            fetch: undefined,
-            events: undefined,
-          }
-        : {
-            url: "http://opencode.internal",
-            fetch: createWorkerFetch(client),
-            events: createEventSource(client),
+      if (!existingUrl) {
+        // Acquire an election lock so that concurrent TUI startups do not all
+        // spawn a daemon at the same time (e.g. opening 4 tabs simultaneously).
+        electionLease = await Flock.acquire("opencode.server", {
+          dir: path.join(Global.Path.state, "locks"),
+          timeoutMs: 30_000,
+          staleMs: 10_000,
+        })
+        // Re-check under lock: another process may have won the race between
+        // the fast-check and the lock acquisition.
+        const lock = await ServerLock.read()
+        existingUrl =
+          lock && ServerLock.alive(lock.pid) && (await ServerLock.ping(lock.port))
+            ? `http://127.0.0.1:${lock.port}`
+            : null
+        if (!existingUrl && lock) await ServerLock.clear()
+
+        if (existingUrl) {
+          // Slave path found under lock: release lease immediately.
+          await electionLease.release()
+          electionLease = undefined
+        } else {
+          // ── Spawn the daemon ──────────────────────────────────────────────
+          const network = resolveNetworkOptionsNoConfig(args)
+          const external =
+            process.argv.includes("--port") ||
+            process.argv.includes("--hostname") ||
+            process.argv.includes("--mdns") ||
+            network.mdns ||
+            network.port !== 0 ||
+            network.hostname !== "127.0.0.1"
+
+          const daemonFile = await target()
+          const printLogs = process.argv.includes("--print-logs")
+          const proc = _spawn(
+            [process.execPath, daemonFile],
+            {
+              env: {
+                ...env,
+                ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
+                ...(external
+                  ? {
+                      OPENCODE_EXTERNAL_PORT: String(network.port),
+                      OPENCODE_EXTERNAL_HOSTNAME: network.hostname,
+                      OPENCODE_EXTERNAL_MDNS: network.mdns ? "1" : "",
+                    }
+                  : {}),
+              },
+              stdin: "ignore",
+              stdout: printLogs ? "inherit" : "ignore",
+              stderr: printLogs ? "inherit" : "ignore",
+            },
+          )
+          proc.unref()
+
+          // Wait for the daemon to write the lock and for its server to respond.
+          const deadline = Date.now() + 30_000
+          while (Date.now() < deadline) {
+            const daemonLock = await ServerLock.read()
+            if (daemonLock && daemonLock.pid === proc.pid && ServerLock.alive(daemonLock.pid)) {
+              if (external) {
+                if (daemonLock.externalUrl) {
+                  existingUrl = daemonLock.externalUrl
+                  break
+                }
+              } else if (await ServerLock.ping(daemonLock.port)) {
+                existingUrl = `http://127.0.0.1:${daemonLock.port}`
+                break
+              }
+            }
+            await Bun.sleep(100)
           }
 
+          // Release election lease: daemon is live (or we are about to error).
+          await electionLease.release()
+          electionLease = undefined
+
+          if (!existingUrl) {
+            UI.error("opencode daemon failed to start within 30 seconds")
+            proc.kill()
+            return
+          }
+
+          // Forward SIGUSR2 (config reload) to the daemon (Unix only).
+          if (process.platform !== "win32") {
+            fwdReload = () => { try { proc.kill("SIGUSR2") } catch {} }
+            process.on("SIGUSR2", fwdReload)
+          }
+        }
+      }
+
+      // ── Common path: validate session then start TUI ──────────────────────
       try {
         await validateSession({
-          url: transport.url,
+          url: existingUrl!,
           sessionID: args.session,
           directory: cwd,
-          fetch: transport.fetch,
         })
       } catch (error) {
         UI.error(errorMessage(error))
@@ -221,22 +228,20 @@ export const TuiThreadCommand = cmd({
         return
       }
 
-      setTimeout(() => {
-        client.call("checkUpgrade", { directory: cwd }).catch(() => {})
-      }, 1000).unref?.()
+      // Release election lease if still held from the slave path.
+      if (electionLease) {
+        await electionLease.release()
+        electionLease = undefined
+      }
 
       try {
         await tui({
-          url: transport.url,
+          url: existingUrl!,
           async onSnapshot() {
-            const tui = writeHeapSnapshot("tui.heapsnapshot")
-            const server = await client.call("snapshot", undefined)
-            return [tui, server]
+            return [writeHeapSnapshot("tui.heapsnapshot")]
           },
           config,
           directory: cwd,
-          fetch: transport.fetch,
-          events: transport.events,
           args: {
             continue: args.continue,
             sessionID: args.session,
@@ -247,12 +252,15 @@ export const TuiThreadCommand = cmd({
           },
         })
       } finally {
-        await stop()
+        if (fwdReload) {
+          process.off("SIGUSR2", fwdReload)
+          fwdReload = undefined
+        }
       }
     } finally {
+      await electionLease?.release().catch(() => undefined)
       unguard?.()
     }
     process.exit(0)
   },
 })
-// scratch

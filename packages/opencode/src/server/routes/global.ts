@@ -20,7 +20,19 @@ const log = Log.create({ service: "server" })
 
 export const GlobalDisposedEvent = BusEvent.define("global.disposed", Schema.Struct({}))
 
+// Tracks the number of active SSE clients so the daemon can implement an
+// idle-timeout and exit when no TUI is connected.
+let sseClientCount = 0
+let onSseCountChange: ((n: number) => void) | undefined
+
+export function onSseClientCountChange(cb: (n: number) => void) {
+  onSseCountChange = cb
+}
+
 async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>) => () => void) {
+  sseClientCount++
+  onSseCountChange?.(sseClientCount)
+
   return streamSSE(c, async (stream) => {
     const q = new AsyncQueue<string | null>()
     let done = false
@@ -49,6 +61,8 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
     const stop = () => {
       if (done) return
       done = true
+      sseClientCount--
+      onSseCountChange?.(sseClientCount)
       clearInterval(heartbeat)
       unsub()
       q.push(null)

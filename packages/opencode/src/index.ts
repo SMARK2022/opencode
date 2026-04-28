@@ -42,6 +42,15 @@ import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
 
 const processMetadata = ensureProcessMetadata("main")
 
+// When the compiled binary is spawned as a daemon worker by thread.ts it has
+// OPENCODE_PROCESS_ROLE=worker in its environment.  Bypass yargs entirely and
+// run the worker module; the HTTP server keeps the event loop alive until
+// gracefulShutdown() calls process.exit(0).
+if (processMetadata.processRole === "worker") {
+  await import("./cli/cmd/tui/worker")
+  await new Promise<never>(() => {})
+}
+
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {
     e: errorMessage(e),

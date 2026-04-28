@@ -3,21 +3,19 @@ import { Server } from "@/server/server"
 import { Log } from "@/util"
 import { Instance } from "@/project/instance"
 import { InstanceBootstrap } from "@/project/bootstrap"
-import { Rpc } from "@/util"
 import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config"
-import { GlobalBus } from "@/bus/global"
-import { Flag } from "@opencode-ai/core/flag/flag"
-import { writeHeapSnapshot } from "node:v8"
-import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
 import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
 import * as Database from "@/storage/db"
+import { ServerLock } from "@/cli/cmd/tui/server-lock"
+import { Heap } from "@/cli/heap"
+import { onSseClientCountChange } from "@/server/routes/global"
 
 ensureProcessMetadata("worker")
 
 await Log.init({
-  print: process.argv.includes("--print-logs"),
+  print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",
   dev: Installation.isLocal(),
   level: (() => {
     if (Installation.isLocal()) return "DEBUG"
@@ -39,68 +37,80 @@ process.on("uncaughtException", (e) => {
   })
 })
 
-// Subscribe to global events and forward them via RPC
-GlobalBus.on("event", (event) => {
-  Rpc.emit("global.event", event)
+// Always start the internal loopback HTTP server first.
+const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
+
+// Start an external HTTP server when the launching TUI requests it.
+let externalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
+let externalUrl: string | undefined
+
+const externalPort = process.env.OPENCODE_EXTERNAL_PORT
+if (externalPort !== undefined) {
+  externalServer = await Server.listen({
+    port: Number(externalPort),
+    hostname: process.env.OPENCODE_EXTERNAL_HOSTNAME ?? "0.0.0.0",
+    mdns: process.env.OPENCODE_EXTERNAL_MDNS === "1",
+  })
+  externalUrl = externalServer.url.toString()
+}
+
+// Write the lock file atomically (internal port + optional external URL).
+const lockToken = await ServerLock.write(internalServer.port, externalUrl)
+
+// ── Graceful shutdown ──────────────────────────────────────────────────────
+let shutdownInProgress = false
+
+async function gracefulShutdown() {
+  if (shutdownInProgress) return
+  shutdownInProgress = true
+  Log.Default.info("daemon shutting down")
+  await ServerLock.clearIfOwner(lockToken)
+  await Instance.disposeAll()
+  if (externalServer) await externalServer.stop(true)
+  await internalServer.stop(true)
+  Database.close()
+  process.exit(0)
+}
+
+process.on("SIGTERM", () => void gracefulShutdown())
+
+// Config reload on SIGUSR2 (Unix only — Windows does not support this signal).
+if (process.platform !== "win32") {
+  process.on("SIGUSR2", () => {
+    AppRuntime.runPromise(Config.Service.use((cfg) => cfg.invalidate(true))).catch(() => {})
+  })
+}
+
+// ── Idle timeout ───────────────────────────────────────────────────────────
+// Exit 30 s after the last SSE client disconnects.  The timer only starts
+// after the first connection, so a slow-starting TUI does not race the daemon.
+const IDLE_TIMEOUT_MS = 30_000
+
+let hadClient = false
+let idleTimer: ReturnType<typeof setTimeout> | undefined
+
+onSseClientCountChange((count) => {
+  if (count > 0) {
+    hadClient = true
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+      idleTimer = undefined
+    }
+    return
+  }
+  if (!hadClient) return // No client has ever connected; don't start the timer.
+  idleTimer = setTimeout(() => void gracefulShutdown(), IDLE_TIMEOUT_MS)
+  idleTimer.unref?.()
 })
 
-let server: Awaited<ReturnType<typeof Server.listen>> | undefined
-
-export const rpc = {
-  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
-    const headers = { ...input.headers }
-    const auth = getAuthorizationHeader()
-    if (auth && !headers["authorization"] && !headers["Authorization"]) {
-      headers["Authorization"] = auth
-    }
-    const request = new Request(input.url, {
-      method: input.method,
-      headers,
-      body: input.body,
-    })
-    const response = await Server.Default().app.fetch(request)
-    const body = await response.text()
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers.entries()),
-      body,
-    }
-  },
-  snapshot() {
-    const result = writeHeapSnapshot("server.heapsnapshot")
-    return result
-  },
-  async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
-    if (server) await server.stop(true)
-    server = await Server.listen(input)
-    return { url: server.url.toString() }
-  },
-  async checkUpgrade(input: { directory: string }) {
-    await Instance.provide({
-      directory: input.directory,
-      init: () => AppRuntime.runPromise(InstanceBootstrap),
-      fn: async () => {
-        await upgrade().catch(() => {})
-      },
-    })
-  },
-  async reload() {
-    await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.invalidate(true)))
-  },
-  async shutdown() {
-    Log.Default.info("worker shutting down")
-
-    await Instance.disposeAll()
-    if (server) await server.stop(true)
-    Database.close()
-  },
-}
-
-Rpc.listen(rpc)
-
-function getAuthorizationHeader(): string | undefined {
-  const password = Flag.OPENCODE_SERVER_PASSWORD
-  if (!password) return undefined
-  const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
-  return `Basic ${btoa(`${username}:${password}`)}`
-}
+// ── Startup tasks ──────────────────────────────────────────────────────────
+// Check for upgrades non-blocking, 1 s after start.
+setTimeout(async () => {
+  await Instance.provide({
+    directory: process.cwd(),
+    init: () => AppRuntime.runPromise(InstanceBootstrap),
+    fn: async () => {
+      await upgrade().catch(() => {})
+    },
+  }).catch(() => {})
+}, 1_000).unref?.()
