@@ -12,6 +12,7 @@ import {
   UnknownError,
 } from "@opencode-ai/protocol/errors"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { EventClients } from "../event-clients"
 
 const DefaultSessionsLimit = 50
 const DefaultSessionHistoryLimit = 50
@@ -19,6 +20,7 @@ const DefaultSessionHistoryLimit = 50
 export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* SessionV2.Service
+    const clients = yield* EventClients.Service
 
     return handlers
       .handle(
@@ -358,7 +360,8 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.events",
         Effect.fn((ctx) =>
           Effect.succeed(
-            session.events({ sessionID: ctx.params.sessionID, after: ctx.query.after }).pipe(Stream.orDie),
+            // 按会话订阅 durable events 的客户端也持有租约，历史页终止时正常释放。
+            Stream.unwrap(Effect.as(clients.acquire, session.events({ sessionID: ctx.params.sessionID, after: ctx.query.after }).pipe(Stream.orDie))),
           ),
         ),
       )

@@ -4,11 +4,13 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Cause, Config, Effect, Exit, Layer } from "effect"
+import { Cause, Config, Context, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
 import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { LocationServiceMap } from "@opencode-ai/core/location-services"
+import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
@@ -24,6 +26,8 @@ import * as HttpSessionError from "../../src/server/routes/instance/httpapi/hand
 import { ExperimentalPaths } from "../../src/server/routes/instance/httpapi/groups/experimental"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
 import { Session } from "@/session/session"
+import { SessionRunState } from "../../src/session/run-state"
+import { AppLayer } from "../../src/effect/app-runtime"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
@@ -37,7 +41,7 @@ import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, provideInstanceEffect, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { TestLLMServer } from "../lib/llm-server"
 import { testProviderConfig } from "../lib/test-provider"
-import { pollWithTimeout, testEffect } from "../lib/effect"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 
 const originalWorkspaces = Flag.OPENCODE_EXPERIMENTAL_WORKSPACES
 const noopBootstrapLayer = Layer.succeed(
@@ -237,6 +241,66 @@ afterEach(async () => {
 })
 
 describe("session HttpApi", () => {
+  // 原 it 会启动 HTTP 路由；此用例只构建生产服务，验证跨入口取消而不监听端口。
+  testEffect(appLayer).instance(
+    "shares session ownership and cancels V1 runs across service contexts",
+    () =>
+      Effect.gen(function* () {
+        const shared = HttpApiApp.createSharedServices()
+        const scope = yield* Scope.Scope
+        const firstScope = yield* Scope.fork(scope)
+        const secondScope = yield* Scope.fork(scope)
+        const runtimeScope = yield* Scope.fork(scope)
+        const first = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, firstScope)
+        const second = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, secondScope)
+        const runtime = yield* Layer.buildWithMemoMap(AppLayer, shared.memoMap, runtimeScope)
+
+        const firstRunState = Context.get(first, SessionRunState.Service)
+        const secondRunState = Context.get(second, SessionRunState.Service)
+        expect(secondRunState).toBe(firstRunState)
+        expect(Context.get(second, SessionExecution.Service)).toBe(Context.get(first, SessionExecution.Service))
+        expect(Context.get(second, LocationServiceMap.Service)).toBe(Context.get(first, LocationServiceMap.Service))
+        expect(Context.get(second, Database.Service)).toBe(Context.get(first, Database.Service))
+        expect(Context.get(runtime, SessionRunState.Service)).toBe(firstRunState)
+        expect(Context.get(runtime, InstanceStore.Service)).toBe(Context.get(first, InstanceStore.Service))
+        const configuration = yield* Effect.promise(() => import("../../src/config/config"))
+        expect(Context.get(runtime, configuration.Config.Service)).toBe(Context.get(first, configuration.Config.Service))
+
+        // 直接调用无端口 handler，确认共享服务不会把第二棵路由或 CORS 缓存为第一棵。
+        const handlers = ["https://first.test", "https://second.test"].map(origin => ({
+          origin, web: HttpRouter.toWebHandler(HttpApiApp.createRoutes({ cors: [origin] }, undefined, shared), { disableLogger: true }),
+        }))
+        yield* Effect.addFinalizer(() => Effect.promise(() => Promise.all(handlers.map(entry => entry.web.dispose()))))
+        for (const entry of handlers) {
+          const response = yield* Effect.promise(() => entry.web.handler(new Request("http://localhost/global/health", { headers: { origin: entry.origin } }), HttpApiApp.context))
+          expect(response.status).toBe(200)
+          expect(response.headers.get("access-control-allow-origin")).toBe(entry.origin)
+        }
+        // 共享层使用独立内存库，项目也须由同一服务上下文登记后再创建会话。
+        const instance = yield* TestInstance
+        yield* Context.get(first, Project.Service).fromDirectory(instance.directory)
+        const session = yield* createSession().pipe(Effect.provide(first))
+        const message = yield* createTextMessage(session.id, "shared run").pipe(Effect.provide(first))
+        const interrupted = { info: message.info, parts: [message.part] }
+        const ready = yield* Deferred.make<void>()
+        const fiber = yield* firstRunState
+          .ensureRunning(
+            session.id,
+            Effect.succeed(interrupted),
+            Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)),
+          )
+          .pipe(Effect.provide(first), Effect.forkScoped)
+
+        yield* awaitWithTimeout(Deferred.await(ready), "shared V1 run never became ready")
+        yield* awaitWithTimeout(
+          secondRunState.cancel(session.id).pipe(Effect.provide(second)),
+          "cross-context V1 cancellation did not finish",
+        )
+        const exit = yield* awaitWithTimeout(Fiber.await(fiber), "shared V1 run did not complete after cancellation")
+        expect(exit).toEqual(Exit.succeed(interrupted))
+      }),
+  )
+
   it.effect("maps busy sessions to public session busy errors", () =>
     Effect.gen(function* () {
       const sessionID = SessionID.descending()

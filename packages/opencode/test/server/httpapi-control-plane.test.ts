@@ -6,6 +6,7 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { EventClients } from "@opencode-ai/server/event-clients"
 import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
 import { Installation } from "../../src/installation"
@@ -28,6 +29,8 @@ const called = Ref.makeUnsafe<MoveSession.Input | undefined>(undefined)
 const apiLayer = HttpRouter.serve(
   HttpApiBuilder.layer(RootHttpApi).pipe(
     Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
+    // 此测试绕过 createRoutes，显式提供生产计数服务；无 idle callback，不改变测试服务器退出策略。
+    Layer.provide(EventClients.layer),
     Layer.provide([authorizationLayer, schemaErrorLayer]),
     // Raw HttpApi routes expose an opaque handler context at the request boundary.
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion

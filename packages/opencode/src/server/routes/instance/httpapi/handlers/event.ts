@@ -8,6 +8,7 @@ import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
+import { EventClients } from "@opencode-ai/server/event-clients"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -22,7 +23,7 @@ function eventID() {
   return EventV2.ID.create()
 }
 
-function eventResponse(events: EventV2.Interface) {
+function eventResponse(events: EventV2.Interface, clients: EventClients.Interface) {
   return Effect.gen(function* () {
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
@@ -68,13 +69,14 @@ function eventResponse(events: EventV2.Interface) {
 
     yield* Effect.logInfo("event connected")
     return HttpServerResponse.stream(
-      Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
+      // /event 使用相同 body-scope 租约，不能因为未订阅 /global/event 被误判为空闲。
+      Stream.unwrap(Effect.as(clients.acquire, Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
         Stream.concat(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
         Stream.ensuring(Effect.logInfo("event disconnected")),
-      ),
+      ))),
       {
         contentType: "text/event-stream",
         headers: {
@@ -90,10 +92,12 @@ function eventResponse(events: EventV2.Interface) {
 export const eventHandlers = HttpApiBuilder.group(EventApi, "event", (handlers) =>
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
+    // 只跨闭包传递稳定服务；原有 eager EventV2 listener 的无丢事件顺序不变。
+    const clients = yield* EventClients.Service
     return handlers.handleRaw(
       "subscribe",
       Effect.fn("EventHttpApi.subscribe")(function* () {
-        return yield* eventResponse(events)
+        return yield* eventResponse(events, clients)
       }),
     )
   }),

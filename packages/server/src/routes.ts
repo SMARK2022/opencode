@@ -22,6 +22,7 @@ import { schemaErrorLayer } from "./middleware/schema-error"
 import { PtyEnvironment } from "./pty-environment"
 import { layer as locationLayer } from "./location"
 import { sessionLocationLayer } from "./middleware/session-location"
+import { EventClients } from "./event-clients"
 
 const applicationServices = LayerNode.group([
   Database.node,
@@ -58,6 +59,8 @@ function makeRoutes<AuthError, AuthServices>(auth: Layer.Layer<ServerAuth.Config
     Layer.provide(authorizationLayer),
     Layer.provide(schemaErrorLayer),
     Layer.provide(auth),
+    // standalone server 无 daemon callback，但仍满足原生 handler 的同一服务契约。
+    Layer.provide(EventClients.layer),
     Layer.provide(serviceLayer),
   )
 }

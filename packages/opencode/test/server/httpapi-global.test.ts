@@ -7,6 +7,7 @@ import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
 import { Installation } from "../../src/installation"
 import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
+import { EventClients } from "@opencode-ai/server/event-clients"
 import { ServerAuth } from "../../src/server/auth"
 import { RootHttpApi } from "../../src/server/routes/instance/httpapi/api"
 import { GlobalPaths } from "../../src/server/routes/instance/httpapi/groups/global"
@@ -20,6 +21,8 @@ import { testEffect } from "../lib/effect"
 const apiLayer = HttpRouter.serve(
   HttpApiBuilder.layer(RootHttpApi).pipe(
     Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
+    // 部分 RootHttpApi Layer 仍需满足 global event 的稳定服务依赖，不能在 handler 中隐式补服务。
+    Layer.provide(EventClients.layer),
     Layer.provide([authorizationLayer, schemaErrorLayer]),
     // Raw HttpApi routes expose an opaque handler context at the request boundary.
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
