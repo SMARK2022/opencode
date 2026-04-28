@@ -180,8 +180,10 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
       const output = item.state.structured
       if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
           (output.encoding !== "utf8" && output.type !== "text-page")) return item
-      // 分页截断与行内截断都丢失正文，两个相同前缀不能证明完整版本。
-      if (output.type === "text-page" && (output.truncated !== false || output.next !== undefined ||
+      // 下一页到达请求末界说明本页完整；字节提前截断与长行裁剪仍不能作为版本证明。
+      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? 2000)
+      if (output.type === "text-page" &&
+          ((output.next === undefined ? output.truncated !== false : output.next !== pageEnd) ||
           output.content.includes("... (line truncated to 2000 chars)"))) return item
       if (item.state.outputPaths?.length || item.state.attachments?.length ||
           item.state.content.some((part) => part.type !== "text")) return item

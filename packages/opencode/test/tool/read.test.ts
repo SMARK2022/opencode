@@ -196,10 +196,8 @@ describe("tool.read external_directory permission", () => {
 
         const { items, next } = asks()
         const target = path.join(dir, "test.txt")
-        // 保留 fixture 盘符；根相对路径归当前进程盘，跨盘临时目录不能假定同盘。
-        const alt = target
-          .replaceAll("\\", "/")
-          .toLowerCase()
+        // 驱动器别名交给实际路径规范化；保留其余路径大小写，不能改写文件身份。
+        const alt = target.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll("\\", "/")
 
         yield* exec(dir, { filePath: alt }, next)
         const read = items.find((item) => item.permission === "read")
@@ -331,6 +329,8 @@ describe("tool.read truncation", () => {
       }
       const history = (result: Tool.ExecuteResult, sessionID = ctx.sessionID): Tool.Context["messages"] => {
         // 使用真实持久化 Schema 构造历史，不以 any 伪造工具结果的身份字段。
+        // 分页历史保存真实请求范围，不用测试侧缓存或比较算法伪造命中。
+        const input = { filePath: target, offset: 1, limit: 1 }
         const decoded = Schema.decodeUnknownSync(SessionV1.WithParts)({
           info: {
             id: "msg_prior", sessionID, role: "assistant", parentID: "msg_parent",
@@ -340,43 +340,57 @@ describe("tool.read truncation", () => {
           },
           parts: [{
             id: "prt_prior", sessionID, messageID: "msg_prior", type: "tool", tool: "read", callID: "prior",
-            state: { status: "completed", input: { filePath: target }, ...result, time: { start: 1, end: 2 } },
+            state: { status: "completed", input, ...result, time: { start: 1, end: 2 } },
           }],
         })
         return [decoded as SessionV1.WithParts]
       }
-      yield* put(target, "v1")
-      const first = yield* exec(dir, { filePath: target })
+      // 多行文件强制形成分页视图，覆盖取消部分视图排除的原始意图。
+      yield* put(target, "v1\ntail")
+      const request = { filePath: target, offset: 1, limit: 1 }
+      const first = yield* exec(dir, request)
       const visible = history(first)
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
+      // 同会话已有完整页面可预热命中，第一次历史调用也无需进程级初始化。
+      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
       // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
-      yield* put(target, "v2")
-      const second = yield* exec(dir, { filePath: target }, { ...ctx, sessionID: SessionID.make("ses_b") })
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toContain("v2")
+      yield* put(target, "v2\ntail")
+      const b = { ...ctx, sessionID: SessionID.make("ses_b") }
+      const second = yield* exec(dir, request, b)
+      // 独立预期来自实际写入文字，不只比较两次可能同时错误的返回值。
+      expect(second.output).toContain("1: v2")
+      expect(second.output).not.toContain("1: v1")
+      expect(second.metadata.truncated).toBe(true)
+      const reread = yield* exec(dir, request, { ...ctx, messages: visible })
+      expect(reread.output).toContain("1: v2")
+      expect(reread.output).not.toContain("1: v1")
+      // B 的本会话可见页面证明当前版本；A 的旧页面不能借用这个证明。
+      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toBe(FILE_UNCHANGED_STUB)
       // 外会话即使包含当前版本，也不构成本会话的可见证明。
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(second, SessionID.make("ses_b")) })).output).toContain("v2")
+      expect((yield* exec(dir, request, { ...ctx, messages: history(second, b.sessionID) })).output).toContain("v2")
       const current = history(second)
       const part = current[0].parts[0]
       if (part.type !== "tool" || part.state.status !== "completed") throw new Error("invalid fixture")
       // 压缩时间为零仍是压缩；stub 不能作为新的正文证明。
       part.state.time.compacted = 0
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
+      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
       delete part.state.time.compacted
       part.state.output = FILE_UNCHANGED_STUB
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
+      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
       part.state.output = second.output
       // 范围变化必须返回正文；权限也必须先于成功的 stub 判定执行。
+      part.state.input.limit = 2
+      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
       part.state.input.limit = 1
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
-      delete part.state.input.limit
-      const denied = yield* fail(dir, { filePath: target }, {
+      // 恢复范围确实命中，避免拒绝断言仅因测试历史失配而偶然成立。
+      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toBe(FILE_UNCHANGED_STUB)
+      const denied = yield* fail(dir, request, {
         ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
       })
       expect(denied.message).toBe("read denied")
       // 相同截断前缀不是完整版本证明，长行必须继续返回实际可见内容。
       yield* put(target, "x".repeat(3000))
-      const partial = yield* exec(dir, { filePath: target })
-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(partial) })).output)
+      const partial = yield* exec(dir, request)
+      expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
         .not.toBe(FILE_UNCHANGED_STUB)
     }),
   )
@@ -619,7 +633,8 @@ describe("tool.read truncation", () => {
       yield* put(path.join(dir, "image.bin"), jpeg)
 
       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
-      expect(result.output).toBe("Image read successfully")
+      // 图片文案允许附加说明；原生附件 MIME 与 data URL 断言继续保留。
+      expect(result.output).toStartWith("Image read successfully")
       expect(result.attachments?.[0].mime).toBe("image/jpeg")
       expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
     }),

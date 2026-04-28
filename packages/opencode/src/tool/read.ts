@@ -503,11 +503,12 @@ export const ReadTool = Tool.define<
         output += CYBER_REMINDER
       }
 
-      // 权限与本次有界读取均已完成；只省模型上下文，不让缓存替代内容版本证明。
-      // 行内截断同样丢失正文，不能把两个不同文件的相同截断前缀当作完整文件。
       if (
-        !truncated &&
+        // 当前页读取与权限检查已完成；未截掉页内正文时分页仍可去重。
+        !file.cut &&
+        // 行内截断丢失完整内容，相同前缀不能证明文件版本一致。
         file.raw.every((line) => !line.endsWith(MAX_LINE_SUFFIX)) &&
+        // 每次用本会话可见历史证明范围与版本，恢复会话无需预热或借用外会话缓存。
         findUnexpandedFileInContext(ctx, params, output)
       ) {
         return {

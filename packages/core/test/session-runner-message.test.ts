@@ -46,7 +46,19 @@ describe("toLLMMessages", () => {
       id: id("checkpoint"), type: "compaction", reason: "auto", summary: "summary", recent: "recent", time: { created },
     })
     expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
-    // 部分页、行内截断与媒体即使两个结果完全一样，也不能用纯文本 stub 取代。
+    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2 }
+    const range = { path: "note.txt", offset: 1, limit: 1 }
+    // 文件有后续页不等于本次请求被截断；相同完整页保留首份并只压缩重复模型结果。
+    expect(JSON.stringify(results(read("page1", page, range), read("page2", page, range))[1]))
+      .toContain("File unchanged since last read")
+    // 版本与请求范围仍独立参与证明，不能用相同前缀冒充新版或更大页面。
+    expect(results(read("page3", page, range), read("page4", { ...page, content: "changed" }, range))[1])
+      .toMatchObject({ type: "json", value: { ...page, content: "changed" } })
+    expect(results(read("page5", page, range), read("page6", page, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
+    // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
+    expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
+
+    // 不足请求范围的页面、行内截断与媒体仍不具备完整正文证明。
     for (const partial of [
       { type: "text-page", content: "prefix", offset: 1, truncated: true, next: 2 },
       { type: "text-page", content: "prefix... (line truncated to 2000 chars)", offset: 1, truncated: false },
