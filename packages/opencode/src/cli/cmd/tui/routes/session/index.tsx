@@ -87,6 +87,7 @@ import { Filesystem } from "@/util"
 import { Global } from "@opencode-ai/core/global"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
+import { ContextUsagePanel } from "./context-usage"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
@@ -150,8 +151,11 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+  const [contextVisible, setContextVisible] = createSignal(false)
+  const visible = createMemo(
+    () => !session()?.parentID && permissions().length === 0 && questions().length === 0 && !contextVisible(),
+  )
+  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
 
   const pending = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
@@ -535,6 +539,18 @@ export function Session() {
             duration: 8000,
           })
         }
+      },
+    },
+    {
+      title: contextVisible() ? "Hide context usage" : "Context usage",
+      value: "session.context",
+      category: "Session",
+      slash: {
+        name: "context",
+      },
+      onSelect: (dialog) => {
+        dialog.clear()
+        setContextVisible((visible) => !visible)
       },
     },
     {
@@ -1200,6 +1216,9 @@ export function Session() {
               </Show>
               <Show when={permissions().length === 0 && questions().length > 0}>
                 <QuestionPrompt request={questions()[0]} />
+              </Show>
+              <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>
+                <ContextUsagePanel sessionID={route.sessionID} onClose={() => setContextVisible(false)} />
               </Show>
               <Show when={session()?.parentID}>
                 <SubagentFooter />
