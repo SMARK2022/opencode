@@ -960,6 +960,7 @@
         "diff": "catalog:",
         "effect": "catalog:",
         "fuzzysort": "catalog:",
+        "gray-matter": "4.0.3",
         "opentui-spinner": "catalog:",
         "remeda": "catalog:",
         "solid-js": "catalog:",
