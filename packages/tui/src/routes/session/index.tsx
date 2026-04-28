@@ -73,6 +73,7 @@ import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
+import { ContextUsagePanel } from "./context-usage"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
@@ -243,8 +244,12 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+  // 权限/问题拥有插槽优先级，打开面板不能同时启用普通输入；关闭只恢复可见性而不回复审批。
+  const [contextVisible, setContextVisible] = createSignal(false)
+  const visible = createMemo(
+    () => !session()?.parentID && permissions().length === 0 && questions().length === 0 && !contextVisible(),
+  )
+  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
 
   const pending = createMemo(() => {
     const completed = messages().findLastIndex((message) => message.role === "assistant" && message.time.completed)
@@ -631,6 +636,18 @@ export function Session() {
           sessionID: route.sessionID,
           messageID: message.id,
         })
+      },
+    },
+    {
+      // 命令只切换本会话视图信号，不向 runner 发起 prompt、resume 或 interrupt，查看不会改变执行账本。
+      title: contextVisible() ? "Hide context usage" : "Context usage",
+      value: "session.context",
+      category: "Session",
+      slash: {
+        name: "context",
+      },
+      run: () => {
+        setContextVisible((visible) => !visible)
       },
     },
     {
@@ -1269,6 +1286,10 @@ export function Session() {
                     request={questions()[0]}
                     directory={sync.session.get(questions()[0].sessionID)?.directory}
                   />
+                </Show>
+                {/* 面板归此 Show owner 管理，隐藏时释放订阅，已开始的文件读取仍可自然完成。 */}
+                <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>
+                  <ContextUsagePanel sessionID={route.sessionID} onClose={() => setContextVisible(false)} />
                 </Show>
                 <Show when={session()?.parentID}>
                   <SubagentFooter />
