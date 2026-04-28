@@ -448,8 +448,8 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
       // 零 token 的 step-finish 也已确认，历史回退取决于部件存在性而非总额真值。
       confirmed = true
       usage.input += part.tokens.input
-      // output 包含 reasoning，因为推理 token 也计入输出
-      usage.output += part.tokens.output + part.tokens.reasoning
+      // getUsage 已扣除 reasoning；展示的 output 不应再次包含推理。
+      usage.output += part.tokens.output
       usage.reasoning += part.tokens.reasoning
       usage.cacheRead += part.tokens.cache.read
       usage.cacheWrite += part.tokens.cache.write
@@ -462,15 +462,16 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
     for (const msg of messages) {
       if (msg.info.role !== "assistant") continue
       usage.input += msg.info.tokens.input
-      usage.output += msg.info.tokens.output + msg.info.tokens.reasoning
+      // 助手消息与 step-finish 保存同一 getUsage 结果，回退也保持分栏。
+      usage.output += msg.info.tokens.output
       usage.reasoning += msg.info.tokens.reasoning
       usage.cacheRead += msg.info.tokens.cache.read
       usage.cacheWrite += msg.info.tokens.cache.write
       usage.cost += msg.info.cost
     }
   }
-  // total 不含 cost：cost 是金额而非 token，单独累计避免单位混淆
-  usage.total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
+  // total 各加一次 output/reasoning；cost 是金额，不能进入 token 总额。
+  usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
   return usage
 }
 
@@ -919,7 +920,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const maxTokens = modelInfo.model?.limit.context ?? 0
 
   const msg = messageTokens(compacted)
-  const usage = usageTotals(compacted)
+  // raw 保存整场会话用量；窗口分类仍由 compacted 估算。
+  const usage = usageTotals(raw)
   const instructions = await gatherInstructionFiles(input)
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
   const messageText = msg.text.join("\n")

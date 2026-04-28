@@ -533,12 +533,16 @@ describe("context usage", () => {
       toolDefinitions: [],
     })
 
-    // input=100, output=40+10=50, reasoning=10, cacheRead=20, cacheWrite=5
-    expect(data.details.usage).toMatchObject({ input: 100, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
+    // output 已扣除 reasoning；真实生产者的两栏只能各累计一次。
+    expect(data.details.usage).toMatchObject({ input: 100, output: 40, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
+    // 缓存、推理与普通输入输出合计 175；金额独立保留。
+    expect(data.details.usage.total).toBe(175)
+    expect(data.details.usage.cost).toBe(0.01)
+    expect(contextUsageFooter(data, 100)).toContain("Reason 10")
     // 正文仅有 hello/world，账本的 100 输入来自 step-finish；显示总额不能取短正文的字符估算。
     expect(contextUsageFooter(data, 100)).toContain("Session Totals")
-    // 输出含推理：Output 50
-    expect(contextUsageFooter(data, 100)).toContain("Output 50")
+    // Footer 的 Output 与 Reason 是同一生产者的独立字段。
+    expect(contextUsageFooter(data, 100)).toContain("Output 40")
     // 非对称缓存数值才能验证 W/R 展示次序，两个字段相等会掩盖反转。
     expect(contextUsageFooter(data, 100)).toContain("Cache W/R 5/20")
     // 有确认字段时也要留关闭提示宽度，不能因为切到 Session Totals 就绕过 formatter。
@@ -566,5 +570,32 @@ describe("context usage", () => {
     const result = filterCompactedMessages(messages.toReversed()).map((item) => item.info.id)
     // 精确顺序要求先 tail 后请求/摘要；只比较集合会掩盖倒序结果或 summary 移到窗口开头。
     expect(result).toEqual(["3", "4", "5", "6"])
+  })
+
+  test("keeps raw fallback totals across compaction", async () => {
+    // 旧助手被窗口裁剪后，持久消息上的确认用量仍属于整场会话。
+    const old = { ...assistant("2", "1"), tokens: { input: 100, output: 40, reasoning: 10, cache: { read: 20, write: 5 } }, cost: 0.01 } as Message
+    const data = await computeContextData({
+      messages: [user("1"), old, user("3"), assistant("4", "3", true)],
+      parts: {
+        "1": [text("1", "old")],
+        "2": [text("2", "old answer")],
+        // 无 tail_start_id 表示旧消息全部压缩，窗口仅保留请求与摘要。
+        "3": [{ id: "c", sessionID: "s", messageID: "3", type: "compaction", auto: true } as Part],
+        "4": [text("4", "summary")],
+      },
+      providers: [provider],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      instructionFiles: [], skills: [], toolDefinitions: [],
+    })
+    // 无 step-finish 时走真实助手字段回退，不能因裁剪把总额清零。
+    expect(data.details.usage).toMatchObject({ input: 100, output: 40, reasoning: 10, cacheRead: 20, cacheWrite: 5, total: 175, cost: 0.01 })
+    // 窗口分类仍只含摘要；会话总额与窗口估算是两个既有口径。
+    expect(data.details.messages.assistantText).toBe(0)
+    expect(data.details.messages.compactionSummary).toBe(2)
+    // Footer 分栏输出，reasoning 没有再次混入 Output。
+    expect(contextUsageFooter(data, 180)).toContain("Output 40")
+    expect(contextUsageFooter(data, 180)).toContain("Reason 10")
+    expect(contextUsageFooter(data, 180)).toContain("Cost $0.0100")
   })
 })
