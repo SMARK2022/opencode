@@ -1,11 +1,14 @@
 import fs from "fs/promises"
 import os from "os"
 import path from "path"
-import { fileURLToPath } from "url"
+import { fileURLToPath, pathToFileURL } from "url"
 import matter from "gray-matter"
 import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { estimate as estimateTokens } from "@/util/token"
+import { toJsonSchema } from "@/util/effect-zod"
+import { Schema } from "effect"
+import { Shell } from "@/shell/shell"
 import { Skill } from "@/skill"
 import {
   provider as systemProviderPrompt,
@@ -427,29 +430,134 @@ async function gatherSkills(input: ComputeContextDataInput) {
   return skills
 }
 
-async function scanToolDefinitions() {
-  const toolDir = fileURLToPath(new URL("../../../../tool/", import.meta.url))
+const TOOL_DIR = fileURLToPath(new URL("../../../../tool/", import.meta.url))
+
+function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
+  if (!text.includes("${")) return text
+
+  const shell = Shell.preferred()
+  const shellPath = typeof shell === "string" ? shell : (shell as { path: string }).path
+  const shellName = Shell.name(shellPath)
+
+  const chain =
+    shellName === "powershell"
+      ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
+      : shellName === "pwsh"
+        ? "If commands depend on each other, use `&&` when the second command should only run after the first succeeds. Use `;` only for unconditional sequencing."
+        : shellName === "cmd"
+          ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
+          : "If commands depend on each other, use a single shell call with '&&' to chain them together."
+
+  const shellGuidance = (() => {
+    if (process.platform !== "win32") return ""
+    if (shellName === "powershell") return [
+      "PowerShell notes:",
+      "- This shell is Windows PowerShell 5.1 unless configured otherwise.",
+      "- Do NOT use Unix utilities such as tail, head, sed, awk, or grep.",
+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+      "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+      "- Do NOT use /dev/null. Use $null.",
+      "- Do NOT use && or ||. Use `A; if ($?) { B }` when B depends on A succeeding.",
+      "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+    ].join("\n")
+    if (shellName === "pwsh") return [
+      "PowerShell notes:",
+      "- This shell is PowerShell 7+.",
+      "- Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may still be unavailable.",
+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+      "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+      "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+    ].join("\n")
+    if (shellName === "cmd") return [
+      "Windows cmd notes:",
+      "- Use cmd.exe syntax, not Bash or PowerShell syntax.",
+      "- Use `dir` for directory listing and `type` for simple file output.",
+      "- Do NOT use Unix utilities such as ls, tail, head, sed, awk, or grep.",
+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+      "- Use `NUL` for the null device, not `/dev/null`.",
+    ].join("\n")
+    return [
+      "Windows shell notes:",
+      "- This shell may not support Unix utilities. Prefer dedicated OpenCode tools for file operations.",
+    ].join("\n")
+  })()
+
+  const listCommand =
+    process.platform !== "win32" ? "`ls`"
+      : shellName === "powershell" || shellName === "pwsh" ? "`Get-ChildItem`"
+      : shellName === "cmd" ? "`dir`"
+      : "the shell-native directory listing command"
+
+  return text
+    .replaceAll("${os}", process.platform)
+    .replaceAll("${shell}", shellName)
+    .replaceAll("${directory}", paths.cwd)
+    .replaceAll("${chaining}", chain)
+    .replaceAll("${shellGuidance}", shellGuidance)
+    .replaceAll("${listCommand}", listCommand)
+    .replaceAll("${maxLines}", "2000")
+    .replaceAll("${maxBytes}", "51200")
+    .replaceAll("${compressionGuidance}", "")
+}
+
+async function resolveToolDescriptions(paths: ContextUsagePaths) {
   const result = [] as Array<{ name: string; text: string }>
   let entries: string[]
   try {
-    entries = await fs.readdir(toolDir)
+    entries = await fs.readdir(TOOL_DIR)
   } catch {
     return result
   }
+
   for (const entry of entries) {
     if (!entry.endsWith(".ts")) continue
-    const filepath = path.join(toolDir, entry)
+    const baseName = entry.slice(0, -3)
+    const filepath = path.join(TOOL_DIR, entry)
+
+    // Extract tool ID from source (single regex, very reliable)
     const source = await readText(filepath)
     const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
     if (!id) continue
-    const descriptionImport = source.match(/import\s+([A-Z_]+)\s+from\s+["']\.\/([^"']+\.txt)["']/)
-    const description = descriptionImport ? await readText(path.join(toolDir, descriptionImport[2])) : ""
-    const parameterStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
-    const parameterEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
-    const parameters = parameterStart >= 0
-      ? source.slice(parameterStart, parameterEnd > parameterStart ? parameterEnd : undefined)
-      : ""
-    result.push({ name: id, text: [`Tool: ${id}`, description, parameters].filter(Boolean).join("\n") })
+
+    // Find the .txt import path
+    const txtImport = source.match(/import\s\w+\s+from\s+["']\.\/([^"']+\.txt)["']/)
+    const txtPath = txtImport ? path.join(TOOL_DIR, txtImport[1]) : path.join(TOOL_DIR, `${baseName}.txt`)
+
+    // Load .txt content via dynamic import (proper module loading)
+    let description = ""
+    try {
+      if (await exists(txtPath)) {
+        const txtModule = await import(pathToFileURL(txtPath).href)
+        description = txtModule.default ?? ""
+      }
+    } catch {
+      description = await readText(txtPath)
+    }
+
+    // Resolve template variables in description
+    description = resolveTemplateVars(description, paths)
+
+    // Get parameters via dynamic import of the tool module
+    let parametersText = ""
+    try {
+      const mod = await import(pathToFileURL(filepath).href)
+      const parameters = (mod as Record<string, unknown>).Parameters
+      if (parameters) {
+        parametersText = JSON.stringify(toJsonSchema(parameters as Schema.Top))
+      }
+    } catch {
+      // Fall back to source extraction
+    }
+    if (!parametersText) {
+      const paramStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
+      const paramEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
+      parametersText = paramStart >= 0
+        ? source.slice(paramStart, paramEnd > paramStart ? paramEnd : undefined)
+        : ""
+    }
+
+    const text = [`Tool: ${id}`, description, parametersText].filter(Boolean).join("\n")
+    result.push({ name: id, text })
   }
   return result
 }
@@ -480,23 +588,13 @@ function dynamicToolText(name: string, input: ComputeContextDataInput, skills: A
   return ""
 }
 
-function observedToolShape(name: string, messages: WithParts[]) {
-  const samples: unknown[] = []
-  for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (part.type === "tool" && part.tool === name && samples.length < 3) samples.push(part.state.input)
-    }
-  }
-  return samples.length ? `Observed inputs:\n${stableJson(samples)}` : ""
-}
-
 async function toolDefinitionTokens(
   input: ComputeContextDataInput,
   messages: WithParts[],
   skills: Array<{ name: string; description: string; path: string }>,
   lastUser: Message | undefined,
 ) {
-  const scanned = input.toolDefinitions ?? await scanToolDefinitions()
+  const scanned = input.toolDefinitions ?? await resolveToolDescriptions(input.paths)
   const active = activeToolNames(messages, lastUser)
   if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
     for (const item of scanned) active.add(item.name)
@@ -504,9 +602,7 @@ async function toolDefinitionTokens(
   const byName = new Map(scanned.map((item) => [item.name, item.text]))
   const details = [] as Array<{ name: string; tokens: number }>
   for (const name of active) {
-    const text = [byName.get(name), dynamicToolText(name, input, skills), observedToolShape(name, messages)]
-      .filter(Boolean)
-      .join("\n")
+    const text = [byName.get(name), dynamicToolText(name, input, skills)].filter(Boolean).join("\n")
     details.push({ name, tokens: estimate(text || name) })
   }
   return details.toSorted((a, b) => a.name.localeCompare(b.name))

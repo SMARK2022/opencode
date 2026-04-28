@@ -55,6 +55,22 @@ const FILES = new Set([
 ])
 const FLAGS = new Set(["-destination", "-literalpath", "-path"])
 const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
+const GIT_WRITES = new Set([
+  "add",
+  "commit",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "revert",
+  "pull",
+  "push",
+  "checkout",
+  "switch",
+  "restore",
+  "reset",
+  "clean",
+])
+const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch"])
 
 export const Parameters = Schema.Struct({
   command: Schema.String.annotate({ description: "The command to execute" }),
@@ -219,6 +235,37 @@ function pathArgs(list: Part[], ps: boolean) {
     out.push(item.text)
   }
   return out
+}
+
+function gitSubcommand(tokens: string[]) {
+  const name = tokens[0]?.toLowerCase().replace(/\.exe$/, "")
+  if (name !== "git") return
+  let skip = false
+  for (const token of tokens.slice(1)) {
+    if (skip) {
+      skip = false
+      continue
+    }
+    const lower = token.toLowerCase()
+    if (lower === "-c" || lower === "--git-dir" || lower === "--work-tree" || lower === "--namespace") {
+      skip = true
+      continue
+    }
+    if (lower.startsWith("--git-dir=") || lower.startsWith("--work-tree=") || lower.startsWith("--namespace=")) continue
+    if (lower.startsWith("-")) continue
+    return lower
+  }
+}
+
+function riskyGit(tokens: string[]) {
+  const subcommand = gitSubcommand(tokens)
+  if (!subcommand) return false
+  if (subcommand === "stash") {
+    const action = tokens.slice(2).map((item) => item.toLowerCase()).find((item) => !item.startsWith("-"))
+    if (!action) return true
+    return GIT_STASH_WRITES.has(action)
+  }
+  return GIT_WRITES.has(subcommand)
 }
 
 function preview(text: string) {
@@ -483,7 +530,7 @@ export const BashTool = Tool.define(
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          if (!riskyGit(tokens)) scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
         }
       }
 

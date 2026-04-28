@@ -4,16 +4,18 @@ When using the Task tool, you must specify a subagent_type parameter to select w
 
 Use task when:
 - The user invokes a custom slash command; pass the slash command invocation as the full prompt.
-- A broad codebase question requires multiple rounds of search/read synthesis.
+- A broad codebase question splits into 2+ independent search/read branches.
 - A non-blocking subtask can run in parallel while you continue useful local work.
 - A specialized agent clearly matches the task and can materially advance the request.
+- You need an isolated review/research pass and the user requested or accepted that workflow.
 
 Do NOT use task when:
 - You need to read a known file path; use read.
 - You need to find files by name; use glob.
-- You need to search known keywords or a small set of files; use grep/read.
-- The next local step is blocked on the result and you can answer it faster yourself.
-- The task is trivial or would duplicate work you are already doing.
+- You need to search known keywords, symbols, error text, or a small set of files; use grep/read.
+- The next local step is blocked on the result and you can search or read it yourself.
+- The task is normal debugging, implementation, or verification work in the current thread.
+- The task is trivial, would duplicate work you are already doing, or would only save context.
 
 Prompting rules:
 - Make the prompt self-contained unless resuming with task_id.
@@ -32,35 +34,22 @@ Usage notes:
 Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
 
 <example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a significant piece of code
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
+"explorer": use this agent for broad, independent codebase exploration across multiple unrelated areas
+"reviewer": use this agent for an isolated review pass after the user requested or accepted review
 </example_agent_description>
 
 <example>
-user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the Write tool to write a function that checks if a number is prime
-assistant: I'm going to use the Write tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
+user: "Where is the database lock error thrown?"
 <commentary>
-Since a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+The target is a known error string, so use grep/read directly instead of Task.
 </commentary>
-assistant: Now let me use the code-reviewer agent to review the code
-assistant: Uses the Task tool to launch the code-reviewer agent
+assistant: Uses grep for "database is locked", then reads the matching files.
 </example>
 
 <example>
-user: "Hello"
+user: "Compare the server lifecycle, permission model, and streaming event flow."
 <commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
+This has 3 independent research branches and can run in parallel, so Task may be useful.
 </commentary>
-assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+assistant: Uses Task to launch independent exploration for each non-overlapping branch.
 </example>
