@@ -114,6 +114,7 @@ import { compressionLayer } from "./middleware/compression"
 import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
+import { EventClients } from "@opencode-ai/server/event-clients"
 import { schemaErrorLayer } from "./middleware/schema-error"
 
 export const context = Context.makeUnsafe<unknown>(new Map())
@@ -270,11 +271,26 @@ const app = LayerNode.group([
   PtyTicket.node,
 ])
 
+export function createSharedServices() {
+  const locationServiceMapV2 = buildLocationServiceMap()
+  return {
+    layer: Layer.mergeAll(
+      AppNodeBuilderV1.build(app),
+      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), [
+        [LocationServiceMap.node, locationServiceMapV2],
+        [SessionExecution.node, SessionExecutionLocal.node],
+      ]),
+      AppNodeBuilderV1.build(MoveSession.node, [[LocationServiceMap.node, locationServiceMapV2]]),
+    ).pipe(Layer.provideMerge(locationServiceMapV2)),
+    memoMap,
+  }
+}
+
 export function createRoutes(
   corsOptions?: CorsOptions,
+  eventClients?: EventClients.Interface,
+  shared?: ReturnType<typeof createSharedServices>,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-  const locationServiceMapV2 = buildLocationServiceMap()
-
   return Layer.mergeAll(
     rootApiRoutes,
     eventApiRoutes,
@@ -284,28 +300,25 @@ export function createRoutes(
     docRoute,
     uiRoute,
   ).pipe(
+    // 在整个 legacy/native 合并树的装配边界提供同一服务，不在每个请求重建 Layer。
+    Layer.provide(eventClients ? Layer.succeed(EventClients.Service)(eventClients) : EventClients.layer),
     Layer.provide([
       errorLayer,
       compressionLayer,
       corsVaryFix,
       fenceLayer,
       cors(corsOptions),
-      AppNodeBuilderV1.build(MoveSession.node, [[LocationServiceMap.node, locationServiceMapV2]]),
       HttpServer.layerServices,
     ]),
     Layer.provide(Layer.succeed(CorsConfig)(corsOptions)),
     Layer.provide(sessionLocationLayer),
     Layer.provide(locationLayer),
     Layer.provide(PtyEnvironment.layer),
-    Layer.provide(
-      AppNodeBuilderV1.build(SessionV2.node, [
-        [LocationServiceMap.node, locationServiceMapV2],
-        [SessionExecution.node, SessionExecutionLocal.node],
-      ]),
-    ),
-    Layer.provide(locationServiceMapV2),
-
-    Layer.provide(AppNodeBuilderV1.build(app)),
+    // 只复用应用服务；路由注册、认证及 CORS 仍由各 listener 的 MemoMap 独立构建。
+    Layer.provide(shared
+      ? Layer.effectContext(Effect.flatMap(Effect.scope, (scope) =>
+          Layer.buildWithMemoMap(shared.layer, shared.memoMap, scope)))
+      : createSharedServices().layer),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout

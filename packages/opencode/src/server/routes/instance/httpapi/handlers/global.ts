@@ -12,6 +12,7 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
+import { EventClients } from "@opencode-ai/server/event-clients"
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -22,7 +23,7 @@ function eventData(data: unknown): Sse.Event {
   }
 }
 
-function eventResponse() {
+function eventResponse(clients: EventClients.Interface) {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
     const events = Stream.callback<GlobalBusEvent>((queue) => {
@@ -38,13 +39,14 @@ function eventResponse() {
     )
 
     return HttpServerResponse.stream(
-      Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
+      // 计数属于响应 body 的 scope；未消费响应不虚增，取消流自动释放。
+      Stream.unwrap(Effect.as(clients.acquire, Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
         Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
         Stream.map(eventData),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
         Stream.ensuring(Effect.logInfo("global event disconnected")),
-      ),
+      ))),
       {
         contentType: "text/event-stream",
         headers: {
@@ -62,13 +64,15 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     const config = yield* Config.Service
     const installation = yield* Installation.Service
     const bridge = yield* EffectBridge.make()
+    // Handler 只持有注入的共享服务，不另建 global-event 专属计数器。
+    const clients = yield* EventClients.Service
 
     const health = Effect.fn("GlobalHttpApi.health")(function* () {
       return { healthy: true as const, version: InstallationVersion }
     })
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return yield* eventResponse()
+      return yield* eventResponse(clients)
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {

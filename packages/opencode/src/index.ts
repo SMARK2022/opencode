@@ -30,6 +30,13 @@ import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
 
+// 编译入口只凭明确的 worker 环境角色旁路 yargs，普通用户参数仍走原 CLI parser。
+if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
+  await import("./cli/tui/worker")
+  // listener 拥有事件循环；悬置入口防止继续启动 TUI，退出仍由 worker 的资源清理决定。
+  await new Promise<never>(() => {})
+}
+
 const args = hideBin(process.argv)
 
 function show(out: string) {

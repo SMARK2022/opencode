@@ -1,19 +1,16 @@
 import { cmd } from "@/cli/cmd/cmd"
-import { Rpc } from "@/util/rpc"
-import { type rpc } from "../tui/worker"
+import { ServerLock } from "@/cli/tui/server-lock"
+import { Flock } from "@opencode-ai/core/util/flock"
+import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
 import { errorMessage } from "@opencode-ai/tui/util/error"
-import { withTimeout } from "@/util/timeout"
 import { withNetworkOptions, resolveNetworkOptionsNoConfig, hasArg } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
-import type { GlobalEvent } from "@opencode-ai/sdk/v2"
-import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import type { UpdateNotice, UpdateSource } from "@opencode-ai/tui"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { writeHeapSnapshot } from "v8"
-import { ServerAuth } from "@/server/auth"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
 
@@ -21,34 +18,10 @@ declare global {
   const OPENCODE_WORKER_PATH: string
 }
 
-type RpcClient = ReturnType<typeof Rpc.client<typeof rpc>>
-
-function createWorkerFetch(client: RpcClient): typeof fetch {
-  const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const request = new Request(input, init)
-    const body = request.body ? await request.text() : undefined
-    const result = await client.call("fetch", {
-      url: request.url,
-      method: request.method,
-      headers: Object.fromEntries(request.headers.entries()),
-      body,
-    })
-    return new Response(result.body, {
-      status: result.status,
-      headers: result.headers,
-    })
-  }
-  return fn as typeof fetch
-}
-
-function createEventSource(client: RpcClient): EventSource {
-  return {
-    subscribe: async (handler) => {
-      return client.on<GlobalEvent>("global.event", (e) => {
-        handler(e)
-      })
-    },
-  }
+// 唯一生产 spawn seam 同时用于注入测试；测试不能另跑一条模拟发现算法。
+export const DaemonProcess = {
+  // Bun 支持 windowsHide；直接启动 worker，不经可见 pwsh 窗口或改变用户弹窗工具。
+  spawn: (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, { ...opts, windowsHide: true }),
 }
 
 // Mirrors the V2 CLI updater: the TUI process checks every 10 minutes and installs on this machine,
@@ -91,8 +64,162 @@ function createUpdater(latest: () => Promise<UpdateNotice | undefined>): UpdateS
 async function target() {
   if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
   const dist = new URL("./cli/tui/worker.js", import.meta.url)
-  if (await Filesystem.exists(fileURLToPath(dist))) return dist
-  return new URL("../tui/worker.ts", import.meta.url)
+  // 编译入口与源码入口共用 argv，文件 URL 必须在启动边界转换成原生路径。
+  if (await Filesystem.exists(fileURLToPath(dist))) return fileURLToPath(dist)
+  return fileURLToPath(new URL("../tui/worker.ts", import.meta.url))
+}
+
+// 依赖注入只替换外部 I/O，身份判断与失败清理仍执行下面的生产主路径。
+export type DiscoverDaemonDeps = {
+  read: typeof ServerLock.read
+  alive: typeof ServerLock.alive
+  ping: typeof ServerLock.ping
+  clear: typeof ServerLock.clearIfOwner
+  acquire: typeof Flock.acquire
+  spawn: typeof DaemonProcess.spawn
+  sleep: (ms: number) => Promise<unknown>
+  resolveDaemonFile: () => Promise<string>
+  identity: typeof ServerLock.identity
+  placement: typeof ServerLock.placement
+  resolveNetwork: (args: Parameters<typeof resolveNetworkOptionsNoConfig>[0]) => Promise<ReturnType<typeof resolveNetworkOptionsNoConfig>>
+  electionTimeoutMs: number
+  electionStaleMs: number
+  pollMs: number
+  waitMs: number
+}
+
+// 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
+const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
+  read: ServerLock.read,
+  alive: ServerLock.alive,
+  ping: ServerLock.ping,
+  clear: ServerLock.clearIfOwner,
+  acquire: Flock.acquire,
+  spawn: DaemonProcess.spawn,
+  sleep: (ms) => Bun.sleep(ms),
+  resolveDaemonFile: target,
+  identity: ServerLock.identity,
+  placement: ServerLock.placement,
+  // 全局 server 配置与 CLI 显式值按现有 network owner 合并，复用前即解析。
+  resolveNetwork: async (args) => {
+    const { AppRuntime } = await import("@/effect/app-runtime")
+    const { resolveNetworkOptions } = await import("@/cli/network")
+    return AppRuntime.runPromise(resolveNetworkOptions(args))
+  },
+  // 选举等待只限制 contender，不缩短成功持锁者启动健康服务的完整预算。
+  electionTimeoutMs: 30_000,
+  // staleMs 交给已有 Flock heartbeat 维护，不能凭 HTTP 超时自行打破活租约。
+  electionStaleMs: 10_000,
+  // 启动轮询等待 owner 写锁，不能把尚未发布端口的进程当作可复用服务。
+  pollMs: 100,
+  waitMs: 30_000,
+})
+
+export async function discoverOrSpawnDaemon(
+  networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
+  deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
+): Promise<{ url: string; fwdPid?: number }> {
+  // 身份与网络请求先于快速路径解析，禁止复用另一数据库或忽略显式外部端口。
+  const identity = deps.identity()
+  const network = await deps.resolveNetwork(networkArgs)
+  const external = ["--port", "--hostname", "--mdns", "--mdns-domain", "--cors"].some(hasArg) ||
+    network.mdns || network.port !== 0 || network.hostname !== "127.0.0.1" || network.cors.length > 0
+  // 同一 DB/channel 共用发现路径；显式网络请求只在复用检查中判断兼容性。
+  const lockPath = deps.placement()
+  async function reuse(lock: ServerLock.ServerLock | undefined) {
+    if (!lock || !deps.alive(lock.pid)) return null
+    // 活进程身份不符或认证失败均保留原锁，不另建备用 daemon，也不杀其他进程。
+    const dbPath = path.normalize(lock.dbPath)
+    const expectedPath = path.normalize(identity.dbPath)
+    if ((process.platform === "win32" ? dbPath.toLowerCase() !== expectedPath.toLowerCase() : dbPath !== expectedPath) || lock.channel !== identity.channel)
+      throw new Error("Existing opencode daemon has a different database or channel; stop it explicitly before switching")
+    if (external && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
+      throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
+    if (!(await deps.ping(lock.port))) throw new Error("Existing opencode daemon health or authentication check failed")
+    // 探测期间锁可能换主；复读 token 后才允许把地址交给 TUI。
+    const current = await deps.read(lockPath)
+    if (current?.token !== lock.token || current.pid !== lock.pid) throw new Error("Opencode daemon ownership changed during discovery")
+    return external && lock.externalUrl ? lock.externalUrl : `http://127.0.0.1:${lock.port}`
+  }
+  // 快速检查与持锁复查都调用 reuse，身份、认证与 token 校验不分叉。
+  let existingUrl = await reuse(await deps.read(lockPath))
+  let fwdPid: number | undefined
+
+  // URL 为空只能进入选举或失败出口，不能返回一个猜测的旧端口作为成功。
+      
+  if (!existingUrl) {
+    // Flock key 与发现路径绑定，四个并发 TUI 对同一身份只能产生一个 winner。
+    // 租约由此作用域获取并 finally 释放，调用方不能传入已持有的 lease。
+    const electionLease = await deps.acquire(`opencode.server:${lockPath ?? "default"}`, {
+      dir: path.join(Global.Path.state, "locks"),
+      timeoutMs: deps.electionTimeoutMs,
+      staleMs: deps.electionStaleMs,
+    })
+    try {
+      // acquire 等待期间其他 contender 可能已完成启动，持锁后重新读取 owner。
+      const lock = await deps.read(lockPath)
+      existingUrl = await reuse(lock)
+      // 仅清除已确认死亡的 owner；短暂不可达的存活服务不能被替换。
+      if (!existingUrl && lock) await deps.clear(lock.token, lockPath)
+
+      if (existingUrl) {
+        return { url: existingUrl }
+      } else {
+        const daemonFile = await deps.resolveDaemonFile()
+        const printLogs = process.argv.includes("--print-logs")
+        const env = Object.fromEntries(
+          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+        )
+        // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
+        const proc = deps.spawn([process.execPath, daemonFile], {
+          env: {
+            ...env,
+            OPENCODE_PROCESS_ROLE: "worker",
+            ...(lockPath ? { OPENCODE_LOCK_PATH: lockPath } : {}),
+            // 覆盖继承的外部监听变量，避免内部请求误启动旧的外部端口。
+            OPENCODE_EXTERNAL_NETWORK: external ? JSON.stringify(network) : "",
+            ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
+          },
+          stdin: "ignore",
+          stdout: printLogs ? "inherit" : "ignore",
+          stderr: printLogs ? "inherit" : "ignore",
+        })
+        try {
+          // exited 的拒绝先安装 observer；read/unref 的同步异常仍由两层 finally 清理。
+          void proc.exited.catch(() => undefined)
+          proc.unref()
+          fwdPid = proc.pid
+
+          const deadline = Date.now() + deps.waitMs
+          // 端口即使被其他健康服务占用，也不能替代本次子进程 PID 的发现锁。
+          while (Date.now() < deadline) {
+            const daemonLock = await deps.read(lockPath)
+            if (daemonLock && daemonLock.pid === proc.pid && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
+              // 只交付本次子进程已发布且通过认证的锁，未知 owner 不进入本次清理范围。
+              existingUrl = await reuse(daemonLock)
+              if (existingUrl) break
+            }
+            await deps.sleep(deps.pollMs)
+          }
+
+          if (!existingUrl) {
+            // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
+            UI.error("opencode daemon failed to start within 30 seconds")
+            throw new Error("opencode daemon failed to start within 30 seconds")
+          }
+        } finally {
+          // 只终止本次启动且尚未交付的子进程；read/sleep/ping 异常也会进入此处。
+          if (!existingUrl) proc.kill()
+        }
+      }
+    } finally {
+      // acquire 的同一作用域释放租约，spawn 同步抛错也不依赖返回值交接。
+      await electionLease.release()
+    }
+  }
+
+  if (!existingUrl) throw new Error("Opencode daemon discovery produced no ready listener")
+  return { url: existingUrl, fwdPid }
 }
 
 async function input(value?: string) {
@@ -226,6 +353,8 @@ export const TuiThreadCommand = cmd({
     }
 
     const unguard = win32InstallCtrlCGuard()
+    // 转发句柄属于 TUI，选举租约在 discoverOrSpawnDaemon 内部闭合。
+    let fwdReload: (() => void) | undefined
     try {
       const { TuiConfig } = await import("@/config/tui")
       if (args.fork && !args.continue && !args.session) {
@@ -237,7 +366,6 @@ export const TuiThreadCommand = cmd({
       // Resolve relative --project paths from PWD, then use the real cwd after
       // chdir so the thread and worker share the same directory key.
       const next = resolveThreadDirectory(args.project)
-      const file = await target()
       try {
         process.chdir(next)
       } catch {
@@ -246,53 +374,38 @@ export const TuiThreadCommand = cmd({
       }
       const cwd = Filesystem.resolve(process.cwd())
 
-      const worker = new Worker(file, {
-        env: Object.fromEntries(
-          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-        ),
-      })
-      const client = Rpc.client<typeof rpc>(worker)
-      const reload = () => {
-        client.call("reload", undefined).catch(() => {})
-      }
-      process.on("SIGUSR2", reload)
-
-      let stopped = false
-      const stop = async () => {
-        if (stopped) return
-        stopped = true
-        process.off("SIGUSR2", reload)
-        await withTimeout(client.call("shutdown", undefined), 5000).catch(() => {})
-        worker.terminate()
-      }
-
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()
 
-      const network = resolveNetworkOptionsNoConfig(args)
-      const external = hasArg("--port") || hasArg("--hostname") || network.mdns === true
-
-      const headers = external ? ServerAuth.headers() : undefined
-
-      const transport = external
-        ? {
-            url: (await client.call("server", network)).url,
-            fetch: undefined,
-            events: undefined,
-            headers,
+      // chdir 后再发现服务，保证会话 directory 与配置解析使用同一个实际 cwd。
+      let existingUrl: string
+      try {
+        const discovered = await discoverOrSpawnDaemon(args)
+        existingUrl = discovered.url
+        // Windows 不注册不支持的 SIGUSR2；TUI 也不能因重载信号走共享服务的退出路径。
+        if (discovered.fwdPid !== undefined && process.platform !== "win32") {
+          const pid = discovered.fwdPid
+          fwdReload = () => {
+            try {
+              process.kill(pid, "SIGUSR2")
+            } catch {}
           }
-        : {
-            url: "http://opencode.internal",
-            fetch: createWorkerFetch(client),
-            events: createEventSource(client),
-          }
+          process.on("SIGUSR2", fwdReload)
+        }
+      } catch (error) {
+        UI.error(errorMessage(error))
+        process.exitCode = 1
+        return
+      }
 
+      // validateSession 和 TUI 必须使用同一发现 URL，避免校验一个库却连接另一个服务。
+      // HTTP transport 不能沿用旧内部 RPC 的免认证假设，校验与事件流必须带同一 auth header。
+      const headers = ServerLock.headers()
       try {
         await validateSession({
-          url: transport.url,
+          url: existingUrl,
           sessionID: args.session,
           directory: cwd,
-          fetch: transport.fetch,
           headers,
         })
       } catch (error) {
@@ -301,7 +414,11 @@ export const TuiThreadCommand = cmd({
         return
       }
 
-      const updater = createUpdater(async () => await client.call("checkUpgrade", { directory: cwd }))
+      // 更新检查沿用原 upgrade owner，只将已移除的 RPC 调用改为同进程调用。
+      const updater = createUpdater(async () => {
+        const { upgrade } = await import("@/cli/upgrade")
+        return upgrade()
+      })
 
       try {
         const { Effect } = await import("effect")
@@ -309,18 +426,15 @@ export const TuiThreadCommand = cmd({
         const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
         await Effect.runPromise(
           run({
-            url: transport.url,
+            url: existingUrl,
             async onSnapshot() {
-              const tui = writeHeapSnapshot("tui.heapsnapshot")
-              const server = await client.call("snapshot", undefined)
-              return [tui, server]
+              // 不伪造已移除的 RPC snapshot 响应；本回调只返回实际生成的本进程快照。
+              return [writeHeapSnapshot("tui.heapsnapshot")]
             },
             config,
             pluginHost: createLegacyTuiPluginHost(),
             directory: cwd,
-            fetch: transport.fetch,
-            headers: transport.headers,
-            events: transport.events,
+            headers,
             updater,
             args: {
               continue: args.continue,
@@ -334,9 +448,15 @@ export const TuiThreadCommand = cmd({
           }),
         )
       } finally {
-        await stop()
+        // 共享 daemon 可能仍服务其他窗口，TUI finally 只卸载自己的信号监听。
+        if (fwdReload) {
+          process.off("SIGUSR2", fwdReload)
+          fwdReload = undefined
+        }
       }
     } finally {
+      // 校验会话提前返回时仍卸载转发，避免 TUI 留下 daemon 信号监听。
+      if (fwdReload) process.off("SIGUSR2", fwdReload)
       try {
         unguard?.()
       } catch {}

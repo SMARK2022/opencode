@@ -13,6 +13,7 @@ import { WebSocketTracker } from "./routes/instance/httpapi/websocket-tracker"
 import { PublicApi } from "./routes/instance/httpapi/public"
 import type { CorsOptions } from "@opencode-ai/server/cors"
 import { lazy } from "@/util/lazy"
+import { EventClients } from "@opencode-ai/server/event-clients"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -34,6 +35,11 @@ type ListenOptions = CorsOptions & {
   hostname: string
   mdns?: boolean
   mdnsDomain?: string
+  // 内部发现监听才设置此项；公开 port=0 仍保留优先 4096 的既有行为。
+  ephemeral?: boolean
+  // 两个 listener 共享调用方创建的服务，不依赖各自的 MemoMap 恰好相同。
+  eventClients?: EventClients.Interface
+  sharedServices?: ReturnType<typeof HttpApiApp.createSharedServices>
 }
 type ListenerState = {
   scope: Scope.Scope
@@ -98,7 +104,7 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
 )
 
 function listenerLayer(opts: ListenOptions, port: number) {
-  return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
+  return HttpRouter.serve(HttpApiApp.createRoutes(opts, opts.eventClients, opts.sharedServices), {
     middleware: disposeMiddleware,
     disableLogger: true,
     disableListenLog: true,
@@ -115,7 +121,8 @@ function listenerLayer(opts: ListenOptions, port: number) {
 }
 
 function startWithPortFallback(opts: ListenOptions) {
-  if (opts.port !== 0) return startListener(opts, opts.port)
+  // ephemeral 直接 exact-bind 到 0；失败仍失败，不先占用公开端口再回退。
+  if (opts.ephemeral || opts.port !== 0) return startListener(opts, opts.port)
   // Match the legacy listener port-resolution behavior: explicit `0` prefers
   // 4096 first, then any free port.
   return startListener(opts, 4096).pipe(Effect.catch(() => startListener(opts, 0)))
