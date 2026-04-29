@@ -158,6 +158,57 @@ describe("tui thread", () => {
       expect(result.url).toBe("http://127.0.0.1:9999")
     })
 
+    test("normalizes proxies in the actual daemon spawn while retaining the full environment", async () => {
+      const proxyKeys = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]
+      const keys = [...proxyKeys, "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "SMARK_ENV_KEEP"]
+      const previous = keys.map((key) => process.env[key])
+      try {
+        // 三条 CA 路径和任意用户变量都不属于代理白名单，仍须进入真实 spawn 参数。
+        Object.assign(process.env, { NODE_EXTRA_CA_CERTS: "extra.pem", SSL_CERT_FILE: "ca.pem", SSL_CERT_DIR: "certs", SMARK_ENV_KEEP: "retained" })
+        const cases: Array<{ env: Record<string, string>; values: Array<string | undefined> }> = [
+          // 冲突双写法必须统一选大写，不能仅将父环境原样交给不同 HTTP 实现。
+          { env: { HTTP_PROXY: "http-upper", http_proxy: "http-lower", HTTPS_PROXY: "https-upper", https_proxy: "https-lower", ALL_PROXY: "all-upper", all_proxy: "all-lower", NO_PROXY: "no-upper", no_proxy: "no-lower" }, values: ["http-upper", "https-upper", "all-upper", "no-upper"] },
+          // 只有小写 HTTP 时，同时补齐大写与 HTTPS 继承，且不凭空引入 ALL/NO。
+          { env: { http_proxy: "http-only" }, values: ["http-only", "http-only", undefined, undefined] },
+          // 小写 HTTPS 是明确配置，不应被大写 HTTP 的继承值抢占。
+          { env: { HTTP_PROXY: "http", https_proxy: "https", all_proxy: "all", no_proxy: "no" }, values: ["http", "https", "all", "no"] },
+          // 空大写是已定义值；空 NO_PROXY 也必须覆盖非空小写绕过名单。
+          { env: { HTTP_PROXY: "", http_proxy: "lower", NO_PROXY: "", no_proxy: "lower" }, values: ["", "", undefined, ""] },
+        ]
+        for (const item of cases) {
+          proxyKeys.forEach((key) => { delete process.env[key] })
+          Object.assign(process.env, item.env)
+          const parent = { ...process.env }
+          let reads = 0
+          let spawns = 0
+          const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
+            read: async () => ++reads <= 2 ? undefined : fakeLock,
+            spawn: ((_cmd, opts) => {
+              spawns++
+              const env = opts?.env
+              // 断言生产函数实际传入的 env，不能只测试一个独立归一 helper。
+              expect(env).toBeDefined()
+              proxyKeys.forEach((key, index) => expect(env?.[key]).toBe(item.values[Math.floor(index / 2)]))
+              // 全量转发的保护覆盖所有非代理父键，而非仅检查上述四个 fixture 值。
+              Object.entries(parent).forEach(([key, value]) => {
+                if (proxyKeys.includes(key) || ["OPENCODE_PROCESS_ROLE", "OPENCODE_LOCK_PATH", "OPENCODE_EXTERNAL_NETWORK", "OPENCODE_PRINT_LOGS"].includes(key)) return
+                expect(env?.[key]).toBe(value)
+              })
+              expect(env?.OPENCODE_PROCESS_ROLE).toBe("worker")
+              expect(env?.SMARK_ENV_KEEP).toBe("retained")
+              // 注入 proc handle 不创建进程；就绪仍走真实 PID、身份和 token 复查。
+              return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+            }) as DiscoverDaemonDeps["spawn"],
+          }))
+          expect(spawns).toBe(1)
+          expect(result.url).toBe("http://127.0.0.1:9999")
+        }
+      } finally {
+        // 精确恢复缺失与空值，避免代理设置污染既有发现异常和网络身份用例。
+        keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+      }
+    })
+
     test("no existing server: daemon is spawned then URL returned", async () => {
       let daemonSpawnCount = 0
       let readCount = 0
