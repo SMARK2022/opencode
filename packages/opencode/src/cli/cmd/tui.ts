@@ -174,9 +174,23 @@ export async function discoverOrSpawnDaemon(
       } else {
         const daemonFile = await deps.resolveDaemonFile()
         const printLogs = process.argv.includes("--print-logs")
+        // 全量快照保留 PATH、认证和 CA；归一只覆盖代理键，不另建选择性环境。
         const env = Object.fromEntries(
           Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
         )
+        // 大写优先，即使为空也不回退小写，防止消费者按不同大小写选到不同代理。
+        const http = env.HTTP_PROXY ?? env.http_proxy
+        // 仅 HTTPS 两种写法都缺失时继承 HTTP，显式 HTTPS 配置不被覆盖。
+        const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
+        const all = env.ALL_PROXY ?? env.all_proxy
+        const no = env.NO_PROXY ?? env.no_proxy
+        // 同一快照原位补齐双写法；下方唯一 spawn 仍负责覆盖 worker 身份和监听请求。
+        Object.assign(env, {
+          ...(http !== undefined ? { HTTP_PROXY: http, http_proxy: http } : {}),
+          ...(https !== undefined ? { HTTPS_PROXY: https, https_proxy: https } : {}),
+          ...(all !== undefined ? { ALL_PROXY: all, all_proxy: all } : {}),
+          ...(no !== undefined ? { NO_PROXY: no, no_proxy: no } : {}),
+        })
         // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
         const proc = deps.spawn([process.execPath, daemonFile], {
           env: {
