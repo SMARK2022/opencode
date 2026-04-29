@@ -1,6 +1,6 @@
 import { createStore } from "solid-js/store"
 import { createSimpleContext } from "./helper"
-import { batch, createEffect, createMemo } from "solid-js"
+import { batch, createEffect, createMemo, untrack } from "solid-js"
 import { useSync } from "./sync"
 import { useEvent } from "./event"
 import path from "path"
@@ -61,6 +61,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const event = useEvent()
     const permission = usePermission()
 
+    // 标记随选择 owner 保留，只覆盖当前会话访问。
+    const selection = {
+      sessionID: undefined as string | undefined,
+      initialized: false,
+    }
+
+    function selectSession() {
+      // 成功选择先认领，迟到历史不能覆盖；失败分支不认领。
+      selection.sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+      selection.initialized = true
+    }
+
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
       return !!provider?.models[model.modelID]
@@ -103,6 +115,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               message: `Agent not found: ${name}`,
               duration: 3000,
             })
+          selectSession()
           setAgentStore("current", name)
         },
         move(direction: 1 | -1) {
@@ -113,6 +126,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             if (next < 0) next = agents().length - 1
             if (next >= agents().length) next = 0
             const value = agents()[next]
+            selectSession()
             setAgentStore("current", value.name)
           })
         },
@@ -285,6 +299,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (!val) return
           const a = agent.current()
           if (!a) return
+          selectSession()
           setModelStore("model", a.name, { ...val })
         },
         cycleFavorite(direction: 1 | -1) {
@@ -313,6 +328,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (!next) return
           const a = agent.current()
           if (!a) return
+          selectSession()
           setModelStore("model", a.name, { ...next })
           setModelStore("recent", recentModels(next, modelStore.recent))
           save()
@@ -329,6 +345,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             }
             const a = agent.current()
             if (!a) return
+            selectSession()
             setModelStore("model", a.name, model)
             if (options?.recent) {
               setModelStore("recent", recentModels(model, modelStore.recent))
@@ -383,6 +400,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           set(value: string | undefined) {
             const m = currentModel()
             if (!m) return
+            selectSession()
             const key = `${m.providerID}/${m.modelID}`
             setModelStore("variant", key, value ?? "default")
             save()
@@ -407,6 +425,32 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     }
 
     const model = createModel()
+
+    // 按当前访问初始化，切换会话后允许再次恢复历史。
+    createEffect(() => {
+      const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
+      if (selection.sessionID !== sessionID) {
+        selection.sessionID = sessionID
+        selection.initialized = false
+      }
+      // 等待启动数据和本地 variant 读盘，避免空历史及持久化竞态。
+      if (!sessionID || selection.initialized || sync.status === "loading" || !model.ready) return
+      const msg = sync.data.message[sessionID]?.findLast((message) => message.role === "user")
+      if (!msg || msg.role !== "user") return
+
+      // 只等待首次历史；恢复写入不订阅选择，Prompt 重挂载也不再触发。
+      untrack(() => {
+        selection.initialized = true
+        const isPrimaryAgent = agent.list().some((item) => item.name === msg.agent)
+        if (!msg.agent || !isPrimaryAgent) return
+        // 保留命令行 agent 优先级及现有模型、variant setter。
+        if (!args.agent) agent.set(msg.agent)
+        if (msg.model) {
+          model.set(msg.model)
+          model.variant.set(msg.model.variant)
+        }
+      })
+    })
 
     function createSession() {
       const [sessionStore, setSessionStore] = createStore<{
