@@ -41,38 +41,45 @@ const MAX_PRESERVE_RECENT_TOKENS = 8_000
 const SUMMARY_TEMPLATE = `Output exactly this Markdown structure and keep the section order unchanged:
 ---
 ## Goal
-- [single-sentence task summary]
+- [single-sentence current user goal]
 
-## Constraints & Preferences
-- [user constraints, preferences, specs, or "(none)"]
+## User Constraints & Preferences
+- [durable user instructions, preferences, specs, or "(none)"]
 
 ## Progress
 ### Done
-- [completed work or "(none)"]
+- [completed work, verified findings, or "(none)"]
 
 ### In Progress
-- [current work or "(none)"]
+- [current unfinished work and where it stopped, or "(none)"]
 
 ### Blocked
-- [blockers or "(none)"]
+- [blockers, missing info, failed commands, or "(none)"]
+
+## Files & Code
+- [path: relevant symbols/sections and why they matter, or "(none)"]
+
+## Errors & Fixes
+- [exact error/output and fix/status, or "(none)"]
 
 ## Key Decisions
-- [decision and why, or "(none)"]
+- [decision and reason, or "(none)"]
 
 ## Next Steps
-- [ordered next actions or "(none)"]
+- [ordered next actions directly tied to the latest user request, or "(none)"]
 
 ## Critical Context
-- [important technical facts, errors, open questions, or "(none)"]
-
-## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
+- [non-obvious technical facts, tool results, command outputs, open questions, or "(none)"]
 ---
 
 Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Preserve exact file paths, commands, error strings, identifiers, symbols, and line numbers when known.
+- Prefer facts needed to continue work; remove stale or resolved details.
+- For files, include why they matter and the relevant symbol/section when known.
+- For errors, include the fix/status so the next model does not repeat dead ends.
+- Do not include long file contents or large command outputs; summarize them by path, symbol, and result.
 - Do not mention the summary process or that context was compacted.`
 type Turn = {
   start: number
