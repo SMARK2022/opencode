@@ -309,9 +309,9 @@ export const layer = Layer.effect(
           `</env>`,
         ]
         return [
-          envLines.join("\n"),
           toolUsageSection(toolIds),
           ...staticSections(),
+          envLines.join("\n"),
         ]
       }),
 

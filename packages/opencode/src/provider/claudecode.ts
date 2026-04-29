@@ -69,8 +69,9 @@ export function computeFingerprint(messageText: string, version: string): string
 
 /**
  * 构造 Billing Header 占位块
- * 发包前需要依赖这里的 cch=00000 作为标记，用于后续 xxHash 替换
+ * cch 保持 00000，避免完整 body hash 污染最早 system 前缀
  */
+//  * 发包前需要依赖这里的 cch=00000 作为标记，用于后续 xxHash 替换
 export function buildBillingHeaderBlock(fp: string) {
   return {
     type: "text" as const,
@@ -320,11 +321,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     if (originalThinking?.type === "disabled") {
       // 用户明确禁用 thinking，尊重它
       thinking = originalThinking
-    } else if (
-      modelId.includes("opus-4-7") ||
-      modelId.includes("opus-4-6") ||
-      modelId.includes("sonnet-4-6")
-    ) {
+    } else if (modelId.includes("opus-4-7") || modelId.includes("opus-4-6") || modelId.includes("sonnet-4-6")) {
       // 新模型走 adaptive
       thinking = { type: "adaptive" }
     } else if (modelId.includes("haiku")) {
@@ -360,9 +357,12 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
     }
 
-    // 6. 占位符替换机制
-    const bodyWithPlaceholder = JSON.stringify(patchedBody)
-    const finalBodyStr = patchCch(bodyWithPlaceholder)
+    // // 6. 占位符替换机制
+    // const bodyWithPlaceholder = JSON.stringify(patchedBody)
+    // const finalBodyStr = patchCch(bodyWithPlaceholder)
+
+    // 6. 保留 cch=00000 占位，避免每轮重写最早 system 前缀
+    const finalBodyStr = JSON.stringify(patchedBody)
 
     // 7. 处理请求头与鉴权
     const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
