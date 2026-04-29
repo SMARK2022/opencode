@@ -725,12 +725,12 @@ it.instance(
 )
 
 it.instance(
-  "defaultAgent returns plan when build is disabled and default_agent not set",
+  "defaultAgent returns interactive when build is disabled and default_agent not set",
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      // build is disabled, so it should return plan (next primary agent)
-      expect(agent).toBe("plan")
+      // build 禁用后，interactive 是插入顺序中的下一个 primary agent
+      expect(agent).toBe("interactive")
     }),
   {
     config: {
@@ -747,7 +747,10 @@ it.instance(
   {
     config: {
       agent: {
+        // 禁用所有 primary agent 以触发 "no primary visible agent found" 错误
         build: { disable: true },
+        interactive: { disable: true },
+        review: { disable: true },
         plan: { disable: true },
       },
     },
