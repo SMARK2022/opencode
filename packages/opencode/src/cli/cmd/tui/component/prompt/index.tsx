@@ -1,5 +1,5 @@
 import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, onMount, createSignal, onCleanup, on, untrack, Show, Switch, Match } from "solid-js"
 import "opentui-spinner/solid"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -86,6 +86,11 @@ function fadeColor(color: RGBA, alpha: number) {
 }
 
 let stashed: { prompt: PromptInfo; cursor: number } | undefined
+
+// Tracks which session IDs have already had their agent/model initialized from
+// the last user message. Module-level (outside Prompt) so the state survives
+// Prompt unmount/remount cycles (e.g. when the /context panel is toggled).
+const initializedSessionIDs = new Set<string>()
 
 export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
@@ -328,26 +333,46 @@ export function Prompt(props: PromptProps) {
     }
   })
 
-  // Initialize agent/model/variant from last user message when session changes
-  let syncedSessionID: string | undefined
+  // Initialize agent/model/variant from last user message when session changes.
+  //
+  // Two bugs this guards against:
+  //
+  // Bug A – async message-load race: messages arrive from the server a few
+  // seconds after Prompt mounts.  The old code tracked `lastUserMessage()` as a
+  // reactive dependency, so when messages loaded the effect re-ran and called
+  // `local.model.set(msg.model)` even though the user may have already switched
+  // to a different model in the meantime.  Fix: read `lastUserMessage` with
+  // `untrack` so it is NOT a reactive dependency; the effect only re-fires when
+  // `props.sessionID` itself changes (i.e. the user navigates to another
+  // session).
+  //
+  // Bug B – /context panel remount: opening the /context panel unmounts Prompt
+  // (via `<Show when={visible()}>`) and closing it remounts Prompt fresh.  The
+  // old guard variable `syncedSessionID` was a `let` inside the function body,
+  // so it was reset to `undefined` on every remount, causing re-initialization
+  // to run again and revert the user's model choice.  Fix: use the module-level
+  // `initializedSessionIDs` Set so the guard survives Prompt remounts.
   createEffect(() => {
     const sessionID = props.sessionID
-    const msg = lastUserMessage()
 
-    if (sessionID !== syncedSessionID) {
-      if (!sessionID || !msg) return
+    if (!sessionID || initializedSessionIDs.has(sessionID)) return
 
-      syncedSessionID = sessionID
+    // Read without subscribing — prevents re-running when messages load later.
+    const msg = untrack(lastUserMessage)
+    if (!msg) return
 
-      // Only set agent if it's a primary agent (not a subagent)
-      const isPrimaryAgent = local.agent.list().some((x) => x.name === msg.agent)
-      if (msg.agent && isPrimaryAgent) {
-        // Keep command line --agent if specified.
-        if (!args.agent) local.agent.set(msg.agent)
-        if (msg.model) {
-          local.model.set(msg.model)
-          local.model.variant.set(msg.model.variant)
-        }
+    // Claim this session now so neither an async message arrival nor a future
+    // Prompt remount triggers another initialization pass.
+    initializedSessionIDs.add(sessionID)
+
+    // Only set agent if it's a primary agent (not a subagent)
+    const isPrimaryAgent = local.agent.list().some((x) => x.name === msg.agent)
+    if (msg.agent && isPrimaryAgent) {
+      // Keep command line --agent if specified.
+      if (!args.agent) local.agent.set(msg.agent)
+      if (msg.model) {
+        local.model.set(msg.model)
+        local.model.variant.set(msg.model.variant)
       }
     }
   })
