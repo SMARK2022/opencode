@@ -325,17 +325,10 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
 })
 
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
-  if (process.platform === "win32" && Shell.ps(shell)) {
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
-      cwd,
-      env,
-      stdin: "ignore",
-      detached: false,
-    })
-  }
-
-  return ChildProcess.make(command, [], {
-    shell,
+  // 编码仅发生在授权后的 spawn 边界；AST 与权限 metadata 继续使用原始输入。
+  const invocation = Shell.cmd(shell, command)
+  return ChildProcess.make(invocation.command, invocation.args, {
+    shell: invocation.shell,
     cwd,
     env,
     stdin: "ignore",
