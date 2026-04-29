@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
+import fs from "fs/promises"
 import path from "path"
 import { Shell } from "@opencode-ai/core/shell"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { which } from "@opencode-ai/core/util/which"
+import { tmpdir } from "./fixture/tmpdir"
 
 const withShell = async (shell: string | undefined, fn: () => void | Promise<void>) => {
   const prev = process.env.SHELL
@@ -24,16 +26,15 @@ describe("shell", () => {
   test("builds Windows UTF-8 overlays without mutating the inherited environment", () => {
     const env = { PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" }
     // 平台作为纯输入覆盖两支，不写全局环境或伪造 process.platform。
-    expect(Shell.utf8Environment(env, "linux")).toEqual({})
-    expect(Shell.utf8Environment(env, "darwin")).toEqual({})
-    expect(Shell.utf8Environment(env, "win32")).toEqual({
+    expect(Shell.utf8Environment("linux")).toEqual({})
+    expect(Shell.utf8Environment("darwin")).toEqual({})
+    expect(Shell.utf8Environment("win32")).toEqual({
       PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
-      JAVA_TOOL_OPTIONS: "-Xmx1g -Dfile.encoding=UTF-8", RUBYOPT: "-w -Eutf-8",
     })
-    // 空值必须 trim 掉前导空格；任意非编码变量仍由 process 环境继承。
-    expect(Shell.utf8Environment({}, "win32")).toEqual({
+    // 只覆盖 Python；用户显式 Java/Ruby 原值在环境合并中保留，不能重建旧 oracle。
+    expect({ ...env, ...Shell.utf8Environment("win32") }).toEqual({
       PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
-      JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8", RUBYOPT: "-Eutf-8",
+      PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w",
     })
     expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
   })
@@ -88,7 +89,12 @@ describe("shell", () => {
     })
 
     test("normalizes Git Bash shell paths from env", async () => {
-      const shell = "/cygdrive/c/Program Files/Git/bin/bash.exe"
+      // 路径归一测试只需存在的可执行文件名，不依赖主机Git安装，也不启动该夹具。
+      await using tmp = await tmpdir()
+      const file = path.join(tmp.path, "Git with spaces", "bin", "bash.exe")
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(file, "fixture executable is never invoked")
+      const shell = file.replace(/^([A-Za-z]):/, (_, drive) => `/cygdrive/${drive.toLowerCase()}`).replaceAll("\\", "/")
       await withShell(shell, async () => {
         expect(Shell.preferred()).toBe(FSUtil.windowsPath(shell))
       })

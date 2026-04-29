@@ -27,15 +27,13 @@ const META: Record<string, { deny?: boolean; login?: boolean; posix?: boolean; p
 }
 
 // 只返回子进程覆盖项，不修改 process.env，也不改变非 Windows 环境。
-export const utf8Environment = (env: Readonly<Record<string, string | undefined>> = process.env, platform: string = process.platform) => {
+export const utf8Environment = (platform: string = process.platform) => {
   if (platform !== "win32") return {}
   return {
     // Python 管道编码与 UTF-8 模式分别控制输出编码和解释器默认编码。
     PYTHONIOENCODING: "utf-8",
     PYTHONUTF8: "1",
-    // 追加而非替换已有 Java/Ruby 参数，保留用户的内存、代理与加载选项。
-    JAVA_TOOL_OPTIONS: `${env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
-    RUBYOPT: `${env.RUBYOPT || ""} -Eutf-8`.trim(),
+    // 不注入 Java/Ruby 参数；用户原值由宿主继承，V1 插件 extras 仍最后覆盖。
   }
 }
 
@@ -177,6 +175,25 @@ function info(file: string): Item {
     path: item,
     name: resolve(n) ? n : item,
     acceptable: ok(item),
+  }
+}
+
+export function cmd(file: string, command: string, platform: string = process.platform) {
+  if (platform !== "win32" || !ps(file)) return { command, args: [], shell: file }
+  // UTF-16LE base64 只传输脚本文本；Console 与管道生产端使用无 BOM 的 UTF-8。
+  const script = [
+    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [Console]::OutputEncoding",
+    command,
+    // 换行隔开用户尾注释；仅透传实际 native exit，不把 cmdlet 的空值变成退出码。
+    "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+  ].join("\n")
+  return {
+    command: file,
+    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    // 显式 argv 不能再经 shell 包装，否则引号和中文会被第二次解释。
+    shell: false,
   }
 }
 

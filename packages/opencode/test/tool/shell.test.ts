@@ -180,7 +180,7 @@ const mustTruncate = (result: {
 }
 
 describe("tool.shell", () => {
-  each("basic", () =>
+  each("basic", (item) =>
     runIn(
       projectRoot,
       Effect.gen(function* () {
@@ -189,6 +189,24 @@ describe("tool.shell", () => {
         })
         expect(result.metadata.exit).toBe(0)
         expect(result.metadata.output).toContain("test")
+        if (process.platform !== "win32" || !PS.has(item.label)) return
+        // 在既有每-shell 实进程测试中验证中文、单双引号、表格与 native 最后退出码。
+        const command = [
+          `Write-Output '桌面 大学文档 毕业设计 压缩感知 ''单引号'' "双引号"'`,
+          `[pscustomobject]@{ Name = '中文表格' } | Format-Table -HideTableHeaders`,
+          `[Console]::Error.Write("中文错误")`,
+          `& '${process.execPath.replaceAll("'", "''")}' -e 'process.exit(7)' # 尾注释`,
+        ].join("\n")
+        const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+        const encoded = yield* run({ command, compress_output: false }, capture(requests))
+        expect(encoded.metadata.exit).toBe(7)
+        for (const text of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
+          expect(encoded.output).toContain(text)
+        }
+        expect(encoded.output).not.toContain("\uFFFD")
+        expect(requests.some((request) => request.metadata.command === command)).toBe(true)
+        expect((yield* run({ command: "Write-Output '中文'; exit 9" })).metadata.exit).toBe(9)
+
       }),
     ),
   )

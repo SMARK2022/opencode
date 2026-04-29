@@ -264,12 +264,11 @@ const layer = Layer.effectDiscard(
               const started = yield* Clock.currentTimeMillis
               const limits = yield* outputStore.limits()
               // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
-              const powershell = process.platform === "win32" && Shell.ps(shell)
-              // 与V1同样禁用PowerShell profile和交互；仍只创建一个命令并调用一次AppProcess.run。
-              const command = ChildProcess.make(powershell ? shell : input.command,
-                powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", input.command] : [], {
+              // 共用无profile的UTF-8 argv，原始命令仍是授权资源，执行与capture各只有一次。
+              const invocation = Shell.cmd(shell, input.command)
+              const command = ChildProcess.make(invocation.command, invocation.args, {
                 cwd: target.canonical,
-                shell: powershell ? false : shell,
+                shell: invocation.shell,
                 // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
                 extendEnv: true,
                 // V2 尚无插件 shell.env owner；这里只叠加源编码设置，不能恢复 legacy hook。

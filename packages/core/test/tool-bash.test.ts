@@ -76,9 +76,12 @@ const appProcess = Layer.succeed(
     run: (command: ChildProcess.Command, options?: AppProcess.RunOptions) =>
       Effect.suspend(() => {
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
-        // 显式PowerShell argv也记录原命令和实际可执行文件，同时保留完整argv供启动边界断言。
-        // 在既有 process 观察边界记录真正交给 spawner 的环境，不重复执行命令。
-        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
+        // 仅在测试观察边界解码传输包装；完整argv仍保留，真实编码由另一个实进程用例验证。
+        const argument = command.args.at(-1)
+        const original = command.args.includes("-EncodedCommand") && argument !== undefined
+          ? Buffer.from(argument, "base64").toString("utf16le").split("\n").slice(3, -1).join("\n")
+          : argument ?? command.command
+        runs.push({ command: original, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
           args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
         // 原有 process 替身必须履行新的观察回调契约，不能让 settlement 测试得到空原文。
         return (options?.onOutput ? options.onOutput(result.output ?? result.stdout) : Effect.void).pipe(
@@ -212,13 +215,11 @@ describe("BashTool", () => {
               maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
             })
             expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
-            // 真实 leaf 的环境必须继承宿主，四项 Windows 覆盖与已有 options 精确对应。
+            // extendEnv 保留用户显式 Java/Ruby 值，leaf 的两项覆盖不能重写它们。
             expect(runs[0]?.extendEnv).toBe(true)
             expect(runs[0]?.env).toEqual(process.platform === "win32" ? {
               PYTHONIOENCODING: "utf-8",
               PYTHONUTF8: "1",
-              JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
-              RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim(),
             } : {})
             expect(runs).toHaveLength(1)
             // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
@@ -271,9 +272,10 @@ describe("BashTool", () => {
             // 同一配置 refresh 不重复注入，保留既有 Context Epoch 的比较边界。
             expect(yield* SystemContext.reconcile(yield* contexts.load(), initialized.snapshot)).toEqual({ _tag: "Unchanged" })
             expect(definitions[0]?.description).toContain("Use workdir instead of changing directories")
-            // 防止通用shell选项重新启用用户profile，直接检查实际单次命令的argv。
+            // 独立字节预期同时约束无profile、UTF-8前导与原命令，不能只检查编码标志。
             if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
-              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "pwd"])
+              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "pwd", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
           }),
         )
           .pipe(Effect.andThen(() => Effect.gen(function* () {
@@ -322,6 +324,8 @@ describe("BashTool", () => {
                   expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
                   expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
                   expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
+                  // 原命令观察不代替spawn契约；PowerShell必须实际使用非交互的编码argv。
+                  if (!cmd) expect(runs[0]?.args?.slice(0, 4)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"])
                 }
               }), appProcess, shell)
             }
@@ -389,6 +393,54 @@ describe("BashTool", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
+
+  if (process.platform === "win32") {
+    it.live("preserves PowerShell UTF-8, quotes, inherited env and exit through the real Core leaf", () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.gen(function* () {
+          const shells = [Bun.which("pwsh"), Bun.which("powershell")].filter((file): file is string => Boolean(file))
+          expect(shells.length).toBeGreaterThan(0)
+          for (const shell of shells) {
+            reset()
+            const command = [
+              `Write-Output '桌面 大学文档 毕业设计 压缩感知 ''单引号'' "双引号"'`,
+              `[pscustomobject]@{ Name = '中文表格' } | Format-Table -HideTableHeaders`,
+              // stderr 直接经过 Console 编码；表格与 stdout 正确不能替代这条独立生产端检查。
+              `[Console]::Error.Write("中文错误")`,
+              `& '${process.execPath.replaceAll("'", "''")}' -e 'process.stdout.write(JSON.stringify([process.env.JAVA_TOOL_OPTIONS ?? null, process.env.RUBYOPT ?? null])); process.exit(7)' # 尾注释`,
+            ].join("\n")
+            // 走 registry、真实 AppProcess 和原始 request 授权，不把编码串当资源或重跑解码。
+            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+              const settled = yield* settleTool(registry, call({ command, compress_output: false }))
+              // fixture 的 Bun 路径在临时 Location 外；完整匹配 advisory，不能省略警告或只检查退出码子串。
+              const status = `Warnings:\n- Command argument references external directory ${path.join(path.dirname(process.execPath), "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.\n\nCommand exited with code 7.`
+              if (settled.result.type !== "content") throw new Error("expected content")
+              expect(settled.result.value).toHaveLength(2)
+              const first = settled.result.value[0]
+              const second = settled.result.value[1]
+              if (first?.type !== "text" || second?.type !== "text") throw new Error("expected two text parts")
+              const text = first.text
+              const actualStatus = second.text
+              expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
+              expect(text).not.toContain("\uFFFD")
+              expect(actualStatus).toBe(status)
+              for (const expected of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
+                expect(text).toContain(expected)
+              }
+              // native 子进程回显实际继承值；仅检查 leaf 的覆盖键无法发现继承时追加的 Java/Ruby 参数。
+              expect(text).toContain(JSON.stringify([process.env.JAVA_TOOL_OPTIONS ?? null, process.env.RUBYOPT ?? null]))
+              expect(assertions).toMatchObject([{ action: "bash", resources: [command], save: [command] }])
+              // native 的 7、纯 cmdlet 的 0 与显式 exit 9 区分透传、旧 LASTEXITCODE 泄漏和用户退出优先。
+              expect((yield* settleTool(registry, call({ command: "Write-Output '中文'" }))).output?.structured).toMatchObject({ exit: 0 })
+              expect((yield* settleTool(registry, call({ command: "Write-Output '中文'; exit 9" }))).output?.structured).toMatchObject({ exit: 9 })
+            }), LayerNode.compile(AppProcess.node), shell)
+          }
+        }),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+    )
+  }
 
   if (process.platform !== "win32") {
     it.live("executes a real shell command through AppProcess", () =>
