@@ -118,7 +118,8 @@ describe("installation", () => {
         Effect.gen(function* () {
           calls.length = 0
           expect(yield* Installation.use.latest(method)).toBe("1.19.2")
-          expect(calls[0]).toBe(npm)
+          // registry 可由用户配置；保留包名与 latest 路径约束，不固定主机名。
+          expect(calls[0]?.endsWith("/opencode-ai/latest")).toBe(true)
           expect(calls.slice(1).every((url) => url.startsWith(choco))).toBe(true)
         }),
       )
