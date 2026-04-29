@@ -928,7 +928,7 @@ describe("Anthropic Messages route", () => {
       }
     }),
   )
-  it.effect("preserves raw ClaudeCode system and signs final wire bytes", () =>
+  it.effect("preserves raw ClaudeCode system and fixed zero CCH on the wire", () =>
     Effect.gen(function* () {
       const route = AnthropicMessages.route.with({ provider: "claudecode" })
       // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
@@ -966,12 +966,8 @@ describe("Anthropic Messages route", () => {
           // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
           const fp = createHash("sha256").update("59cf53e54c78ehu2.1.117").digest("hex").slice(0, 3)
           const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=`
-          expect(text.startsWith(prefix)).toBe(true)
-          const offset = prefix.length
-          // 只还原自有五位占位，独立校验最终 overlay/metadata/thinking 的完整 UTF-8 字节。
-          const zeroed = text.slice(0, offset) + "00000" + text.slice(offset + 5)
-          const cch = (Bun.hash.xxHash64(new TextEncoder().encode(zeroed)) & 0xfffffn).toString(16).padStart(5, "0")
-          expect(text.slice(offset, offset + 5)).toBe(cch)
+          // 断言真实发包前缀固定五位零；raw/cache/metadata 的既有矩阵继续执行。
+          expect(text.startsWith(`${prefix}00000;`)).toBe(true)
           expect(text).toContain("中文 cch=00000;")
           expect(text).not.toContain("You are Claude Code")
           expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")

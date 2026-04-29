@@ -198,6 +198,15 @@ const builtIns = Layer.effectDiscard(
       "</env>",
     ].join("\n")
     const context = SystemContext.combine([
+      // 新 generation 的稳定指引先于环境；既有 key/codec 与持久化 baseline 不重写。
+      SystemContext.make({
+        key: SystemContext.Key.make("core/action-guidance"),
+        codec: Schema.toCodecJson(Schema.String),
+        load: Effect.succeed([ACTION_GUIDANCE, OUTPUT_GUIDANCE].join("\n\n")),
+        baseline: (text) => text,
+        update: (_previous, text) => text,
+      }),
+      // 环境、Git、日期仍是独立 source，后续变化沿用原有 reconcile 与历史更新。
       SystemContext.make({
         key: SystemContext.Key.make("core/environment"),
         codec: Schema.toCodecJson(Schema.String),
@@ -222,16 +231,6 @@ const builtIns = Layer.effectDiscard(
         load: DateTime.nowAsDate.pipe(Effect.map((date) => date.toDateString())),
         baseline: (date) => `Today's date: ${date}`,
         update: (_previous, date) => `Today's date is now: ${date}`,
-      }),
-      // 独立 source 接纳稳定指引，已有 environment/Git 快照无需被整体替换或重采样。
-      SystemContext.make({
-        key: SystemContext.Key.make("core/action-guidance"),
-        // 字符串 codec 让提示版本变化可被既有 reconcile 精确比较，而非覆盖默认 agent。
-        codec: Schema.toCodecJson(Schema.String),
-        // 两个完整 literal 一起接纳；没有重复注册 environment 或重新采集 Git 的捷径。
-        load: Effect.succeed([ACTION_GUIDANCE, OUTPUT_GUIDANCE].join("\n\n")),
-        baseline: (text) => text,
-        update: (_previous, text) => text,
       }),
     ])
 

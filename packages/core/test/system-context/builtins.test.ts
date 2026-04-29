@@ -225,8 +225,11 @@ describe("SystemContextBuiltIns", () => {
       const context = yield* SystemContextRegistry.Service
       const initialized = yield* SystemContext.initialize(yield* context.load())
 
+      // 全文比较固定 general 在环境/日期前，独立 source 的持久值仍在下面逐项校验。
       expect(initialized.baseline).toBe(
         [
+          expectedGuidance,
+          "",
           "Here is some useful information about the environment you are running in:",
           "<env>",
           `  Working directory: ${directory}`,
@@ -238,8 +241,6 @@ describe("SystemContextBuiltIns", () => {
           "</env>",
           "",
           `Today's date: ${localDate(timestamp)}`,
-          "",
-          expectedGuidance,
         ].join("\n"),
       )
       // 禁用 Git 的固定 fixture 只有三个 source；不能因新增指引泄露 Git 或工具 Shell 注册。
@@ -287,9 +288,11 @@ describe("SystemContextBuiltIns", () => {
       yield* TestClock.setTime(timestamp)
       const context = yield* SystemContextRegistry.Service
 
-      // ambient instructions 仍须位于稳定指引之后；完整比较防止二者被重新排序或吞并。
+      // ambient 仍在完整 builtins baseline 之后；前置 general 不能吞掉环境或项目指令。
       expect((yield* SystemContext.initialize(yield* context.load())).baseline).toBe(
         [
+          expectedGuidance,
+          "",
           "Here is some useful information about the environment you are running in:",
           "<env>",
           `  Working directory: ${directory}`,
@@ -301,8 +304,6 @@ describe("SystemContextBuiltIns", () => {
           "</env>",
           "",
           `Today's date: ${localDate(timestamp)}`,
-          "",
-          expectedGuidance,
           "",
           `Instructions from: ${instructionFile}\nBe precise.`,
         ].join("\n"),

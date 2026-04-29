@@ -38,7 +38,7 @@ export function computeFingerprint(messageText: string, version: string): string
   return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 3)
 }
 
-// 校验前必须保留五位零占位符；缩短占位符会改变请求体长度与签名字节。
+// cch 固定为五位零；完整 body hash 不能改写最早的计费 system 前缀。
 export function buildBillingHeaderBlock(fp: string) {
   return {
     type: "text" as const,
@@ -88,144 +88,6 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
     "user-agent": `claude-cli/${VERSION} (external, cli)`,
     "x-claude-code-session-id": opts.sessionId,
   }
-}
-
-// 保留源纯 TS 实现替换前项的 Bun 内置哈希，seed=0 的 CCH 字节契约保持一致。
-const MASK_64 = 0xffff_ffff_ffff_ffffn
-// 五个质数属于 xxHash64 规范，换成 xxHash32 常量会改变全部签名字节。
-const PRIME64_1 = 0x9e37_79b1_85eb_ca87n
-const PRIME64_2 = 0xc2b2_ae3d_27d4_eb4fn
-const PRIME64_3 = 0x1656_67b1_9e37_79f9n
-const PRIME64_4 = 0x85eb_ca77_c2b2_ae63n
-const PRIME64_5 = 0x27d4_eb2f_1656_67c5n
-
-// BigInt 不会溢出，必须显式按模 2^64 截断才能复现无符号机器运算。
-const add64 = (a: bigint, b: bigint) => (a + b) & MASK_64
-const mul64 = (a: bigint, b: bigint) => (a * b) & MASK_64
-// 输入均已截断为非负值，右移才等价于规范的无符号循环移位。
-const rotl64 = (x: bigint, bits: number) => {
-  const r = BigInt(bits)
-  return ((x << r) | (x >> (64n - r))) & MASK_64
-}
-
-// 小端高字节可能置位符号位；转 BigInt 前用 >>> 0 保留无符号 32 位值。
-const readU32LE = (bytes: Uint8Array, offset: number) => {
-  const b0 = bytes[offset] ?? 0
-  const b1 = bytes[offset + 1] ?? 0
-  const b2 = bytes[offset + 2] ?? 0
-  const b3 = bytes[offset + 3] ?? 0
-  return BigInt((b0 + b1 * 0x100 + b2 * 0x10000 + b3 * 0x1000000) >>> 0)
-}
-
-// 高低两段分别转 BigInt 后拼接，避免 Number 丢失 64 位整数精度。
-const readU64LE = (bytes: Uint8Array, offset: number) => readU32LE(bytes, offset) | (readU32LE(bytes, offset + 4) << 32n)
-
-// lane 先乘 PRIME64_2 再旋转，不能与尾部八字节的 hash 旋转步骤互换。
-const round64 = (acc: bigint, lane: bigint) => mul64(rotl64(add64(acc, mul64(lane, PRIME64_2)), 31), PRIME64_1)
-
-// 合并使用零种子的 round；直接异或累加器会遗漏规范要求的二次混合。
-const mergeRound64 = (acc: bigint, lane: bigint) => {
-  const merged = (acc ^ round64(0n, lane)) & MASK_64
-  return add64(mul64(merged, PRIME64_1), PRIME64_4)
-}
-
-// 雪崩的三次右移与两次乘法顺序固定，中间结果也必须保持 64 位。
-const avalanche64 = (value: bigint) => {
-  let hash = value
-  hash = (hash ^ (hash >> 33n)) & MASK_64
-  hash = mul64(hash, PRIME64_2)
-  hash = (hash ^ (hash >> 29n)) & MASK_64
-  hash = mul64(hash, PRIME64_3)
-  hash = (hash ^ (hash >> 32n)) & MASK_64
-  return hash
-}
-
-// 接收已经编码的请求字节，字符串字符数不能替代 UTF-8 字节长度。
-export function xxh64(bodyBytes: Uint8Array, seed = 0n) {
-  let offset = 0
-  const len = bodyBytes.length
-  let hash: bigint
-
-  if (len >= 32) {
-    // 加法与负 PRIME64_1 都按模 2^64 归一化，负种子和超宽种子同样回绕。
-    let v1 = add64(add64(seed, PRIME64_1), PRIME64_2)
-    let v2 = add64(seed, PRIME64_2)
-    let v3 = seed & MASK_64
-    let v4 = add64(seed, -PRIME64_1)
-
-    // 包含 offset == limit，恰好 32 字节及最后完整块都必须进入四 lane 分支。
-    const limit = len - 32
-    while (offset <= limit) {
-      v1 = round64(v1, readU64LE(bodyBytes, offset))
-      v2 = round64(v2, readU64LE(bodyBytes, offset + 8))
-      v3 = round64(v3, readU64LE(bodyBytes, offset + 16))
-      v4 = round64(v4, readU64LE(bodyBytes, offset + 24))
-      offset += 32
-    }
-
-    // 四 lane 的旋转权重不同，合并顺序保持 v1 到 v4，不能按数值排序。
-    hash = add64(add64(rotl64(v1, 1), rotl64(v2, 7)), add64(rotl64(v3, 12), rotl64(v4, 18)))
-    hash = mergeRound64(hash, v1)
-    hash = mergeRound64(hash, v2)
-    hash = mergeRound64(hash, v3)
-    hash = mergeRound64(hash, v4)
-  } else {
-    // 短输入没有四 lane 合并阶段，直接使用 seed + PRIME64_5 初始化。
-    hash = add64(seed, PRIME64_5)
-  }
-
-  // 总字节长度在尾部混合前加入，不能改成剩余字节数。
-  hash = add64(hash, BigInt(len))
-
-  // 尾部按 8、4、1 字节顺序消费；调换顺序会对同一字节流产生不同哈希。
-  while (offset + 8 <= len) {
-    const lane = readU64LE(bodyBytes, offset)
-    hash = (hash ^ round64(0n, lane)) & MASK_64
-    hash = add64(mul64(rotl64(hash, 27), PRIME64_1), PRIME64_4)
-    offset += 8
-  }
-
-  // 四字节尾块最多一次；等号保证恰好剩四字节时不会误走单字节分支。
-  if (offset + 4 <= len) {
-    hash = (hash ^ mul64(readU32LE(bodyBytes, offset), PRIME64_1)) & MASK_64
-    hash = add64(mul64(rotl64(hash, 23), PRIME64_2), PRIME64_3)
-    offset += 4
-  }
-
-  // 最后不足四字节逐字节混合，字节大于 127 也保持无符号值。
-  while (offset < len) {
-    hash = (hash ^ mul64(BigInt(bodyBytes[offset]), PRIME64_5)) & MASK_64
-    hash = mul64(rotl64(hash, 11), PRIME64_1)
-    offset += 1
-  }
-
-  // 所有尾字节消费后才雪崩，空输入也执行同一终结阶段。
-  return avalanche64(hash)
-}
-
-export function computeCch(bodyBytes: Uint8Array): string {
-  // 低 20 位对应五个小写 hex nibble；保留前导零以维持定长 CCH wire 格式。
-  const low20 = xxh64(bodyBytes) & 0xfffffn
-  return low20.toString(16).padStart(5, "0")
-}
-
-// 替换保持五位定长，不重新解析 JSON，避免字段顺序和序列化形式被二次改写。
-export function patchCch(bodyStr: string): string {
-  // 自有 billing 固定在首字段首块；MCP URL/token 和用户文字不参与定位，也不重新解析 JSON。
-  const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=${VERSION}.`
-  const suffix = "; cc_entrypoint=cli; cch="
-  const idx = prefix.length + 3 + suffix.length
-
-  if (!bodyStr.startsWith(prefix) || bodyStr.slice(prefix.length + 3, idx + 6) !== `${suffix}00000;`) {
-    console.warn("[claudecode] owned billing layout not found in body, skipping patch")
-    return bodyStr
-  }
-
-  const bodyBytes = new TextEncoder().encode(bodyStr)
-  const cch = computeCch(bodyBytes)
-
-  // offset 直接指向自有五位值，MCP 与其余字段的字节和字段顺序完全保留。
-  return bodyStr.slice(0, idx) + cch + bodyStr.slice(idx + 5)
 }
 
 // --- Fetch 拦截与重写包装器 ---
@@ -318,8 +180,8 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
     }
 
-    // 所有 metadata/thinking/tools 合并完毕后修补最终字节，继续复用源保留的 patchCch。
-    const finalBodyStr = patchCch(JSON.stringify(patchedBody))
+    // 合并 metadata/thinking/tools 后直接编码，固定零值不随本轮内容变化。
+    const finalBodyStr = JSON.stringify(patchedBody)
 
     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
     const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })

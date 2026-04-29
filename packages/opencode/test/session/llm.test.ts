@@ -1272,7 +1272,7 @@ describe("session.llm.stream", () => {
           model: resolved,
           agent,
           permission: [{ permission: "question", pattern: "*", action: "allow" }],
-          system: ["You are a helpful assistant."],
+          system: ["You are a helpful assistant.", "<env>request environment</env>"],
           messages: [{ role: "user", content: "Hello" }],
           tools: {
             question: tool({
@@ -1286,6 +1286,13 @@ describe("session.llm.stream", () => {
         const capture = yield* Effect.promise(() => request)
         const tools = capture.body.tools as Array<{ function?: { name?: string } }> | undefined
         expect(tools?.some((item) => item.function?.name === "question")).toBe(true)
+        // 真实 HTTP 捕获验证最终 system，而非单独调用 toolUsage 复制生产逻辑。
+        const messages = capture.body.messages as Array<{ role: string; content: string }>
+        const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n")
+        expect(system.indexOf("# Using your tools")).toBeGreaterThanOrEqual(0)
+        expect(system.indexOf("You are a helpful assistant.")).toBeGreaterThan(system.indexOf("# Using your tools"))
+        expect(system.indexOf("<env>")).toBeGreaterThan(system.indexOf("You are a helpful assistant."))
+        expect(system).not.toContain("To read files use the read tool")
       }),
     {
       config: () => ({

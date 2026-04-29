@@ -1,6 +1,5 @@
 import { Effect, Schema } from "effect"
 import { createHash, randomUUID } from "node:crypto"
-import { HttpTransport } from "../route/transport"
 import { Route } from "../route/client"
 import { Auth } from "../route/auth"
 import { Endpoint } from "../route/endpoint"
@@ -922,28 +921,14 @@ export const protocol = Protocol.make({
   },
 })
 
-// 复用现有 HTTP 执行/取消路径，只在最终 overlay 编码之后修补自有五位 CCH。
-const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
+// 固定零值不需要专用签名 transport；标准路径保留 overlay、鉴权和取消契约。
 export const route = Route.make({
   id: ADAPTER,
   provider: "anthropic",
   protocol,
   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
   auth: Auth.none,
-  transport: {
-    ...transport,
-    prepare: (input) => Effect.gen(function* () {
-      if (input.request.model.provider !== "claudecode") return yield* transport.prepare(input)
-      const parts = yield* HttpTransport.jsonRequestParts(input)
-      // Schema/return 保证自有 ASCII 首块；URL、MCP 和用户 UTF-8 内容不影响定位。
-      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
-      if (!parts.bodyText.startsWith(`${prefix}00000;`)) return yield* invalid("ClaudeCode billing layout changed before transport")
-      // xxHash64 零种子低 20 位只覆盖占位值，不重新解析或编码已合并的请求。
-      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
-      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
-      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
-    }),
-  },
+  framing: Framing.sse,
   // 请求头在 protocol route 的既有构造点产生，运输层仍拥有取消和 stream 生命周期。
   headers: ({ request }) => {
     // 使用已合并的配置/variant beta；仅在协议 owner 去重，不生成另一条 HTTP 覆盖路径。

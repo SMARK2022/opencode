@@ -61,9 +61,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const toolGuidance = SystemContextBuiltIns.toolUsage(Object.keys(tools))
   const system = [
     [
+      // 当前权限过滤后的工具指引先于静态提示和环境，两个运行时共用此 producer。
+      ...(toolGuidance ? [toolGuidance] : []),
       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
       ...input.system,
-      ...(toolGuidance ? [toolGuidance] : []),
       ...(input.user.system ? [input.user.system] : []),
     ]
       .filter((x) => x)

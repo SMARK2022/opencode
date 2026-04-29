@@ -889,9 +889,10 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
       yield* session.resume(sessionID)
 
+      // 工具指引前置不改变持久 baseline；生产者变化仍只追加到 chronological messages。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
       ])
       // echo/defect 的真实请求不广告 bash，完整 system 不能从宿主默认 shell 泄漏 Git 政策。
       expect(requests[0]?.system.map((part) => part.text).join("\n")).not.toContain("# Git repository state changes")
@@ -1059,8 +1060,8 @@ describe("SessionRunnerLLM", () => {
       response = fragmentFixture("text", "text-build", ["Done"]).completeEvents
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
-      // false 必须进入实际 provider turn；自定义 system 仍是第一块且没有族提示重复。
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Build agent instructions", "Initial context", expectedModelIdentity])
+      // false 仍进入实际 turn；自定义 agent 紧随工具指引，不被默认族提示重复或替换。
       expect(requests.at(-1)?.providerOptions?.openai?.parallelToolCalls).toBe(false)
       const db = (yield* Database.Service).db
       const row = yield* db.select({ created: SessionTable.time_created, slug: SessionTable.slug }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
@@ -1138,10 +1139,10 @@ describe("SessionRunnerLLM", () => {
         // 稳定 baseline 仍仅出现一次；族提示与真实模型身份都不进入持久 source。
         expect(parts.filter((part) => part === "Initial context")).toHaveLength(1)
         // 正文逐字比较独立资产，不能用生产selector同时生成期望来隐藏选错族。
-        expect(parts).toEqual([prompt, "Initial context", expectedToolGuidance,
+        expect(parts).toEqual([expectedToolGuidance, prompt, "Initial context",
           `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
-        expect(parts[2]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
+        expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
         expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
       }))
     }),
@@ -1169,7 +1170,7 @@ describe("SessionRunnerLLM", () => {
       response = fragmentFixture("text", "text-reviewer", ["Done"]).completeEvents
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Reviewer instructions", "Initial context", expectedModelIdentity])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
     }),
   )
@@ -1198,7 +1199,7 @@ describe("SessionRunnerLLM", () => {
       response = fragmentFixture("text", "text-selected", ["Done"]).completeEvents
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Reviewer instructions", "Initial context", expectedModelIdentity])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
     }),
   )
@@ -1225,8 +1226,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedModelIdentity],
       ])
       expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
     }),
@@ -1259,7 +1260,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedModelIdentity],
       ])
     }),
   )
@@ -1377,7 +1378,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
       expect(requests.map((request) => request.model)).toEqual([model])
       // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity]])
+      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity]])
     }),
   )
 
@@ -1427,9 +1428,9 @@ describe("SessionRunnerLLM", () => {
 
       // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
       ])
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
@@ -1473,9 +1474,9 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
       ])
     }),
   )
@@ -1511,8 +1512,8 @@ describe("SessionRunnerLLM", () => {
 
       // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Replacement context", expectedToolGuidance, expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Replacement context", expectedModelIdentity],
       ])
       yield* replaySessionProjection(sessionID)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
@@ -1928,7 +1929,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
       yield* session.resume(sessionID)
 
-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity])
+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity])
       expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
     }),
   )
@@ -2127,8 +2128,8 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
+        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
       ])
       expect(systemTexts(requests[1]!)).toContain("Replacement context")
     }),
