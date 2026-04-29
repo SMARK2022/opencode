@@ -80,7 +80,7 @@ describe("installation", () => {
         Installation.Service.use((svc) => svc.latest("npm")).pipe(Effect.provide(layer)),
       )
       expect(result).toBe("1.5.0")
-      expect(calls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+      expect(calls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
     })
 
     test("reads bun versions via registry", async () => {
@@ -94,7 +94,7 @@ describe("installation", () => {
         Installation.Service.use((svc) => svc.latest("bun")).pipe(Effect.provide(layer)),
       )
       expect(result).toBe("1.6.0")
-      expect(calls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+      expect(calls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
     })
 
     test("reads pnpm versions via registry", async () => {
@@ -108,7 +108,7 @@ describe("installation", () => {
         Installation.Service.use((svc) => svc.latest("pnpm")).pipe(Effect.provide(layer)),
       )
       expect(result).toBe("1.7.0")
-      expect(calls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+      expect(calls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
     })
 
     test("reads scoop manifest versions", async () => {

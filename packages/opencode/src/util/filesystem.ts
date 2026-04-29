@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, stat as statFile, writeFile } from "fs/promises"
 import { createWriteStream, existsSync, statSync } from "fs"
 import { realpathSync } from "fs"
-import { dirname, join, relative, resolve as pathResolve, win32 } from "path"
+import { dirname, join, relative, resolve as pathResolve, win32, isAbsolute } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "@opencode-ai/core/util/glob"
@@ -162,7 +162,11 @@ export function overlaps(a: string, b: string) {
 }
 
 export function contains(parent: string, child: string) {
-  return !relative(parent, child).startsWith("..")
+  const rel = relative(parent, child)
+  // On Windows, cross-drive path.relative returns the absolute child path.
+  // isAbsolute(rel) catches this case and correctly returns false.
+  if (isAbsolute(rel)) return false
+  return !rel.startsWith("..")
 }
 
 export async function findUp(
