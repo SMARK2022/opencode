@@ -282,7 +282,7 @@ const layer = Layer.effect(
             ? { parallelToolCalls: agent.info.request.body.parallelToolCalls ?? agent.info.request.body.parallel_tool_calls } : {}),
         } },
         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
-        system: [agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline, toolGuidance,
+        system: [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
           `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),

@@ -125,8 +125,8 @@ const layer = Layer.effect(
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-        return [
-          [
+        // 环境整体放到稳定指引之后，不改写 Session 起始 Git 快照或 shell 来源。
+        const environment = [
             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
             `Here is some useful information about the environment you are running in:`,
             `<env>`,
@@ -144,7 +144,8 @@ const layer = Layer.effect(
             // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
             ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
             `</env>`,
-          ].join("\n"),
+          ].join("\n")
+        return [
           references.length === 0
             ? undefined
             : [
@@ -165,6 +166,7 @@ const layer = Layer.effect(
               ].join("\n"),
           SystemContextBuiltIns.ACTION_GUIDANCE,
           SystemContextBuiltIns.OUTPUT_GUIDANCE,
+          environment,
         ].filter((part): part is string => part !== undefined)
       }),
 

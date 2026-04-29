@@ -103,6 +103,9 @@ describe("session.system", () => {
   it.instance("does not inject private Git fields into non-repository environments", () => Effect.gen(function* () {
     const prompt = yield* SystemPrompt.Service
     const text = (yield* prompt.environment({ providerID: "test", api: { id: "test" } } as Provider.Model)).join("\n")
+    // 检查真实 environment producer，稳定指引先于包含模型身份的环境尾块。
+    expect(text.indexOf("# Doing tasks")).toBeGreaterThanOrEqual(0)
+    expect(text.indexOf("You are powered by")).toBeGreaterThan(text.indexOf("# Doing tasks"))
     expect(text).toContain("Is directory a git repo: no")
     expect(text).not.toContain("Git user:")
     expect(text).not.toContain("Recent commits:")
