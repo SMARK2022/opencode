@@ -51,7 +51,6 @@ import { useKV } from "../../context/kv"
 import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
-import { useArgs } from "../../context/args"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
@@ -148,7 +147,6 @@ export function Prompt(props: PromptProps) {
 
   const leader = useLeaderActive()
   const local = useLocal()
-  const args = useArgs()
   const paths = useTuiPaths()
   const location = useLocation()
   const terminalEnvironment = useTuiTerminalEnvironment()
@@ -397,30 +395,6 @@ export function Prompt(props: PromptProps) {
     const interval = setInterval(() => { setElapsedSeconds(Math.floor((Date.now() - start) / 1000)) }, 1000)
     // 起点变化与组件卸载都由创建 interval 的 effect owner 清理旧 tick。
     onCleanup(() => clearInterval(interval))
-  })
-
-  // Initialize agent/model/variant from last user message when session changes
-  let syncedSessionID: string | undefined
-  createEffect(() => {
-    const sessionID = props.sessionID
-    const msg = lastUserMessage()
-
-    if (sessionID !== syncedSessionID) {
-      if (!sessionID || !msg) return
-
-      syncedSessionID = sessionID
-
-      // Only set agent if it's a primary agent (not a subagent)
-      const isPrimaryAgent = local.agent.list().some((x) => x.name === msg.agent)
-      if (msg.agent && isPrimaryAgent) {
-        // Keep command line --agent if specified.
-        if (!args.agent) local.agent.set(msg.agent)
-        if (msg.model) {
-          local.model.set(msg.model)
-          local.model.variant.set(msg.model.variant)
-        }
-      }
-    }
   })
 
   const promptCommands = createMemo(() =>
