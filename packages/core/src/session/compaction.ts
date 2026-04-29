@@ -20,6 +20,8 @@ const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
+// 保留上游工作状态结构；文件定位与错误修复单列，避免恢复时重读文件或重复失败尝试。
+// 原生 Core 摘要不经过 V1 agent，语言约束须放在共享模板；路径、符号和错误等字面值仍保持原样。
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Objective
@@ -42,19 +44,28 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 1. [immediate concrete action, or "(none)"]
 2. [next action if known, or "(none)"]
 
-## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
+## Files & Code
+- [path: relevant symbols/sections and why they matter, or "(none)"]
+
+## Errors & Fixes
+- [exact error/output and fix or current status, or "(none)"]
 </template>
 
 Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Respond in the same language as the conversation.
+- Preserve exact file paths, symbols, commands, error strings, URLs, identifiers, and line numbers when known.
+- Prefer facts over speculation; remove stale or resolved details to keep the snapshot accurate.
+- Files entries must include why they matter and relevant symbols.
+- Errors entries must include the fix or current status so the next model does not repeat dead ends.
+- No long file contents or large command outputs — reference them, do not reproduce them.
 - Do not mention the summary process or that context was compacted.`
+// 前次摘要会被丢弃；合并必须保留仍需继续的约束，并由较新对话纠正旧事实。
 const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
 
 When combining:
-- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished, resolved, or no longer needed.
 - The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
 - Add new progress, decisions, constraints, and context from the conversation.
 - Move completed work from "Active" to "Completed".
@@ -169,6 +180,7 @@ const select = (
   }
 }
 
+// V1 与 V2 共用此入口，首次快照和前次摘要合并都使用同一模板，避免维护第二套 builder。
 export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) => {
   const conversation = `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
   if (!input.previousSummary)

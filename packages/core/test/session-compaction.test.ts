@@ -12,7 +12,10 @@ test("compaction prompt preserves detailed work state and relevant files", () =>
   expect(prompt).toContain("## Work State\n### Completed")
   expect(prompt).toContain("### Active")
   expect(prompt).toContain("### Blocked")
-  expect(prompt).toContain("## Relevant Files")
+  // 验证真实共享提示词的两个恢复分区，避免只更新 agent 文本却遗漏 V2 使用的模板。
+  expect(prompt).toContain("## Files & Code")
+  expect(prompt).toContain("## Errors & Fixes")
+  expect(prompt).toContain("- Respond in the same language as the conversation.")
 })
 
 test("compaction prompt gives update instructions for a prior summary", () => {
@@ -28,6 +31,7 @@ test("compaction prompt gives update instructions for a prior summary", () => {
   )
   expect(prompt).toContain('Move completed work from "Active" to "Completed".')
   expect(prompt).toContain('Update "Objective" and "Next Move" to reflect the current work state.')
+  expect(prompt).toContain("- Respond in the same language as the conversation.")
 })
 
 test("compaction describes tool media without embedding base64", () => {
