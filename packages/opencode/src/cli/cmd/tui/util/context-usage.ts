@@ -1,7 +1,6 @@
 import fs from "fs/promises"
 import os from "os"
 import path from "path"
-import { fileURLToPath, pathToFileURL } from "url"
 import matter from "gray-matter"
 import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -10,6 +9,40 @@ import { toJsonSchema } from "@/util/effect-zod"
 import { Schema } from "effect"
 import { Shell } from "@/shell/shell"
 import { Skill } from "@/skill"
+import { Wildcard } from "@/util"
+import APPLY_PATCH_DESCRIPTION from "@/tool/apply_patch.txt"
+import BASH_DESCRIPTION from "@/tool/bash.txt"
+import CODESEARCH_DESCRIPTION from "@/tool/codesearch.txt"
+import EDIT_DESCRIPTION from "@/tool/edit.txt"
+import GLOB_DESCRIPTION from "@/tool/glob.txt"
+import GREP_DESCRIPTION from "@/tool/grep.txt"
+import LSP_DESCRIPTION from "@/tool/lsp.txt"
+import PLAN_EXIT_DESCRIPTION from "@/tool/plan-exit.txt"
+import QUESTION_DESCRIPTION from "@/tool/question.txt"
+import READ_DESCRIPTION from "@/tool/read.txt"
+import SKILL_DESCRIPTION from "@/tool/skill.txt"
+import TASK_DESCRIPTION from "@/tool/task.txt"
+import TODOWRITE_DESCRIPTION from "@/tool/todowrite.txt"
+import WEBFETCH_DESCRIPTION from "@/tool/webfetch.txt"
+import WEBSEARCH_DESCRIPTION from "@/tool/websearch.txt"
+import WRITE_DESCRIPTION from "@/tool/write.txt"
+import { ApplyPatchTool, Parameters as ApplyPatchParameters } from "@/tool/apply_patch"
+import { BashTool, Parameters as BashParameters } from "@/tool/bash"
+import { CodeSearchTool, Parameters as CodeSearchParameters } from "@/tool/codesearch"
+import { EditTool, Parameters as EditParameters } from "@/tool/edit"
+import { GlobTool, Parameters as GlobParameters } from "@/tool/glob"
+import { GrepTool, Parameters as GrepParameters } from "@/tool/grep"
+import { InvalidTool, Parameters as InvalidParameters } from "@/tool/invalid"
+import { LspTool, Parameters as LspParameters } from "@/tool/lsp"
+import { PlanExitTool, Parameters as PlanExitParameters } from "@/tool/plan"
+import { QuestionTool, Parameters as QuestionParameters } from "@/tool/question"
+import { ReadTool, Parameters as ReadParameters } from "@/tool/read"
+import { SkillTool, Parameters as SkillParameters } from "@/tool/skill"
+import { TaskTool, Parameters as TaskParameters } from "@/tool/task"
+import { TodoWriteTool, Parameters as TodoWriteParameters } from "@/tool/todo"
+import { WebFetchTool, Parameters as WebFetchParameters } from "@/tool/webfetch"
+import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websearch"
+import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
 import {
   provider as systemProviderPrompt,
   skillsSection as systemSkillsSection,
@@ -430,7 +463,55 @@ async function gatherSkills(input: ComputeContextDataInput) {
   return skills
 }
 
-const TOOL_DIR = fileURLToPath(new URL("../../../../tool/", import.meta.url))
+
+
+type PermissionRuleLike = {
+  permission: string
+  pattern: string
+  action: string
+}
+
+const EDIT_TOOL_NAMES = new Set<string>([EditTool.id, WriteTool.id, ApplyPatchTool.id])
+
+function evaluateRule(permission: string, pattern: string, ruleset: readonly PermissionRuleLike[] = []) {
+  return ruleset.findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern))
+}
+
+function disabledTools(names: string[], ruleset: readonly PermissionRuleLike[] = []) {
+  return new Set(
+    names.filter((name) => {
+      const permission = EDIT_TOOL_NAMES.has(name) ? EditTool.id : name
+      const rule = evaluateRule(permission, "*", ruleset)
+      return rule?.pattern === "*" && rule.action === "deny"
+    }),
+  )
+}
+
+type ToolDefinitionTemplate = {
+  name: string
+  description: string
+  parameters: Schema.Top
+}
+
+const STATIC_TOOL_DEFINITIONS: ToolDefinitionTemplate[] = [
+  { name: InvalidTool.id, description: "Do not use", parameters: InvalidParameters },
+  { name: QuestionTool.id, description: QUESTION_DESCRIPTION, parameters: QuestionParameters },
+  { name: BashTool.id, description: BASH_DESCRIPTION, parameters: BashParameters },
+  { name: ReadTool.id, description: READ_DESCRIPTION, parameters: ReadParameters },
+  { name: GlobTool.id, description: GLOB_DESCRIPTION, parameters: GlobParameters },
+  { name: GrepTool.id, description: GREP_DESCRIPTION, parameters: GrepParameters },
+  { name: EditTool.id, description: EDIT_DESCRIPTION, parameters: EditParameters },
+  { name: WriteTool.id, description: WRITE_DESCRIPTION, parameters: WriteParameters },
+  { name: TaskTool.id, description: TASK_DESCRIPTION, parameters: TaskParameters },
+  { name: WebFetchTool.id, description: WEBFETCH_DESCRIPTION, parameters: WebFetchParameters },
+  { name: TodoWriteTool.id, description: TODOWRITE_DESCRIPTION, parameters: TodoWriteParameters },
+  { name: WebSearchTool.id, description: WEBSEARCH_DESCRIPTION, parameters: WebSearchParameters },
+  { name: CodeSearchTool.id, description: CODESEARCH_DESCRIPTION, parameters: CodeSearchParameters },
+  { name: SkillTool.id, description: SKILL_DESCRIPTION, parameters: SkillParameters },
+  { name: ApplyPatchTool.id, description: APPLY_PATCH_DESCRIPTION, parameters: ApplyPatchParameters },
+  { name: LspTool.id, description: LSP_DESCRIPTION, parameters: LspParameters },
+  { name: PlanExitTool.id, description: PLAN_EXIT_DESCRIPTION, parameters: PlanExitParameters },
+]
 
 function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
   if (!text.includes("${")) return text
@@ -500,112 +581,84 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
     .replaceAll("${compressionGuidance}", "")
 }
 
-async function resolveToolDescriptions(paths: ContextUsagePaths) {
-  const result = [] as Array<{ name: string; text: string }>
-  let entries: string[]
-  try {
-    entries = await fs.readdir(TOOL_DIR)
-  } catch {
-    return result
-  }
+function baseToolDefinitions(input: ComputeContextDataInput, modelInfo: ReturnType<typeof currentModel>, lastUser: Message | undefined) {
+  if (input.toolDefinitions) return input.toolDefinitions
 
-  for (const entry of entries) {
-    if (!entry.endsWith(".ts")) continue
-    const baseName = entry.slice(0, -3)
-    const filepath = path.join(TOOL_DIR, entry)
+  const usePatch =
+    modelInfo.modelID.includes("gpt-") && !modelInfo.modelID.includes("oss") && !modelInfo.modelID.includes("gpt-4")
+  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
+  const disabled = agent ? disabledTools(STATIC_TOOL_DEFINITIONS.map((item) => item.name), agent.permission as PermissionRuleLike[]) : new Set<string>()
 
-    // Extract tool ID from source (single regex, very reliable)
-    const source = await readText(filepath)
-    const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
-    if (!id) continue
-
-    // Find the .txt import path
-    const txtImport = source.match(/import\s\w+\s+from\s+["']\.\/([^"']+\.txt)["']/)
-    const txtPath = txtImport ? path.join(TOOL_DIR, txtImport[1]) : path.join(TOOL_DIR, `${baseName}.txt`)
-
-    // Load .txt content via dynamic import (proper module loading)
-    let description = ""
-    try {
-      if (await exists(txtPath)) {
-        const txtModule = await import(pathToFileURL(txtPath).href)
-        description = txtModule.default ?? ""
+  return STATIC_TOOL_DEFINITIONS
+    .filter((item) => {
+      if (item.name === QuestionTool.id) {
+        return ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
       }
-    } catch {
-      description = await readText(txtPath)
-    }
-
-    // Resolve template variables in description
-    description = resolveTemplateVars(description, paths)
-
-    // Get parameters via dynamic import of the tool module
-    let parametersText = ""
-    try {
-      const mod = await import(pathToFileURL(filepath).href)
-      const parameters = (mod as Record<string, unknown>).Parameters
-      if (parameters) {
-        parametersText = JSON.stringify(toJsonSchema(parameters as Schema.Top))
+      if (item.name === LspTool.id) return Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL
+      if (item.name === PlanExitTool.id) return Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli"
+      if (item.name === CodeSearchTool.id || item.name === WebSearchTool.id) {
+        return modelInfo.providerID === "opencode" || Flag.OPENCODE_ENABLE_EXA
       }
-    } catch {
-      // Fall back to source extraction
-    }
-    if (!parametersText) {
-      const paramStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
-      const paramEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
-      parametersText = paramStart >= 0
-        ? source.slice(paramStart, paramEnd > paramStart ? paramEnd : undefined)
-        : ""
-    }
-
-    const text = [`Tool: ${id}`, description, parametersText].filter(Boolean).join("\n")
-    result.push({ name: id, text })
-  }
-  return result
+      if (item.name === ApplyPatchTool.id) return usePatch
+      if (item.name === EditTool.id || item.name === WriteTool.id) return !usePatch
+      return true
+    })
+    .filter((item) => !disabled.has(item.name))
+    .map((item) => ({
+      name: item.name,
+      text: [
+        `Tool: ${item.name}`,
+        resolveTemplateVars(item.description, input.paths),
+        stableJson(toJsonSchema(item.parameters)),
+      ].join("\n"),
+    }))
 }
 
-function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
-  const names = new Set<string>()
+function activeToolNames(definitions: Array<{ name: string; text: string }>, lastUser: Message | undefined) {
+  const disabled = new Set<string>()
   if (lastUser?.role === "user" && lastUser.tools) {
     for (const [name, enabled] of Object.entries(lastUser.tools)) {
-      if (enabled) names.add(name)
+      if (enabled) continue
+      disabled.add(name)
+      if (name === "edit") {
+        disabled.add(EditTool.id)
+        disabled.add(WriteTool.id)
+        disabled.add(ApplyPatchTool.id)
+      }
     }
   }
-  for (const msg of messages) {
-    for (const part of msg.parts) if (part.type === "tool") names.add(part.tool)
-  }
-  return names
+  return definitions.map((item) => item.name).filter((name) => !disabled.has(name))
 }
 
-function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>) {
-  if (name === "task") {
+function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>, lastUser: Message | undefined) {
+  if (name === TaskTool.id) {
+    const current = lastUser?.role === "user" ? input.agents?.find((agent) => agent.name === lastUser.agent) : undefined
     const description = (input.agents ?? [])
       .filter((agent) => agent.mode !== "primary")
+      .filter((agent) => !current || evaluateRule(TaskTool.id, agent.name, current.permission as PermissionRuleLike[])?.action !== "deny")
       .toSorted((a, b) => a.name.localeCompare(b.name))
       .map((agent) => `- ${agent.name}: ${agent.description ?? "This subagent should only be called manually by the user."}`)
       .join("\n")
     return ["Available agent types and the tools they have access to:", description].join("\n")
   }
-  if (name === "skill") return Skill.fmt(skillInfo(skills), { verbose: false })
+  if (name === SkillTool.id) return skills.length === 0 ? "No skills are currently available." : Skill.fmt(skillInfo(skills), { verbose: false })
   return ""
 }
 
 async function toolDefinitionTokens(
   input: ComputeContextDataInput,
-  messages: WithParts[],
   skills: Array<{ name: string; description: string; path: string }>,
   lastUser: Message | undefined,
+  modelInfo: ReturnType<typeof currentModel>,
 ) {
-  const scanned = input.toolDefinitions ?? await resolveToolDescriptions(input.paths)
-  const active = activeToolNames(messages, lastUser)
-  if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
-    for (const item of scanned) active.add(item.name)
-  }
-  const byName = new Map(scanned.map((item) => [item.name, item.text]))
-  const details = [] as Array<{ name: string; tokens: number }>
-  for (const name of active) {
-    const text = [byName.get(name), dynamicToolText(name, input, skills)].filter(Boolean).join("\n")
-    details.push({ name, tokens: estimate(text || name) })
-  }
-  return details.toSorted((a, b) => a.name.localeCompare(b.name))
+  const definitions = baseToolDefinitions(input, modelInfo, lastUser)
+  const byName = new Map(definitions.map((item) => [item.name, item.text]))
+  return activeToolNames(definitions, lastUser)
+    .map((name) => ({
+      name,
+      tokens: estimate([byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n")),
+    }))
+    .toSorted((a, b) => a.name.localeCompare(b.name))
 }
 
 function baseSystemPrompt(
@@ -781,7 +834,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     path: skill.path,
     tokens: estimate(systemSkillsSection(skillInfo([skill]))),
   }))
-  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser)
+  const toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo)
   const systemText = [
     baseSystemPrompt(input, lastUser, modelInfo.model),
     environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
@@ -803,7 +856,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     { name: "System prompt", tokens: envTokens, color: "primary" },
     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
     { name: "Skills", tokens: skillTokens, color: "success" },
-    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
+    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
     { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },

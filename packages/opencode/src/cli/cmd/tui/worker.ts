@@ -81,6 +81,11 @@ if (process.platform !== "win32") {
   })
 }
 
+// Ensure lock is cleaned up even when the daemon crashes or receives a fatal
+// signal.  Placed after gracefulShutdown is defined so the closure is valid.
+process.prependListener("unhandledRejection", () => void gracefulShutdown())
+process.prependListener("uncaughtException", () => void gracefulShutdown())
+
 // ── Idle timeout ───────────────────────────────────────────────────────────
 // Exit 30 s after the last SSE client disconnects.  The timer only starts
 // after the first connection, so a slow-starting TUI does not race the daemon.

@@ -82,7 +82,7 @@ export function alive(pid: number) {
 export async function ping(port: number) {
   try {
     const resp = await fetch(`http://127.0.0.1:${port}/global/health`, {
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(500),
     })
     return resp.ok
   } catch {

@@ -119,7 +119,7 @@ describe("context usage", () => {
     expect(data.details.messages.assistantText).toBe(3)
     expect(data.details.messages.toolResults).toBe(4)
     expect(data.details.instructions[0]?.tokens).toBe(2)
-    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBeGreaterThan(4)
+    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
     expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
     expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(6)
     expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(7)
@@ -195,6 +195,71 @@ describe("context usage", () => {
 
     expect(data.details.toolDefs.map((item) => item.name)).toEqual(["bash", "read"])
     expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(0)
+  })
+
+  test("does not collapse tool definitions to historical tool calls", async () => {
+    const messages = [user("1"), assistant("2", "1")]
+    const parts: Record<string, Part[]> = {
+      "1": [text("1", "hello")],
+      "2": [
+        {
+          id: "2-tool",
+          sessionID: "s",
+          messageID: "2",
+          type: "tool",
+          callID: "call",
+          tool: "task",
+          state: {
+            status: "completed",
+            input: { description: "inspect", prompt: "inspect", subagent_type: "general" },
+            output: "done",
+            title: "inspect",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        } as Part,
+      ],
+    }
+
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+    })
+
+    expect(data.details.toolDefs.length).toBeGreaterThan(10)
+    expect(data.details.toolDefs.find((item) => item.name === "task")?.tokens).toBeGreaterThan(20)
+    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(1000)
+  })
+
+  test("explicit false tools disable definitions without turning true tools into a subset", async () => {
+    const data = await computeContextData({
+      messages: [user("1", { read: true, bash: false }), assistant("2", "1")],
+      parts: {
+        "1": [text("1", "hello")],
+        "2": [text("2", "world")],
+      },
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [
+        { name: "bash", text: "bash description" },
+        { name: "grep", text: "grep description" },
+        { name: "read", text: "read description" },
+      ],
+    })
+
+    expect(data.details.toolDefs.map((item) => item.name)).toEqual(["grep", "read"])
   })
 
   test("context usage detail lines are bounded so they do not push into the grid", async () => {

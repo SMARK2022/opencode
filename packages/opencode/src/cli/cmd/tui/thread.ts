@@ -129,8 +129,8 @@ export const TuiThreadCommand = cmd({
         // spawn a daemon at the same time (e.g. opening 4 tabs simultaneously).
         electionLease = await Flock.acquire("opencode.server", {
           dir: path.join(Global.Path.state, "locks"),
-          timeoutMs: 30_000,
-          staleMs: 10_000,
+          timeoutMs: 10_000,
+          staleMs: 5_000,
         })
         // Re-check under lock: another process may have won the race between
         // the fast-check and the lock acquisition.
@@ -179,6 +179,10 @@ export const TuiThreadCommand = cmd({
           )
           proc.unref()
 
+          // The daemon cannot possibly be ready within 1 s — skip the first
+          // poll iterations to avoid pointless lock reads.
+          await Bun.sleep(1000)
+
           // Wait for the daemon to write the lock and for its server to respond.
           const deadline = Date.now() + 30_000
           while (Date.now() < deadline) {
@@ -194,7 +198,7 @@ export const TuiThreadCommand = cmd({
                 break
               }
             }
-            await Bun.sleep(100)
+            await Bun.sleep(200)
           }
 
           // Release election lease: daemon is live (or we are about to error).
