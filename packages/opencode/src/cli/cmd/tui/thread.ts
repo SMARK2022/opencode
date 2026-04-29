@@ -43,6 +43,23 @@ async function input(value?: string) {
   return piped + "\n" + value
 }
 
+function proxyEnv() {
+  const http = process.env.HTTP_PROXY ?? process.env.http_proxy
+  const https = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? http
+  const all = process.env.ALL_PROXY ?? process.env.all_proxy
+  const no = process.env.NO_PROXY ?? process.env.no_proxy
+
+  return {
+    ...(http ? { HTTP_PROXY: http, http_proxy: http } : {}),
+    ...(https ? { HTTPS_PROXY: https, https_proxy: https } : {}),
+    ...(all ? { ALL_PROXY: all, all_proxy: all } : {}),
+    ...(no ? { NO_PROXY: no, no_proxy: no } : {}),
+    ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
+    ...(process.env.SSL_CERT_FILE ? { SSL_CERT_FILE: process.env.SSL_CERT_FILE } : {}),
+    ...(process.env.SSL_CERT_DIR ? { SSL_CERT_DIR: process.env.SSL_CERT_DIR } : {}),
+  }
+}
+
 export const TuiThreadCommand = cmd({
   command: "$0 [project]",
   describe: "start opencode tui",
@@ -109,10 +126,13 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
-      const env = sanitizedProcessEnv({
-        [OPENCODE_PROCESS_ROLE]: "worker",
-        [OPENCODE_RUN_ID]: ensureRunID(),
-      })
+      const env = {
+        ...sanitizedProcessEnv({
+          [OPENCODE_PROCESS_ROLE]: "worker",
+          [OPENCODE_RUN_ID]: ensureRunID(),
+        }),
+        ...proxyEnv(),
+      }
 
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()
