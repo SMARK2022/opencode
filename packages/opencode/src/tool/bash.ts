@@ -339,9 +339,23 @@ const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan) 
   })
 })
 
+function psUtf8(command: string) {
+  return [
+    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    "$OutputEncoding = [Console]::OutputEncoding",
+    command,
+    "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+  ].join("\n")
+}
+
+function psEncoded(command: string) {
+  return Buffer.from(psUtf8(command), "utf16le").toString("base64")
+}
+
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32" && Shell.ps(shell)) {
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
       cwd,
       env,
       stdin: "ignore",
@@ -545,13 +559,12 @@ export const BashTool = Tool.define(
         { env: {} },
       )
 
-      // 兼容性修改：探测 Windows 平台并静默挂载 UTF-8 强控变量以解决管道读取乱码
+      // On Windows, ensure Python programs use UTF-8 for stdout/stderr.
+      // PowerShell Console encoding is handled at spawn time via -EncodedCommand wrapper.
       const isWin = process.platform === "win32"
       const utf8EnvOverrides = isWin ? {
         PYTHONIOENCODING: "utf-8",
         PYTHONUTF8: "1",
-        JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
-        RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim()
       } : {}
 
       return {

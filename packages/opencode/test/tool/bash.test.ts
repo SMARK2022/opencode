@@ -184,6 +184,38 @@ describe("tool.bash", () => {
   })
 })
 
+describe("tool.bash windows encoding", () => {
+  if (process.platform !== "win32") return
+
+  for (const item of ps) {
+    test(
+      `PowerShell outputs Chinese without replacement characters [${item.label}]`,
+      withShell(item, async () => {
+        await using tmp = await tmpdir()
+        await Instance.provide({
+          directory: tmp.path,
+          fn: async () => {
+            const bash = await initBash()
+            const result = await Effect.runPromise(
+              bash.execute(
+                {
+                  command: `Write-Output "桌面 大学文档 毕业设计 压缩感知"`,
+                  description: "Echo Chinese text",
+                },
+                ctx,
+              ),
+            )
+            expect(result.output).toContain("桌面")
+            expect(result.output).toContain("大学文档")
+            expect(result.output).toContain("毕业设计")
+            expect(result.output).not.toContain("\uFFFD")
+          },
+        })
+      }),
+    )
+  }
+})
+
 describe("tool.bash permissions", () => {
   each("asks for bash permission with correct pattern", async () => {
     await using tmp = await tmpdir()
