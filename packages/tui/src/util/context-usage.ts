@@ -2,11 +2,13 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import matter from "gray-matter"
-import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
+import type { Agent, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { estimate } from "@opencode-ai/core/util/token"
 import { ConfigProvider, Effect } from "effect"
 import { boolean, withDefault } from "effect/Config"
+// 过滤共享 Schema 的纯权限语法，避免新增 TUI 到 Core 的运行时入口。
+import { Wildcard } from "@opencode-ai/schema/wildcard"
 import { estimateDataUrlInputTokens } from "./token-estimate"
 import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
 import GIT_SAFETY from "../../../core/src/git-safety.txt"
@@ -23,10 +25,10 @@ function truthy(key: string) {
 }
 
 // RuntimeFlags 从环境 ConfigProvider 取值，不读取 SDK config.experimental；专用 false 覆盖实验伞。
-function enabledByExperimental(key: string) {
+function enabledByExperimental(key: string, inheritExperimental = true) {
   const provider = ConfigProvider.fromEnv()
   // withDefault 只处理缺失值；实际 Config.boolean 保留 yes/on/1 等编码及非法值失败，不自行复制真值表。
-  const experimental = Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
+  const experimental = inheritExperimental && Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
   return Effect.runSync(boolean(key).pipe(withDefault(experimental)).parse(provider))
 }
 
@@ -285,6 +287,8 @@ export interface ComputeContextDataInput {
   providers: Provider[]
   config?: Config
   agents?: Agent[]
+  // 会话权限由 prompt 持久化；下一条用户消息省略 tools 时仍决定工具广告。
+  session?: Session
   lastUserModel?: { providerID: string; modelID: string }
   vcs?: VcsInfo
   paths: ContextUsagePaths
@@ -744,57 +748,127 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
     .replaceAll("{{year}}", String(new Date().getFullYear()))
 }
 
-// 用户 tools 映射与历史调用是两个既有输入来源，缺省映射不能被解释成已明确禁用所有工具。
-function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
-  const names = new Set<string>()
+
+
+type PermissionRuleLike = Agent["permission"][number]
+const EDIT_TOOL_NAMES = new Set(["edit", "write", "apply_patch"])
+// 后写规则覆盖早期默认规则，复用 core 的 ? 与 Windows 路径归一语义。
+function evaluateRule(permission: string, pattern: string, ruleset: readonly PermissionRuleLike[] = []) {
+  for (let i = ruleset.length - 1; i >= 0; i--) {
+    const rule = ruleset[i]
+    if (Wildcard.match(permission, rule.permission, process.platform === "win32") && Wildcard.match(pattern, rule.pattern, process.platform === "win32")) return rule
+  }
+  return undefined
+}
+// disabled 与 runtime 一样先取最后匹配 permission 的规则，再判断是否全资源 deny。
+function disabledTools(names: string[], ruleset: readonly PermissionRuleLike[] = []) {
+  return new Set(
+    names.filter((name) => {
+      const permission = EDIT_TOOL_NAMES.has(name) ? "edit" : ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"].includes(name) ? "read" : name
+      const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission, process.platform === "win32"))
+      return rule?.pattern === "*" && rule.action === "deny"
+    }),
+  )
+}
+// catalog 提供序列化定义，当前模型、开关及权限过滤决定集合，历史调用不覆写这些输入。
+function baseToolDefinitions(
+  input: ComputeContextDataInput,
+  modelInfo: ReturnType<typeof currentModel>,
+) {
+  // 注入 definitions 是完整测试覆盖，包括空数组；不能再合并真实 catalog 扩大这个集合。
+  if (input.toolDefinitions) return input.toolDefinitions
+  // registry 收到解析后的 API ID；显示别名保留给面板，缺失模型不能猜测它的后端身份。
+  const apiID = modelInfo.model?.api.id
+  const usePatch = apiID !== undefined && apiID.includes("gpt-") && !apiID.includes("oss") && !apiID.includes("gpt-4")
+  const resolved = resolveToolDescriptions(input.paths)
+  // EXA 合并实验伞，Parallel/question 缺省 false；先解析全部键，不能用 provider/client 旁路掩盖非法值。
+  const flags = {
+    exa: ["OPENCODE_EXPERIMENTAL", "OPENCODE_ENABLE_EXA", "OPENCODE_EXPERIMENTAL_EXA"].map((key) => enabledByExperimental(key, false)).some(Boolean),
+    parallel: ["OPENCODE_ENABLE_PARALLEL", "OPENCODE_EXPERIMENTAL_PARALLEL"].map((key) => enabledByExperimental(key, false)).some(Boolean),
+    question: enabledByExperimental("OPENCODE_ENABLE_QUESTION_TOOL", false),
+  }
+  return resolved
+    .filter((item) => {
+      if (item.name === "question") {
+        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
+        return ["app", "cli", "desktop"].includes(client) || flags.question
+      }
+      // 专用关闭值优先于实验伞；只有后端会提供 LSP 时才估算其定义 token。
+      if (item.name === "lsp") return enabledByExperimental("OPENCODE_EXPERIMENTAL_LSP_TOOL")
+      // plan_exit 还受 client=cli 限制，桌面客户端即使启用实验 plan 也不能看到不可执行工具。
+      if (item.name === "plan_exit") {
+        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
+        return enabledByExperimental("OPENCODE_EXPERIMENTAL_PLAN_MODE") && client === "cli"
+      }
+      // 与实际 registry 对齐：Go provider 与 Parallel 开关同样广告 websearch。
+      if (item.name === "websearch") return ["opencode", "opencode-go"].includes(modelInfo.providerID) || flags.exa || flags.parallel
+      if (usePatch) return item.name !== "edit" && item.name !== "write"
+      return item.name !== "apply_patch"
+    })
+}
+
+// 活跃集合以定义列表为基线，避免历史 tool parts 折叠
+function activeToolNames(definitions: Array<{ name: string }>, lastUser: Message | undefined) {
+  const names = new Set(definitions.map((item) => item.name))
   if (lastUser?.role === "user" && lastUser.tools) {
     for (const [name, enabled] of Object.entries(lastUser.tools)) {
-      if (enabled) names.add(name)
+      if (enabled === false) {
+        names.delete(name)
+        // 旧消息的 edit:false 是编辑能力禁令，模型切到 apply_patch 也不能绕过这份显式禁用。
+        if (name === "edit") {
+          names.delete("write")
+          names.delete("apply_patch")
+        }
+      }
     }
-  }
-  for (const msg of messages) {
-    for (const part of msg.parts) if (part.type === "tool") names.add(part.tool)
   }
   return names
 }
 
-// primary agent 不作为 task 子代理广告；task/skill 追加的是动态能力文本，不是再次执行工具。
-function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>) {
+// 定义文本由 catalog 序列化，调用参数已归消息分类，不再加入工具定义样本。
+function toolDefinitionTokens(
+  input: ComputeContextDataInput,
+  skills: Array<{ name: string; description: string; path: string }>,
+  lastUser: Message | undefined,
+  modelInfo: ReturnType<typeof currentModel>,
+) {
+  // catalog 渲染模板，动态描述保留原始文本并使用同一请求模型身份。
+  const scanned = baseToolDefinitions(input, modelInfo)
+  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
+  // Session 规则排在 agent 后；同一过滤也作用于完整注入定义，不能绕过持久 deny。
+  const disabled = disabledTools(scanned.map((item) => item.name), [...(agent?.permission ?? []), ...(input.session?.permission ?? [])])
+  // 可用定义先过滤权限与用户禁用项，历史调用不能重新广告已禁用工具。
+  const active = activeToolNames(scanned.filter((item) => !disabled.has(item.name)), lastUser)
+  const byName = new Map(scanned.map((item) => [item.name, item.text]))
+  const details: Array<{ name: string; tokens: number }> = []
+  for (const name of active) {
+    const text = [byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n")
+    details.push({ name, tokens: estimate(text || name) })
+  }
+  return details.toSorted((a, b) => a.name.localeCompare(b.name))
+}
+
+function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>, lastUser?: Message) {
   if (name === "task") {
+    // task 子代理名称按同一 Wildcard 规则过滤；revie? deny 必须影响动态描述而不仅是工具集合。
+    const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
+    const rules = agent?.permission ?? []
     const description = (input.agents ?? [])
-      .filter((agent) => agent.mode !== "primary")
+      .filter((item) => item.mode !== "primary")
+      .filter((item) => {
+        if (!agent) return true
+        const rule = evaluateRule("task", item.name, rules)
+        return !(rule && rule.action === "deny")
+      })
       .toSorted((a, b) => a.name.localeCompare(b.name))
-      .map((agent) => `- ${agent.name}: ${agent.description ?? "This subagent should only be called manually by the user."}`)
-      .join("\n")
-    return ["Available agent types and the tools they have access to:", description].join("\n")
+      .map((item) => "- " + item.name + ": " + (item.description ?? "This subagent should only be called manually by the user."))
+      .join(String.fromCharCode(10))
+    return ["Available agent types and the tools they have access to:", description].join(String.fromCharCode(10))
   }
   if (name === "skill") return skillFmt(skillInfo(skills), { verbose: false })
   return ""
 }
 
-// 定义只计算 catalog 与动态描述；调用输入已经归类为消息，不能再次计入定义。
-function toolDefinitionTokens(
-  input: ComputeContextDataInput,
-  messages: WithParts[],
-  skills: Array<{ name: string; description: string; path: string }>,
-  lastUser: Message | undefined,
-) {
-  const scanned = input.toolDefinitions ?? resolveToolDescriptions(input.paths)
-  const active = activeToolNames(messages, lastUser)
-  // 只在 tools 缺省时补全集，显式空映射没有可用能力，不能因 active 为空再次恢复所有定义。
-  if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
-    for (const item of scanned) active.add(item.name)
-  }
-  const byName = new Map(scanned.map((item) => [item.name, item.text]))
-  const details = [] as Array<{ name: string; tokens: number }>
-  for (const name of active) {
-    const text = [byName.get(name), dynamicToolText(name, input, skills)]
-      .filter(Boolean)
-      .join("\n")
-    details.push({ name, tokens: estimate(text || name) })
-  }
-  return details.toSorted((a, b) => a.name.localeCompare(b.name))
-}
 
 // agent 自定义 prompt 完整替换模型模板，不能同时拼入两份族模板把系统开销翻倍。
 function baseSystemPrompt(
@@ -997,7 +1071,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     path: skill.path,
     tokens: estimate(skillsSection(skillInfo([skill]))),
   }))
-  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser)
+  const toolDefs = toolDefinitionTokens(input, skills, lastUser, modelInfo)
   // 用户 system 是同一请求的附加系统载荷；存在自定义 agent prompt 也不能省略该字段。
   const systemText = [
     baseSystemPrompt(input, lastUser, modelInfo.model),
@@ -1025,7 +1099,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     { name: "System prompt", tokens: envTokens, color: "primary" },
     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
     { name: "Skills", tokens: skillTokens, color: "success" },
-    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
+    // 工具定义与输入消息分别用 secondary/warning，保留两种分类的视觉辨识。
+    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
     { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
     // free 非零也不能进入 used；isDeferred 只影响网格可见性门槛，不改变百分比分子。

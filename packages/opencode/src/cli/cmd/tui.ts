@@ -89,6 +89,7 @@ export type DiscoverDaemonDeps = {
 }
 
 // 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
+// 只缩短 contender 等待和探测频率，完整启动 deadline 仍由独立 waitMs 约束。
 const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
   read: ServerLock.read,
   alive: ServerLock.alive,
@@ -107,11 +108,17 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
     return AppRuntime.runPromise(resolveNetworkOptions(args))
   },
   // 选举等待只限制 contender，不缩短成功持锁者启动健康服务的完整预算。
-  electionTimeoutMs: 30_000,
+  // acquire 超时必须显式失败，不能在未获得租约时私自拉起另一个同身份服务。
+
+  electionTimeoutMs: 10_000,
   // staleMs 交给已有 Flock heartbeat 维护，不能凭 HTTP 超时自行打破活租约。
-  electionStaleMs: 10_000,
+  // Flock 持有期间仍按 staleMs 更新 heartbeat，长启动不等于 lease 已失效。
+
+  electionStaleMs: 5_000,
   // 启动轮询等待 owner 写锁，不能把尚未发布端口的进程当作可复用服务。
-  pollMs: 100,
+  // 增大间隔减少未发布 owner 的无效读取；就绪验证仍检查同一子 PID 和受保护 health。
+
+  pollMs: 200,
   waitMs: 30_000,
 })
 
@@ -190,6 +197,9 @@ export async function discoverOrSpawnDaemon(
           proc.unref()
           fwdPid = proc.pid
 
+          // 等待放在 proc 与 lease 的 finally 内，sleep 拒绝也不能泄漏选举所有权。
+          // 完整启动预算从 sleep 后开始，不能用避让早期探测的延迟吃掉健康等待时间。
+          await deps.sleep(1000)
           const deadline = Date.now() + deps.waitMs
           // 端口即使被其他健康服务占用，也不能替代本次子进程 PID 的发现锁。
           while (Date.now() < deadline) {

@@ -50,6 +50,7 @@
   "dependencies": {
     "@opencode-ai/core": "workspace:*",
     "@opencode-ai/plugin": "workspace:*",
+    "@opencode-ai/schema": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",
     "@opencode-ai/ui": "workspace:*",
     "@opentui/core": "catalog:",

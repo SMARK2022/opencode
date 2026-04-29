@@ -7,8 +7,8 @@ import { createTestKeymap, type TestKeymapEvent, type TestKeymapTarget } from "@
 import { estimate } from "@opencode-ai/core/util/token"
 import { TuiKeybind } from "../src/config/keybind"
 import { tmpdir } from "./fixture/fixture"
-import type { Agent, Message, Part, Provider, TextPart } from "@opencode-ai/sdk/v2"
-import { computeContextData, filterCompactedMessages, resolveToolDescriptions } from "../src/util/context-usage"
+import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
+import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
 import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
 import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
 import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
@@ -94,9 +94,13 @@ function text(messageID: string, value: string): TextPart {
 
 describe("context usage", () => {
   test("subscribes to in-place text, pending input, and confirmed token changes", async () => {
+    const session: Session = {
+      id: "ses_context", slug: "context", projectID: "p", directory: ".", title: "Session", version: "1",
+      time: { created: 0, updated: 0 }, permission: [],
+    }
     const mounted = createRoot((dispose) => {
       const [store, setStore] = createStore({
-        messages: [user("1"), assistant("2", "1"), assistant("3", "1")],
+        messages: [user("1"), assistant("2", "1"), assistant("3", "1")].map((message) => ({ ...message, sessionID: session.id })),
         parts: {
           "1": [text("1", "abcd")],
           "2": [{ id: "raw", sessionID: "s", messageID: "2", type: "tool" as const, callID: "call", tool: "bash",
@@ -104,7 +108,8 @@ describe("context usage", () => {
           "3": [{ id: "sf", sessionID: "s", messageID: "3", type: "step-finish" as const, reason: "stop", cost: 0,
             tokens: { input: 10, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }],
         },
-        providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
+        session,
+        providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [{ name: "read", text: "read" }],
       })
       // 挂载生产 helper 的唯一 resource，不能在测试中复制 JSON 快照或计算公式。
       const [data] = contextUsageResource(() => store)
@@ -120,6 +125,11 @@ describe("context usage", () => {
     })
     try {
       const initial = await mounted.next()
+      expect(initial.details.toolDefs.map((item) => item.name)).toEqual(["read"])
+      // 原位持久权限更新保持 Session/消息身份不变，必须由现有 tracked snapshot 捕获。
+      const permissionChanged = mounted.next()
+      mounted.setStore("session", "permission", [{ permission: "read", pattern: "*", action: "deny" }])
+      expect((await permissionChanged).details.toolDefs).toEqual([])
       // 数组身份与长度不变，只替换 text 字段，必须被 tracked 快照捕获。
       const textChanged = mounted.next()
       mounted.setStore("parts", "1", 0, "text", "abcdefghijkl")
@@ -332,7 +342,7 @@ describe("context usage", () => {
     expect(data.details.messages.toolResults).toBe(4)
     // instructionFiles 是完整覆盖，真实 AGENTS.md 不应偷偷叠加进注入的 2 token。
     expect(data.details.instructions[0]?.tokens).toBe(2)
-    // 注入定义恰为 16 字符；历史调用输入不能放大这 4 个定义 token。
+    // 固定 16 字符定义只计 4 token，权限过滤和历史调用不能扩大注入定义的载荷。
     expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
     // 自定义 schema 不关闭环境/系统载荷，不能通过减少分类项让整体占用看似更低。
     expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
@@ -462,7 +472,166 @@ describe("context usage", () => {
     expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(0)
   })
 
-  // 超长 Windows 路径保留文件尾部，验证中间截断而非简单 slice 掩盖真正的文件身份。
+
+  test("does not collapse tool definitions to historical tool calls", async () => {
+    const messages = [user("1"), assistant("2", "1")]
+    const parts: Record<string, Part[]> = {
+      "1": [text("1", "hello")],
+      "2": [
+        {
+          id: "2-tool",
+          sessionID: "s",
+          messageID: "2",
+          type: "tool",
+          callID: "call",
+          tool: "task",
+          state: {
+            status: "completed",
+            input: { description: "inspect", prompt: "inspect", subagent_type: "general" },
+            output: "done",
+            title: "inspect",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        },
+      ],
+    }
+
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+    })
+
+    // 历史只有 task 仍应广告全部可用定义；只从已调用工具反推集合会低估后续请求的 prompt。
+    expect(data.details.toolDefs.length).toBeGreaterThan(10)
+    expect(data.details.toolDefs.find((item) => item.name === "task")?.tokens).toBeGreaterThan(20)
+    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(1000)
+  })
+
+  test("explicit false tools disable definitions without turning true tools into a subset", async () => {
+    const input: ComputeContextDataInput = {
+      messages: [user("1", { read: true, bash: false }), assistant("2", "1")],
+      parts: {
+        "1": [text("1", "hello")],
+        "2": [text("2", "world")],
+      },
+      providers: [provider],
+      config: {},
+      agents: [{ name: "general", mode: "primary", options: {}, permission: [{ permission: "bash", pattern: "*", action: "allow" }] }],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [
+        { name: "bash", text: "bash description" },
+        { name: "grep", text: "grep description" },
+        { name: "read", text: "read description" },
+      ],
+    }
+    const data = await computeContextData(input)
+
+    // false 是撤销广告，true 不是 allow-list；未提及的 grep 必须继续留在定义集合。
+    // 注入 fixture 也经过消息级禁用过滤，避免测试 seam 绕过真实 false-tools 语义。
+    expect(data.details.toolDefs.map((item) => item.name)).toEqual(["grep", "read"])
+    const session: Session = { id: "ses_context", slug: "context", projectID: "p", directory: ".", title: "Session", version: "1",
+      time: { created: 0, updated: 0 }, permission: [{ permission: "bash", pattern: "*", action: "deny" }] }
+    const messages = [user("1", { read: true, bash: false }), assistant("2", "1"), user("3"), assistant("4", "3")].map((message) => ({ ...message, sessionID: session.id }))
+    // 第二条 prompt 没有 tools；runtime 持久化的 deny 仍必须撤销 bash 广告。
+    expect((await computeContextData({ ...input, messages, session })).details.toolDefs.map((item) => item.name)).toEqual(["grep", "read"])
+    input.agents = [{ name: "general", mode: "primary", options: {}, permission: [{ permission: "bash", pattern: "*", action: "deny" }] }]
+    session.permission = [{ permission: "bash", pattern: "*", action: "allow" }]
+    expect((await computeContextData({ ...input, messages, session })).details.toolDefs.map((item) => item.name)).toEqual(["bash", "grep", "read"])
+    // 最后匹配 permission 的定向规则保留工具；不能跳过它回看更早的全资源 deny。
+    session.permission = [{ permission: "bash", pattern: "*", action: "deny" }, { permission: "bash", pattern: "private/*", action: "allow" }]
+    expect((await computeContextData({ ...input, messages, session })).details.toolDefs.map((item) => item.name)).toEqual(["bash", "grep", "read"])
+  })
+
+  test("selects editing tools by resolved API ID in both alias directions", async () => {
+    for (const [modelID, apiID, patch] of [["coding", "gpt-5-codex", true], ["gpt-5-codex", "claude-sonnet", false]] as const) {
+      const message = user("1")
+      if (message.role === "user") message.model = { providerID: "test", modelID }
+      const aliased: Provider = { ...provider, models: { [modelID]: { ...provider.models.model,
+        id: modelID, api: { ...provider.models.model.api, id: apiID } } } }
+      const data = await computeContextData({ messages: [message], parts: {}, providers: [aliased],
+        paths: { cwd: process.cwd() }, instructionFiles: [], skills: [] })
+      // 显示键不变；真正发送给 registry 的 API ID 决定 patch/edit/write 分支。
+      expect(data.model).toBe(`test/${modelID}`)
+      expect(data.details.toolDefs.some((item) => item.name === "apply_patch")).toBe(patch)
+      expect(data.details.toolDefs.some((item) => item.name === "edit")).toBe(!patch)
+      expect(data.details.toolDefs.some((item) => item.name === "write")).toBe(!patch)
+    }
+  })
+
+  test("matches task wildcard permissions and websearch provider flags", async () => {
+    const keys = ["OPENCODE_EXPERIMENTAL", "OPENCODE_ENABLE_EXA", "OPENCODE_EXPERIMENTAL_EXA",
+      "OPENCODE_ENABLE_PARALLEL", "OPENCODE_EXPERIMENTAL_PARALLEL", "OPENCODE_ENABLE_QUESTION_TOOL", "OPENCODE_CLIENT"]
+    const previous = keys.map((key) => process.env[key])
+    try {
+      // 使用真实 catalog 而非注入定义，覆盖 provider 与两种 Parallel 开关。
+      for (const key of keys) process.env[key] = "false"
+      process.env.OPENCODE_CLIENT = "api"
+      const primary: Agent = { name: "general", mode: "primary", options: {}, permission: [
+        { permission: process.platform === "win32" ? "TaSk" : "task", pattern: "revie?", action: "deny" },
+        { permission: "task", pattern: "team\\revie?", action: "deny" },
+      ] }
+      async function compute(providerID: string, agents: Agent[]) {
+        const message = user("1")
+        if (message.role === "user") message.model = { providerID, modelID: "model" }
+        return computeContextData({ messages: [message], parts: {}, providers: [provider], config: {},
+          agents, paths: { cwd: process.cwd() }, columns: 100, instructionFiles: [], skills: [] })
+      }
+      const base = await compute("test", [primary])
+      const denied = await compute("test", [primary,
+        { name: "review", mode: "subagent", options: {}, permission: [], description: "secret ".repeat(100) },
+        { name: "team/review", mode: "subagent", options: {}, permission: [], description: "hidden ".repeat(100) }])
+      // ? 与反斜杠规则必须移除动态子代理文本，不能只过滤整个 task 定义。
+      expect(denied.details.toolDefs.find((item) => item.name === "task")?.tokens)
+        .toBe(base.details.toolDefs.find((item) => item.name === "task")?.tokens)
+      expect(base.details.toolDefs.some((item) => item.name === "websearch")).toBe(false)
+      for (const providerID of ["opencode", "opencode-go"])
+        expect((await compute(providerID, [primary])).details.toolDefs.some((item) => item.name === "websearch")).toBe(true)
+      // 原始字符串交给真实 Config codec；大小写或非法值不能静默变成 false。
+      for (const [key, tool] of [["OPENCODE_EXPERIMENTAL", "websearch"], ["OPENCODE_ENABLE_EXA", "websearch"],
+        ["OPENCODE_EXPERIMENTAL_EXA", "websearch"], ["OPENCODE_ENABLE_PARALLEL", "websearch"],
+        ["OPENCODE_EXPERIMENTAL_PARALLEL", "websearch"], ["OPENCODE_ENABLE_QUESTION_TOOL", "question"]]) {
+        for (const [value, enabled] of [["true", true], ["yes", true], ["on", true], ["y", true], ["1", true],
+          ["false", false], ["no", false], ["off", false], ["n", false], ["0", false], [undefined, false]] as const) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+          expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === tool)).toBe(enabled)
+        }
+        for (const value of ["TRUE", "Yes", "ON", "Y", "False", "invalid", ""]) {
+          process.env[key] = value
+          for (const providerID of ["test", "opencode"])
+            await expect(compute(providerID, [primary])).rejects.toThrow()
+        }
+        process.env[key] = "false"
+      }
+      // CLI/app/desktop 广告 question 不依赖专用开关；缺省 client 仍是 cli，实验伞不授权其他客户端。
+      delete process.env.OPENCODE_CLIENT
+      expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === "question")).toBe(true)
+      for (const client of ["app", "cli", "desktop"]) {
+        process.env.OPENCODE_CLIENT = client
+        expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === "question")).toBe(true)
+      }
+      process.env.OPENCODE_CLIENT = "api"
+      process.env.OPENCODE_EXPERIMENTAL = "yes"
+      expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === "question")).toBe(false)
+      expect(base.categories.find((item) => item.name === "Tool definitions")?.color).toBe("secondary")
+    } finally {
+      // 环境开关恢复原始缺省状态，避免影响非折叠与 false-tools 的既有用例。
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+
   test("context usage detail lines are bounded so they do not push into the grid", async () => {
     const data = await computeContextData({
       messages: [user("1", { bash: true }), assistant("2", "1")],
@@ -476,6 +645,7 @@ describe("context usage", () => {
       paths: { cwd: process.cwd(), worktree: process.cwd() },
       columns: 100,
       // 宿主可以是 Unix，保存的 Windows 路径仍应按两种分隔符保留 AGENTS.md 的文件尾部。
+      // 超长 Windows 路径保留文件尾部，验证中间截断而非简单 slice 掩盖真正的文件身份。
       instructionFiles: [{ path: "F:\\very\\long\\nested\\workspace\\path\\that\\should\\not\\overflow\\AGENTS.md", content: "body" }],
       skills: [],
       toolDefinitions: [{ name: "bash", text: "bash description" }],

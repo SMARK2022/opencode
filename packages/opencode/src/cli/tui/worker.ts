@@ -17,9 +17,9 @@ import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
 
 Heap.start()
 
-const onUnhandledRejection = (_error: unknown) => {}
+let onUnhandledRejection: (error: unknown) => void = (_error: unknown) => {}
 
-const onUncaughtException = (_error: Error) => {}
+let onUncaughtException: (error: Error) => void = (_error: Error) => {}
 
 process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
@@ -125,6 +125,9 @@ if (isDaemon) {
   async function gracefulShutdown(exitCode = 0) {
     if (shutdownInProgress) return
     shutdownInProgress = true
+    // 致命关闭也有上限；只退出当前 daemon，不向其他 owner 发终止信号。
+    const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
+    shutdownTimer.unref?.()
     if (idleTimer) clearTimeout(idleTimer)
     if (upgradeTimer) clearTimeout(upgradeTimer)
     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
@@ -135,11 +138,24 @@ if (isDaemon) {
     const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
     const runtime = await Promise.allSettled([AppRuntime.dispose()])
     // Database Layer 的 finalizer 在 native close 前 checkpoint，监听 scope 与 runtime 均照常释放。
+    clearTimeout(shutdownTimer)
     process.exit(exitCode || ([...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
   }
 
   // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
   process.on("SIGTERM", () => void gracefulShutdown())
+
+  // daemon 致命路径替换线程空监听，启动与空闲阶段共享同一资源清理闭包。
+  process.off("unhandledRejection", onUnhandledRejection)
+  process.off("uncaughtException", onUncaughtException)
+  onUnhandledRejection = (_error: unknown) => {
+    void gracefulShutdown(1)
+  }
+  onUncaughtException = (_error: Error) => {
+    void gracefulShutdown(1)
+  }
+  process.prependListener("unhandledRejection", onUnhandledRejection)
+  process.prependListener("uncaughtException", onUncaughtException)
 
   // reload 失效配置和实例而不是停止共享 HTTP listener，其他窗口的订阅必须保持。
   if (process.platform !== "win32") {

@@ -125,8 +125,8 @@ export async function ping(port: number, credentials?: ServerAuth.Credentials) {
     const resp = await fetch(`http://127.0.0.1:${port}/global/health`, {
       // 保留受保护的健康路由，401 不能被当作陈旧 owner 并覆盖锁。
       headers: headers(credentials),
-      // deadline 覆盖响应与 JSON body 读取，卡住的 body 不能永久占用选举租约。
-      signal: AbortSignal.timeout(2000),
+      // 500ms deadline 覆盖响应与 body；超时或 401 均不授权清理存活 owner。
+      signal: AbortSignal.timeout(500),
     })
     // 健康 JSON 与当前版本均匹配才可复用，不能接受任意监听者的 200。
     if (!resp.ok) return false
