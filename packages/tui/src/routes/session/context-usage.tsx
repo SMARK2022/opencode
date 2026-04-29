@@ -286,6 +286,8 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
       providers: [...sync.data.provider],
       config: sync.data.config,
       agents: [...sync.data.agent],
+      // 保留 store proxy 到现有 tracked 序列化边界，嵌套 permission 更新也能刷新同一 resource。
+      session: sync.session.get(props.sessionID),
       lastUserModel: local.model.current(),
       vcs: sync.data.vcs,
       paths: { cwd: paths.directory, worktree: paths.worktree, shell: sync.data.config.shell },
