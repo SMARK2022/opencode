@@ -252,6 +252,9 @@ export function Session() {
   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
 
   const pending = createMemo(() => {
+    // idle 或缺省状态不应把残留未完成助手显示为排队；busy/retry 仍保留完成边界扫描。
+    const status = sync.data.session_status?.[route.sessionID]
+    if (!status || status.type === "idle") return undefined
     const completed = messages().findLastIndex((message) => message.role === "assistant" && message.time.completed)
     const pending = messages().findLastIndex(
       (message, index) => index > completed && message.role === "assistant" && !message.time.completed,
