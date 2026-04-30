@@ -20,5 +20,7 @@ export function sanitizedProcessEnv(overrides?: Record<string, string>) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
   )
+  delete env[OPENCODE_RUN_ID]
+  delete env[OPENCODE_PROCESS_ROLE]
   return overrides ? Object.assign(env, overrides) : env
 }

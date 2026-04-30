@@ -12,6 +12,7 @@ import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { NpmConfig } from "@opencode-ai/core/npm-config"
+import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
 
 const log = Log.create({ service: "installation" })
 
@@ -102,8 +103,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
         function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
           const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
             cwd: opts?.cwd,
-            env: opts?.env,
-            extendEnv: true,
+            env: sanitizedProcessEnv(opts?.env),
+            extendEnv: false,
           })
           const handle = yield* spawner.spawn(proc)
           const out = yield* Stream.mkString(Stream.decodeText(handle.stdout))
@@ -118,8 +119,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
         function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
           const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
             cwd: opts?.cwd,
-            env: opts?.env,
-            extendEnv: true,
+            env: sanitizedProcessEnv(opts?.env),
+            extendEnv: false,
           })
           const handle = yield* spawner.spawn(proc)
           const [stdout, stderr] = yield* Effect.all(
@@ -148,8 +149,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
           const bodyBytes = new TextEncoder().encode(body)
           const proc = ChildProcess.make("bash", [], {
             stdin: Stream.make(bodyBytes),
-            env: { VERSION: target },
-            extendEnv: true,
+            env: sanitizedProcessEnv({ VERSION: target }),
+            extendEnv: false,
           })
           const handle = yield* spawner.spawn(proc)
           const [stdout, stderr] = yield* Effect.all(

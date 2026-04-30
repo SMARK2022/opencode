@@ -15,6 +15,9 @@ import * as Database from "@/storage/db"
 import { ServerLock } from "@/cli/cmd/tui/server-lock"
 import { Heap } from "@/cli/heap"
 import { onSseClientCountChange } from "@/server/routes/global"
+import path from "path"
+import { Global } from "@opencode-ai/core/global"
+import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
 
 ensureProcessMetadata("worker")
 
@@ -40,6 +43,42 @@ process.on("uncaughtException", (e) => {
     e: e instanceof Error ? e.message : e,
   })
 })
+
+// Pre-warm external plugin imports BEFORE the HTTP server goes live.
+//
+// Bun synchronously transpiles the entire dependency graph on the first
+// `import()` of an unbundled TypeScript plugin (e.g. opencode-gemini-auth)
+// which can stall the event loop for 20-30 seconds.  Doing this here means
+// the stall is over before the lock file is written, so by the time the
+// launching TUI starts polling the server is already fully responsive.
+//
+// This is a best-effort warm-up: every error is swallowed so a missing or
+// incompatible plugin cannot prevent the server from starting.
+async function warmupExternalPlugins() {
+  if (Flag.OPENCODE_PURE) return
+  try {
+    const configFile = path.join(Global.Path.config, "opencode.json")
+    const raw: unknown = await Bun.file(configFile).json().catch(() => ({}))
+    if (!raw || typeof raw !== "object") return
+    const pluginField = (raw as Record<string, unknown>).plugin
+    if (!Array.isArray(pluginField)) return
+    const specs: string[] = pluginField.flatMap((p: unknown) =>
+      Array.isArray(p) ? (typeof p[0] === "string" ? [p[0] as string] : []) : typeof p === "string" ? [p] : [],
+    )
+    await Promise.all(
+      specs.map(async (spec) => {
+        try {
+          const target = await resolvePluginTarget(spec)
+          if (!target) return
+          const entry = await createPluginEntry(spec, target, "server")
+          if (entry.entry) await import(entry.entry)
+        } catch {}
+      }),
+    )
+  } catch {}
+}
+
+await warmupExternalPlugins()
 
 // Always start the internal loopback HTTP server first.
 const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })

@@ -349,7 +349,7 @@
     },
     "packages/opencode": {
       "name": "opencode",
-      "version": "1.14.28-smark",
+      "version": "1.14.29-smark",
       "bin": {
         "opencode": "./bin/opencode",
       },

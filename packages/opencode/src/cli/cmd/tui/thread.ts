@@ -207,7 +207,9 @@ export const TuiThreadCommand = cmd({
           await Bun.sleep(1000)
 
           // Wait for the daemon to write the lock and for its server to respond.
-          const deadline = Date.now() + 30_000
+          // The daemon pre-warms external plugins before writing the lock, which
+          // can take up to ~30 s on the first run.  Give it 60 s to be safe.
+          const deadline = Date.now() + 60_000
           while (Date.now() < deadline) {
             const daemonLock = await ServerLock.read()
             if (daemonLock && daemonLock.pid === proc.pid && ServerLock.alive(daemonLock.pid)) {
@@ -229,7 +231,7 @@ export const TuiThreadCommand = cmd({
           electionLease = undefined
 
           if (!existingUrl) {
-            UI.error("opencode daemon failed to start within 30 seconds")
+            UI.error("opencode daemon failed to start within 60 seconds")
             proc.kill()
             return
           }
