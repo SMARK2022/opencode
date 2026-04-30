@@ -108,6 +108,11 @@ describe("Image", () => {
       source.free()
       expect(resized.get_width()).toBeLessThanOrEqual(2_000)
       expect(resized.get_height()).toBeLessThanOrEqual(2_000)
+      // Photon 必须真正缩放并保持单像素高度，输出声明也须匹配实际 PNG 编码。
+      expect(resized.get_width()).toBe(2_000)
+      expect(resized.get_height()).toBe(1)
+      expect(result.mime).toBe("image/png")
+      expect(result.url.startsWith("data:image/png;base64,")).toBe(true)
       resized.free()
     }),
   )
