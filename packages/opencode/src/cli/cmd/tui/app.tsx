@@ -138,8 +138,16 @@ export function tui(input: {
     // differ from the shell, causing wcwidth() to return -1 for CJK characters
     // and rendering them as empty cells. Force the built-in Unicode width tables
     // (mode 2026) instead, which is locale-independent and always correct.
+    //
+    // Also wait up to 100 ms for the macOS PTY to report terminal dimensions:
+    // stdout.columns may be 0 immediately after process start if the PTY has not
+    // finished initialising. Reading it too early causes createCliRenderer() to
+    // fall back to 80×24, producing a garbled first frame that only a SIGWINCH
+    // (e.g. dragging the window) would otherwise correct.
     if (process.platform === "darwin") {
       process.env.OPENTUI_FORCE_UNICODE = "1"
+      for (let i = 0; i < 10 && !process.stdout.columns; i++)
+        await new Promise<void>((r) => setTimeout(r, 10))
     }
 
     const renderer = await createCliRenderer(rendererConfig(input.config))
@@ -209,6 +217,11 @@ export function tui(input: {
         </ErrorBoundary>
       )
     }, renderer)
+    // Safety net for the stale-but-nonzero case: emit SIGWINCH after the first
+    // frame so the renderer re-reads stdout.columns/rows with their current
+    // values. processResize() is a no-op when dimensions match, so this only
+    // produces an extra repaint when the initial frame used stale dimensions.
+    if (process.platform !== "win32") process.kill(process.pid, "SIGWINCH")
   })
 }
 
