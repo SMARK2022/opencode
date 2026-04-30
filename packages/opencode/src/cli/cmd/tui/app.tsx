@@ -132,6 +132,16 @@ export function tui(input: {
       await TuiPluginRuntime.dispose()
     }
 
+    // On macOS, opentui 0.1.104+ may detect the terminal as using wcwidth mode,
+    // which relies on the system C library wcwidth() with locale support.
+    // In compiled Bun binaries the locale context for the native Zig layer may
+    // differ from the shell, causing wcwidth() to return -1 for CJK characters
+    // and rendering them as empty cells. Force the built-in Unicode width tables
+    // (mode 2026) instead, which is locale-independent and always correct.
+    if (process.platform === "darwin") {
+      process.env.OPENTUI_FORCE_UNICODE = "1"
+    }
+
     const renderer = await createCliRenderer(rendererConfig(input.config))
     const mode = (await renderer.waitForThemeMode(1000)) ?? "dark"
 
