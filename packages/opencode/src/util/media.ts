@@ -45,7 +45,7 @@ async function getSharp(): Promise<typeof import("sharp") | null> {
   try {
     const mod = await import("sharp")
     // 处理 ESM/CJS 互操作
-    sharpCached = (mod as any).default ?? mod
+    sharpCached = ((mod as any).default ?? mod) as typeof import("sharp")
     return sharpCached as typeof import("sharp")
   } catch {
     sharpCached = SHARP_UNAVAILABLE  // 标记为不可用
