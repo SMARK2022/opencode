@@ -124,6 +124,26 @@ async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks:
   }
 }
 
+// 预热只求值外部模块，不能提前调用 server hook 或安装事件订阅。
+export const warmupExternalPlugins = Effect.fn("Plugin.warmupExternalPlugins")(function* () {
+  const flags = yield* RuntimeFlags.Service
+  // pure 必须在读取配置和依赖等待前返回，与正式插件面的开关保持一致。
+  if (flags.pure) return
+  const config = yield* Config.Service
+  // 使用 Config 已合并、去重且解析相对路径的声明，不另读 JSON 或构造第二配置来源。
+  const cfg = yield* config.get()
+  const items = cfg.plugin_origins ?? []
+  if (!items.length) return
+  // 本地模块的依赖也由 Config owner 准备，不能先 import 再指望正式加载修复缓存失败。
+  yield* config.waitForDependencies()
+  // 正式管线先解析入口并检查 npm 兼容性，再并行 import；弃用包和缺入口同样跳过。
+  yield* Effect.promise(() => PluginLoader.loadExternal({ items, kind: "server" }))
+  // 不提供 finish：这里只填模块缓存，正式加载仍负责顺序执行 hook 与形状校验。
+},
+  // 配置、安装和模块预热都是 advisory；包含 defect 的失败也不阻止 daemon 健康锁发布。
+  Effect.catchCause((cause) => Effect.logWarning("external plugin warmup failed", { cause: String(cause) })),
+)
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {

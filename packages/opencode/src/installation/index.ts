@@ -15,6 +15,16 @@ import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/inst
 import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
+function installChildEnv(extra: Record<string, string | undefined> = {}) {
+  // 安装子进程保留代理、CA、PATH 与 VERSION；仅剥离 daemon 身份和 Electron 执行角色。
+  return Object.fromEntries(
+    Object.entries({ ...process.env, ...extra }).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined &&
+        !["OPENCODE_PROCESS_ROLE", "OPENCODE_RUN_ID", "ELECTRON_RUN_AS_NODE"].includes(entry[0]),
+    ),
+  )
+}
+
 export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
 
 export const Event = InstallationEvent
@@ -114,10 +124,11 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
     const text = Effect.fnUntraced(
       function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
         const result = yield* appProcess.run(
+          // 安装 spawn 均用过滤后的完整环境并关闭继承，避免 ChildProcess 补回 daemon/Electron 执行角色。
           ChildProcess.make(cmd[0], cmd.slice(1), {
             cwd: opts?.cwd,
-            env: opts?.env,
-            extendEnv: true,
+            env: installChildEnv(opts?.env),
+            extendEnv: false,
           }),
         )
         return result.stdout.toString("utf8")
@@ -130,8 +141,8 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         const result = yield* appProcess.run(
           ChildProcess.make(cmd[0], cmd.slice(1), {
             cwd: opts?.cwd,
-            env: opts?.env,
-            extendEnv: true,
+            env: installChildEnv(opts?.env),
+            extendEnv: false,
           }),
         )
         return {
@@ -172,8 +183,9 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         const result = yield* appProcess.run(
           ChildProcess.make(shell, [], {
             stdin: Stream.make(bodyBytes),
-            env: { VERSION: target },
-            extendEnv: true,
+            // VERSION 是安装脚本目标而非 daemon 身份；合并覆盖值后仍剥离角色。
+            env: installChildEnv({ VERSION: target }),
+            extendEnv: false,
           }),
         )
         return {

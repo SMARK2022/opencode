@@ -908,6 +908,8 @@ export default {
         await Bun.write(
           file,
           [
+            // 顶层副作用先于 server hook，pure 断言必须能发现仅预热却未执行 hook 的违规。
+            `await Bun.write(${JSON.stringify(mark)}, "imported")`,
             "export default {",
             '  id: "demo.pure",',
             "  server: async () => {",
@@ -928,6 +930,13 @@ export default {
       },
       (tmp) =>
         Effect.gen(function* () {
+          let reads = 0
+          // 记录配置访问次数；不能因 advisory catch 吞掉注入异常而误判 pure 已提前返回。
+          yield* Plugin.warmupExternalPlugins().pipe(
+            Effect.provide(TestConfig.layer({ get: () => Effect.sync(() => { reads++; return {} }) })),
+            Effect.provide(RuntimeFlags.layer({ pure: true })),
+          )
+          expect(reads).toBe(0)
           yield* load(tmp.path, { pure: true })
           const called = yield* Effect.promise(() =>
             fs
@@ -937,6 +946,71 @@ export default {
           )
           expect(called).toBe(false)
         }),
+    ),
+  )
+
+  it.live("warmup qualifies npm plugins before import and leaves hooks to formal loading", () =>
+    withTmp(
+      async (dir) => {
+        // 两个真实模块分别记录顶层副作用，不能仅以 hooks 为空推断未 import。
+        const packages = await Promise.all(["allowed", "rejected"].map(async (name) => {
+          const mod = path.join(dir, name)
+          const mark = path.join(dir, `${name}.txt`)
+          await fs.mkdir(mod, { recursive: true })
+          await Bun.write(path.join(mod, "package.json"), JSON.stringify({
+            name: `${name}-plugin`, type: "module", main: "./index.js",
+            engines: { opencode: name === "allowed" ? "1.18.32-smark" : ">=99.0.0" },
+          }))
+          await Bun.write(path.join(mod, "index.js"), [
+            `await Bun.write(${JSON.stringify(mark)}, "imported")`,
+            // hook 改写同一 marker，断言可区分仅 import 与提前调用，不能被 advisory catch 掩盖。
+            `export default { server: async () => { await Bun.write(${JSON.stringify(mark)}, "hook"); return {} } }`,
+          ].join("\n"))
+          return { name, mod, mark }
+        }))
+        return { packages }
+      },
+      (tmp) => Effect.gen(function* () {
+        const shared = yield* Effect.promise(() => import("../../src/plugin/shared"))
+        const check = shared.checkPluginCompatibility
+        // 本地测试版本是 local，注入目标发行版本后仍执行真实 semver/manifest 检查。
+        const compatibility = spyOn(shared, "checkPluginCompatibility").mockImplementation((target, _version, pkg) => check(target, "1.18.32-smark", pkg))
+        // 只替换 npm 安装 I/O，解析入口、兼容性与 import 均使用正式 loader 实现。
+        const install = spyOn(Npm, "add").mockImplementation(async (spec) => {
+          const hit = tmp.extra.packages.find((item) => spec.startsWith(`${item.name}-plugin@`))
+          if (!hit) throw new Error(`unexpected package ${spec}`)
+          return { directory: hit.mod, entrypoint: undefined }
+        })
+        let waits = 0
+        const items = tmp.extra.packages.map((item) => ({ spec: `${item.name}-plugin@1.0.0`, source: "injected.jsonc", scope: "global" as const }))
+        try {
+          yield* Plugin.warmupExternalPlugins().pipe(
+            // 只有规范化 origins，不提供原始 plugin 字段，锁定 Config 的正式声明入口。
+            Effect.provide(TestConfig.layer({
+              get: () => Effect.succeed({ plugin_origins: items }),
+              waitForDependencies: () => Effect.sync(() => { waits++ }),
+            })),
+            Effect.provide(RuntimeFlags.layer()),
+          )
+          expect(waits).toBe(1)
+          expect(compatibility).toHaveBeenCalledTimes(2)
+          // 被拒 npm 包的顶层文件必须不存在，证明兼容性门位于 import 之前。
+          for (const item of tmp.extra.packages) {
+            expect(yield* Effect.promise(() => Bun.file(item.mark).exists())).toBe(item.name === "allowed")
+            if (item.name === "allowed") expect(yield* Effect.promise(() => Bun.file(item.mark).text())).toBe("imported")
+          }
+          // 正式加载重走同一资格管线；预热不放宽门槛，也不自行注册插件 hook。
+          const loaded = yield* Effect.promise(() => PluginLoader.loadExternal({ items, kind: "server" }))
+          expect(loaded.map((item) => item.spec)).toEqual(["allowed-plugin@1.0.0"])
+          expect(compatibility).toHaveBeenCalledTimes(4)
+          // import 缓存可复用但拒绝包仍没有副作用，不能靠后续 skip 掩盖预热违规。
+          expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "rejected.txt")).exists())).toBe(false)
+        } finally {
+          // 两个 I/O/版本注入都恢复，避免影响既有插件资格与 pure 用例。
+          install.mockRestore()
+          compatibility.mockRestore()
+        }
+      }),
     ),
   )
 

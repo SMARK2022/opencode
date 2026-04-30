@@ -195,6 +195,29 @@ if (isDaemon) {
 
   try {
     const sharedServices = HttpApiApp.createSharedServices()
+    // 先完成预热再发布监听，已安装的 fatal/shutdown 闭包仍负责预热失败时的 token/scope 清理。
+    await AppRuntime.runPromise(Effect.gen(function* () {
+      const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
+      const flags = yield* RuntimeFlags.Service
+      // pure 不建立预热项目上下文，避免为本应跳过的用户插件读取配置或准备依赖。
+      if (flags.pure) return
+      const { Project } = yield* Effect.promise(() => import("@/project/project"))
+      const { InstanceRef } = yield* Effect.promise(() => import("@/effect/instance-ref"))
+      const { FSUtil } = yield* Effect.promise(() => import("@opencode-ai/core/fs-util"))
+      const { Plugin } = yield* Effect.promise(() => import("@/plugin"))
+      const project = yield* Project.Service
+      const directory = FSUtil.resolve(process.cwd())
+      const resolved = yield* project.fromDirectory(directory)
+      // 仅绑定真实目录/工作树供 Config 合并；不调用 InstanceStore.load 的 bootstrap 提前执行 hook。
+      yield* Plugin.warmupExternalPlugins().pipe(Effect.provideService(InstanceRef, {
+        directory,
+        worktree: resolved.sandbox,
+        project: resolved.project,
+      }))
+    }).pipe(
+      // 上下文解析自身失败也只取消预热，监听启动失败仍走外层非零退出清理。
+      Effect.catchCause((cause) => Effect.logWarning("daemon plugin warmup skipped", { cause: String(cause) })),
+    ))
     // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
     // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
@@ -202,6 +225,7 @@ if (isDaemon) {
       ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
       : undefined
     if (network) {
+      // 外部网络选项完整运输，cors/mdnsDomain 与共享客户端计数不因内部预热而丢失。
       externalServer = await Server.listen({ ...network, eventClients, sharedServices })
       externalUrl = externalServer.url.toString()
     }

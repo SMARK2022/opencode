@@ -119,7 +119,8 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
   // 增大间隔减少未发布 owner 的无效读取；就绪验证仍检查同一子 PID 和受保护 health。
 
   pollMs: 200,
-  waitMs: 30_000,
+  // 冷插件在监听前并行预热；完整健康等待给 60 秒，不改变 contender 的选举预算。
+  waitMs: 60_000,
 })
 
 export async function discoverOrSpawnDaemon(
@@ -228,8 +229,9 @@ export async function discoverOrSpawnDaemon(
 
           if (!existingUrl) {
             // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
-            UI.error("opencode daemon failed to start within 30 seconds")
-            throw new Error("opencode daemon failed to start within 30 seconds")
+            // 超时仍向上失败；杀本次 proc 与释放 lease 继续由原有两层 finally 执行。
+            UI.error("opencode daemon failed to start within 60 seconds")
+            throw new Error("opencode daemon failed to start within 60 seconds")
           }
         } finally {
           // 只终止本次启动且尚未交付的子进程；read/sleep/ping 异常也会进入此处。
