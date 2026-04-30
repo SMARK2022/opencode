@@ -158,6 +158,8 @@ export function Session() {
   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
 
   const pending = createMemo(() => {
+    const status = sync.data.session_status?.[route.sessionID]
+    if (!status || status.type === "idle") return undefined
     return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
   })
 
