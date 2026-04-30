@@ -173,8 +173,13 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     Effect.gen(function* () {
       const renderer = yield* Effect.acquireRelease(
         Effect.tryPromise({
-          try: () =>
-            createCliRenderer({
+          try: async () => {
+            // macOS 编译 Bun 的 native locale 可能让系统 wcwidth 对 CJK 返回 -1，改用内置宽度表。
+            if (process.platform === "darwin") {
+              process.env.OPENTUI_FORCE_UNICODE = "1"
+            }
+            // 宽度模式由实际渲染器创建时读取，不能延到主题等待或挂载之后再设置。
+            return createCliRenderer({
               externalOutputMode: "passthrough",
               targetFps: 60,
               gatherStats: false,
@@ -186,7 +191,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
               consoleOptions: {
                 keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
               },
-            }),
+            })
+          },
           catch: (error) => (error instanceof Error ? error : new Error(String(error))),
         }),
         (renderer) =>
