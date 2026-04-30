@@ -177,6 +177,10 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
             // macOS 编译 Bun 的 native locale 可能让系统 wcwidth 对 CJK 返回 -1，改用内置宽度表。
             if (process.platform === "darwin") {
               process.env.OPENTUI_FORCE_UNICODE = "1"
+              // PTY 尚未报告列数时最多等 100ms，避免初帧过早采用 80x24 回退尺寸。
+              for (let i = 0; i < 10 && !process.stdout.columns; i++) {
+                await new Promise<void>((r) => setTimeout(r, 10))
+              }
             }
             // 宽度模式由实际渲染器创建时读取，不能延到主题等待或挂载之后再设置。
             return createCliRenderer({
@@ -340,6 +344,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
             </ExitProvider>
           )
         }, renderer)
+        // 主题等待和挂载后再重读尺寸，覆盖非零但过期的初帧尺寸；Windows 不支持该信号。
+        if (process.platform !== "win32") process.kill(process.pid, "SIGWINCH")
       })
       yield* Deferred.await(shutdown)
       return { epilogue: exit.epilogue, reason: exit.reason }
