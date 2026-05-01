@@ -7,7 +7,7 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util/locale"
-import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 
@@ -55,25 +55,10 @@ export function SubagentFooter() {
     const getParts = (id: string) => sync.data.part[id] ?? []
 
     const lastUser = users.at(-1)
-    const requestModel =
-      lastUser &&
-      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
 
-    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-
     if (requestAssistants.length === 0) {
-      if (!isRunning) return
-      const tokens = bootstrapInputTokens
-      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
-      return {
-        input: tokens,
-        output: 0,
-        totalInput: tokens,
-        totalOutput: 0,
-        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
-        cost: undefined,
-      }
+      return
     }
 
     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
@@ -87,7 +72,7 @@ export function SubagentFooter() {
       output: currentOutput,
       totalInput,
       totalOutput,
-    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
+    } = computeFinalTokens(last, lastParts, requestConfirmed)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 

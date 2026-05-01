@@ -3,7 +3,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
-import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
 
 const id = "internal:sidebar-context"
 
@@ -38,29 +38,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const lastUser = users.at(-1)
     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
 
-    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-
     if (requestAssistants.length === 0) {
-      if (!isRunning()) {
-        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-      }
-      const requestModel =
-        lastUser &&
-        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-      const percent =
-        bootstrapInputTokens > 0 && requestModel?.limit.context
-          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
-          : null
-      return {
-        tokens: bootstrapInputTokens,
-        totalTokens: bootstrapInputTokens,
-        input: bootstrapInputTokens,
-        output: 0,
-        totalInput: bootstrapInputTokens,
-        totalOutput: 0,
-        percent,
-        cost: 0,
-      }
+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
     }
 
     // 显示规则：外面是最后一个 step 的累计（真实上下文大小）；括号里是当前 user request / agent loop 的累计。
@@ -74,7 +53,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       output,
       totalInput,
       totalOutput,
-    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
+    } = computeFinalTokens(last, lastParts, requestConfirmed)
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]

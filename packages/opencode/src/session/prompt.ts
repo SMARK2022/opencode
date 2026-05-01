@@ -54,7 +54,6 @@ import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { EffectBridge } from "@/effect/bridge"
-
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
 
@@ -1438,7 +1437,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             time: { created: Date.now() },
             sessionID,
           }
-          yield* sessions.updateMessage(msg)
           const handle = yield* processor.create({
             assistantMessage: msg,
             sessionID,
@@ -1501,6 +1499,45 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(mcpInstr ? [mcpInstr] : [])]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
+            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
+            // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，
+            // 按累积字符量停止（≥16000），不按轮数，代替固定 /4
+            const systemText = [
+              ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),
+              ...system,
+              ...(lastUser.system ? [lastUser.system] : []),
+            ].join("\n")
+            const messagesText = JSON.stringify(messages)
+            const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
+            const toolsText = Object.entries(tools)
+              .filter(([name]) => lastUser.tools?.[name] !== false && !disabledTools.has(name))
+              .map(([name, tool]) => {
+                const item = tool as { description?: string; inputSchema?: unknown }
+                return `Tool: ${name}\n${item.description ?? ""}\n${JSON.stringify(item.inputSchema)}`
+              })
+              .join("\n")
+            const inputChars = [systemText, messagesText, toolsText].join("\n").length
+            let historyOutputTokens = 0
+            let historyOutputChars = 0
+            for (let i = msgs.length - 1; i >= 0 && historyOutputChars < 16000; i--) {
+              const m = msgs[i]
+              if (m.info.role !== "assistant") continue
+              const sf = m.parts.findLast((p) => p.type === "step-finish")
+              if (!sf) continue
+              const chars = m.parts
+                .filter((p) => p.type === "text" || p.type === "reasoning")
+                .reduce((sum, p) => sum + ((p as any).text?.length ?? 0), 0)
+              const tokens = (sf.tokens.output ?? 0) + (sf.tokens.reasoning ?? 0)
+              historyOutputTokens += tokens
+              historyOutputChars += chars
+            }
+            const charsPerToken = historyOutputTokens > 0 && historyOutputChars > 500
+              ? historyOutputChars / historyOutputTokens
+              : 4
+            const estimatedInput = Math.round(inputChars / charsPerToken)
+            handle.message.tokens.input = estimatedInput
+            yield* sessions.updateMessage(handle.message)
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1508,7 +1545,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               sessionID,
               parentSessionID: session.parentID,
               system,
-              messages: [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
+              messages,
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
