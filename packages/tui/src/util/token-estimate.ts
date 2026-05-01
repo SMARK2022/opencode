@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, Part, Provider, SessionRequestUsage } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, Part, SessionRequestUsage } from "@opencode-ai/sdk/v2"
 import { estimate } from "@opencode-ai/core/util/token"
 
 export type UsageInfo = {
@@ -9,12 +9,6 @@ export type UsageInfo = {
   context: string | undefined
   cost: string | undefined
 }
-
-// 服务端系统提示包含模型身份、目录、git、平台、技能和用户指令；800 仅粗估未知开销，provider 确认后不作为真实输入下限。
-export const SYSTEM_PROMPT_OVERHEAD = 800
-
-// 工具名称、描述和 JSON Schema 在 15-25 个活跃工具下可达 3000-8000+ 字符；2000 沿用源典型开销，不是精确上界。
-export const TOOL_DEFINITION_OVERHEAD = 2000
 
 export function estimateDataUrlInputTokens(url: string, mime: string) {
   if (!url.startsWith("data:")) return 0
@@ -28,32 +22,6 @@ export function estimateDataUrlInputTokens(url: string, mime: string) {
   if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
   // 其他 MIME 没有视觉估算规则，负载回到通用文本估算。
   return Math.max(1, estimate(url.slice(comma + 1)))
-}
-
-export function estimateUserInputTokens(parts: ReadonlyArray<Part>) {
-  return parts.reduce((sum, part) => {
-    // synthetic 文件、编辑器和 MCP 正文也发送给模型，只有 ignored 文本不计入。
-    if (part.type === "text" && !part.ignored) {
-      return sum + estimate(part.text ?? "")
-    }
-    if (part.type === "file") {
-      // text/plain 和目录已展开成 synthetic 正文，模型投影跳过原附件，不能重复计数。
-      if (part.mime === "text/plain" || part.mime === "application/x-directory") return sum
-      return sum + estimateDataUrlInputTokens(part.url ?? "", part.mime ?? "")
-    }
-    if (part.type === "agent") {
-      return sum + estimate(part.name ?? "")
-    }
-    if (part.type === "subtask") {
-      return sum + estimate(`${part.description ?? ""}\n${part.prompt ?? ""}`)
-    }
-    return sum
-  }, 0)
-}
-
-export function estimateRequestOverhead(): number {
-  // 首轮无助手确认时用系统提示和工具定义粗估引导上下文。
-  return SYSTEM_PROMPT_OVERHEAD + TOOL_DEFINITION_OVERHEAD
 }
 
 export function sumConfirmed(
@@ -81,53 +49,10 @@ export function sumConfirmed(
   )
 }
 
-export function getContextSize(
-  item: AssistantMessage,
-  getParts: (id: string) => ReadonlyArray<Part>,
-): number {
-  const parts = getParts(item.id)
-  // 上下文以最新一轮确认为准，倒序只取最后 step-finish，早期确认不再代表当前大小。
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const p = parts[i]
-    if (p.type === "step-finish") {
-      return (
-        p.tokens.input +
-        p.tokens.cache.read +
-        p.tokens.cache.write +
-        p.tokens.output +
-        p.tokens.reasoning
-      )
-    }
-  }
-  return 0
-}
-
-export function getBootstrapInputTokens(
-  messages: ReadonlyArray<Message>,
-  request: SessionRequestUsage | undefined,
-  getParts: (id: string) => ReadonlyArray<Part>,
-): number {
-  // 请求身份来自持久化投影，显示窗口最后一个用户可能属于其他请求。
-  const user = messages.find((item) => item.id === request?.messageID && item.role === "user")
-  // 用户被窗口淘汰时零表示缺少可估正文，不能借用旧用户内容。
-  if (!user) return 0
-  const estimatedPromptInputTokens = estimateUserInputTokens(getParts(user.id))
-  // 只借用用户之前的助手上下文，防止排队或混合入口中的较新回复混入本次估算。
-  const previousAssistant = messages.findLast(
-    (item): item is AssistantMessage => item.role === "assistant" && item.parentID !== user.id && item.time.created < user.time.created,
-  )
-  const previousContextSize = previousAssistant ? getContextSize(previousAssistant, getParts) : 0
-  // 历史上下文取最后一步，不取全部请求累计；固定开销只用于没有可见历史确认的引导。
-  return previousContextSize > 0
-    ? previousContextSize + estimatedPromptInputTokens
-    : estimatedPromptInputTokens + estimateRequestOverhead()
-}
-
 export function computeFinalTokens(
   lastAssistant: AssistantMessage | undefined,
   lastParts: ReadonlyArray<Part>,
   request: SessionRequestUsage,
-  bootstrapInputTokens: number,
 ) {
   const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
   const streamingOut = !lastAssistant || lastAssistant.time.completed !== undefined
@@ -146,6 +71,8 @@ export function computeFinalTokens(
     ? 0
     : lastParts.reduce((sum, p, i) => {
         if (i <= lastSFIdx) return sum
+        // server 请求体已包含游标之前的工具结果，只为之后的新结果追加下一轮输入估算。
+        if (request.estimatedInput !== undefined && p.id <= (lastAssistant.inputEstimate?.afterPartID ?? "")) return sum
         if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
         return sum
       }, 0)
@@ -155,25 +82,29 @@ export function computeFinalTokens(
   const pendingOutputTokens = Math.round(streamingOut / 4)
   // 可见尾部可能先于 Session 快照到达；立即遮掉旧 step，保留请求历史累计。
   const hasInFlightTail = !!lastAssistant && lastAssistant.time.completed === undefined && lastParts.some((_, i) => i > lastSFIdx)
-  // input 为零不足以判定未确认，还须检查 output、step-finish 与完成时间；assistantID 存在而缓存缺失时相信投影。
-  const unconfirmed = request.pendingInput === undefined && request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
-    && lastSFIdx < 0 && (!request.assistantID || (!!lastAssistant && lastAssistant.time.completed === undefined))
   const lastStepFinish = lastParts[lastSFIdx]
   // 最新助手可以没有 parts，投影仍提供末步基数；可见零确认或完成先到时立即遮掉旧估算。
   const projectedPendingInput = !lastAssistant || (lastAssistant.time.completed === undefined && (lastSFIdx < 0 || hasInFlightTail))
     ? request.pendingInput : undefined
-  // 下一步继承末步完整上下文，输出、reasoning 和缓存输入均进入历史，不能用全部请求累计替代。
-  const pendingStepInput = hasInFlightTail && lastStepFinish?.type === "step-finish"
+  // 零估算有效；确认 part 或完成先到时立即遮掉旧 Session provisional input。
+  const estimatedInput = (!lastAssistant || lastAssistant.time.completed === undefined)
+    && lastAssistant?.inputEstimate?.confirmed !== true
+    && (lastSFIdx < 0 || (lastAssistant?.inputEstimate?.afterPartID ?? "") >= (lastStepFinish?.id ?? ""))
+    ? request.estimatedInput : undefined
+  // 首轮只消费服务端实际请求估算，确认值包括零均不受本地 bootstrap 下限约束。
+  const pendingStepInput = estimatedInput ?? (hasInFlightTail && lastStepFinish?.type === "step-finish"
+    // 下一步继承末步完整上下文，输出、reasoning 和缓存输入均进入历史，不能用全部请求累计替代。
     ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
       + lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-    : projectedPendingInput ?? (unconfirmed ? bootstrapInputTokens : 0)
-  // 完成态确认值包括零均有权威性，不用 bootstrap 作下限或重新补一轮输入。
-  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + pendingStepInput
-  const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + pendingOutputTokens
-  // durable 累计已含末步确认，只能再加尚未结算的下一步估算，避免 100 变 200。
+    : projectedPendingInput ?? 0)
+  // 确认 step 读取完整 Session 投影，parts 只补未确认尾部；完成态零值同样有权威性。
+  const currentInput = (hasInFlightTail || estimatedInput !== undefined ? 0 : request.stepInput) + pendingInputTokens + pendingStepInput
+  const currentOutput = (hasInFlightTail || estimatedInput !== undefined ? 0 : request.stepOutput) + pendingOutputTokens
+  // durable 累计独立于可见助手与 V1 part 缓存，末步已确认用量只叠加未结算的下一步估算。
   const totalInput = request.input + pendingInputTokens + pendingStepInput
   const totalOutput = request.output + pendingOutputTokens
 
+  // 此函数仅返回显示值，不写 Session.tokens 或费用，不成为持久化账本的第二个 owner。
   return {
     input: currentInput,
     output: currentOutput,
@@ -183,10 +114,13 @@ export function computeFinalTokens(
 }
 
 export function getContextLimit(
-  provider: ReadonlyArray<Provider>,
+  provider: ReadonlyArray<{ id: string; models: Record<string, { limit: { context: number } }> }>,
   providerID: string | undefined,
   modelID: string | undefined,
+  contextLimit?: number,
 ): number | undefined {
+  // 本轮冻结预算包括零均有权威性；仅旧 V1 Catalog ID 沿用原字典查找。
+  if (contextLimit !== undefined) return contextLimit
   // 模型缺省时没有可算上限，保留 undefined，不能拿系统开销代替上下文窗口。
   if (!providerID || !modelID) return undefined
   return provider.find((item) => item.id === providerID)?.models[modelID]?.limit.context

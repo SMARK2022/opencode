@@ -41,7 +41,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
 import { formatDuration, formatDurationCompact } from "../../util/format"
-import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
@@ -285,9 +285,7 @@ export function Prompt(props: PromptProps) {
     // 身份和已确认请求累计来自完整投影；缓存中用户缺失不等于请求缺失。
     // 这里只读取最后助手的流式尾部，不从 100 条显示页计算已确认总量。
     const request = session?.request
-    // 引导只读取匹配持久化身份的正文；缓存后来的用户不应覆盖当前请求。
-    const getParts = (id: string) => sync.data.part[id] ?? []
-    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
+    // 首轮等待真实请求体估算；身份与窗口外确认累计继续取 Session.request。
     // 空闲无回复仍隐藏；运行中无回复进入共享估算，不借用旧请求的确认值。
     if (!request || (!request.assistantID && !isRunning)) {
       if (!isRunning) return
@@ -300,7 +298,7 @@ export function Prompt(props: PromptProps) {
     // 当前助手缺失时仍显示 native 或已分页淘汰的确认投影，不恢复窗口累计。
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
     // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
+    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
     if (requestTokens <= 0 && totalTokens <= 0) {
@@ -311,8 +309,8 @@ export function Prompt(props: PromptProps) {
     // 模型随完整请求投影提供，窗口淘汰助手后仍不丢真实上下文上限。
     // 首次等待的模型来自同一用户，确认后继续优先使用请求投影中的实际模型。
     const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
-    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
-    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
+    const contextLimit = getContextLimit(sync.data.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
+    const pct = requestTokens > 0 && contextLimit ? `${Math.round((requestTokens / contextLimit) * 100)}%` : undefined
     // 恢复源提交的请求费用范围；服务端来源并不使 Session.cost 等同请求 cost。
     // 确认价格继续由原生产者计算，此处只消费完整请求的助手费用求和。
     const cost = request.cost

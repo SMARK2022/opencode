@@ -11,6 +11,7 @@ type Input = {
   readonly agent: string
   readonly model: ModelV2.Ref
   readonly snapshot?: string
+  readonly inputEstimate?: () => SessionMessage.InputEstimate | undefined
 }
 
 const safe = (value: number | undefined) => Math.max(0, Number.isFinite(value) ? (value ?? 0) : 0)
@@ -80,6 +81,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
       ...input,
       assistantMessageID,
       timestamp: yield* timestamp,
+      inputEstimate: input.inputEstimate?.(),
       snapshot: input.snapshot,
     }, { finalizer })
     return assistantMessageID

@@ -140,6 +140,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       // 零助手请求终态只更新账本，消息投影保留真实零助手历史。
       "session.next.prompt.failed": () => Effect.void,
       "session.next.prompt.completed": () => Effect.void,
+      // 估算事件仅供现有 Session SELECT 读取，不创建消息或触发用量结算。
+      "session.next.request.estimated": () => Effect.void,
       "session.next.context.updated": (event) =>
         adapter.appendMessage(
           SessionMessage.System.make({
@@ -202,6 +204,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
               type: "assistant",
               agent: event.data.agent,
               model: event.data.model,
+              // 原生助手的 tokens 在 Ended 前仍缺省，元数据不会触发结算。
+              inputEstimate: event.data.inputEstimate,
               time: { created: event.data.timestamp },
               content: [],
               snapshot: event.data.snapshot ? { start: event.data.snapshot } : undefined,
@@ -216,6 +220,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           draft.finish = draft.error ? "error" : event.data.finish
           draft.cost = event.data.cost
           draft.tokens = event.data.tokens
+          // 零输入也完成确认；迟到结算继续修订同一助手快照。
+          if (draft.inputEstimate) draft.inputEstimate.confirmed = true
           if (event.data.snapshot || event.data.files)
             draft.snapshot = {
               ...draft.snapshot,

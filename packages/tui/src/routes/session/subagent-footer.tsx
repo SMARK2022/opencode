@@ -5,7 +5,7 @@ import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
-import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
@@ -60,9 +60,7 @@ export function SubagentFooter() {
 
     // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
     const request = session()?.request
-    // 子代理只估算自己的用户正文，不能从父 Session 借入工具上下文或用量。
-    const getParts = (id: string) => sync.data.part[id] ?? []
-    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
+    // 子代理只消费自己的服务端请求体估算，不借用父 Session 或本地 bootstrap。
     // 无回复且空闲保持隐藏；运行中使用引导，确认后仍读自己的完整投影。
     if (!request || (!request.assistantID && !isRunning)) {
       if (!isRunning) return
@@ -75,7 +73,7 @@ export function SubagentFooter() {
     // footer 的缓存只供未确认尾部，助手淘汰后不能丢掉已确认请求累计。
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
     // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
+    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 
@@ -87,8 +85,8 @@ export function SubagentFooter() {
     // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
     // 用户模型仅用于首次等待；确认模型仍由子代理请求投影提供。
     const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
-    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
-    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
+    const contextLimit = getContextLimit(sync.data.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
+    const pct = requestTokens > 0 && contextLimit ? `${Math.round((requestTokens / contextLimit) * 100)}%` : undefined
     // 恢复 footer 的请求费用 hunk，不把子代理 Session.cost 当作请求费用。
     // 仍使用共享费用生产策略和现有 money 格式化，费用不参与箭头增长判断。
     const cost = request.cost

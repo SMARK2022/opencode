@@ -47,6 +47,7 @@ import { MAX_STEPS_PROMPT } from "./max-steps"
 import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
+import { Token } from "../../util/token"
 import { FSUtil } from "../../fs-util"
 import { Global } from "../../global"
 
@@ -294,6 +295,16 @@ const layer = Layer.effect(
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()
+      // ContextEpoch 仍决定 baseline 和历史选择，估算不另建历史或改变请求。
+      const samples = context.toReversed().flatMap((message) => {
+        // publisher 保存实际 provider/API model ID；边界只去除品牌，不换成 Session 的 catalog 别名。
+        if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
+          || !message.inputEstimate?.confirmed || !message.tokens) return []
+        return [{ bodyChars: message.inputEstimate.bodyChars,
+          input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
+      })
+      let inputEstimate: SessionMessage.InputEstimate | undefined
+      // 只使用现有 provider step；不启动第二次 stream 或 advisory wake。
       const publisher = createLLMEventPublisher(events, {
         sessionID: session.id,
         agent: agent.id,
@@ -303,13 +314,33 @@ const layer = Layer.effect(
           ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }),
         },
         snapshot: startSnapshot,
+        // compile 回调晚于 publisher 创建，真实 Started 时才读取该轮估算。
+        inputEstimate: () => inputEstimate,
       })
       hasAssistantStarted = publisher.hasAssistantStarted
       const withPublication = Semaphore.makeUnsafe(1).withPermit
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
         withPublication(publisher.publish(event, outputPaths))
       let overflowFailure: ProviderErrorEvent | undefined
-      const providerStream = llm.stream(request).pipe(
+      const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
+        // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
+        inputEstimate = {
+          ...Token.estimateRequest(body, samples),
+          contextLimit: model.defaults?.limits?.context ?? model.route.defaults.limits?.context ?? 0,
+        }
+        // 使用实际已提升输入身份；较新的未提升 queue 不能接管这个请求。
+        const promoted = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable)
+          .where(and(eq(SessionInputTable.session_id, session.id), isNotNull(SessionInputTable.promoted_seq)))
+          .orderBy(desc(SessionInputTable.promoted_seq)).limit(1).get().pipe(Effect.orDie)
+        // Durable event 保存唯一 provisional 快照，沿现有请求身份投影，不新增请求表或第二次 stream。
+        if (promoted) yield* events.publish(SessionEvent.RequestEstimated, {
+          sessionID: session.id, messageID: SessionMessage.ID.make(promoted.id), timestamp: yield* DateTime.now,
+          model: { id: ModelV2.ID.make(model.id), providerID: ProviderV2.ID.make(model.provider),
+            ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }) },
+          inputEstimate,
+        })
+        // 不提前创建助手，空 EOF、失败、overflow 与中断继续使用原来的 owner。
+      })).pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
             if (overflowFailure || publisher.hasProviderError()) return

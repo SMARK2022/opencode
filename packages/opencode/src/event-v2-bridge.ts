@@ -63,6 +63,11 @@ const layer = Layer.effect(
           // admission 先到也必须刷新，确保尚未回复的新请求与旧助手断开。
           event.type === SessionEvent.PromptAdmitted.type ||
           event.type === SessionEvent.Prompted.type ||
+          // 估算及零助手终态也刷新同一个 Session 读投影，不发送新 durable Updated。
+          event.type === SessionEvent.RequestEstimated.type ||
+          event.type === SessionEvent.PromptCompleted.type ||
+          event.type === SessionEvent.PromptFailed.type ||
+          event.type === SessionEvent.Step.Failed.type ||
           event.type === SessionEvent.Step.Started.type ||
           event.type === SessionEvent.Step.Ended.type ||
           event.type === SessionEvent.RevertEvent.Committed.type

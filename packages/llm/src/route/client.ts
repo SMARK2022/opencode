@@ -155,7 +155,7 @@ export interface Interface {
 }
 
 export interface StreamMethod {
-  (request: LLMRequest): Stream.Stream<LLMEvent, LLMError>
+  (request: LLMRequest, onPrepared?: (body: unknown) => Effect.Effect<void>): Stream.Stream<LLMEvent, LLMError>
 }
 
 export interface GenerateMethod {
@@ -371,10 +371,12 @@ const prepareWith = Effect.fn("LLMClient.prepare")(function* (request: LLMReques
   })
 })
 
-const streamRequestWith = (runtime: TransportRuntime) => (request: LLMRequest) =>
+const streamRequestWith = (runtime: TransportRuntime) => (request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]) =>
   Stream.unwrap(
     Effect.gen(function* () {
       const compiled = yield* compile(request)
+      // 估算复用 compile 的协议正文；运输 metadata 和信封不扩展 token 观察接口。
+      if (onPrepared) yield* onPrepared(compiled.body)
       return compiled.route.streamPrepared(compiled.prepared, compiled.request, runtime)
     }),
   )
@@ -393,10 +395,11 @@ const generateWith = (stream: Interface["stream"]) =>
 export const prepare = <Body = unknown>(request: LLMRequest) =>
   prepareWith(request) as Effect.Effect<PreparedRequestOf<Body>, LLMError>
 
-export function stream(request: LLMRequest): Stream.Stream<LLMEvent, LLMError> {
+export function stream(request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]): Stream.Stream<LLMEvent, LLMError> {
   return Stream.unwrap(
     Effect.gen(function* () {
-      return (yield* Service).stream(request)
+      const client = yield* Service
+      return client.stream(request, onPrepared)
     }),
   ) as Stream.Stream<LLMEvent, LLMError>
 }
@@ -407,10 +410,11 @@ export function generate(request: LLMRequest): Effect.Effect<LLMResponse, LLMErr
   }) as Effect.Effect<LLMResponse, LLMError>
 }
 
-export const streamRequest = (request: LLMRequest) =>
+export const streamRequest = (request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]) =>
   Stream.unwrap(
     Effect.gen(function* () {
-      return (yield* Service).stream(request)
+      const client = yield* Service
+      return client.stream(request, onPrepared)
     }),
   )
 
