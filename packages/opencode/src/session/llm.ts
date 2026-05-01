@@ -44,6 +44,8 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  // 回调属于 processor，LLM 只交付已解析的最终请求体，不写账本。
+  onRequestPrepared?: (body: unknown) => Effect.Effect<void>
 }
 
 export type StreamRequest = StreamInput & {
@@ -240,6 +242,8 @@ const live: Layer.Layer<
           abort: input.abort,
         })
         if (native.type === "supported") {
+          // native adapter 已完成消息 lowering 和实际工具广告，运输尚未开始。
+          if (input.onRequestPrepared) yield* input.onRequestPrepared(native.body)
           yield* Effect.logInfo("llm runtime selected", {
             "llm.runtime": "native",
             "llm.provider": input.model.providerID,
@@ -334,6 +338,14 @@ const live: Layer.Layer<
                       input.model,
                       prepared.messageTransformOptions,
                     )
+                  }
+                  if (args.type === "stream" && input.onRequestPrepared) {
+                    // middleware 此处已得到 SDK 的 JSON Schema 工具与变换后消息。
+                    // OAuth/workflow 的 system 没有重复进入普通 messages。
+                    await bridge.promise(input.onRequestPrepared({
+                      system: isWorkflow ? prepared.system : [],
+                      messages: args.params.prompt, tools: args.params.tools, providerOptions: args.params.providerOptions,
+                    }))
                   }
                   return args.params
                 },

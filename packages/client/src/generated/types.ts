@@ -248,7 +248,8 @@ export type SessionsListOutput = {
       readonly stepInput: number
       readonly stepOutput: number
       readonly pendingInput?: number
-      readonly model?: { readonly providerID: string; readonly modelID: string }
+      readonly estimatedInput?: number
+      readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
     }
     readonly tokens: {
       readonly input: number
@@ -321,7 +322,8 @@ export type SessionsCreateOutput = {
       readonly stepInput: number
       readonly stepOutput: number
       readonly pendingInput?: number
-      readonly model?: { readonly providerID: string; readonly modelID: string }
+      readonly estimatedInput?: number
+      readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
     }
     readonly tokens: {
       readonly input: number
@@ -370,7 +372,8 @@ export type SessionsGetOutput = {
       readonly stepInput: number
       readonly stepOutput: number
       readonly pendingInput?: number
-      readonly model?: { readonly providerID: string; readonly modelID: string }
+      readonly estimatedInput?: number
+      readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
     }
     readonly tokens: {
       readonly input: number
@@ -620,6 +623,13 @@ export type SessionsContextOutput = {
         readonly type: "assistant"
         readonly agent: string
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly inputEstimate?: {
+          readonly input: number
+          readonly bodyChars: number
+          readonly confirmed: boolean
+          readonly afterPartID?: string
+          readonly contextLimit?: number
+        }
         readonly content: ReadonlyArray<
           | { readonly type: "text"; readonly id: string; readonly text: string }
           | {
@@ -841,6 +851,26 @@ export type SessionsHistoryOutput = {
     | {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "session.next.request.estimated"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly timestamp: number
+          readonly sessionID: string
+          readonly messageID: string
+          readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+          readonly inputEstimate: {
+            readonly input: number
+            readonly bodyChars: number
+            readonly confirmed: boolean
+            readonly afterPartID?: string
+            readonly contextLimit?: number
+          }
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.context.updated"
         readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -903,6 +933,13 @@ export type SessionsHistoryOutput = {
           readonly assistantMessageID: string
           readonly agent: string
           readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+          readonly inputEstimate?: {
+            readonly input: number
+            readonly bodyChars: number
+            readonly confirmed: boolean
+            readonly afterPartID?: string
+            readonly contextLimit?: number
+          }
           readonly snapshot?: string
         }
       }
@@ -1363,6 +1400,26 @@ export type SessionsEventsOutput =
   | {
       readonly id: string
       readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "session.next.request.estimated"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly timestamp: number
+        readonly sessionID: string
+        readonly messageID: string
+        readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly inputEstimate: {
+          readonly input: number
+          readonly bodyChars: number
+          readonly confirmed: boolean
+          readonly afterPartID?: string
+          readonly contextLimit?: number
+        }
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
       readonly type: "session.next.context.updated"
       readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1425,6 +1482,13 @@ export type SessionsEventsOutput =
         readonly assistantMessageID: string
         readonly agent: string
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly inputEstimate?: {
+          readonly input: number
+          readonly bodyChars: number
+          readonly confirmed: boolean
+          readonly afterPartID?: string
+          readonly contextLimit?: number
+        }
         readonly snapshot?: string
       }
     }
@@ -1826,6 +1890,13 @@ export type SessionsMessageOutput = {
         readonly type: "assistant"
         readonly agent: string
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly inputEstimate?: {
+          readonly input: number
+          readonly bodyChars: number
+          readonly confirmed: boolean
+          readonly afterPartID?: string
+          readonly contextLimit?: number
+        }
         readonly content: ReadonlyArray<
           | { readonly type: "text"; readonly id: string; readonly text: string }
           | {
@@ -1998,6 +2069,13 @@ export type MessagesListOutput = {
         readonly type: "assistant"
         readonly agent: string
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly inputEstimate?: {
+          readonly input: number
+          readonly bodyChars: number
+          readonly confirmed: boolean
+          readonly afterPartID?: string
+          readonly contextLimit?: number
+        }
         readonly content: ReadonlyArray<
           | { readonly type: "text"; readonly id: string; readonly text: string }
           | {

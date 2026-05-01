@@ -161,12 +161,25 @@ export const AssistantContent = Schema.Union([AssistantText, AssistantReasoning,
 )
 export type AssistantContent = AssistantText | AssistantReasoning | AssistantTool
 
+// 请求体估算与 provider tokens 分离；confirmed 只说明校准样本已经结算。
+// bodyChars 保留实际请求体的字符基数，不能拿输出正文校准输入用量。
+export interface InputEstimate extends Schema.Schema.Type<typeof InputEstimate> {}
+export const InputEstimate = Schema.Struct({
+  input: Schema.Finite,
+  bodyChars: Schema.Finite,
+  confirmed: Schema.Boolean,
+  afterPartID: Schema.String.pipe(optional),
+  // 同轮解析出的显示预算独立于 token 校准样本，后续模型选择不能改写它。
+  contextLimit: Schema.Finite.pipe(optional),
+}).annotate({ identifier: "Session.Message.InputEstimate" })
+
 export interface Assistant extends Schema.Schema.Type<typeof Assistant> {}
 export const Assistant = Schema.Struct({
   ...Base,
   type: Schema.Literal("assistant"),
   agent: Schema.String,
   model: Model.Ref,
+  inputEstimate: InputEstimate.pipe(optional),
   content: AssistantContent.pipe(Schema.Array),
   snapshot: Schema.Struct({
     start: Schema.String.pipe(optional),

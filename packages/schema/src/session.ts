@@ -30,9 +30,14 @@ export const RequestUsage = Schema.Struct({
   stepOutput: Schema.Finite,
   // 未确认下一轮的上下文基数；缺省表示无在途估算，零表示已确认的零基数。
   pendingInput: Schema.Finite.pipe(optional),
+  // 实际请求体的 provisional input 优先于继承基数；零也是有效估算。
+  // 此字段不进入 input/output/cost，不表示 provider 已确认或已计费。
+  estimatedInput: Schema.Finite.pipe(optional),
   model: Schema.Struct({
     providerID: Schema.String,
     modelID: Schema.String,
+    // 冻结预算优先于 Catalog 查找；零表示未知，不能拿同 API 的其他 alias 补齐。
+    contextLimit: Schema.Finite.pipe(optional),
   }).pipe(optional),
 }).annotate({ identifier: "Session.RequestUsage" })
 

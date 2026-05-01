@@ -72,6 +72,15 @@ export const selection = {
     ), last_assistant AS (
       -- 最后助手与模型随请求读出，用户被窗口淘汰后仍能锁定同一请求尾部。
       SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
+    ), native_estimate AS (
+      -- 复用 durable event 保存首包前估算；请求身份仍属于原 current_request。
+      SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind = 'native'
+      WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.request.estimated.1'
+        AND json_extract(e.data, '$.messageID') = r.id
+        AND NOT EXISTS (SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
+          AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = r.id
+          AND terminal.type IN ('session.next.prompt.completed.1', 'session.next.prompt.failed.1'))
+      ORDER BY e.seq DESC LIMIT 1
     ), last_step AS (
       -- V1 parts 按 ID 排序，最后 step-finish 不等于最后一个任意 part。
       SELECT p.id, p.data FROM part p JOIN last_assistant a ON a.kind = 'v1' AND a.id = p.message_id
@@ -79,11 +88,16 @@ export const selection = {
       ORDER BY p.id DESC LIMIT 1
     ), step AS (
       -- native 每个助手就是一轮；V1 未完成且还有尾部时不能沿用旧 step 确认值。
-      SELECT CASE WHEN a.kind = 'native' THEN a.data
-        WHEN json_extract(a.data, '$.time.completed') IS NULL AND EXISTS (
+      SELECT CASE WHEN a.kind = 'native' AND coalesce((SELECT seq FROM native_estimate), -1) > a.position THEN '{}'
+        -- 估算已替换旧 step，但既有 settled 请求累计保持原值。
+        WHEN a.kind = 'native' THEN a.data
+        WHEN json_extract(a.data, '$.time.completed') IS NULL AND (
+          (json_extract(a.data, '$.inputEstimate.confirmed') = 0
+            AND coalesce((SELECT id FROM last_step), '') <= coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), ''))
+          OR EXISTS (
           SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = "session"."id"
             AND p.id > coalesce((SELECT id FROM last_step), '')
-        ) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
+        )) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
       FROM last_assistant a
     )
     SELECT json_object(
@@ -95,7 +109,9 @@ export const selection = {
         + coalesce(json_extract(data, '$.tokens.reasoning'), 0)) FROM settled), 0),
       -- 费用仍取完整请求的助手 cost，当前 step 的展示变化不缩窄费用范围或反推价格。
       'cost', coalesce((SELECT sum(json_extract(data, '$.cost')) FROM assistants), 0),
-      'assistantID', (SELECT id FROM last_assistant),
+      'assistantID', (SELECT id FROM last_assistant
+        WHERE kind = 'v1' OR position >= coalesce((SELECT seq FROM native_estimate), -1)),
+      -- 首包前不冒用上一助手，确认后仍返回真实的最后助手身份。
       'stepInput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.input'), 0)
         + coalesce(json_extract(data, '$.tokens.cache.read'), 0)
         + coalesce(json_extract(data, '$.tokens.cache.write'), 0) FROM step), 0),
@@ -109,11 +125,26 @@ export const selection = {
         FROM last_usage u, last_assistant a, step s
         WHERE json_extract(a.data, '$.time.completed') IS NULL
           AND json_extract(s.data, '$.tokens') IS NULL),
+      -- 只投影当前助手未确认的请求体估算，不从累计或旧用户恢复 bootstrap。
+      -- native tokens 存在（包括全零）或 V1 新 step-finish 到达时立即停止估算。
+      'estimatedInput', coalesce((SELECT json_extract(e.data, '$.inputEstimate.input') FROM native_estimate e
+        WHERE e.seq > coalesce((SELECT position FROM last_assistant), -1)),
+        (SELECT json_extract(a.data, '$.inputEstimate.input') FROM last_assistant a
+        WHERE json_extract(a.data, '$.time.completed') IS NULL
+          AND json_extract(a.data, '$.inputEstimate.confirmed') = 0
+          AND (a.kind = 'v1' OR json_extract(a.data, '$.tokens') IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM last_step p WHERE a.kind = 'v1'
+            AND p.id > coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), '')))),
       -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
-      'model', json((SELECT json_object(
+      'model', json(coalesce((SELECT json_object(
+        'providerID', json_extract(data, '$.model.providerID'), 'modelID', json_extract(data, '$.model.id'),
+        'contextLimit', coalesce(json_extract(data, '$.inputEstimate.contextLimit'), 0)) FROM native_estimate
+        WHERE seq > coalesce((SELECT position FROM last_assistant), -1)), (SELECT json_object(
         'providerID', coalesce(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')),
-        'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id'))
-      ) FROM last_assistant))
+        'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id')),
+        'contextLimit', CASE WHEN kind = 'native' THEN coalesce(json_extract(data, '$.inputEstimate.contextLimit'), 0)
+          ELSE json_extract(data, '$.inputEstimate.contextLimit') END
+      ) FROM last_assistant)))
     ) FROM current_request r
   )`.mapWith((value) => {
     // SQL 没有请求时返回 null；空请求有身份且所有累计为零，两者不能混淆。
@@ -125,13 +156,15 @@ export const selection = {
       assistantID: Schema.NullOr(Schema.String),
       stepInput: Schema.Finite, stepOutput: Schema.Finite,
       pendingInput: Schema.NullOr(Schema.Finite),
-      model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
+      estimatedInput: Schema.NullOr(Schema.Finite),
+      model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String, contextLimit: Schema.NullOr(Schema.Finite) })),
     }))(parsed)
     return Session.RequestUsage.make({
       ...fields,
       assistantID: fields.assistantID ?? undefined,
       pendingInput: fields.pendingInput ?? undefined,
-      model: fields.model ?? undefined,
+      estimatedInput: fields.estimatedInput ?? undefined,
+      model: fields.model ? { ...fields.model, contextLimit: fields.model.contextLimit ?? undefined } : undefined,
     })
   }),
 }

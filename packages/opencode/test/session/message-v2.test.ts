@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Token } from "@opencode-ai/core/util/token"
 import { createXai } from "@ai-sdk/xai"
 import { APICallError, generateText } from "ai"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -262,9 +263,13 @@ describe("session.message-v2.toModelMessage", () => {
           {
             ...basePart(messageID, "p2"),
             type: "text",
-            text: "ignored",
+            text: "i".repeat(4000),
             ignored: true,
           },
+          { ...basePart(messageID, "file-text"), type: "text", synthetic: true, text: "f".repeat(800) },
+          { ...basePart(messageID, "editor"), type: "text", synthetic: true, text: "e".repeat(800) },
+          { ...basePart(messageID, "mcp"), type: "text", synthetic: true, text: "m".repeat(800) },
+          { ...basePart(messageID, "data-text"), type: "file", mime: "text/plain", url: `data:text/plain;base64,${"x".repeat(800)}` },
           {
             ...basePart(messageID, "p3"),
             type: "file",
@@ -302,11 +307,15 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+    const messages = await MessageV2.toModelMessages(input, model)
+    expect(messages).toStrictEqual([
       {
         role: "user",
         content: [
           { type: "text", text: "hello" },
+          { type: "text", text: "f".repeat(800) },
+          { type: "text", text: "e".repeat(800) },
+          { type: "text", text: "m".repeat(800) },
           {
             type: "file",
             mediaType: "image/png",
@@ -318,6 +327,7 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+    expect(Token.estimateRequest({ system: [], messages, tools: [] }, [])).toEqual({ input: 697, bodyChars: 2789, confirmed: false })
   })
 
   test("converts assistant tool completion into tool-call + tool-result messages with attachments", async () => {

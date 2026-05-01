@@ -23,7 +23,7 @@ export type RuntimeStatus =
   | { readonly type: "supported"; readonly apiKey: string; readonly baseURL?: string }
   | { readonly type: "unsupported"; readonly reason: string }
 export type StreamResult =
-  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown> }
+  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown>; readonly body: unknown }
   | { readonly type: "unsupported"; readonly reason: string }
 
 type StreamInput = {
@@ -100,17 +100,15 @@ export function stream(input: StreamInput): StreamResult {
     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
     headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
   })
+  // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
+  const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })
   const stream = Stream.scoped(
     Stream.unwrap(
       Effect.gen(function* () {
         const settlements = yield* FiberSet.make<void>()
         const results = yield* Queue.unbounded<LLMEvent, Cause.Done>()
         const provider = input.llmClient
-          .stream(
-            LLMRequest.update(request, {
-              tools: [...request.tools, ...toDefinitions(tools)],
-            }),
-          )
+          .stream(advertised)
           .pipe(
             Stream.flatMap((event) =>
               event.type !== "tool-call" || event.providerExecuted
@@ -141,6 +139,7 @@ export function stream(input: StreamInput): StreamResult {
 
   return {
     ...current,
+    body: { system: advertised.system, messages: advertised.messages, tools: advertised.tools, providerOptions: advertised.providerOptions },
     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
   }
 }

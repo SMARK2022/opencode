@@ -3,7 +3,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
 
 const id = "internal:sidebar-context"
 
@@ -36,9 +36,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
     // plugin 的 session.get 已直通同步 Session，不能另建 sidebar 私有请求账本。
     const request = session()?.request
-    // 侧栏和 Prompt 共用引导 owner，synthetic 文件正文也参与首轮输入估算。
-    const getParts = (id: string) => props.api.state.part(id)
-    const bootstrapInputTokens = getBootstrapInputTokens(messages, request, getParts)
+    // 三个视图共享服务端 provisional input；侧栏不维护第二个估算/累计 owner。
     // 空闲无回复保持全字段零值，避免新 Session 留下上一请求的费用或百分比。
     if (!request || (!request.assistantID && !isRunning())) {
       return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
@@ -50,12 +48,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     // 参数只含当前助手尾部，不能把其他请求的缓存 parts 传给共享计算。
     const lastParts = last ? props.api.state.part(last.id) : []
     // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
-    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
+    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     // 未确认请求可用其用户模型；已确认 native 请求不依赖用户仍在显示窗口。
     const modelRef = request.model ?? messages.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
-    const model = modelRef ? props.api.state.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
+    const contextLimit = getContextLimit(props.api.state.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
     return {
       tokens,
       totalTokens,
@@ -64,7 +62,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       totalInput,
       totalOutput,
       // 没有当前 step 的上下文或模型上限时，保留缺省百分比而不捏造测量值。
-      percent: tokens > 0 && model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
+      percent: tokens > 0 && contextLimit ? Math.round((tokens / contextLimit) * 100) : null,
       // 请求费用是所有助手 cost 的完整求和，不是最后 step 的费用。
       cost: request.cost,
     }

@@ -12,6 +12,7 @@ import { SessionID } from "../session-id"
 import { WorkspaceID } from "../workspace-id"
 import { PermissionV1 } from "./permission"
 import { Session } from "../session"
+import { SessionMessage } from "../session-message"
 
 const Timestamp = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -470,6 +471,8 @@ export const Assistant = Schema.Struct({
   }),
   summary: Schema.optional(Schema.Boolean),
   cost: Schema.Finite,
+  // V1 复用 canonical 元数据，不把 provisional input 混入 tokens.input。
+  inputEstimate: optional(SessionMessage.InputEstimate),
   tokens: Schema.Struct({
     total: Schema.optional(Schema.Finite),
     input: Schema.Finite,

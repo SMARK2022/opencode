@@ -161,6 +161,14 @@ export namespace Shell {
   export type Ended = typeof Ended.Type
 }
 
+// 首包前只有请求估算，不伪造助手；Started 仍由真实 provider 响应触发。
+export const RequestEstimated = Event.define({
+  type: "session.next.request.estimated",
+  ...options,
+  schema: { ...Base, messageID: SessionMessage.ID, model: Model.Ref, inputEstimate: SessionMessage.InputEstimate },
+})
+export type RequestEstimated = typeof RequestEstimated.Type
+
 export namespace Step {
   export const Started = Event.define({
     type: "session.next.step.started",
@@ -170,6 +178,8 @@ export namespace Step {
       assistantMessageID: SessionMessage.ID,
       agent: Schema.String,
       model: Model.Ref,
+      // Started 携带当前实际请求的估算；旧事件缺省仍可重放。
+      inputEstimate: SessionMessage.InputEstimate.pipe(optional),
       snapshot: Schema.String.pipe(optional),
     },
   })
@@ -488,6 +498,7 @@ export const DurableDefinitions = Event.inventory(
   PromptAdmitted,
   PromptFailed,
   PromptCompleted,
+  RequestEstimated,
   ContextUpdated,
   Synthetic,
   Shell.Started,
@@ -522,6 +533,7 @@ export const Definitions = Event.inventory(
   PromptAdmitted,
   PromptFailed,
   PromptCompleted,
+  RequestEstimated,
   ContextUpdated,
   Synthetic,
   Shell.Started,

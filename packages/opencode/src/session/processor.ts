@@ -29,6 +29,7 @@ import { and, eq } from "drizzle-orm"
 import { MessageTable } from "@opencode-ai/core/session/sql"
 import type { EventV2 } from "@opencode-ai/core/event"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { Token } from "@opencode-ai/core/util/token"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -539,6 +540,9 @@ const layer = Layer.effect(
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            // 只有本 step 的实际确认能把请求体样本标记为可校准。
+            if (ctx.assistantMessage.inputEstimate)
+              ctx.assistantMessage.inputEstimate.confirmed = true
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -744,7 +748,26 @@ const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
+              const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
+              const samples = history.toReversed().flatMap((message) => {
+                const info = message.info
+                // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
+                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id
+                  || !info.inputEstimate?.confirmed) return []
+                return [{ bodyChars: info.inputEstimate.bodyChars,
+                  input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
+              })
+              // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
+              ctx.assistantMessage.inputEstimate = {
+                ...Token.estimateRequest(body, samples),
+                contextLimit: ctx.model.limit.context,
+                // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
+                afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,
+              }
+              // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
+              yield* publishAssistant(ctx.assistantMessage, events)
+            }) })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),

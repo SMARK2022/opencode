@@ -1,8 +1,9 @@
 import { describe, expect } from "bun:test"
-import { LLM } from "@opencode-ai/llm"
-import { LLMClient } from "@opencode-ai/llm/route"
-import { DateTime, Effect } from "effect"
+import { LLM, ModelID } from "@opencode-ai/llm"
+import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
+import { DateTime, Effect, Stream } from "effect"
 import { Headers } from "effect/unstable/http"
+import { Token } from "@opencode-ai/core/util/token"
 import { Credential } from "@opencode-ai/core/credential"
 import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -345,6 +346,65 @@ describe("SessionRunnerModel", () => {
 
       expect(resolved.route.defaults.http?.body).toEqual({})
     }),
+  )
+
+  it.effect("estimates each stream after catalog system defaults are lowered", () =>
+    Effect.gen(function* () {
+      const client = yield* LLMClient.Service
+      const estimates: ReturnType<typeof Token.estimateRequest>[] = []
+      const calls = { prepare: 0, frames: 0 }
+      for (const raw of ["", "x".repeat(8000)]) {
+        const resolved = yield* SessionRunnerModel.fromCatalogModel(
+          ModelV2.Info.make({
+            ...model({ type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic.example/v1" }),
+            providerID: ProviderV2.ID.make("claudecode"),
+            request: { headers: {}, body: { apiKey: "fixture", system: raw } },
+            limit: { context: 100_000, output: 20 },
+          }),
+        )
+        expect(resolved.id).toBe(ModelID.make("api-test-model"))
+        expect(resolved.route.defaults.limits?.context).toBe(100_000)
+        const route = resolved.route.with({
+          transport: {
+            ...resolved.route.transport,
+            prepare(input) {
+              calls.prepare++
+              return resolved.route.transport.prepare(input)
+            },
+            frames() {
+              calls.frames++
+              expect(estimates).toHaveLength(calls.frames)
+              return Stream.empty
+            },
+          },
+        })
+        const input = LLM.request({
+          model: route.model({ id: resolved.id }),
+          http: { body: { metadata: { fixture: raw } } },
+          system: "Session system", prompt: "hello", cache: "none",
+          tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object", properties: { text: { type: "string" } } } }],
+          providerOptions: { anthropic: { thinking: { type: "disabled" } } },
+        })
+        expect(input.providerOptions?.anthropic?.system).toBeUndefined()
+        yield* client.stream(input, (body) => Effect.sync(() => {
+          estimates.push(Token.estimateRequest(body, []))
+          expect(body).toMatchObject({
+            system: expect.arrayContaining([{ type: "text", text: "Session system" }, { type: "text", text: raw }]),
+            messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+            tools: expect.arrayContaining([{ name: "echo", description: "Echo", input_schema: { type: "object", properties: { text: { type: "string" } } } }]),
+          })
+          // metadata 与 system 同增 8000，估算仍只增长正文的 8000；运输附加字段不能再计一遍。
+          expect(body).not.toHaveProperty("metadata.fixture")
+        })).pipe(Stream.runDrain)
+      }
+      expect(calls).toEqual({ prepare: 2, frames: 2 })
+      expect(estimates).toHaveLength(2)
+      expect(Math.max(...estimates.map(item => item.bodyChars)) - Math.min(...estimates.map(item => item.bodyChars))).toBe(8000)
+      expect(Math.max(...estimates.map(item => item.input)) - Math.min(...estimates.map(item => item.input))).toBe(2000)
+    }).pipe(
+      Effect.provide(LLMClient.layer),
+      Effect.provideService(RequestExecutor.Service, { execute: () => Effect.die("Prepared fixture must not send provider IO") }),
+    ),
   )
 
   it.effect("rejects catalog APIs without a native route", () =>

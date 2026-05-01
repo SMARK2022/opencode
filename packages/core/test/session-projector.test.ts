@@ -163,12 +163,27 @@ describe("SessionProjector", () => {
       // 每轮给五项不同的非零计数，能发现只累加最后一轮、遗漏 reasoning 或合并 cache 的错误。
       const records = yield* Effect.forEach([1, 2], (factor) => Effect.gen(function* () {
         const assistantMessageID = SessionMessage.ID.make(`msg_native_usage_${factor}`)
+        // 首包前估算使用真实请求身份，不创建助手，也不重置历史确认累计。
+        yield* events.publish(SessionEvent.RequestEstimated, {
+          sessionID, messageID: SessionMessage.ID.make("msg_native_request"), timestamp: DateTime.makeUnsafe(factor),
+          model, inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
+        })
+        expect((yield* sessions.get(sessionID)).request).toMatchObject({
+          messageID: "msg_native_request", input: factor === 1 ? 0 : 14, output: factor === 1 ? 0 : 4,
+          stepInput: 0, stepOutput: 0, estimatedInput: 777,
+        })
+        expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+        expect((yield* sessions.get(sessionID)).request?.model).toEqual({ providerID: model.providerID, modelID: model.id, contextLimit: factor === 1 ? 2000 : 8000 })
         yield* events.publish(SessionEvent.Step.Started, {
           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
+          inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
         })
         // 第二个原生助手没有 tokens；首轮 14 输入和 4 输出仍是本请求的在途基数。
         expect((yield* sessions.get(sessionID)).request).toMatchObject({ assistantID: assistantMessageID, stepInput: 0, stepOutput: 0 })
         expect((yield* sessions.get(sessionID)).request?.pendingInput).toBe(factor === 1 ? undefined : 18)
+        // Started 估算不改变任何确认累计或费用；get/list 共用 canonical 投影。
+        expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBe(777)
+        expect((yield* sessions.list({ project: Project.ID.global })).find(item => item.id === sessionID)?.request?.estimatedInput).toBe(777)
         const ended = yield* events.publish(SessionEvent.Step.Ended, {
           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor + 1), finish: "stop", cost: factor / 4,
           tokens: { input: factor * 2, output: factor * 3, reasoning: factor, cache: { read: factor * 5, write: factor * 7 } },
@@ -194,6 +209,19 @@ describe("SessionProjector", () => {
         // 此确认值不依赖任何 V1 step-finish，也不依赖 TUI 消息窗口。
       })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
+      const selected = ModelV2.Ref.make({
+        providerID: model.providerID, id: ModelV2.ID.make("other-alias"), variant: ModelV2.VariantID.make("later"),
+      })
+      // 真实切换 producer 创建独立消息，不能覆盖已有用户与请求身份。
+      yield* sessions.switchModel({ sessionID, model: selected })
+      expect((yield* sessions.get(sessionID)).model?.id).toBe(selected.id)
+      expect((yield* sessions.get(sessionID)).model?.variant).toBe(ModelV2.VariantID.make("later"))
+      expect((yield* sessions.messages({ sessionID, order: "asc" })).at(-1)).toMatchObject({ type: "model-switched", model: selected })
+      expect(yield* sessions.message({ sessionID, messageID: SessionMessage.ID.make("msg_native_request") })).toMatchObject({ type: "user", text: "request" })
+      expect((yield* sessions.get(sessionID)).request?.model).toEqual({ providerID: model.providerID, modelID: model.id, contextLimit: 8000 })
+      expect((yield* sessions.list({ project: Project.ID.global })).find(item => item.id === sessionID)?.request?.model?.contextLimit).toBe(8000)
+      expect((yield* sessions.get(sessionID)).tokens).toEqual(expected.tokens)
       // 这里检查公开 get 的投影，不在断言里重复实现事件到请求的归属计算。
       // 重放已经落盘的两次结算，保留现有 sequencer 的去重边界，不在投影中另建标记。
       for (const record of records) yield* events.replay(record)
@@ -286,11 +314,17 @@ describe("SessionProjector", () => {
         messageID: userID, assistantID: next.id, input: 42, output: 12, stepInput: 0, stepOutput: 0, pendingInput: 36,
       })
       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
+      // V1 元数据先到，tokens 仍为零；真实请求体估算不进入确认 input=42。
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next,
+        inputEstimate: { input: 777, bodyChars: 3108, confirmed: false } } })
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, estimatedInput: 777 })
+      // fixture 后续零 step-finish 必须直接遮掉 provisional input，不能等待完成时间。
       // 零 step-finish 是确认边界，不得因为累计仍非零就保留上一轮估算。
       yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: { ...finish, id: SessionV1.PartID.ascending(), messageID: next.id, tokens: next.tokens },
         time: 12 })
       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, stepInput: 0, stepOutput: 0 })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
       // completed=0 同样是终态；展示输入不能恢复到先前非零上下文。
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next, time: { created: 12, completed: 0 } } })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
@@ -301,6 +335,32 @@ describe("SessionProjector", () => {
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
       expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+      // 原生零确认没有 V1 part，必须依靠 tokens 是否存在而不是数字真值。
+      const zeroRequest = SessionMessage.ID.make("msg_zero_estimate")
+      const zeroAssistant = SessionMessage.ID.make("msg_zero_estimate_assistant")
+      const inputEstimate = { input: 777, bodyChars: 3108, confirmed: false }
+      yield* events.publish(SessionEvent.Prompted, { sessionID, messageID: zeroRequest,
+        timestamp: DateTime.makeUnsafe(14), prompt: Prompt.make({ text: "zero" }), delivery: "steer" })
+      yield* events.publish(SessionEvent.RequestEstimated, { sessionID, messageID: zeroRequest,
+        timestamp: DateTime.makeUnsafe(15), model, inputEstimate })
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: zeroAssistant,
+        timestamp: DateTime.makeUnsafe(16), agent: "build", model, inputEstimate })
+      yield* events.publish(SessionEvent.Step.Ended, { sessionID, assistantMessageID: zeroAssistant,
+        timestamp: DateTime.makeUnsafe(17), finish: "stop", cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
+      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
+      // 空成功只闭合现有请求，估算事件不制造零用量助手或额外 provider turn。
+      const emptyRequest = SessionMessage.ID.make("msg_empty_estimate")
+      yield* events.publish(SessionEvent.Prompted, { sessionID, messageID: emptyRequest,
+        timestamp: DateTime.makeUnsafe(18), prompt: Prompt.make({ text: "empty" }), delivery: "steer" })
+      yield* events.publish(SessionEvent.RequestEstimated, { sessionID, messageID: emptyRequest,
+        timestamp: DateTime.makeUnsafe(19), model, inputEstimate })
+      yield* events.publish(SessionEvent.PromptCompleted, { sessionID, messageID: emptyRequest,
+        timestamp: DateTime.makeUnsafe(20), requestIDs: [emptyRequest] })
+      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
     }).pipe(Effect.provide(sessionsLayer)),
   )
 

@@ -23,6 +23,7 @@ export type Event =
   | EventSessionNextPromptAdmitted
   | EventSessionNextPromptFailed
   | EventSessionNextPromptCompleted
+  | EventSessionNextRequestEstimated
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
   | EventSessionNextShellStarted
@@ -362,6 +363,7 @@ export type AssistantMessage = {
   }
   summary?: boolean
   cost: number
+  inputEstimate?: SessionMessageInputEstimate
   tokens: {
     total?: number
     input: number
@@ -898,6 +900,17 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.request.estimated"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          model: ModelRef
+          inputEstimate: SessionMessageInputEstimate
+        }
+      }
+    | {
+        id: string
         type: "session.next.context.updated"
         properties: {
           timestamp: number
@@ -946,6 +959,7 @@ export type GlobalEvent = {
           assistantMessageID: string
           agent: string
           model: ModelRef
+          inputEstimate?: SessionMessageInputEstimate
           snapshot?: string
         }
       }
@@ -1680,6 +1694,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextPromptAdmitted
     | SyncEventSessionNextPromptFailed
     | SyncEventSessionNextPromptCompleted
+    | SyncEventSessionNextRequestEstimated
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
     | SyncEventSessionNextShellStarted
@@ -2838,6 +2853,7 @@ export type SessionDurableEvent =
   | SessionNextPromptAdmitted
   | SessionNextPromptFailed
   | SessionNextPromptCompleted
+  | SessionNextRequestEstimated
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2968,6 +2984,7 @@ export type V2Event =
   | SessionNextPromptAdmitted
   | SessionNextPromptFailed
   | SessionNextPromptCompleted
+  | SessionNextRequestEstimated
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -3144,10 +3161,20 @@ export type SessionRequestUsage = {
   stepInput: number
   stepOutput: number
   pendingInput?: number
+  estimatedInput?: number
   model?: {
     providerID: string
     modelID: string
+    contextLimit?: number
   }
+}
+
+export type SessionMessageInputEstimate = {
+  input: number
+  bodyChars: number
+  confirmed: boolean
+  afterPartID?: string
+  contextLimit?: number
 }
 
 export type ModelRef = {
@@ -3536,6 +3563,24 @@ export type SyncEventSessionNextPromptCompleted = {
   }
 }
 
+export type SyncEventSessionNextRequestEstimated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.request.estimated.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      model: ModelRef
+      inputEstimate: SessionMessageInputEstimate
+    }
+  }
+}
+
 export type SyncEventSessionNextContextUpdated = {
   type: "sync"
   id: string
@@ -3619,6 +3664,7 @@ export type SyncEventSessionNextStepStarted = {
       assistantMessageID: string
       agent: string
       model: ModelRef
+      inputEstimate?: SessionMessageInputEstimate
       snapshot?: string
     }
   }
@@ -4316,6 +4362,7 @@ export type SessionMessageAssistant = {
   type: "assistant"
   agent: string
   model: ModelRef
+  inputEstimate?: SessionMessageInputEstimate
   content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
   snapshot?: {
     start?: string
@@ -4504,6 +4551,27 @@ export type SessionNextPromptCompleted = {
   }
 }
 
+export type SessionNextRequestEstimated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.request.estimated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    model: ModelRef
+    inputEstimate: SessionMessageInputEstimate
+  }
+}
+
 export type SessionNextContextUpdated = {
   id: string
   metadata?: {
@@ -4603,6 +4671,7 @@ export type SessionNextStepStarted = {
     assistantMessageID: string
     agent: string
     model: ModelRef
+    inputEstimate?: SessionMessageInputEstimate
     snapshot?: string
   }
 }
@@ -6618,6 +6687,18 @@ export type EventSessionNextPromptCompleted = {
   }
 }
 
+export type EventSessionNextRequestEstimated = {
+  id: string
+  type: "session.next.request.estimated"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    model: ModelRef
+    inputEstimate: SessionMessageInputEstimate
+  }
+}
+
 export type EventSessionNextContextUpdated = {
   id: string
   type: "session.next.context.updated"
@@ -6672,6 +6753,7 @@ export type EventSessionNextStepStarted = {
     assistantMessageID: string
     agent: string
     model: ModelRef
+    inputEstimate?: SessionMessageInputEstimate
     snapshot?: string
   }
 }
