@@ -491,7 +491,6 @@ export const BashTool = Tool.define(
     const fs = yield* AppFileSystem.Service
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
-    const instance = yield* InstanceState.context
 
     const cygpath = Effect.fn("BashTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -787,6 +786,7 @@ export const BashTool = Tool.define(
         const limits = yield* trunc.limits()
         const configInfo = yield* configService.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
         const userCompressionEnabled = bashCompressionEnabled(configInfo)
+        const instance = yield* InstanceState.context
         const compressionGuidance = userCompressionEnabled
           ? [
               "  - Bash output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",

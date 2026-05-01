@@ -5,6 +5,7 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
+import { SessionRequestUsage } from "@/session/request-usage"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
@@ -38,6 +39,74 @@ export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   before: Schema.optional(Schema.String),
 })
+const RequestUsageSource = Schema.Literals([
+  "prompt",
+  "command",
+  "shell",
+  "system_compaction",
+  "system_continue",
+  "unknown",
+] as const).annotate({ identifier: "RequestUsageSource" })
+const RequestUsageStatus = Schema.Literals(["running", "completed", "error", "aborted"] as const).annotate({
+  identifier: "RequestUsageStatus",
+})
+const RequestUsageTokens = Schema.Struct({
+  input: Schema.Number,
+  output: Schema.Number,
+  reasoning: Schema.Number,
+  cache: Schema.Struct({
+    read: Schema.Number,
+    write: Schema.Number,
+  }),
+  total: Schema.Number,
+}).annotate({ identifier: "RequestUsageTokens" })
+export const RequestUsageQuery = Schema.Struct({
+  limit: Schema.optional(Schema.NumberFromString),
+  before: Schema.optional(Schema.NumberFromString),
+  rootRequestID: Schema.optional(MessageID),
+  source: Schema.optional(RequestUsageSource),
+})
+const RequestUsageModel = Schema.Struct({
+  providerID: Schema.String,
+  modelID: Schema.String,
+  variant: Schema.optional(Schema.String),
+})
+const RequestUsageRequest = Schema.Struct({
+  sessionID: SessionID,
+  requestID: MessageID,
+  rootRequestID: MessageID,
+  source: RequestUsageSource,
+  status: RequestUsageStatus,
+  agent: Schema.String,
+  model: RequestUsageModel,
+  assistantCount: Schema.Number,
+  stepCount: Schema.Number,
+  tokens: RequestUsageTokens,
+  cost: Schema.Number,
+  error: Schema.optional(Schema.String),
+  time: Schema.Struct({
+    created: Schema.Number,
+    updated: Schema.Number,
+    completed: Schema.optional(Schema.Number),
+  }),
+}).annotate({ identifier: "SessionRequestUsage" })
+const RequestUsageAssistant = Schema.Struct({
+  sessionID: SessionID,
+  requestID: MessageID,
+  assistantMessageID: MessageID,
+  rootRequestID: MessageID,
+  status: RequestUsageStatus,
+  model: RequestUsageModel,
+  stepCount: Schema.Number,
+  tokens: RequestUsageTokens,
+  cost: Schema.Number,
+  error: Schema.optional(Schema.String),
+  time: Schema.Struct({
+    created: Schema.Number,
+    updated: Schema.Number,
+    completed: Schema.optional(Schema.Number),
+  }),
+}).annotate({ identifier: "SessionRequestUsageAssistant" })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
@@ -73,6 +142,9 @@ export const SessionPaths = {
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
   todo: `${root}/:sessionID/todo`,
+  requestUsage: `${root}/:sessionID/request_usage`,
+  requestUsageGet: `${root}/:sessionID/request_usage/:requestID`,
+  requestUsageAssistants: `${root}/:sessionID/request_usage/:requestID/assistant`,
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
   message: `${root}/:sessionID/message/:messageID`,
@@ -151,6 +223,40 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.todo",
             summary: "Get session todos",
             description: "Retrieve the todo list associated with a specific session, showing tasks and action items.",
+          }),
+        ),
+        HttpApiEndpoint.get("requestUsageList", SessionPaths.requestUsage, {
+          params: { sessionID: SessionID },
+          query: RequestUsageQuery,
+          success: described(Schema.Array(RequestUsageRequest), "Request usage list"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.request_usage.list",
+            summary: "List request usage",
+            description: "List per-request token usage and cost for a session.",
+          }),
+        ),
+        HttpApiEndpoint.get("requestUsageGet", SessionPaths.requestUsageGet, {
+          params: { sessionID: SessionID, requestID: MessageID },
+          success: described(RequestUsageRequest, "Request usage detail"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.request_usage.get",
+            summary: "Get request usage",
+            description: "Get token usage and cost for a specific request.",
+          }),
+        ),
+        HttpApiEndpoint.get("requestUsageAssistants", SessionPaths.requestUsageAssistants, {
+          params: { sessionID: SessionID, requestID: MessageID },
+          success: described(Schema.Array(RequestUsageAssistant), "Assistant usage list"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.request_usage.assistants",
+            summary: "List request assistant usage",
+            description: "List assistant-round usage for a specific request.",
           }),
         ),
         HttpApiEndpoint.get("diff", SessionPaths.diff, {

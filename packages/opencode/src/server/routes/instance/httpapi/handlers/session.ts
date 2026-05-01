@@ -11,6 +11,7 @@ import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
+import { SessionRequestUsage } from "@/session/request-usage"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
@@ -32,6 +33,7 @@ import {
   MessagesQuery,
   PermissionResponsePayload,
   PromptPayload,
+  RequestUsageQuery,
   RevertPayload,
   ShellPayload,
   SummarizePayload,
@@ -58,6 +60,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
+    const requestUsage = yield* SessionRequestUsage.Service
     const summary = yield* SessionSummary.Service
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
@@ -88,6 +91,33 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     const todo = Effect.fn("SessionHttpApi.todo")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* todoSvc.get(ctx.params.sessionID)
+    })
+
+    const requestUsageList = Effect.fn("SessionHttpApi.requestUsageList")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: typeof RequestUsageQuery.Type
+    }) {
+      return yield* requestUsage.list({
+        sessionID: ctx.params.sessionID,
+        limit: ctx.query.limit,
+        before: ctx.query.before,
+        rootRequestID: ctx.query.rootRequestID,
+        source: ctx.query.source as SessionRequestUsage.Source | undefined,
+      })
+    })
+
+    const requestUsageGet = Effect.fn("SessionHttpApi.requestUsageGet")(function* (ctx: {
+      params: { sessionID: SessionID; requestID: MessageID }
+    }) {
+      const result = yield* requestUsage.get(ctx.params)
+      if (result) return result
+      return yield* new HttpApiError.NotFound({})
+    })
+
+    const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: {
+      params: { sessionID: SessionID; requestID: MessageID }
+    }) {
+      return yield* requestUsage.assistants(ctx.params)
     })
 
     const diff = Effect.fn("SessionHttpApi.diff")(function* (ctx: {
@@ -362,6 +392,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("get", get)
       .handle("children", children)
       .handle("todo", todo)
+      .handle("requestUsageList", requestUsageList)
+      .handle("requestUsageGet", requestUsageGet)
+      .handle("requestUsageAssistants", requestUsageAssistants)
       .handle("diff", diff)
       .handle("messages", messages)
       .handle("message", message)

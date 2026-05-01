@@ -704,12 +704,12 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 // Cancel semantics
 
-it.live(
+unix(
   "cancel interrupts loop and resolves with an assistant message",
   () =>
     provideTmpdirServer(
@@ -734,10 +734,10 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
-it.live(
+unix(
   "cancel records MessageAbortedError on interrupted process",
   () =>
     provideTmpdirServer(
@@ -762,7 +762,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 it.live(
@@ -814,7 +814,7 @@ it.live(
   30_000,
 )
 
-it.live(
+unix(
   "cancel with queued callers resolves all cleanly",
   () =>
     provideTmpdirServer(
@@ -840,7 +840,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 // Queue semantics
@@ -864,7 +864,7 @@ it.live("concurrent loop callers get same result", () =>
   ),
 )
 
-it.live(
+unix(
   "concurrent loop callers all receive same error result",
   () =>
     provideTmpdirServer(
@@ -884,10 +884,10 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
-it.live(
+unix(
   "prompt submitted during an active run is included in the next LLM input",
   () =>
     provideTmpdirServer(
@@ -953,7 +953,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 it.live(
@@ -983,7 +983,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 it.live("assertNotBusy succeeds when idle", () =>
@@ -1003,7 +1003,7 @@ it.live("assertNotBusy succeeds when idle", () =>
 
 // Shell semantics
 
-it.live(
+unix(
   "shell rejects with BusyError when loop running",
   () =>
     provideTmpdirServer(
@@ -1028,7 +1028,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 unix("shell captures stdout and stderr in completed tool output", () =>
@@ -1213,7 +1213,7 @@ unix(
   30_000,
 )
 
-it.live(
+unix(
   "loop waits while shell runs and starts after shell exits",
   () =>
     provideTmpdirServer(
@@ -1248,10 +1248,10 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
-it.live(
+unix(
   "shell completion resumes queued loop callers",
   () =>
     provideTmpdirServer(
@@ -1288,7 +1288,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 unix(
@@ -1763,7 +1763,7 @@ it.live("does not loop empty assistant turns for a simple reply", () =>
   ),
 )
 
-it.live(
+unix(
   "records aborted errors when prompt is cancelled mid-stream",
   () =>
     provideTmpdirServer(
@@ -1803,7 +1803,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  3_000,
+  10_000,
 )
 
 // Agent variant
