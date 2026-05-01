@@ -666,11 +666,10 @@ const layer = Layer.effect(
         }
         ctx.reasoningMap = {}
 
-        yield* Effect.forEach(
-          Object.values(ctx.toolcalls),
-          (call) => Deferred.await(call.done).pipe(Effect.timeout("250 millis"), Effect.ignore),
-          { concurrency: "unbounded" },
-        )
+        // cleanup 直接唤醒协调信号，移除有界等待；这不表示工具执行已完成。
+        for (const call of Object.values(ctx.toolcalls)) {
+          yield* Deferred.succeed(call.done, undefined).pipe(Effect.ignore)
+        }
 
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
           const match = yield* readToolCall(toolCallID)

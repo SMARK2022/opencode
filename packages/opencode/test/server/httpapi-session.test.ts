@@ -401,11 +401,26 @@ describe("session HttpApi", () => {
         expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=0`, { headers })).toEqual([])
         // limit=0 也属于显式输入，不能退回默认一百条。
         expect(yield* requestJson<unknown[]>(`${url}?limit=0`, { headers })).toEqual([])
+        // 负整数保留不限量语义：同根两条都应返回，不能钳制为一条或拒绝为负数。
+        expect(
+          (yield* requestJson<Array<{ requestID: string }>>(`${url}?limit=-1&source=prompt&rootRequestID=${root.info.id}`, { headers })).map((row) => row.requestID),
+        ).toEqual([newer.info.id, root.info.id])
         // 每个排除行只违反一个条件，不能靠单一 source/root/before 条件碰巧通过。
         expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
+        // 整数限制仅属于 limit；before 的小数边界与安全整数上界仍须正常查询。
+        expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1.5&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
+        expect(yield* requestJson<unknown[]>(`${url}?limit=${Number.MAX_SAFE_INTEGER}&before=1.5&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
 
         // 数字 codec 拒绝不可转换文本，避免只测试服务方法而遗漏 HttpApi query 解码。
         expect((yield* request(`${url}?limit=bad`, { headers })).status).toBe(400)
+        // 小数及正负安全整数溢出必须在 Query codec 拒绝，不能触发 SQLite defect 或静默取整。
+        for (const limit of [1.5, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1]) {
+          const invalid = yield* request(`${url}?limit=${limit}`, { headers })
+          expect(invalid.status).toBe(400)
+          expect(yield* responseJson(invalid)).toMatchObject({
+            name: "BadRequest", data: { kind: "Query", message: expect.stringContaining("limit") },
+          })
+        }
         // Session 已存在且 message ID 合法，404 必须来自缺失账本资源而非路由或 ID 校验。
         const missingID = MessageID.ascending()
         const missing = yield* request(`${url}/${missingID}`, { headers })

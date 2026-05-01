@@ -449,8 +449,8 @@ export const SessionApi = HttpApi.make("session")
         // 历史账本与 Session.request 即时投影分开命名，不能用最新请求视图替代历史分页。
         HttpApiEndpoint.get("requestUsageList", "/session/:sessionID/request_usage", {
           params: { sessionID: SessionID },
-          // URL 文本转换后拒绝 NaN/Infinity；零仍有效，不额外限制整数、正值或范围。
-          query: { ...WorkspaceRoutingQueryFields, limit: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), rootRequestID: Schema.optional(MessageID), source: Schema.optional(SessionRequestUsage.SourceSchema) },
+          // limit 使用安全整数绑定 SQLite，保留零及负数不限量；before 仍允许有限小数时间游标。
+          query: { ...WorkspaceRoutingQueryFields, limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt())), before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), rootRequestID: Schema.optional(MessageID), source: Schema.optional(SessionRequestUsage.SourceSchema) },
           success: Schema.Array(SessionRequestUsage.RequestUsageSchema),
           error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.list", summary: "List request usage" })),
