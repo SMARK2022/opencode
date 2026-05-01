@@ -1,5 +1,6 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
@@ -881,6 +882,12 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "tool abort")
+        // 使用真实数据库账本与已持久化用户身份，不复制结算逻辑或猜测最新请求。
+        const usage = SessionRequestUsage.make(database.db)
+        yield* usage.begin({
+          sessionID: chat.id, requestID: parent.id, source: "prompt", agent: "build",
+          providerID: ref.providerID, modelID: ref.modelID,
+        })
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
         const handle = yield* processors.create({
@@ -920,7 +927,8 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
             messages: [{ role: "user", content: "tool abort" }],
             tools: {},
           })
-          .pipe(Effect.forkChild)
+          // 显式提供可选账本服务，使 cleanup 的生产者实际执行持久化结算。
+          .pipe(Effect.provideService(SessionRequestUsage.Service, usage), Effect.forkChild)
 
         yield* llm.wait(1)
         yield* waitFor(
@@ -954,6 +962,21 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           expect(call.state.metadata?.raw).toBe('{"cmd"')
           expect(call.state.time.end).toBeDefined()
         }
+        // Fiber 退出后读取编码后的助手终态，协调信号完成不能代替消息落盘。
+        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        expect(stored.info).toMatchObject({
+          id: msg.id, parentID: parent.id, role: "assistant",
+          error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) },
+        })
+        // 没有 step-finish 的取消仍须闭合请求；未解析工具输入不能被当作 provider 用量。
+        expect(yield* usage.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({
+          rootRequestID: parent.id, status: "aborted", assistantCount: 1, stepCount: 0,
+          cost: 0, tokens: { total: 0 }, time: { completed: expect.any(Number) },
+        })
+        // 明细身份固定为本次助手与调用者请求，拒绝错属或只修改内存的假结算。
+        expect(yield* usage.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([
+          { assistantMessageID: msg.id, rootRequestID: parent.id, status: "aborted", stepCount: 0, cost: 0 },
+        ])
       }),
     { config: (url) => providerCfg(url) },
   ),
