@@ -88,6 +88,13 @@ export type DiscoverDaemonDeps = {
   waitMs: number
 }
 
+// 冷插件预热使用完整 60 秒健康等待，选举竞争者另有获锁等待预算。
+export const DAEMON_START_TIMEOUT_MS = 60_000
+// 75 秒只限制 contender 等待 acquire；持锁期限由 heartbeat 和 release 管理。
+export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
+export const SERVER_ELECTION_STALE_MS = 5_000
+export const SERVER_POLL_INTERVAL_MS = 200
+
 // 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
 // 只缩短 contender 等待和探测频率，完整启动 deadline 仍由独立 waitMs 约束。
 const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
@@ -107,20 +114,20 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
     const { resolveNetworkOptions } = await import("@/cli/network")
     return AppRuntime.runPromise(resolveNetworkOptions(args))
   },
-  // 选举等待只限制 contender，不缩短成功持锁者启动健康服务的完整预算。
+  // contender 可等待冷启动 winner 完成交付；超时只拒绝此次获锁请求，不驱逐持锁者。
   // acquire 超时必须显式失败，不能在未获得租约时私自拉起另一个同身份服务。
 
-  electionTimeoutMs: 10_000,
+  electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS,
   // staleMs 交给已有 Flock heartbeat 维护，不能凭 HTTP 超时自行打破活租约。
   // Flock 持有期间仍按 staleMs 更新 heartbeat，长启动不等于 lease 已失效。
 
-  electionStaleMs: 5_000,
+  electionStaleMs: SERVER_ELECTION_STALE_MS,
   // 启动轮询等待 owner 写锁，不能把尚未发布端口的进程当作可复用服务。
-  // 增大间隔减少未发布 owner 的无效读取；就绪验证仍检查同一子 PID 和受保护 health。
+  // Windows 启动器不是锁 owner；轮询仍验证存活、认证、身份和 token 复读。
 
-  pollMs: 200,
-  // 冷插件在监听前并行预热；完整健康等待给 60 秒，不改变 contender 的选举预算。
-  waitMs: 60_000,
+  pollMs: SERVER_POLL_INTERVAL_MS,
+  // 与超时文案共用常量，完整启动 deadline 仍在避让早期探测的 sleep 后开始。
+  waitMs: DAEMON_START_TIMEOUT_MS,
 })
 
 export async function discoverOrSpawnDaemon(
@@ -210,19 +217,22 @@ export async function discoverOrSpawnDaemon(
           // exited 的拒绝先安装 observer；read/unref 的同步异常仍由两层 finally 清理。
           void proc.exited.catch(() => undefined)
           proc.unref()
-          fwdPid = proc.pid
 
           // 等待放在 proc 与 lease 的 finally 内，sleep 拒绝也不能泄漏选举所有权。
           // 完整启动预算从 sleep 后开始，不能用避让早期探测的延迟吃掉健康等待时间。
           await deps.sleep(1000)
           const deadline = Date.now() + deps.waitMs
-          // 端口即使被其他健康服务占用，也不能替代本次子进程 PID 的发现锁。
+          // 启动器 PID 可不同；健康锁仍必须通过 reuse 的身份与稳定 owner 校验。
           while (Date.now() < deadline) {
             const daemonLock = await deps.read(lockPath)
-            if (daemonLock && daemonLock.pid === proc.pid && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
-              // 只交付本次子进程已发布且通过认证的锁，未知 owner 不进入本次清理范围。
+            if (daemonLock && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
+              // 交付身份、认证与 token 复读均通过的 daemon owner，启动器 PID 不代替锁身份。
               existingUrl = await reuse(daemonLock)
-              if (existingUrl) break
+              // 重载信号的目标是已验证 daemon，而不是可能已经退出的启动器。
+              if (existingUrl) {
+                fwdPid = daemonLock.pid
+                break
+              }
             }
             await deps.sleep(deps.pollMs)
           }
@@ -230,8 +240,8 @@ export async function discoverOrSpawnDaemon(
           if (!existingUrl) {
             // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
             // 超时仍向上失败；杀本次 proc 与释放 lease 继续由原有两层 finally 执行。
-            UI.error("opencode daemon failed to start within 60 seconds")
-            throw new Error("opencode daemon failed to start within 60 seconds")
+            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
+            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
           }
         } finally {
           // 只终止本次启动且尚未交付的子进程；read/sleep/ping 异常也会进入此处。
