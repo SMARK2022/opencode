@@ -11,6 +11,7 @@ import * as Win32 from "../../../src/cli/cmd/tui/win32"
 import { TuiConfig } from "../../../src/cli/cmd/tui/config/tui"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as ThreadModule from "../../../src/cli/cmd/tui/thread"
+import { Flock } from "@opencode-ai/core/util/flock"
 
 const stop = new Error("stop")
 const seen = {
@@ -192,6 +193,73 @@ describe("tui thread", () => {
     test("no existing server: daemon is spawned", async () => {
       const { daemonSpawnCount } = await callWithDaemonSpy(null)
       expect(daemonSpawnCount).toBe(1)
+    })
+
+    test("accepts lock from real daemon when spawned pid is only a Windows launcher", async () => {
+      setup()
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+      seen.tui.length = 0
+      seen.tuiUrls.length = 0
+
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+
+      const launcherPid = 99998
+      const realDaemonPid = 99999
+      let daemonSpawnCount = 0
+      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
+        daemonSpawnCount++
+        return { pid: launcherPid, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+      })
+
+      let readCount = 0
+      spyOn(ServerLockModule, "read").mockImplementation(async () => {
+        readCount++
+        if (readCount <= 2) return undefined
+        return {
+          ...fakeLock,
+          pid: realDaemonPid,
+        }
+      })
+      spyOn(ServerLockModule, "alive").mockImplementation((pid) => pid === realDaemonPid)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
+
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toBe(stop)
+        expect(daemonSpawnCount).toBe(1)
+        expect(seen.tuiUrls[0]).toBe("http://127.0.0.1:9999")
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
+    test("waits longer than the daemon startup window for server election", async () => {
+      setup()
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+
+      spyOn(ServerLockModule, "read").mockResolvedValue(undefined)
+
+      let timeoutMs: number | undefined
+      spyOn(Flock, "acquire").mockImplementation(async (_key, input) => {
+        timeoutMs = input?.timeoutMs
+        throw stop
+      })
+
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toBe(stop)
+        expect(timeoutMs).toBeGreaterThan(ThreadModule.DAEMON_START_TIMEOUT_MS)
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
     })
 
     test("lock exists + pid alive but HTTP ping fails (server crashed): spawns new daemon and clears stale lock", async () => {

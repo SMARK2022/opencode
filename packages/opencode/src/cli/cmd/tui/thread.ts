@@ -28,6 +28,11 @@ declare global {
   const OPENCODE_WORKER_PATH: string
 }
 
+export const DAEMON_START_TIMEOUT_MS = 60_000
+export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
+const SERVER_ELECTION_STALE_MS = 5_000
+const SERVER_POLL_INTERVAL_MS = 200
+
 // Exposed for testing only – do not call outside this module.
 export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) =>
   Bun.spawn(cmd, opts)
@@ -152,8 +157,8 @@ export const TuiThreadCommand = cmd({
         // spawn a daemon at the same time (e.g. opening 4 tabs simultaneously).
         electionLease = await Flock.acquire("opencode.server", {
           dir: path.join(Global.Path.state, "locks"),
-          timeoutMs: 10_000,
-          staleMs: 5_000,
+          timeoutMs: SERVER_ELECTION_TIMEOUT_MS,
+          staleMs: SERVER_ELECTION_STALE_MS,
         })
         // Re-check under lock: another process may have won the race between
         // the fast-check and the lock acquisition.
@@ -208,11 +213,14 @@ export const TuiThreadCommand = cmd({
 
           // Wait for the daemon to write the lock and for its server to respond.
           // The daemon pre-warms external plugins before writing the lock, which
-          // can take up to ~30 s on the first run.  Give it 60 s to be safe.
-          const deadline = Date.now() + 60_000
+          // can take up to ~30 s on the first run. Give it 60 s to be safe.
+          // Do not require the lock PID to equal Bun.spawn()'s PID: on Windows,
+          // process.execPath can be a shim/launcher that starts the real daemon
+          // process, and the real process is what writes the lock.
+          const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
           while (Date.now() < deadline) {
             const daemonLock = await ServerLock.read()
-            if (daemonLock && daemonLock.pid === proc.pid && ServerLock.alive(daemonLock.pid)) {
+            if (daemonLock && ServerLock.alive(daemonLock.pid)) {
               if (external) {
                 if (daemonLock.externalUrl) {
                   existingUrl = daemonLock.externalUrl
@@ -223,7 +231,7 @@ export const TuiThreadCommand = cmd({
                 break
               }
             }
-            await Bun.sleep(200)
+            await Bun.sleep(SERVER_POLL_INTERVAL_MS)
           }
 
           // Release election lease: daemon is live (or we are about to error).
@@ -231,7 +239,7 @@ export const TuiThreadCommand = cmd({
           electionLease = undefined
 
           if (!existingUrl) {
-            UI.error("opencode daemon failed to start within 60 seconds")
+            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
             proc.kill()
             return
           }
