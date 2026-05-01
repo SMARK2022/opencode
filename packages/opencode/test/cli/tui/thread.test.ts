@@ -4,11 +4,13 @@ import fs from "fs/promises"
 import path from "path"
 import yargs from "yargs"
 import { tmpdir } from "../../fixture/fixture"
-import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
+import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
+  DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS } from "../../../src/cli/cmd/tui"
 import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
 import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
 import { ServerLock } from "../../../src/cli/tui/server-lock"
 import { EventClients } from "@opencode-ai/server/event-clients"
+import { Global } from "@opencode-ai/core/global"
 import { cliIt } from "../../lib/cli-process"
 
 // 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
@@ -209,22 +211,56 @@ describe("tui thread", () => {
       }
     })
 
-    test("no existing server: daemon is spawned then URL returned", async () => {
+    test("accepts the real daemon owner after spawning a Windows launcher", async () => {
+      const launcherPid = 99998
       let daemonSpawnCount = 0
       let readCount = 0
       const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
         read: async () => {
           readCount++
           if (readCount <= 2) return undefined
-          return fakeLock
+          // 快速读取和持锁复读均为空；只有实际 mock spawn 后才发布 daemon owner。
+          return daemonSpawnCount === 1 ? fakeLock : undefined
         },
         spawn: ((_cmd, _opts) => {
           daemonSpawnCount++
-          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+          return { pid: launcherPid, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
         }) as DiscoverDaemonDeps["spawn"],
+        alive: (pid) => pid === FAKE_DAEMON_PID,
+        sleep: async (ms) => { if (ms === 0) throw new Error("healthy daemon was not accepted") },
       }))
       expect(daemonSpawnCount).toBe(1)
       expect(result.url).toBe("http://127.0.0.1:9999")
+      expect(readCount).toBeGreaterThanOrEqual(4)
+      // 独立断言重载目标的语义，URL 正确不代表返回了锁 owner 的 PID。
+      expect(result.fwdPid).toBe(FAKE_DAEMON_PID)
+    })
+
+    test("uses a 75-second contender deadline without changing heartbeat staleness", async () => {
+      expect(DAEMON_START_TIMEOUT_MS).toBe(60_000)
+      expect(SERVER_ELECTION_TIMEOUT_MS).toBe(75_000)
+      expect(SERVER_ELECTION_TIMEOUT_MS).toBe(DAEMON_START_TIMEOUT_MS + 15_000)
+      expect(SERVER_ELECTION_STALE_MS).toBe(5_000)
+      expect(SERVER_POLL_INTERVAL_MS).toBe(200)
+      const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
+      expect(source).toContain("electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS")
+      expect(source).toContain("electionStaleMs: SERVER_ELECTION_STALE_MS")
+      expect(source).toContain("pollMs: SERVER_POLL_INTERVAL_MS")
+      expect(source).toContain("waitMs: DAEMON_START_TIMEOUT_MS")
+      let acquisitions = 0
+      await expect(discoverOrSpawnDaemon(localNet as never, baseDeps({
+        read: async () => undefined,
+        electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS,
+        acquire: async (key, opts) => {
+          acquisitions++
+          // 核对完整获锁请求，不能把注入的 75 秒误用为 staleMs 或只断言常量大小。
+          expect(key).toBe(`opencode.server:${ServerLock.placement()}`)
+          expect(opts).toEqual({ dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
+          throw new Error("contender deadline")
+        },
+        spawn: () => { throw new Error("spawn without election lease") },
+      }))).rejects.toThrow("contender deadline")
+      expect(acquisitions).toBe(1)
     })
 
     test("lock exists + pid alive but HTTP ping fails: preserves owner and rejects", async () => {
