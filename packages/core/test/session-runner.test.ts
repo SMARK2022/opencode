@@ -1,7 +1,9 @@
 import { describe, expect } from "bun:test"
 import {
+  LLM,
   LLMClient,
   LLMError,
+  Message,
   LLMEvent,
   Model,
   TransportReason,
@@ -38,6 +40,9 @@ import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator
 import { SessionRunner } from "@opencode-ai/core/session/runner"
 import * as SessionRunnerLLM from "@opencode-ai/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
+import { Catalog } from "@opencode-ai/core/catalog"
+import { SessionCompaction } from "@opencode-ai/core/session/compaction"
+import { SessionHistory } from "@opencode-ai/core/session/history"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
 import { AgentV2 } from "@opencode-ai/core/agent"
@@ -303,6 +308,7 @@ const it = testEffect(
       ToolRegistry.node,
       ToolRegistry.toolsNode,
       echoNode,
+      Catalog.node,
       SessionRunnerModel.node,
       SystemContextRegistry.node,
       SkillGuidance.node,
@@ -1728,6 +1734,62 @@ describe("SessionRunnerLLM", () => {
       expect(continuation).not.toContain("EARLIER_END")
       expect(continuation).toContain("<recent-context>\n[Assistant]: Earlier answer")
       expect(continuation).toContain(`RECENT_BOUNDARY ${"b".repeat(3_000)} RECENT_END`)
+      // 延伸已有真实压缩用例，注册 Catalog 输入上限并走 resolve，而非复制预算函数充当 oracle。
+      const catalog = yield* Catalog.Service
+      const database = yield* Database.Service
+      const events = yield* EventV2.Service
+      const store = yield* SessionStore.Service
+      const info = yield* store.get(sessionID)
+      if (!info) return yield* Effect.die("Missing Session for catalog input budget")
+      const entries = yield* SessionHistory.entriesForRunner(database.db, sessionID, 0)
+      const providerID = ProviderV2.ID.make("input-budget")
+      const modelID = ModelV2.ID.make("input-budget")
+      // 68k 保留原 floor 余量；69k 越过 68700，可同时识别丢 input 与重复扣 output 两种回归。
+      for (const [limit, output, buffer, size, expected] of [
+        [73_700, undefined, undefined, 68_000, false],
+        [73_700, undefined, undefined, 69_000, true],
+        // 显式零和自定义 buffer 不被默认 floor 替代，保留 Core 配置优先级。
+        [73_700, undefined, 0, 72_000, false],
+        [73_700, undefined, 10_000, 63_000, false],
+        [73_700, undefined, 10_000, 65_000, true],
+        [73_700, undefined, 3_000, 70_000, false],
+        [73_700, undefined, 3_000, 71_500, true],
+        // 请求输出预算仍可能成为更紧的总窗口约束，不能一律只看 input-floor。
+        [73_700, 140_000, undefined, 64_000, false],
+        [73_700, 140_000, undefined, 66_000, true],
+        // 未提供 input 或 catalog 用零表示未知时，继续沿既有 context/output 预算。
+        [undefined, undefined, undefined, 80_000, false],
+        [0, undefined, undefined, 80_000, false],
+        // 摘要本身装不进输入上限时不得调用 provider，不能靠压缩隐藏另一次溢出。
+        [1, undefined, undefined, 69_000, false],
+      ] as const) {
+        const registration = yield* catalog.transform((draft) => draft.model.update(providerID, modelID, (model) => {
+          model.api = { id: modelID, type: "aisdk", package: "@ai-sdk/openai" }
+          model.enabled = true
+          model.limit = { context: 204_800, input: limit, output: 20_000 }
+        }))
+        const selected = yield* catalog.model.get(providerID, modelID)
+        if (!selected) return yield* Effect.die("Missing registered Catalog model")
+        const resolved = yield* SessionRunnerModel.resolve(info, selected)
+        expect(resolved.route.defaults.limits?.input).toBe(limit)
+        let streams = 0
+        const compaction = SessionCompaction.make({
+          db: database.db, events,
+          // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
+          llm: { stream: () => {
+            streams++
+            return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
+          } },
+          config: buffer === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({
+            compaction: new ConfigCompaction.Info({ buffer }),
+          }) })],
+        })
+        const request = LLM.request({ model: resolved, messages: [Message.user("x".repeat(size * 4))], generation: { maxTokens: output } })
+        expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request })).toBe(expected)
+        // 阈值触发只产生现有一次 summary turn；未触发和摘要预算拒绝都保持零 provider 调用。
+        expect(streams).toBe(expected ? 1 : 0)
+        yield* registration.dispose
+      }
     }),
   )
 

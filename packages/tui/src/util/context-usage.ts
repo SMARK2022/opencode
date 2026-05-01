@@ -5,6 +5,7 @@ import matter from "gray-matter"
 import type { Agent, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { estimate } from "@opencode-ai/core/util/token"
+import { SessionOverflowV1 } from "@opencode-ai/core/v1/session/overflow"
 import { ConfigProvider, Effect } from "effect"
 import { boolean, withDefault } from "effect/Config"
 // 过滤共享 Schema 的纯权限语法，避免新增 TUI 到 Core 的运行时入口。
@@ -178,9 +179,6 @@ function skillsSection(list: Array<{ name: string; description?: string; locatio
   ].join("\n")
 }
 
-// 输入缓冲的 20k 上界与输出限额分开；小输出模型不应仍扣掉完整 20k 输入。
-const COMPACTION_BUFFER = 20_000
-
 // 模型输出上限为 0 时沿 runtime 的全局上限；不能把 0 当作没有输出预留。
 const OUTPUT_TOKEN_MAX = 32_000
 
@@ -188,17 +186,15 @@ function maxOutputTokens(model: Provider["models"][string], outputTokenMax = OUT
   return Math.min(model.limit.output, outputTokenMax) || outputTokenMax
 }
 
-// 显式 input.limit 使用输入缓冲；只有没有输入上限时才从 context 扣输出预留。
+// 显示阈值沿 V1 catalog 预算；不能混用 Core V2 的 request/config.buffer 契约。
 function overflowUsable(input: { cfg: Config; model: Provider["models"][string]; outputTokenMax?: number }): number {
   // 限额来自模型输入契约，面板字符估算的 used 不参与压缩阈值计算。
-  const context = input.model.limit.context
-  if (context === 0) return 0
-  const reserved =
-    (input.cfg as { compaction?: { reserved?: number } }).compaction?.reserved ??
-    Math.min(COMPACTION_BUFFER, maxOutputTokens(input.model, input.outputTokenMax))
-  return input.model.limit.input
-    ? Math.max(0, input.model.limit.input - reserved)
-    : Math.max(0, context - maxOutputTokens(input.model, input.outputTokenMax))
+  return SessionOverflowV1.usable({
+    context: input.model.limit.context,
+    input: input.model.limit.input,
+    output: maxOutputTokens(input.model, input.outputTokenMax),
+    reserved: (input.cfg as { compaction?: { reserved?: number } }).compaction?.reserved,
+  })
 }
 
 type WithParts = {
