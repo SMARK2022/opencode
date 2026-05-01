@@ -123,6 +123,8 @@ export const mergeGenerationOptions = (...items: ReadonlyArray<GenerationOptions
 
 export class ModelLimits extends Schema.Class<ModelLimits>("LLM.ModelLimits")({
   context: Schema.optional(Schema.Number),
+  // 输入上限独立于总窗口；route 编译必须保留它，不能靠缩小 context 隐式代替。
+  input: Schema.optional(Schema.Number),
   output: Schema.optional(Schema.Number),
 }) {}
 

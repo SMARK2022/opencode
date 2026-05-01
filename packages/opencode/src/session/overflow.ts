@@ -1,20 +1,17 @@
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { SessionOverflowV1 } from "@opencode-ai/core/v1/session/overflow"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 
-const COMPACTION_BUFFER = 20_000
-
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
-  const context = input.model.limit.context
-  if (context === 0) return 0
-
-  const reserved =
-    input.cfg.compaction?.reserved ??
-    Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
-  return input.model.limit.input
-    ? Math.max(0, input.model.limit.input - reserved)
-    : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
+  // 输出限额仍由 provider transform 解析，共享预算只消除输入缓冲与 TUI 的重复公式。
+  return SessionOverflowV1.usable({
+    context: input.model.limit.context,
+    input: input.model.limit.input,
+    output: ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax),
+    reserved: input.cfg.compaction?.reserved,
+  })
 }
 
 export function isOverflow(input: {

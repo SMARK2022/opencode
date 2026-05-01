@@ -45,7 +45,11 @@ describe("SessionRunnerModel", () => {
   it.effect("maps catalog OpenAI AI SDK models into native Responses routes", () =>
     Effect.gen(function* () {
       const resolved = yield* SessionRunnerModel.fromCatalogModel(
-        model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
+        // 与 Catalog 相同的真实 limit 进入 route.with/ModelLimits，避免只测手造 LLM Model。
+        ModelV2.Info.make({
+          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
+          limit: { context: 204_800, input: 73_700, output: 20_000 },
+        }),
       )
 
       expect(resolved).toMatchObject({ id: "api-test-model", provider: "test-provider" })
@@ -54,7 +58,7 @@ describe("SessionRunnerModel", () => {
         endpoint: { baseURL: "https://openai.example/v1" },
         defaults: {
           headers: { "x-test": "header" },
-          limits: { context: 100, output: 20 },
+          limits: { context: 204_800, input: 73_700, output: 20_000 },
           http: { body: { custom_extension: { enabled: true } } },
         },
       })

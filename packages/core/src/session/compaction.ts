@@ -17,6 +17,7 @@ import { ProviderV2 } from "../provider"
 import { SessionRunnerModel } from "./runner/model"
 
 const DEFAULT_BUFFER = 20_000
+const DEFAULT_BUFFER_MIN = 5_000
 const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
@@ -79,7 +80,8 @@ type Entry = {
 
 type Settings = {
   readonly auto: boolean
-  readonly buffer: number
+  // 保留缺省与显式零的区别，provider reserve 只抵消缺省输入缓冲。
+  readonly buffer?: number
   readonly tokens: number
 }
 
@@ -153,7 +155,7 @@ const settings = (documents: readonly Config.Entry[]) => {
       buffer: current.buffer ?? result.buffer,
       tokens: current.keep?.tokens ?? result.tokens,
     }),
-    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
+    { auto: true, tokens: DEFAULT_KEEP_TOKENS },
   )
 }
 
@@ -211,7 +213,8 @@ export const make = (dependencies: Dependencies) => {
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
     })
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    if (Token.estimate(summaryPrompt) > context - summaryOutput) return false
+    // 摘要也发送到同一模型，独立 input 上限不能只约束普通 turn 而放过摘要请求。
+    if (Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
     const messageID = SessionMessage.ID.create()
     const startedEventID = EventV2.ID.create()
     const terminalEventID = EventV2.ID.create()
@@ -290,9 +293,16 @@ export const make = (dependencies: Dependencies) => {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+    // 总窗口仍完整预留实际输出与 Core buffer，不能用较小 input 改写 context 后再次扣输出。
+    const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
+    const inputLimit = input.model.route.defaults.limits?.input
+    // 输入增长只扣显式 buffer 或抵消 provider 差额后的缺省 floor，与总窗口预算取交集。
+    const inputUsable = inputLimit
+      ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
+      : usable
     if (
       estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
-      context - Math.max(output, config.buffer)
+      Math.min(usable, inputUsable)
     )
       return false
     return yield* compactAfterOverflow(input)

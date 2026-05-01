@@ -144,7 +144,8 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
     ...(parallel ? { providerOptions: { openai: {
       parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
     } } } : {}),
-    limits: { context: model.limit.context, output: model.limit.output },
+    // Catalog 的输入边界随同一解析 Model 交给压缩 owner，不放入 provider 请求正文。
+    limits: { context: model.limit.context, input: model.limit.input, output: model.limit.output },
   })
 }
 

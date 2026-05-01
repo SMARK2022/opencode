@@ -351,14 +351,14 @@ describe("context usage", () => {
     // 助手文本 3、调用输入 4、推理 1 都归输出；工具结果仍只归输入。
     expect(data.details.messages.reasoning).toBe(1)
     expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(8)
-    // 小输出模型只预留输出上限对应的缓冲，不能使用固定 20k 把整个窗口扣成零。
-    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(100)
+    // 有 input 上限时缓冲抵消 provider reserve；小输出限额不能替代下一轮输入余量。
+    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(19_900)
     // providerReserve 只反映 catalog 的输入差额，不能再把 100 输出限额叠加进来。
     expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(100)
     // 同时检查输入上限与 usable，避免只显示正确 buffer 标签却使用错误压缩阈值。
-    expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 19_800, compactionBuffer: 100 })
-    // 小 fixture 应留下可用输入空间；若 reserve 被再次加到 used，这个余量会错误下降。
-    expect(data.categories.find((item) => item.name === "Free space")?.tokens).toBeGreaterThan(0)
+    expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 0, compactionBuffer: 19_900 })
+    // 缓冲已占满输入上限，free 必须归零，不能沿旧小输出公式留下伪余量。
+    expect(data.categories.find((item) => item.name === "Free space")?.tokens).toBe(0)
     // 100 列终端使用固定采样密度，分类个数增加也不能把总 cells 增长成无限列表。
     expect(data.gridRows.flat()).toHaveLength(100)
     // buffer 预先保留尾部，free 填补舍入空格时不能把它覆盖成自由空间。
@@ -425,18 +425,18 @@ describe("context usage", () => {
       toolDefinitions: [],
     })
 
-    // 输出 cap 为 32k，默认输入缓冲只扣 20k；完整窗口 oracle 同时锁定 usable 与输入上限。
+    // 输出 cap 与输入缓冲来自独立预算，窗口 oracle 同时锁定 input 上限和实际 usable。
     expect(data.details.window).toMatchObject({
       contextLimit: 204_800,
       inputLimit: 73_700,
-      usableInput: 53_700,
+      usableInput: 68_700,
       providerReserve: 131_100,
-      compactionBuffer: 20_000,
+      compactionBuffer: 5_000,
     })
     // provider reserve 属于模型容量，既不计入 used，也不从 usable 再扣一次。
     expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(131_100)
-    // 压缩缓冲独立于 context-input 差额，不能把 131100 当作安全余量。
-    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(20_000)
+    // provider reserve 抵消默认缓冲后仍保留 5000 floor，安全余量不取输出 cap 或整个差额。
+    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(5_000)
     // 自由空间只能位于 buffer 前面，尾部安全缓冲不能因类别排序移到 used 之间。
     expect(data.categories.findIndex((item) => item.name === "Free space")).toBeLessThan(
       data.categories.findIndex((item) => item.name === "Autocompact buffer"),

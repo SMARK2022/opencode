@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream"
 import { Config } from "@/config/config"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction } from "../../src/session/compaction"
+import { usable } from "../../src/session/overflow"
 import { Token } from "@/util/token"
 import { Plugin } from "../../src/plugin"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
@@ -387,6 +388,27 @@ function compactionContext(context: string) {
 }
 
 describe("session.compaction.isOverflow", () => {
+  test("preserves conditional V1 usable budgets and explicit reserves", () => {
+    const model = createModel({ context: 204_800, input: 73_700, output: 20_000 })
+    // 单一真实 runtime 入口验证 floor，不能在测试中复制预算公式作为 oracle。
+    expect(usable({ cfg: {}, model })).toBe(68_700)
+    // 显式零不回退，显式大预留也不能绕过非负输入边界。
+    expect(usable({ cfg: { compaction: { reserved: 0 } }, model })).toBe(73_700)
+    expect(usable({ cfg: { compaction: { reserved: 9_000 } }, model })).toBe(64_700)
+    expect(usable({ cfg: { compaction: { reserved: 80_000 } }, model })).toBe(0)
+    // 差额抵消尚未触及 floor 的中间分支，避免把所有模型都硬编码成 5000。
+    expect(usable({ cfg: {}, model: createModel({ context: 100_000, input: 90_000, output: 100 }) })).toBe(80_000)
+    // 没有 catalog 输入上限时仍扣有效输出，explicit reserved 不能偷偷切换分支。
+    const withoutInput = createModel({ context: 100_000, output: 20_000 })
+    expect(usable({ cfg: { compaction: { reserved: 0 } }, model: withoutInput })).toBe(80_000)
+    // caller 的输出 cap 继续参与无 input 预算，不丢失 outputTokenMax 扩展。
+    expect(usable({ cfg: {}, model: withoutInput, outputTokenMax: 7_000 })).toBe(93_000)
+    // 输出为零沿 transform fallback，不把未知输出当作完全无需预留。
+    expect(usable({ cfg: {}, model: createModel({ context: 100_000, output: 0 }), outputTokenMax: 7_000 })).toBe(93_000)
+    // 未知窗口不猜预算，即使附有输入上限或显式预留也保持零。
+    expect(usable({ cfg: {}, model: createModel({ context: 0, input: 73_700, output: 20_000 }) })).toBe(0)
+  })
+
   it.live(
     "returns true when token count exceeds usable context",
     provideTmpdirInstance(() =>
