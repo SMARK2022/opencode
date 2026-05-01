@@ -10,11 +10,11 @@ import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { Snapshot } from "@/snapshot"
-import { NonNegativeInt } from "@/util/schema"
 import { Schema, SchemaGetter, Struct } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
-import { Authorization } from "../auth"
-import { InstanceContextMiddleware } from "../instance-context"
+import { Authorization } from "../middleware/authorization"
+import { InstanceContextMiddleware } from "../middleware/instance-context"
+import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
 import { described } from "./metadata"
 
 const root = "/session"
@@ -44,7 +44,7 @@ export const UpdatePayload = Schema.Struct({
   permission: Schema.optional(Permission.Ruleset),
   time: Schema.optional(
     Schema.Struct({
-      archived: Schema.optional(NonNegativeInt),
+      archived: Schema.optional(Session.ArchivedTimestamp),
     }),
   ),
 })
@@ -417,6 +417,7 @@ export const SessionApi = HttpApi.make("session")
         }),
       )
       .middleware(InstanceContextMiddleware)
+      .middleware(WorkspaceRoutingMiddleware)
       .middleware(Authorization),
   )
   .annotateMerge(

@@ -2,8 +2,9 @@ import { MCP } from "@/mcp"
 import { ConfigMCP } from "@/config/mcp"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
-import { Authorization } from "../auth"
-import { InstanceContextMiddleware } from "../instance-context"
+import { Authorization } from "../middleware/authorization"
+import { InstanceContextMiddleware } from "../middleware/instance-context"
+import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
 import { described } from "./metadata"
 
 export const AddPayload = Schema.Struct({
@@ -14,6 +15,7 @@ export const AddPayload = Schema.Struct({
 export const StatusMap = Schema.Record(Schema.String, MCP.Status)
 export const AuthStartResponse = Schema.Struct({
   authorizationUrl: Schema.String,
+  oauthState: Schema.String,
 })
 export const AuthCallbackPayload = Schema.Struct({
   code: Schema.String,
@@ -131,6 +133,7 @@ export const McpApi = HttpApi.make("mcp")
         }),
       )
       .middleware(InstanceContextMiddleware)
+      .middleware(WorkspaceRoutingMiddleware)
       .middleware(Authorization),
   )
   .annotateMerge(

@@ -1,7 +1,7 @@
 import { Context, Effect, Layer } from "effect"
 import { type as osType, release as osRelease } from "os"
 
-import { Instance } from "../project/instance"
+import { InstanceState } from "@/effect/instance-state"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -16,6 +16,7 @@ import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
+import type { InstanceContext } from "@/project/instance"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { Git } from "@/git"
@@ -171,7 +172,6 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const git = yield* Git.Service
-    const mcp = yield* MCP.Service
     const registry = yield* ToolRegistry.Service
 
     // 该缓存是会话级快照，按 cwd 作为键。
@@ -227,12 +227,12 @@ export const layer = Layer.effect(
       return null
     }
 
-    const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
-      const cwd = Instance.directory
+    const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* (ctx: InstanceContext) {
+      const cwd = ctx.directory
       const cached = gitContextCache.get(cwd)
       if (cached) return cached
 
-      const project = Instance.project
+      const project = ctx.project
       // 允许关闭详细 git 上下文，但仍保留是否为 git 仓库的信息。
       if (Flag.OPENCODE_DISABLE_GIT) {
         const result = `Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`
@@ -284,17 +284,18 @@ export const layer = Layer.effect(
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
-        const gitContext = yield* getGitContext()
+        const ctx = yield* InstanceState.context
+        const gitContext = yield* getGitContext(ctx)
         const { shellNotes, osVersion } = yield* getEnvExtras()
-        const isWorktree = Instance.worktree !== Instance.directory
+        const isWorktree = ctx.worktree !== ctx.directory
         const cutoff = getKnowledgeCutoff(model.api.id)
         const toolIds = yield* registry.ids()
         const envLines: string[] = [
           `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
           `Here is some useful information about the environment you are running in:`,
           `<env>`,
-          `  Working directory: ${Instance.directory}`,
-          `  Workspace root folder: ${Instance.worktree}`,
+          `  Working directory: ${ctx.directory}`,
+          `  Workspace root folder: ${ctx.worktree}`,
           // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
           ...gitContext.split("\n").map((line) => `  ${line}`),
           `  Platform: ${process.platform}`,

@@ -12,7 +12,6 @@ import { Skill } from "@/skill"
 import { Wildcard } from "@/util"
 import APPLY_PATCH_DESCRIPTION from "@/tool/apply_patch.txt"
 import BASH_DESCRIPTION from "@/tool/bash.txt"
-import CODESEARCH_DESCRIPTION from "@/tool/codesearch.txt"
 import EDIT_DESCRIPTION from "@/tool/edit.txt"
 import GLOB_DESCRIPTION from "@/tool/glob.txt"
 import GREP_DESCRIPTION from "@/tool/grep.txt"
@@ -28,7 +27,6 @@ import WEBSEARCH_DESCRIPTION from "@/tool/websearch.txt"
 import WRITE_DESCRIPTION from "@/tool/write.txt"
 import { ApplyPatchTool, Parameters as ApplyPatchParameters } from "@/tool/apply_patch"
 import { BashTool, Parameters as BashParameters } from "@/tool/bash"
-import { CodeSearchTool, Parameters as CodeSearchParameters } from "@/tool/codesearch"
 import { EditTool, Parameters as EditParameters } from "@/tool/edit"
 import { GlobTool, Parameters as GlobParameters } from "@/tool/glob"
 import { GrepTool, Parameters as GrepParameters } from "@/tool/grep"
@@ -506,7 +504,6 @@ const STATIC_TOOL_DEFINITIONS: ToolDefinitionTemplate[] = [
   { name: WebFetchTool.id, description: WEBFETCH_DESCRIPTION, parameters: WebFetchParameters },
   { name: TodoWriteTool.id, description: TODOWRITE_DESCRIPTION, parameters: TodoWriteParameters },
   { name: WebSearchTool.id, description: WEBSEARCH_DESCRIPTION, parameters: WebSearchParameters },
-  { name: CodeSearchTool.id, description: CODESEARCH_DESCRIPTION, parameters: CodeSearchParameters },
   { name: SkillTool.id, description: SKILL_DESCRIPTION, parameters: SkillParameters },
   { name: ApplyPatchTool.id, description: APPLY_PATCH_DESCRIPTION, parameters: ApplyPatchParameters },
   { name: LspTool.id, description: LSP_DESCRIPTION, parameters: LspParameters },
@@ -596,7 +593,7 @@ function baseToolDefinitions(input: ComputeContextDataInput, modelInfo: ReturnTy
       }
       if (item.name === LspTool.id) return Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL
       if (item.name === PlanExitTool.id) return Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli"
-      if (item.name === CodeSearchTool.id || item.name === WebSearchTool.id) {
+      if (item.name === WebSearchTool.id) {
         return modelInfo.providerID === "opencode" || Flag.OPENCODE_ENABLE_EXA
       }
       if (item.name === ApplyPatchTool.id) return usePatch

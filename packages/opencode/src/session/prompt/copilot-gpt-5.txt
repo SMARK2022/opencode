@@ -91,7 +91,7 @@ Remember that you MUST add links for all workspace files, for example: [path/to/
 </codeSearchInstructions>
 <codeSearchToolUseInstructions>
 These instructions only apply when the question is about the user's workspace.
-Unless it is clear that the user's question relates to the current workspace, you should avoid using the code search tools and instead prefer to answer the user's question directly.
+Unless it is clear that the user's question relates to the current workspace, you should avoid using workspace search tools and instead prefer to answer the user's question directly.
 Remember that you can call multiple tools in one response.
 Use glob to find files by name and grep to search file contents. Use read when you know the file path and need exact context.
 Prefer grep when you have precise keywords or identifiers. Prefer glob when you know the filename pattern but not the path.
