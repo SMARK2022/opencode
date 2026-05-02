@@ -926,6 +926,18 @@ describe("SessionRunnerLLM", () => {
     const store = yield* SessionStore.Service
     const agents = yield* AgentV2.Service
     const db = (yield* Database.Service).db
+    // 会话仍是build；存储grant与实际调用的plan限制冲突，不能从旧身份推导继承规则。
+    yield* db.update(SessionTable).set({ permission: [{ permission: "external_directory", pattern: "/approved/*", action: "allow" }] })
+      .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+    yield* agents.transform(draft => draft.update(AgentV2.ID.make("plan"), parent => {
+      parent.mode = "primary"
+      parent.permissions = [
+        { action: "edit", resource: "*", effect: "deny" },
+        { action: "external_directory", resource: "*", effect: "deny" },
+        { action: "external_directory", resource: "/approved/*", effect: "ask" },
+        { action: "read", resource: "*", effect: "allow" },
+      ]
+    }))
     const taskAssertions: PermissionV2.AssertInput[] = []
     yield* agents.transform(draft => draft.update(AgentV2.ID.make("research"), agent => {
       agent.mode = "subagent"
@@ -952,14 +964,14 @@ describe("SessionRunnerLLM", () => {
     expect(definitions.find(tool => tool.name === "task")?.description).toContain("Prompting rules")
     response = fragmentFixture("text", "task-first", ["Research result"]).completeEvents
     const invoke = (task_id?: string, subagent_type = "research") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
-      sessionID, agent: AgentV2.ID.make("build"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
+      sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
       call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
         input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}) } },
     })))
     const first = yield* invoke()
     expect(first.result.type).toBe("text")
     expect(taskAssertions).toMatchObject([{ action: "task", resources: ["research"], sessionID,
-      agent: "build", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
+      agent: "plan", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
     const output = Schema.decodeUnknownSync(TaskTool.Output)(first.output?.structured)
     const childID = output.task_id
     if (typeof childID !== "string") throw new Error("expected durable child task ID")
@@ -968,10 +980,19 @@ describe("SessionRunnerLLM", () => {
     expect(child.agent).toBe(AgentV2.ID.make("research"))
     expect(child.title).toBe("Research scoped implementation (@research subagent)")
     expect(first.output?.content).toEqual([{ type: "text", text: `task_id: ${childID}\n<task_result>\nResearch result\n</task_result>` }])
-    expect(yield* store.permissions(child.id)).toEqual([
+    const inherited = yield* store.permissions(child.id)
+    expect(inherited).toEqual([
+      { action: "external_directory", resource: "/approved/*", effect: "allow" },
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "external_directory", resource: "*", effect: "deny" },
+      { action: "external_directory", resource: "/approved/*", effect: "ask" },
       { action: "todowrite", resource: "*", effect: "deny" },
       { action: "task", resource: "*", effect: "deny" },
     ])
+    // 固定结果由真实求值器检查；父allow没有下放，有序ask仍覆盖较早deny及会话allow。
+    expect(PermissionV2.evaluate("edit", "/file.ts", inherited).effect).toBe("deny")
+    expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
+    expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("ask")
     const actual = requests.at(-1)
     expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
     expect(userTexts(actual!)).toContain("Inspect the requested module")
@@ -981,6 +1002,7 @@ describe("SessionRunnerLLM", () => {
     expect(resumed.output?.structured).toMatchObject({ task_id: childID, state: "completed" })
     expect(resumed.output?.content[0]).toEqual({ type: "text", text: `task_id: ${childID}\n<task_result>\nContinued result\n</task_result>` })
     expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
+    expect(yield* store.permissions(child.id)).toEqual(inherited)
     const rows = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.parent_id, sessionID)).all().pipe(Effect.orDie)
     expect(rows).toEqual([{ id: child.id }])
     // 另一个父会话不能恢复这个任务，失败不会创建或推进子会话。

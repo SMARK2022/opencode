@@ -26,7 +26,7 @@ function testAgent(input: {
 // exercises the actual helper that task.ts uses to build the subagent's
 // session permission, so any regression in that helper trips this test.
 
-it.instance("subagent permissions take precedence over parent agent restrictions", () =>
+it.instance("subagent inherits the executing parent agent's edit restriction", () =>
   Effect.gen(function* () {
     const planAgent = yield* Agent.use.get("plan")
     const generalAgent = yield* Agent.use.get("general")
@@ -40,17 +40,15 @@ it.instance("subagent permissions take precedence over parent agent restrictions
 
     const parentSessionPermission: PermissionV1.Ruleset = []
 
-    const subagentSessionPermission = deriveSubagentSessionPermission({
-      parentSessionPermission,
-      subagent: generalAgent!,
-    })
+    // 传真实父权限，固定期望才会检查 Task 的继承分支而非空默认。
+    const subagentSessionPermission = deriveSubagentSessionPermission({ parentSessionPermission, subagent: generalAgent! }, planAgent!.permission)
 
     // Mirror the runtime evaluation in session/prompt.ts (~line 410, 639):
     //   ruleset: Permission.merge(agent.permission, session.permission ?? [])
     const effective = Permission.merge(generalAgent!.permission, subagentSessionPermission)
 
-    expect(Permission.evaluate("edit", "/some/file.ts", effective).action).not.toBe("deny")
-    expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set())
+    expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("deny")
+    expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set(["edit", "write", "apply_patch"]))
   }),
 )
 
@@ -71,7 +69,7 @@ it.instance("subagent's own read-only restriction remains effective", () =>
 )
 
 it.instance(
-  "custom subagent can explicitly enable edits denied to its parent agent",
+  "custom subagent cannot enable edits denied to its executing parent agent",
   () =>
     Effect.gen(function* () {
       const planAgent = yield* Agent.use.get("plan")
@@ -80,15 +78,13 @@ it.instance(
       expect(my).toBeDefined()
 
       const parentSessionPermission: PermissionV1.Ruleset = []
-      const subagentSessionPermission = deriveSubagentSessionPermission({
-        parentSessionPermission,
-        subagent: my!,
-      })
+      // 自定义子代理同样承接执行代理限制，不以子代理身份绕过 source 顺序。
+      const subagentSessionPermission = deriveSubagentSessionPermission({ parentSessionPermission, subagent: my! }, planAgent!.permission)
       const effective = Permission.merge(my!.permission, subagentSessionPermission)
 
       expect(Permission.evaluate("edit", "/some/file.ts", planAgent!.permission).action).toBe("deny")
-      expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("allow")
-      expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set())
+      expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("deny")
+      expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set(["edit", "write", "apply_patch"]))
     }),
   {
     config: {
@@ -156,5 +152,24 @@ it.effect("subagent inherits parent session deny rules as hard runtime ceilings"
     )
 
     expect(Permission.evaluate("bash", "git status", effective).action).toBe("deny")
+  }),
+)
+
+it.effect("directory grants retain source parent non-allow precedence", () =>
+  Effect.sync(() => {
+    const executor = testAgent({ name: "executor", mode: "subagent", permission: { external_directory: "allow" } })
+    const grant = Permission.fromConfig({ external_directory: { "/tmp/allowed/*": "allow" } })
+    // 六行固定 oracle 同时约束父 ask、deny、原序与无父限制的 grant，不能由 helper 反算期望。
+    for (const [parent, expected] of [
+      [[], "allow"],
+      [Permission.fromConfig({ external_directory: "ask" }), "ask"],
+      [Permission.fromConfig({ external_directory: "deny" }), "deny"],
+      [Permission.fromConfig({ external_directory: { "*": "deny", "/tmp/allowed/*": "ask" } }), "ask"],
+      [Permission.fromConfig({ external_directory: { "*": "ask", "/tmp/allowed/*": "deny" } }), "deny"],
+      [Permission.fromConfig({ external_directory: "allow" }), "allow"],
+    ] as const) {
+      const rules = deriveSubagentSessionPermission({ parentSessionPermission: grant, subagent: executor }, parent)
+      expect(Permission.evaluate("external_directory", "/tmp/allowed/file", executor.permission, rules).action).toBe(expected)
+    }
   }),
 )

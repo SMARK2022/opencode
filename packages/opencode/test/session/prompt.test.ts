@@ -1162,7 +1162,7 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
   }),
 )
 
-it.instance("subtask child inherits parent session external_directory allow", () =>
+it.instance("subtask child inherits directory grant beneath executing parent ask", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
     const prompt = yield* SessionPrompt.Service
@@ -1184,7 +1184,8 @@ it.instance("subtask child inherits parent session external_directory allow", ()
     expect(rules).toEqual(
       expect.arrayContaining([{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }]),
     )
-    expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("allow")
+    // source 过滤父 allow 后仍保留默认 ask；继承 grant 的存在不能替代最终优先级检查。
+    expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("ask")
     expect(Permission.evaluate("task", "anything", rules).action).toBe("deny")
   }),
 )
