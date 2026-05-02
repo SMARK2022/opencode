@@ -13,7 +13,7 @@ import { TRUNCATION_DIR } from "./truncation-dir"
 const log = Log.create({ service: "truncation" })
 const RETENTION = Duration.days(7)
 
-export const MAX_LINES = 2000
+export const MAX_LINES = 1000
 export const MAX_BYTES = 24 * 1024
 export const DIR = TRUNCATION_DIR
 export const GLOB = path.join(TRUNCATION_DIR, "*")

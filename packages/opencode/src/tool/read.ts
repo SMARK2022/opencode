@@ -13,7 +13,7 @@ import { Instruction } from "../session/instruction"
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
 
-const DEFAULT_READ_LIMIT = 2000
+const DEFAULT_READ_LIMIT = 1000
 const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 24 * 1024
@@ -141,7 +141,7 @@ export const Parameters = Schema.Struct({
     description: "The line number to start reading from (1-indexed)",
   }),
   limit: Schema.optional(NonNegativeInt).annotate({
-    description: "The maximum number of lines to read (defaults to 2000)",
+    description: "The maximum number of lines to read (defaults to 1000)",
   }),
 })
 
