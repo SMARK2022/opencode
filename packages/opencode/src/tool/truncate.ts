@@ -11,7 +11,8 @@ import { TRUNCATION_DIR } from "./truncation-dir"
 
 const RETENTION = Duration.days(7)
 
-export const MAX_LINES = 2000
+// 模型预览的默认行数不限制用户 override，完整原文仍沿既有恢复路径保存。
+export const MAX_LINES = 1000
 // 这里只缩小缺省预览；显式配置和完整原文落盘仍由 limits/output 保留。
 export const MAX_BYTES = 24 * 1024
 export const DIR = TRUNCATION_DIR

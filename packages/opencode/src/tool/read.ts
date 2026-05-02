@@ -10,7 +10,8 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 
-const DEFAULT_READ_LIMIT = 2000
+// 只降低缺省页大小，显式 limit 与既有安全、附件分支不随默认值收紧。
+const DEFAULT_READ_LIMIT = 1000
 const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 // 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
@@ -133,7 +134,7 @@ export const Parameters = Schema.Struct({
     description: "The line number to start reading from (1-indexed)",
   }),
   limit: Schema.optional(NonNegativeInt).annotate({
-    description: "The maximum number of lines to read (defaults to 2000)",
+    description: "The maximum number of lines to read (defaults to 1000)",
   }),
 })
 

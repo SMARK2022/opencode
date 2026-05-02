@@ -135,9 +135,10 @@ export const Info = Schema.Struct({
   ),
   tool_output: Schema.optional(
     Schema.Struct({
-      max_lines: Schema.optional(PositiveInt).annotate({
-        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)",
-      }),
+      // 数值分支携带缺省说明，SDK/OpenAPI 生成时不因 optional 剥离而丢失。
+      max_lines: Schema.optional(PositiveInt.annotate({
+        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
+      })),
       // 默认说明绑定数值分支，公开 OpenAPI 剥离 optional 时仍保留生成文档。
       max_bytes: Schema.optional(PositiveInt.annotate({
         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",

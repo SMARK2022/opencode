@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import path from "path"
-import { Effect, FileSystem } from "effect"
+import { Effect, FileSystem, Schema } from "effect"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -16,6 +16,59 @@ const fixture = Effect.gen(function* () {
 })
 
 describe("ReadToolFileSystem", () => {
+  it.live("separates default pages from accepted limits and preserves byte and next boundaries", () =>
+    Effect.gen(function* () {
+      const fixtureData = yield* fixture
+      const file = path.join(fixtureData.directory, "lines.txt")
+      // 正文小于字节预算却超默认页，专门覆盖完整短文件捷径绕过行数的缺口。
+      yield* fixtureData.files.writeFileString(file, Array.from({ length: 1601 }, () => "x").join("\n"))
+      const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
+      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 1001 })
+      expect(first.content.split("\n")).toHaveLength(1000)
+      // next 是续页 offset，末页恰好返回余下正文且不制造另一页。
+      const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset: 1001 })
+      expect(last.content.split("\n")).toHaveLength(601)
+      expect(last).toMatchObject({ truncated: false })
+      expect("next" in last ? last.next : undefined).toBeUndefined()
+      // schema 与实际执行一起锁定原有可接受范围，不能只测试绕过解码的直接调用。
+      expect(Schema.is(ReadToolFileSystem.PageInput)({ limit: 1500 })).toBe(true)
+      expect(Schema.is(ReadToolFileSystem.PageInput)({ limit: 2000 })).toBe(true)
+      expect(Schema.is(ReadToolFileSystem.PageInput)({ limit: 2001 })).toBe(false)
+      const explicit = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { limit: 1500 })
+      expect(explicit.content.split("\n")).toHaveLength(1500)
+      expect(explicit).toMatchObject({ next: 1501, truncated: true })
+      // 内部直接调用也沿原有 clamp，不因参数超上限扩大文本页。
+      yield* fixtureData.files.writeFileString(file, Array.from({ length: 2101 }, () => "x").join("\n"))
+      const clamped = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { limit: 2500 })
+      expect(clamped.content.split("\n")).toHaveLength(2000)
+      expect(clamped).toMatchObject({ truncated: true, next: 2001 })
+      // 多字节每行计 2000 字节，十二行连同换行仍可容纳，第十三行必须留给 next。
+      yield* fixtureData.files.writeFileString(file, Array.from({ length: 20 }, () => "é".repeat(1000)).join("\n"))
+      const bytes = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
+      expect(bytes).toMatchObject({ type: "text-page", truncated: true, next: 13 })
+      expect(bytes.content.split("\n")).toHaveLength(12)
+      expect(Buffer.byteLength(bytes.content)).toBe(24_011)
+      // 文本页预算独立于媒体摄入，不让降默认行数顺带降图片上限。
+      expect(ReadToolFileSystem.MAX_MEDIA_INGEST_BYTES).toBe(20 * 1024 * 1024)
+      const directory = path.join(fixtureData.directory, "entries")
+      yield* fixtureData.files.makeDirectory(directory)
+      // 使用真实 entries，过滤、排序和 next 都由实际 list 实现承担，不伪造 FS 返回值。
+      yield* Effect.forEach(Array.from({ length: 1501 }, (_, index) => String(index).padStart(4, "0")),
+        (name) => fixtureData.files.writeFileString(path.join(directory, name), ""), { concurrency: 16, discard: true })
+      const entries = yield* ReadToolFileSystem.list(fixtureData.fs, directory)
+      expect(entries.entries).toHaveLength(1000)
+      expect(entries).toMatchObject({ truncated: true, next: 1001 })
+      // 目录的显式 1500 不应被默认1000截断，剩余页保留正确绝对 entry offset。
+      const requested = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { limit: 1500 })
+      expect(requested.entries).toHaveLength(1500)
+      expect(requested).toMatchObject({ truncated: true, next: 1501 })
+      const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1001 })
+      expect(remaining.entries).toHaveLength(501)
+      expect(remaining.truncated).toBe(false)
+      expect(remaining.next).toBeUndefined()
+    }),
+  )
+
   it.effect("fails with a typed filesystem error when a resolved file disappears", () =>
     Effect.gen(function* () {
       const { fs, directory } = yield* fixture

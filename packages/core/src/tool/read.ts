@@ -30,7 +30,8 @@ const LocationInput = Schema.Struct({
     description: "The 1-based directory entry or text line offset to start reading from",
   }),
   limit: ReadToolFileSystem.PageInput.fields.limit.annotate({
-    description: "The maximum number of directory entries or text lines to read",
+    // 模型参数广告区分默认与既有 schema 上限，避免把 1000 误解成最大可请求范围。
+    description: "The maximum number of directory entries or text lines to read (defaults to 1000, maximum 2000)",
   }),
 })
 const Input = LocationInput

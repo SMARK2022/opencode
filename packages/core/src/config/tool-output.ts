@@ -4,7 +4,10 @@ import { Schema } from "effect"
 import { PositiveInt } from "../schema"
 
 export class Info extends Schema.Class<Info>("ConfigV2.ToolOutput")({
-  max_lines: PositiveInt.pipe(Schema.optional),
+  // 保持 optional 的合并契约，只广告新默认，不注入遮蔽用户配置的值。
+  max_lines: PositiveInt.annotate({
+    description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
+  }).pipe(Schema.optional),
   // 描述默认而不填充默认值，避免上层缺省文档覆盖下层显式预算。
   max_bytes: PositiveInt.annotate({
     description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",

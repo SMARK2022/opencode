@@ -2112,6 +2112,9 @@ export type Config = {
     url?: string
   }
   tool_output?: {
+    /**
+     * Maximum lines of tool output before it is truncated and saved to disk (default: 1000)
+     */
     max_lines?: number
     /**
      * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
