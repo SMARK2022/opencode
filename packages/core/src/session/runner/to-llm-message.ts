@@ -7,6 +7,7 @@ import {
   type Model,
   type ProviderMetadata,
 } from "@opencode-ai/llm"
+import { ReadToolFileSystem } from "../../tool/read-filesystem"
 import { SessionMessage } from "../message"
 import type { FileAttachment } from "../prompt"
 
@@ -181,7 +182,8 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
       if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
           (output.encoding !== "utf8" && output.type !== "text-page")) return item
       // 下一页到达请求末界说明本页完整；字节提前截断与长行裁剪仍不能作为版本证明。
-      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? 2000)
+      // 请求范围与实际reader共用默认常量，降默认页长后仍识别同一完整页面。
+      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES)
       if (output.type === "text-page" &&
           ((output.next === undefined ? output.truncated !== false : output.next !== pageEnd) ||
           output.content.includes("... (line truncated to 2000 chars)"))) return item
@@ -192,7 +194,7 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
           part.type === "text" && part.text === JSON.stringify(output))) return item
       // 默认化同一路径/范围，并比较新鲜 durable 结果及提醒；call ID 不代表版本。
       const key = JSON.stringify([item.state.input.path, item.state.input.offset ?? 1,
-        item.state.input.limit ?? 2000, output, item.state.content])
+        item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES, output, item.state.content])
       if (!reads.has(key)) {
         reads.add(key)
         return item

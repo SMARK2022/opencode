@@ -30,7 +30,7 @@ describe("toLLMMessages", () => {
     const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
       .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
     const first = read("first")
-    const second = read("second", output, { path: "note.txt", offset: 1, limit: 2000 })
+    const second = read("second", output, { path: "note.txt", offset: 1, limit: 1000 })
     // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
     expect(results(first, second)[0]).toEqual({ type: "json", value: output })
     expect(results(first, second)[1]).toMatchObject({ type: "text" })
@@ -57,6 +57,12 @@ describe("toLLMMessages", () => {
     expect(results(read("page5", page, range), read("page6", page, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
     // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
     expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
+    // 默认1000与显式1000是同一完整页；显式2000仍请求不同范围，不能被前页证明替代。
+    const defaultPage = { ...page, content: Array.from({ length: 1000 }, () => "line").join("\n"), next: 1001 }
+    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 1000 }))[1]))
+      .toContain("File unchanged since last read")
+    expect(results(read("default3", defaultPage), read("default4", defaultPage, { path: "note.txt", limit: 2000 }))[1])
+      .toEqual({ type: "json", value: defaultPage })
 
     // 不足请求范围的页面、行内截断与媒体仍不具备完整正文证明。
     for (const partial of [

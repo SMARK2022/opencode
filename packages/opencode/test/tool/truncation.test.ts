@@ -101,7 +101,7 @@ describe("Truncate", () => {
     )
 
     test("uses default MAX_LINES and MAX_BYTES", () => {
-      expect(Truncate.MAX_LINES).toBe(2000)
+      expect(Truncate.MAX_LINES).toBe(1000)
       expect(Truncate.MAX_BYTES).toBe(24 * 1024)
     })
 

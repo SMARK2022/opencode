@@ -8,6 +8,8 @@ import { FSUtil } from "../fs-util"
 import { makeLocationNode } from "../effect/app-node"
 import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
 
+// 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
+export const DEFAULT_READ_LINES = 1_000
 export const MAX_READ_LINES = 2_000
 // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
 export const MAX_READ_BYTES = 24 * 1024
@@ -245,7 +247,14 @@ export const read = Effect.fn("ReadTool.read")(function* (
       }
       if (startsWith(first, [0x25, 0x50, 0x44, 0x46]) || extensions.has(path.extname(resource).toLowerCase()))
         return yield* Effect.fail(new BinaryFileError({ resource }))
-      const paged = info.size > MAX_READ_BYTES || page.offset !== undefined || page.limit !== undefined
+      // 小于字节预算也可能超过默认行数；只扫描已读取的字节，不预先解码页外的无效 UTF-8。
+      const firstLines = first.reduce((count, byte) => count + Number(byte === 10), 0) + Number(first.length > 0 && first.at(-1) !== 10)
+      const paged =
+        info.size > MAX_READ_BYTES ||
+        first.length < info.size ||
+        page.offset !== undefined ||
+        page.limit !== undefined ||
+        firstLines > DEFAULT_READ_LINES
       if (!paged) {
         if (binary(resource, first)) return yield* Effect.fail(new BinaryFileError({ resource }))
         const decoder = new TextDecoder("utf-8", { fatal: true })
@@ -265,7 +274,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
         }
       }
       const offset = page.offset ?? 1
-      const limit = Math.min(page.limit ?? MAX_READ_LINES, MAX_READ_LINES)
+      // 显式页仍按原有上限 clamp，缺省才使用较小页；next 继续定位首个未返回行。
+      const limit = Math.min(page.limit ?? DEFAULT_READ_LINES, MAX_READ_LINES)
       const lines: string[] = []
       const decoder = new TextDecoder("utf-8", { fatal: true })
       let pending = ""
@@ -359,7 +369,8 @@ export const list = Effect.fn("ReadTool.list")(function* (fs: FSUtil.Interface, 
   const real = yield* fs.realPath(input)
   const items = yield* fs.readDirectoryEntries(real)
   const offset = page.offset ?? 1
-  const limit = Math.min(page.limit ?? MAX_READ_LINES, MAX_READ_LINES)
+  // 目录也只改变默认页大小，显式请求与按过滤后 entries 推进 next 的行为保持不变。
+  const limit = Math.min(page.limit ?? DEFAULT_READ_LINES, MAX_READ_LINES)
   const entries = yield* Effect.forEach(
     items,
     (item) =>
