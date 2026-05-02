@@ -2113,6 +2113,9 @@ export type Config = {
   }
   tool_output?: {
     max_lines?: number
+    /**
+     * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
+     */
     max_bytes?: number
     /**
      * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.

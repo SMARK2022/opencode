@@ -955,8 +955,11 @@ describe("BashTool", () => {
         }), LayerNode.compile(AppProcess.node))
         // 正文恰好占满字节预算，中间错误会被最终状态与恢复标记挤出 head/tail。
         reset()
-        const rows = Array.from({ length: 600 }, (_, i) => `${i}: ${i === 300 ? "error: UNIQUE-MIDDLE-FAILURE" : "ordinary output"}`.padEnd(84, ".") + "\n").join("")
+        // 每行连同换行固定85字节，使根因始终位于当前预算中部，最后再补齐不足一行的字节。
+        const count = Math.floor(ToolOutputStore.MAX_BYTES / 85)
+        const rows = Array.from({ length: count }, (_, i) => `${i}: ${i === Math.floor(count / 2) ? "error: UNIQUE-MIDDLE-FAILURE" : "ordinary output"}`.padEnd(84, ".") + "\n").join("")
         const exact = rows + "z".repeat(ToolOutputStore.MAX_BYTES - Buffer.byteLength(rows))
+        expect(Buffer.byteLength(exact)).toBe(ToolOutputStore.MAX_BYTES)
         result = { ...result, exitCode: 1, output: Buffer.from(exact) }
         const clock = yield* Clock.Clock
         let now = 0

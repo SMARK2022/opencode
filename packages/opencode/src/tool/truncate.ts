@@ -12,7 +12,8 @@ import { TRUNCATION_DIR } from "./truncation-dir"
 const RETENTION = Duration.days(7)
 
 export const MAX_LINES = 2000
-export const MAX_BYTES = 50 * 1024
+// 这里只缩小缺省预览；显式配置和完整原文落盘仍由 limits/output 保留。
+export const MAX_BYTES = 24 * 1024
 export const DIR = TRUNCATION_DIR
 export const GLOB = path.join(TRUNCATION_DIR, "*")
 

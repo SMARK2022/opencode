@@ -9,7 +9,8 @@ import { makeLocationNode } from "../effect/app-node"
 import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
 
 export const MAX_READ_LINES = 2_000
-export const MAX_READ_BYTES = 50 * 1024
+// UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
+export const MAX_READ_BYTES = 24 * 1024
 export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
 const MAX_LINE_LENGTH = 2_000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`

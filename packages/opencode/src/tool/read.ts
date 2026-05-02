@@ -13,7 +13,8 @@ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
-const MAX_BYTES = 50 * 1024
+// 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
+const MAX_BYTES = 24 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
