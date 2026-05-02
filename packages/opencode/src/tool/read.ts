@@ -16,7 +16,7 @@ import type { MessageV2 } from "../session/message-v2"
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
-const MAX_BYTES = 50 * 1024
+const MAX_BYTES = 24 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
 const MAX_CONTENT_TOKENS = 16000

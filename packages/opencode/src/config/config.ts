@@ -213,7 +213,7 @@ export const Info = Schema.Struct({
         description: "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)",
       }),
       max_bytes: Schema.optional(PositiveInt).annotate({
-        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
+        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
       }),
       bash_compression: Schema.optional(Schema.Boolean).annotate({
         description:

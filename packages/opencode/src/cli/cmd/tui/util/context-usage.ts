@@ -574,7 +574,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
     .replaceAll("${shellGuidance}", shellGuidance)
     .replaceAll("${listCommand}", listCommand)
     .replaceAll("${maxLines}", "2000")
-    .replaceAll("${maxBytes}", "51200")
+    .replaceAll("${maxBytes}", "24576")
     .replaceAll("${compressionGuidance}", "")
 }
 
