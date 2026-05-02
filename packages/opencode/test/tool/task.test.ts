@@ -6,6 +6,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
+import { Permission } from "../../src/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -249,7 +250,9 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
-      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
+      // 恢复复用已保存权限；不能把当前调用代理的限制回写成旧会话的新策略。
+      const permission = [{ permission: "external_directory", pattern: "/saved/*", action: "allow" }] as const
+      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child", permission })
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
@@ -277,6 +280,8 @@ describe("tool.task", () => {
       const kids = yield* sessions.children(chat.id)
       expect(kids).toHaveLength(1)
       expect(kids[0]?.id).toBe(child.id)
+      // 从 Session owner 重新读取，避免只比较恢复前内存对象而漏掉 durable 回写。
+      expect((yield* sessions.get(child.id)).permission).toEqual([...permission])
       expect(result.metadata.sessionId).toBe(child.id)
       expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
       expect(seen?.sessionID).toBe(child.id)
@@ -288,6 +293,9 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
+      // 真实 Task 中的父默认 ask 也须覆盖旧会话 grant，保留 source 的更强审批。
+      yield* sessions.setAgentModel({ sessionID: chat.id, agent: "build", model: { id: ref.modelID, providerID: ref.providerID }, time: Date.now() })
+      yield* sessions.setPermission({ sessionID: chat.id, permission: [{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }] })
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -301,7 +309,8 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
-            agent: "build",
+            // 父 Session 固定 build、目标为 general；plan 独立证明 ctx 才是委派权限源。
+            agent: "plan",
             abort: new AbortController().signal,
             extra: {
               promptOps: stubOps({
@@ -320,6 +329,10 @@ describe("tool.task", () => {
       if (Exit.isSuccess(exit)) throw new Error("expected task failure")
       const child = (yield* sessions.children(chat.id))[0]
       expect(child).toBeDefined()
+      // 不调用 derive 计算期望：真实 Task 创建出的子会话必须包含固定的 plan 编辑禁令。
+      expect(child?.permission).toEqual(expect.arrayContaining([{ permission: "edit", pattern: "*", action: "deny" }]))
+      expect(Permission.evaluate("edit", "/some/file.ts", child?.permission ?? []).action).toBe("deny")
+      expect(Permission.evaluate("external_directory", "/tmp/allowed/file", child?.permission ?? []).action).toBe("ask")
       const failure = Cause.squash(exit.cause)
       expect(failure).toBeInstanceOf(Error)
       if (!(failure instanceof Error)) throw new Error("expected Error defect")
@@ -616,7 +629,15 @@ describe("tool.task", () => {
         const child = yield* sessions.get(result.metadata.sessionId)
         expect(child.parentID).toBe(chat.id)
         expect(child.agent).toBe("reviewer")
+        // source 过滤父 allow 后仍保留默认禁令；完整顺序比较同时守住继承边界与末尾工具 deny。
         expect(child.permission).toEqual([
+          { permission: "doom_loop", pattern: "*", action: "ask" },
+          { permission: "external_directory", pattern: "*", action: "ask" },
+          { permission: "question", pattern: "*", action: "deny" },
+          { permission: "plan_enter", pattern: "*", action: "deny" },
+          { permission: "plan_exit", pattern: "*", action: "deny" },
+          { permission: "read", pattern: "*.env", action: "ask" },
+          { permission: "read", pattern: "*.env.*", action: "ask" },
           {
             permission: "todowrite",
             pattern: "*",

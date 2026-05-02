@@ -89,9 +89,12 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
       const assistant = history.findLast(item => item.type === "assistant" && item.id === context.assistantMessageID)
       const model = agent.model ?? (assistant?.type === "assistant" ? assistant.model : parent.model)
       const parentPermission = yield* store.permissions(parent.id)
+      const parentAgent = yield* agents.get(context.agent)
+      if (!parentAgent) return yield* new ToolFailure({ message: `Unknown parent agent: ${context.agent}` })
       const childPermission: PermissionV2.Ruleset = [
-        // source此时只继承Session拒绝/外部目录规则；父代理non-allow由后续67按原序扩展。
+        // 执行代理可以不同于持久父身份；父non-allow按原序后写，不能被会话grant覆盖。
         ...parentPermission.filter(rule => rule.action === "external_directory" || rule.effect === "deny"),
+        ...parentAgent.permissions.filter(rule => rule.effect !== "allow"),
         ...["todowrite", "task"].flatMap(action => agent.permissions.some(rule => rule.action === action) ? [] : [{ action, resource: "*", effect: "deny" as const }]),
       ]
       const child = existing ?? (yield* sessions.create({

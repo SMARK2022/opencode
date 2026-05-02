@@ -136,10 +136,15 @@ export const TaskTool = Tool.define(
       const session = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
-      const childPermission = deriveSubagentSessionPermission({
-        parentSessionPermission: parent.permission ?? [],
-        subagent: next,
-      })
+      // 执行代理可能不同于持久化 parent.agent；用 ctx.agent 防止切换代理后继承旧权限。
+      const parentAgent = yield* agent.get(ctx.agent)
+      const childPermission = deriveSubagentSessionPermission(
+        {
+          parentSessionPermission: parent.permission ?? [],
+          subagent: next,
+        },
+        parentAgent.permission,
+      )
       const childToolDenies = [
         ...(next.permission.some((rule) => rule.permission === "todowrite")
           ? []
