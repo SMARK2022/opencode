@@ -1,6 +1,7 @@
 import { cmd } from "@/cli/cmd/cmd"
 import { ServerLock } from "@/cli/tui/server-lock"
 import { Flock } from "@opencode-ai/core/util/flock"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -95,6 +96,39 @@ export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
 export const SERVER_ELECTION_STALE_MS = 5_000
 export const SERVER_POLL_INTERVAL_MS = 200
 
+
+// 子进程快照只在唯一 spawn 前归一，父进程的 HTTP/HTTPS/ALL 代理与 CA 配置保持原值。
+function applyProxyEnv(env: Record<string, string>) {
+  const noProxy = [env.NO_PROXY, env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean))
+  const merged = NetworkProxy.noProxyString(noProxy)
+  env.NO_PROXY = merged
+  env.no_proxy = merged
+  if (process.platform === "win32" || process.platform === "darwin") {
+    for (const k of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]) {
+      delete env[k]
+    }
+  } else {
+    // Linux 仍从 env 获取代理，双大小写必须一致才能避免各网络库选到不同地址。
+    for (const [up, low] of [
+      ["HTTP_PROXY", "http_proxy"],
+      ["HTTPS_PROXY", "https_proxy"],
+      ["ALL_PROXY", "all_proxy"],
+    ] as const) {
+      const v = env[up] ?? env[low]
+      if (v) {
+        env[up] = v
+        env[low] = v
+      }
+    }
+    if (!env.HTTPS_PROXY && !env.https_proxy && (env.HTTP_PROXY || env.http_proxy)) {
+      const v = env.HTTP_PROXY ?? env.http_proxy!
+      env.HTTPS_PROXY = v
+      env.https_proxy = v
+    }
+  }
+  return env
+}
+
 // 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
 // 只缩短 contender 等待和探测频率，完整启动 deadline 仍由独立 waitMs 约束。
 const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
@@ -134,6 +168,13 @@ export async function discoverOrSpawnDaemon(
   networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
   deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
 ): Promise<{ url: string; fwdPid?: number }> {
+  // 父进程健康探测直接调用 fetch，首次读锁前就须补回环绕过，不能仅在 spawn 后保护子进程。
+  const noProxy = NetworkProxy.noProxyString(
+    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+  )
+  process.env.NO_PROXY = noProxy
+  process.env.no_proxy = noProxy
+
   // 身份与网络请求先于快速路径解析，禁止复用另一数据库或忽略显式外部端口。
   const identity = deps.identity()
   const network = await deps.resolveNetwork(networkArgs)
@@ -199,6 +240,8 @@ export async function discoverOrSpawnDaemon(
           ...(all !== undefined ? { ALL_PROXY: all, all_proxy: all } : {}),
           ...(no !== undefined ? { NO_PROXY: no, no_proxy: no } : {}),
         })
+        // 快照已补齐代理键后再调整，桌面 shell 的旧代理不能冻结 daemon 的系统路由。
+        applyProxyEnv(env)
         // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
         const proc = deps.spawn([process.execPath, daemonFile], {
           env: {

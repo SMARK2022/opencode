@@ -195,8 +195,21 @@ if (isDaemon) {
 
   try {
     const sharedServices = HttpApiApp.createSharedServices()
-    // 先完成预热再发布监听，已安装的 fatal/shutdown 闭包仍负责预热失败时的 token/scope 清理。
-    await AppRuntime.runPromise(Effect.gen(function* () {
+    // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
+    // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
+    internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
+    const network = process.env.OPENCODE_EXTERNAL_NETWORK
+      ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
+      : undefined
+    if (network) {
+      // 外部网络选项完整运输，cors/mdnsDomain 与共享客户端计数不因内部预热而丢失。
+      externalServer = await Server.listen({ ...network, eventClients, sharedServices })
+      externalUrl = externalServer.url.toString()
+    }
+    // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
+    lockToken = await ServerLock.write(internalServer.port, externalUrl, network)
+    // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。
+    setTimeout(() => void AppRuntime.runPromise(Effect.gen(function* () {
       const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
       const flags = yield* RuntimeFlags.Service
       // pure 不建立预热项目上下文，避免为本应跳过的用户插件读取配置或准备依赖。
@@ -217,20 +230,7 @@ if (isDaemon) {
     }).pipe(
       // 上下文解析自身失败也只取消预热，监听启动失败仍走外层非零退出清理。
       Effect.catchCause((cause) => Effect.logWarning("daemon plugin warmup skipped", { cause: String(cause) })),
-    ))
-    // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
-    // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
-    internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
-    const network = process.env.OPENCODE_EXTERNAL_NETWORK
-      ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
-      : undefined
-    if (network) {
-      // 外部网络选项完整运输，cors/mdnsDomain 与共享客户端计数不因内部预热而丢失。
-      externalServer = await Server.listen({ ...network, eventClients, sharedServices })
-      externalUrl = externalServer.url.toString()
-    }
-    // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
-    lockToken = await ServerLock.write(internalServer.port, externalUrl, network)
+    )), 0).unref?.()
   } catch {
     // 启动失败走相同资源清理，明确非零退出，不伪造成功锁。
     await gracefulShutdown(1)

@@ -23,6 +23,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectPromise } from "@/effect/promise"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { isRecord } from "@/util/record"
 import { optional } from "@opencode-ai/core/schema"
 import { ProviderTransform } from "./transform"
@@ -115,8 +116,11 @@ function timeoutFetch(options: Record<string, any>) {
     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
     if (combined) opts.signal = combined
 
-    const res = await fetchFn(input, {
+          // 鉴权 customFetch 和原有 signal 必须透传，只在同一 provider 请求上叠加代理路由。
+          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
       ...opts,
+            // provider 用途保持与基础设施和 npm 区分，后续策略不能误改模型请求身份。
+            purpose: "provider",
       // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
       timeout: false,
     }).finally(() => headerTimeoutCtl?.clear())

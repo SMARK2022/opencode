@@ -11,6 +11,8 @@ import { InstallationChannel, InstallationVersion } from "./installation/version
 import { EventV2 } from "./event"
 import { makeGlobalNode } from "./effect/app-node"
 import { httpClient } from "./effect/app-node-platform"
+// 基础设施请求也需系统代理，不能让 catalog 更新依赖 daemon 的全局包装。
+import { NetworkProxy } from "./network-proxy"
 
 export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
 export type CatalogModelStatus = typeof CatalogModelStatus.Type
@@ -173,10 +175,21 @@ const layer = Layer.effect(
     })
 
     const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
+      // 原 client 仍负责 transient 重试及非 2xx typed failure，refresh 可继续吞掉可恢复失败。
       return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
         HttpClientRequest.setHeader("User-Agent", USER_AGENT),
         http.execute,
         Effect.flatMap((res) => res.text),
+        // Fetch reference 覆盖共享 transport 而非再包一层，catalog 的 infrastructure 用途仍单次路由。
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          Object.assign(
+            (input: Parameters<typeof fetch>[0], init?: RequestInit) => NetworkProxy.routedFetch(input, { ...init, purpose: "infrastructure" }),
+            // Bun 的 fetch 类型包含 preconnect，局部适配不能丢掉该成员或伪造第二套实现。
+            { preconnect: fetch.preconnect },
+          ),
+        ),
+        // deadline 包含重试和正文读取，headers 已到达不能让 stalled body 永久占住缓存锁。
         Effect.timeout("10 seconds"),
       )
     })

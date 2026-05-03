@@ -63,6 +63,7 @@ type Api = HostPluginApi
 
 type PluginScope = {
   lifecycle: TuiPluginApi["lifecycle"]
+  abort: () => void
   track: (fn: (() => void) | undefined) => () => void
   dispose: () => Promise<void>
 }
@@ -116,6 +117,8 @@ type RuntimeState = {
   plugins: PluginEntry[]
   plugins_by_id: Map<string, PluginEntry>
   pending: Map<string, ConfigPlugin.Origin>
+  // 后台安装与激活归同一 runtime，dispose 必须等它完成才能逆序释放 scope。
+  externalTask?: Promise<void>
   dispose_timeout_ms: number
 }
 
@@ -389,9 +392,17 @@ function createPluginScope(load: PluginLoad, id: string, disposeTimeoutMs: numbe
   const ctrl = new AbortController()
   let list: { key: symbol; fn: TuiDispose }[] = []
   let done = false
+  let late = Promise.resolve()
+  let until = 0
 
   const onDispose = (fn: TuiDispose) => {
-    if (done) return () => {}
+    if (done) {
+      // 晚注册仍执行清理，并沿用该 scope 剩余 deadline；不能因已退出而静默丢掉资源。
+      late = late.then(() => runCleanup(fn, Math.max(0, until - Date.now()))).then((out) => {
+        if (out.type !== "ok") fail("failed to clean up late tui plugin", { path: load.spec, id, result: out })
+      })
+      return () => {}
+    }
     const key = Symbol()
     list.push({ key, fn })
     let drop = false
@@ -422,12 +433,12 @@ function createPluginScope(load: PluginLoad, id: string, disposeTimeoutMs: numbe
   }
 
   const dispose = async () => {
-    if (done) return
+    if (done) return late
     done = true
+    until = Date.now() + disposeTimeoutMs
     ctrl.abort()
     const queue = [...list].reverse()
     list = []
-    const until = Date.now() + disposeTimeoutMs
     for (const item of queue) {
       const left = until - Date.now()
       if (left <= 0) {
@@ -458,10 +469,13 @@ function createPluginScope(load: PluginLoad, id: string, disposeTimeoutMs: numbe
         })
       }
     }
+    // 已登记的迟到清理也归当前 dispose Promise，仍不会延长原有退出预算。
+    await late
   }
 
   return {
     lifecycle,
+    abort: () => ctrl.abort(),
     track,
     dispose,
   }
@@ -514,6 +528,7 @@ async function deactivatePluginEntry(state: RuntimeState, plugin: PluginEntry, p
 }
 
 async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, persist: boolean) {
+  if (runtime !== state) return false
   plugin.enabled = true
   if (persist) writePluginEnabledState(state.api, plugin.id, true)
   if (plugin.scope) {
@@ -522,6 +537,8 @@ async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, per
   }
 
   const scope = createPluginScope(plugin.load, plugin.id, state.dispose_timeout_ms)
+  // init 可能等 lifecycle.signal；先公开 scope，退出才能在等待该 init 前发送 abort。
+  plugin.scope = scope
   const api = pluginApi(state, plugin, scope, plugin.id)
   const ok = await Promise.resolve()
     .then(async () => {
@@ -539,18 +556,20 @@ async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, per
     })
 
   if (!ok) {
+    plugin.scope = undefined
     await scope.dispose()
     state.view.update({ status: listPluginStatus(state) })
     return false
   }
 
-  if (!plugin.enabled) {
+  // abort 后 init 可继续注册资源；它完成后才用同一 scope 清理，不能重新标为 active。
+  if (!plugin.enabled || scope.lifecycle.signal.aborted) {
+    plugin.scope = undefined
     await scope.dispose()
     state.view.update({ status: listPluginStatus(state) })
     return true
   }
 
-  plugin.scope = scope
   state.view.update({ status: listPluginStatus(state) })
   return true
 }
@@ -856,6 +875,7 @@ async function addPluginBySpec(state: RuntimeState | undefined, raw: string) {
     state.pending.delete(spec)
     return true
   }
+  // 用户显式 add 仍等待真实激活结果，不能把启动后台策略误用为已安装成功。
   const ready = await resolveExternalPlugins([cfg], () => TuiConfig.waitForDependencies()).catch((error) => {
     fail("failed to add tui plugin", { path: next, error })
     return [] as PluginLoad[]
@@ -1005,6 +1025,12 @@ export async function init(input: {
   return loaded
 }
 
+// 首屏只等 init；测试和需要完整插件状态的调用方可等待同一个后台 owner。
+export async function ready() {
+  await loaded
+  await runtime?.externalTask
+}
+
 export function list() {
   if (!runtime) return []
   return listPluginStatus(runtime)
@@ -1030,9 +1056,13 @@ export async function dispose() {
   const task = loaded
   loaded = undefined
   dir = ""
-  if (task) await task.catch((error) => fail("failed to finish loading tui plugins during disposal", { error }))
   const state = runtime
   runtime = undefined
+  // 先关闭入场并 abort 已公开 scope，合法等待 signal 的 init 才能结束。
+  for (const plugin of state?.plugins ?? []) plugin.scope?.abort()
+  if (task) await task.catch((error) => fail("failed to finish loading tui plugins during disposal", { error }))
+  // 等 init 完成后再逆序清理，其 abort 后登记的资源仍由原 scope/deadline 负责。
+  await state?.externalTask
   if (!state) return
   const queue = [...state.plugins].reverse()
   for (const plugin of queue) {
@@ -1103,18 +1133,31 @@ async function load(input: {
       })
     }
 
-    const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
-    await addExternalPluginEntries(next, ready)
-
     applyInitialPluginEnabledState(next, config)
     for (const plugin of next.plugins) {
       if (!plugin.enabled) continue
-      // Keep plugin execution sequential for deterministic side effects:
-      // command registration order affects keybind/command precedence,
-      // route registration is last-wins when ids collide,
-      // and hook chains rely on stable plugin ordering.
+      // 内置插件先顺序激活以确定首屏命令与路由优先级，外部网络不能阻塞这条 ready 路径。
       await activatePluginEntry(next, plugin, false)
     }
+
+    // file 与 npm 都可能执行慢初始化，统一后台运行而不以测试来源改变生产时序。
+    next.externalTask = (async () => {
+      if (runtime !== next) return
+      const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+      // 完成解析后再登记，缺入口或永久加载错误不会留下可激活的半成品。
+      const added = await addExternalPluginEntries(next, ready)
+      // 启动期间用户可能切换 enabled，激活前重读 KV 以保留最新决定。
+      applyInitialPluginEnabledState(next, config)
+      for (const plugin of added.plugins) {
+        if (runtime !== next) break
+        if (!plugin.enabled) continue
+        // 一个插件的 async init 完成后才启动下一个，避免 keybind/route 的覆盖次序随 I/O 漂移。
+        await activatePluginEntry(next, plugin, false)
+      }
+    })().catch((error) => {
+      // 失败在后台任务自身观测；既不拒绝首屏 ready，也不形成未处理的 rejection。
+      fail("failed to load external tui plugins", { directory: cwd, error })
+    })
     next.view.update({ status: listPluginStatus(next) })
   } catch (error) {
     fail("failed to load tui plugins", { directory: cwd, error })

@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Effect } from "effect"
 import fs from "fs/promises"
 import path from "path"
@@ -106,6 +107,18 @@ describe("tui thread", () => {
 
 
   describe("single-server enforcement", () => {
+    // 发现会修改父进程绕过名单，每例都恢复双写法，避免污染后续网络用例。
+    const parentNoProxy = new Map<string, string | undefined>()
+    beforeEach(() => {
+      for (const key of ["NO_PROXY", "no_proxy"]) parentNoProxy.set(key, process.env[key])
+    })
+    afterEach(() => {
+      for (const [key, value] of parentNoProxy) {
+        if (value === undefined) delete process.env[key]
+        if (value !== undefined) process.env[key] = value
+      }
+    })
+
     const FAKE_DAEMON_PID = 99999
     const fakeLock = {
       pid: FAKE_DAEMON_PID,
@@ -141,16 +154,34 @@ describe("tui thread", () => {
     const localNet = { port: 0, hostname: "127.0.0.1", mdns: false, cors: [] as string[] }
 
     test("reuses existing server: returns HTTP URL, no daemon spawned", async () => {
+      const aliases = { NO_PROXY: "upper.example", no_proxy: "lower.example" }
+      expect(NetworkProxy.noProxyString(Object.values(aliases))).toBe("localhost,127.0.0.1,::1,::ffff:127.0.0.1,::ffff:7f00:1,upper.example,lower.example")
+      process.env.NO_PROXY = aliases.NO_PROXY
+      process.env.no_proxy = aliases.no_proxy
+      const parent = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy }
+      const noProxy = Array.from(new Set([
+        "localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1",
+        ...[parent.NO_PROXY, parent.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+      ])).join(",")
       let daemonSpawnCount = 0
       const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
-        read: async () => ({
-          pid: process.pid,
-          port: 9999,
-          token: "test-token",
-          dbPath: "/tmp/test.db",
-          channel: "local",
-          startedAt: new Date().toISOString(),
-        }),
+        read: async () => {
+          expect(process.env.NO_PROXY).toBe(noProxy)
+          expect(process.env.no_proxy).toBe(noProxy)
+          return {
+            pid: process.pid,
+            port: 9999,
+            token: "test-token",
+            dbPath: "/tmp/test.db",
+            channel: "local",
+            startedAt: new Date().toISOString(),
+          }
+        },
+        ping: async () => {
+          expect(process.env.NO_PROXY).toBe(noProxy)
+          expect(process.env.no_proxy).toBe(noProxy)
+          return true
+        },
         spawn: ((_cmd, _opts) => {
           daemonSpawnCount++
           return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
@@ -168,29 +199,42 @@ describe("tui thread", () => {
         // 三条 CA 路径和任意用户变量都不属于代理白名单，仍须进入真实 spawn 参数。
         Object.assign(process.env, { NODE_EXTRA_CA_CERTS: "extra.pem", SSL_CERT_FILE: "ca.pem", SSL_CERT_DIR: "certs", SMARK_ENV_KEEP: "retained" })
         const cases: Array<{ env: Record<string, string>; values: Array<string | undefined> }> = [
-          // 冲突双写法必须统一选大写，不能仅将父环境原样交给不同 HTTP 实现。
-          { env: { HTTP_PROXY: "http-upper", http_proxy: "http-lower", HTTPS_PROXY: "https-upper", https_proxy: "https-lower", ALL_PROXY: "all-upper", all_proxy: "all-lower", NO_PROXY: "no-upper", no_proxy: "no-lower" }, values: ["http-upper", "https-upper", "all-upper", "no-upper"] },
-          // 只有小写 HTTP 时，同时补齐大写与 HTTPS 继承，且不凭空引入 ALL/NO。
-          { env: { http_proxy: "http-only" }, values: ["http-only", "http-only", undefined, undefined] },
+          // 协议代理冲突仍选大写，绕过名单则保留两种写法，不能丢掉用户已有目的地。
+          { env: { HTTP_PROXY: "http-upper", http_proxy: "http-lower", HTTPS_PROXY: "https-upper", https_proxy: "https-lower", ALL_PROXY: "all-upper", all_proxy: "all-lower", NO_PROXY: "no-upper", no_proxy: "no-lower" }, values: ["http-upper", "https-upper", "all-upper"] },
+          // HTTP 继承只作用于协议代理，不能因此删掉固定回环绕过。
+          { env: { http_proxy: "http-only" }, values: ["http-only", "http-only", undefined] },
           // 小写 HTTPS 是明确配置，不应被大写 HTTP 的继承值抢占。
-          { env: { HTTP_PROXY: "http", https_proxy: "https", all_proxy: "all", no_proxy: "no" }, values: ["http", "https", "all", "no"] },
-          // 空大写是已定义值；空 NO_PROXY 也必须覆盖非空小写绕过名单。
-          { env: { HTTP_PROXY: "", http_proxy: "lower", NO_PROXY: "", no_proxy: "lower" }, values: ["", "", undefined, ""] },
+          { env: { HTTP_PROXY: "http", https_proxy: "https", all_proxy: "all", no_proxy: "no" }, values: ["http", "https", "all"] },
+          // 空 HTTP 大写仍优先；空 NO_PROXY 不能删除小写中的用户绕过目的地。
+          { env: { HTTP_PROXY: "", http_proxy: "lower", NO_PROXY: "", no_proxy: "lower" }, values: ["", "", undefined] },
         ]
         for (const item of cases) {
           proxyKeys.forEach((key) => { delete process.env[key] })
           Object.assign(process.env, item.env)
-          const parent = { ...process.env }
+          const parent = { ...process.env, ...Object.fromEntries(proxyKeys.map((key) => [key, process.env[key]])) }
+          const noProxy = Array.from(new Set([
+            "localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1",
+            ...[parent.NO_PROXY, parent.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+          ])).join(",")
           let reads = 0
           let spawns = 0
           const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
-            read: async () => ++reads <= 2 ? undefined : fakeLock,
+            read: async () => {
+              // 首读按赋值后的实际快照校验，Windows 别名不能按声明表制造两个独立值。
+              expect(process.env.NO_PROXY).toBe(noProxy)
+              expect(process.env.no_proxy).toBe(noProxy)
+              proxyKeys.slice(0, 6).forEach((key) => expect(process.env[key]).toBe(parent[key]))
+              return ++reads <= 2 ? undefined : fakeLock
+            },
             spawn: ((_cmd, opts) => {
               spawns++
               const env = opts?.env
               // 断言生产函数实际传入的 env，不能只测试一个独立归一 helper。
               expect(env).toBeDefined()
-              proxyKeys.forEach((key, index) => expect(env?.[key]).toBe(item.values[Math.floor(index / 2)]))
+              proxyKeys.forEach((key, index) => {
+                if (index >= 6) return expect(env?.[key]).toBe(noProxy)
+                expect(env?.[key]).toBe(process.platform === "win32" || process.platform === "darwin" ? undefined : item.values[Math.floor(index / 2)])
+              })
               // 全量转发的保护覆盖所有非代理父键，而非仅检查上述四个 fixture 值。
               Object.entries(parent).forEach(([key, value]) => {
                 if (proxyKeys.includes(key) || ["OPENCODE_PROCESS_ROLE", "OPENCODE_LOCK_PATH", "OPENCODE_EXTERNAL_NETWORK", "OPENCODE_PRINT_LOGS"].includes(key)) return
