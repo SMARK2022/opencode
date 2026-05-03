@@ -2,9 +2,9 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import matter from "gray-matter"
-import type { Agent, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
+import type { Agent, AssistantMessage, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { estimate } from "@opencode-ai/core/util/token"
+import { Token } from "@opencode-ai/core/util/token"
 import { SessionOverflowV1 } from "@opencode-ai/core/v1/session/overflow"
 import { ConfigProvider, Effect } from "effect"
 import { boolean, withDefault } from "effect/Config"
@@ -302,6 +302,48 @@ const INSTRUCTION_FILES = [
   "CONTEXT.md",
 ]
 
+function estimate(text: string, ratio = 4) {
+  return Math.max(0, Math.round(text.length / ratio))
+}
+
+function latestInputEstimate(messages: WithParts[], raw: WithParts[], model: { providerID: string; modelID: string }): Partial<NonNullable<AssistantMessage["inputEstimate"]>> {
+  // 仅无请求投影的旧 V1 数据扫描确认点；当前请求缺失估算不等于可以借用旧轮次。
+  // 已有 inputChars 的助手只取确认 parts，不能再叠加同一助手旧 carrier 的相同样本。
+  const samples = raw.toReversed().flatMap(message => {
+    const info = message.info
+    if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) return []
+    const parts = message.parts.toReversed().flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
+      ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
+    return parts.length > 0 ? parts : info.inputEstimate?.confirmed
+      ? [{ bodyChars: info.inputEstimate.bodyChars, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
+  })
+  for (const message of messages.toReversed()) {
+    const info = message.info
+    if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) continue
+    if (info.inputEstimate) return { ...info.inputEstimate, charsPerToken: info.inputEstimate.charsPerToken ?? Token.charsPerTokenFromHistory(samples) }
+    const part = message.parts.findLast(part => part.type === "step-finish" && part.inputBreakdown !== undefined)
+    if (part?.type !== "step-finish") continue
+    return { input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+      bodyChars: part.inputChars ?? 0, confirmed: true, inputBreakdown: part.inputBreakdown,
+      charsPerToken: Token.charsPerTokenFromHistory(samples) }
+  }
+  return { charsPerToken: Token.charsPerTokenFromHistory(samples) }
+}
+
+function distribute<T extends { tokens: number }>(items: T[], total: number, equal = false) {
+  const weight = items.reduce((sum, item) => sum + item.tokens, 0)
+  let previous = 0
+  let cumulative = 0
+  return items.map((item) => {
+    // instructions 无权重时清零；工具允许均分，累计舍入保证非空明细与服务端分类精确同额。
+    cumulative += weight > 0 ? item.tokens / weight : equal ? 1 / items.length : 0
+    const next = Math.round(cumulative * total)
+    const tokens = next - previous
+    previous = next
+    return { ...item, tokens }
+  })
+}
+
 function stableJson(input: unknown): string {
   if (input === undefined) return ""
   try {
@@ -315,10 +357,10 @@ function stableJson(input: unknown): string {
   }
 }
 
-function estimateFileToken(url: string, mime: string) {
+function estimateFileToken(url: string, mime: string, ratio: number) {
   // 内联图片/PDF 沿已有编码负载启发式与图像封顶；不能把整份 data URL 当普通文本重复估算。
   if (url.startsWith("data:")) return estimateDataUrlInputTokens(url, mime)
-  return estimate(url)
+  return estimate(url, ratio)
 }
 
 // 裁剪只认成功摘要与匹配的用户父 ID；正在压缩的请求仍需保留原上下文供重试。
@@ -355,7 +397,7 @@ export function filterCompactedMessages(msgs: Iterable<WithParts>) {
 }
 
 // 当前窗口按投影用途分类；工具请求是输出，工具结果是下一轮输入，不能合并计入同一栏。
-function messageTokens(messages: WithParts[]) {
+function messageTokens(messages: WithParts[], ratio: number) {
   const details: ContextUsageData["details"]["messages"] = {
     userText: 0,
     assistantText: 0,
@@ -376,7 +418,7 @@ function messageTokens(messages: WithParts[]) {
           // synthetic 正文也发送给模型；只有 ignored 文本被投影排除。
           if (part.ignored) continue
           text.push(part.text)
-          const tokens = estimate(part.text)
+          const tokens = estimate(part.text, ratio)
           if (msg.info.role === "user") details.userText += tokens
           else if (msg.info.role === "assistant" && msg.info.summary === true) details.compactionSummary += tokens
           else details.assistantText += tokens
@@ -384,12 +426,12 @@ function messageTokens(messages: WithParts[]) {
         }
         case "reasoning":
           // reasoning 文本是窗口载荷估算，不替代 provider tokens.reasoning 的确认消费。
-          details.reasoning += estimate(part.text)
+          details.reasoning += estimate(part.text, ratio)
           break
         case "tool": {
           toolNames.add(part.tool)
           // JSON 标点和字段名也属于调用载荷；字符数/4 仅用于显示估算。
-          details.toolCalls += estimate(stableJson(part.state.input))
+          details.toolCalls += estimate(stableJson(part.state.input), ratio)
           if (part.state.status === "completed") {
             // metadata 是 wire unknown；只接纳字符串路径，避免把其他工具元数据当文件名读取。
             // 只有完成的 read 提供 loaded 证明，未完成或错误工具不产生指令来源。
@@ -399,25 +441,25 @@ function messageTokens(messages: WithParts[]) {
             }
             // 已压缩的工具结果用占位符估算，避免读取已清除的大体积输出
             const output = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
-            details.toolResults += estimate(output)
+            details.toolResults += estimate(output, ratio)
             // 内联证明必须来自已计入窗口的同一正文，压缩前残留 output 不能证明指令仍可见。
             text.push(output)
             for (const attachment of part.state.attachments ?? []) {
-              details.attachments += estimateFileToken(attachment.url, attachment.mime)
+              details.attachments += estimateFileToken(attachment.url, attachment.mime, ratio)
             }
           }
           // 未解析 raw 属于流式请求载荷；完成/错误状态不得再把残留 raw 加入输出估算。
-          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw)
-          if (part.state.status === "error") details.toolResults += estimate(part.state.error)
+          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw, ratio)
+          if (part.state.status === "error") details.toolResults += estimate(part.state.error, ratio)
           break
         }
         case "file":
           // data URL 使用既有视觉/PDF 启发式，普通 URL 只估算引用文本，不能把二者都按 base64 长度计费。
-          details.attachments += estimateFileToken(part.url, part.mime)
+          details.attachments += estimateFileToken(part.url, part.mime, ratio)
           break
         case "subtask":
           // subtask 是用户发起的任务载荷，不能因最终由子代理执行就挪到助手输出分类。
-          details.userText += estimate(`${part.prompt}\n${part.description}`)
+          details.userText += estimate(`${part.prompt}\n${part.description}`, ratio)
           break
       }
     }
@@ -827,6 +869,7 @@ function toolDefinitionTokens(
   skills: Array<{ name: string; description: string; path: string }>,
   lastUser: Message | undefined,
   modelInfo: ReturnType<typeof currentModel>,
+  ratio: number,
 ) {
   // catalog 渲染模板，动态描述保留原始文本并使用同一请求模型身份。
   const scanned = baseToolDefinitions(input, modelInfo)
@@ -839,7 +882,7 @@ function toolDefinitionTokens(
   const details: Array<{ name: string; tokens: number }> = []
   for (const name of active) {
     const text = [byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n")
-    details.push({ name, tokens: estimate(text || name) })
+    details.push({ name, tokens: estimate(text || name, ratio) })
   }
   return details.toSorted((a, b) => a.name.localeCompare(b.name))
 }
@@ -927,8 +970,7 @@ function windowTokens(input: ComputeContextDataInput, model: Provider["models"][
 }
 
 // 两种预留拥有不同来源：provider input 差额不是自动压缩的阈值，不能合并显示。
-function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
-  const contextLimit = model?.limit.context ?? 0
+function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined, contextLimit = model?.limit.context ?? 0) {
   // catalog 的 input 可能大于 context，先夹住才能让 reserve 与 buffer 保持非负。
   const inputLimit = model?.limit.input ? Math.min(model.limit.input, contextLimit) : contextLimit
   const usableInput = windowTokens(input, model)
@@ -1043,48 +1085,63 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const compacted = filterCompactedMessages(raw.toReversed())
   const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
   const modelInfo = currentModel(input, lastUser)
-  const maxTokens = modelInfo.model?.limit.context ?? 0
+  // 请求投影包含 native 首包前与确认后的细分；只有没有投影的旧 V1 才读取确认 part。
+  const prepared = input.session?.request ? input.session.request.inputEstimate : latestInputEstimate(compacted, raw, modelInfo)
+  const bd = prepared?.inputBreakdown
+  // 密度冻结自本轮输入侧校准；显示窗口或模型选择变化不能重新解释服务端 prepared input。
+  const ratio = prepared?.charsPerToken && Number.isFinite(prepared.charsPerToken) && prepared.charsPerToken > 0 ? prepared.charsPerToken : 4
+  // Catalog 消失或助手被淘汰仍保留本轮预算，零不能被当前同 API 的其他 alias 替换。
+  const frozen = input.session?.request?.model?.contextLimit ?? prepared?.contextLimit
+  const windowModel = modelInfo.model && frozen !== undefined
+    ? { ...modelInfo.model, limit: { ...modelInfo.model.limit, context: frozen } } : modelInfo.model
+  const maxTokens = frozen ?? modelInfo.model?.limit.context ?? 0
 
-  const msg = messageTokens(compacted)
+  const msg = messageTokens(compacted, ratio)
   // raw 保存整场会话用量；窗口分类仍由 compacted 估算。
   const usage = usageTotals(raw)
   const instructions = await gatherInstructionFiles(input)
-  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
+  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
   const messageText = msg.text.join("\n")
   // Read 的指令可能在工具 output 而非 text 部件；只为未在已计数正文内出现的 loaded 路径读盘。
   const loadedInstructions = [] as Array<{ path: string; tokens: number }>
   for (const filepath of msg.loadedInstructionPaths) {
     if (messageText.includes(`Instructions from: ${filepath}`)) continue
     const content = await readText(filepath)
-    if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`) })
+    if (content && !bd) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
   }
 
   const skills = await gatherSkills(input)
   const skillListing = skillsSection(skillInfo(skills))
-  const skillTokens = estimate(skillListing)
+  const skillTokens = bd ? Math.round(bd.skills / ratio) : estimate(skillListing, ratio)
   const skillDetails = skills.map((skill) => ({
     name: skill.name,
     path: skill.path,
-    tokens: estimate(skillsSection(skillInfo([skill]))),
+    tokens: bd ? 1 : estimate(skillsSection(skillInfo([skill])), ratio),
   }))
-  const toolDefs = toolDefinitionTokens(input, skills, lastUser, modelInfo)
+  const toolDefs = toolDefinitionTokens(input, skills, lastUser, modelInfo, ratio)
   // 用户 system 是同一请求的附加系统载荷；存在自定义 agent prompt 也不能省略该字段。
   const systemText = [
     baseSystemPrompt(input, lastUser, modelInfo.model),
     environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
     lastUser?.role === "user" ? lastUser.system : undefined,
   ].filter(Boolean).join("\n")
-  const envTokens = estimate(systemText)
-  const instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+  // 五类与消息六子项只消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
+  const envTokens = bd ? Math.round(bd.system / ratio) : estimate(systemText, ratio)
+  const instructionTokens = bd ? Math.round(bd.instructions / ratio) : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
-  const toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+  const toolDefTokens = bd ? Math.round(bd.tools / ratio) : toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+  const messageDetails = bd ? {
+    userText: Math.round(bd.messages.userText / ratio), assistantText: Math.round(bd.messages.assistantText / ratio),
+    reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
+    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: Math.round(bd.messages.attachments / ratio), compactionSummary: 0,
+  } : msg.details
   // 工具返回内容会成为下一轮输入，即使部件归助手消息也不能挪入 Output Messages。
-  const inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
+  const inputMessageTokens = messageDetails.userText + messageDetails.toolResults + messageDetails.attachments
   // 摘要本身仍是窗口内输出载荷；已裁剪的旧正文不能因 summary 还有父 ID 又被重新计入。
   const outputMessageTokens =
-    msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
+    messageDetails.assistantText + messageDetails.reasoning + messageDetails.toolCalls + messageDetails.compactionSummary
   const messageTotal = inputMessageTokens + outputMessageTokens
-  const window = windowDetails(input, modelInfo.model)
+  const window = windowDetails(input, windowModel, maxTokens)
   // used 只包含发送载荷；free、模型预留与压缩缓冲不是 token 消费，不能再次加入分子。
   // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
@@ -1109,7 +1166,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
 
   // 返回脱离流式 proxy 的数值与字符串，resize 消费同一轮完成的估算结果。
   return {
-    model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
+    model: [input.session?.request?.model?.providerID ?? modelInfo.providerID, input.session?.request?.model?.modelID ?? modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
     totalTokens: used,
     maxTokens,
     percentage: maxTokens ? used / maxTokens : 0,
@@ -1117,11 +1174,12 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     // 未知窗口只选择可渲染的网格分母，maxTokens 与百分比仍保留未知值 0。
     gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
     details: {
-      instructions: instructionDetails,
+      // 服务端零总额也要清零本地明细，不能只在正值分支覆盖默认估算而残留上一轮数值。
+      instructions: bd ? distribute(instructionDetails, instructionTokens) : instructionDetails,
       loadedInstructions,
-      skills: skillDetails,
-      toolDefs,
-      messages: msg.details,
+      skills: bd ? distribute(skillDetails, skillTokens, true) : skillDetails,
+      toolDefs: bd ? distribute(toolDefs, toolDefTokens, true) : toolDefs,
+      messages: messageDetails,
       usage,
       window,
     },

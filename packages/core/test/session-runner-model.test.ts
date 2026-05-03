@@ -387,7 +387,7 @@ describe("SessionRunnerModel", () => {
         })
         expect(input.providerOptions?.anthropic?.system).toBeUndefined()
         yield* client.stream(input, (body) => Effect.sync(() => {
-          estimates.push(Token.estimateRequest(body, []))
+          estimates.push(Token.estimateRequest(body, [], [{ kind: "instructions", text: "Session system" }]))
           expect(body).toMatchObject({
             system: expect.arrayContaining([{ type: "text", text: "Session system" }, { type: "text", text: raw }]),
             messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
@@ -401,6 +401,11 @@ describe("SessionRunnerModel", () => {
       expect(estimates).toHaveLength(2)
       expect(Math.max(...estimates.map(item => item.bodyChars)) - Math.min(...estimates.map(item => item.bodyChars))).toBe(8000)
       expect(Math.max(...estimates.map(item => item.input)) - Math.min(...estimates.map(item => item.input))).toBe(2000)
+      // 协议正文只增长模型默认system；8000增量与固定指令14分别归桶，运输metadata不参与。
+      expect(estimates[1]?.inputBreakdown?.system).toBe((estimates[0]?.inputBreakdown?.system ?? 0) + 8000)
+      expect(estimates.map(item => item.inputBreakdown?.instructions)).toEqual([14, 14])
+      expect(estimates.map(item => item.charsPerToken)).toEqual([4, 4])
+      expect(estimates.every(item => (item.inputBreakdown?.tools ?? 0) > 0)).toBe(true)
     }).pipe(
       Effect.provide(LLMClient.layer),
       Effect.provideService(RequestExecutor.Service, { execute: () => Effect.die("Prepared fixture must not send provider IO") }),

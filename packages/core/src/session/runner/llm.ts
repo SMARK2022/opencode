@@ -325,7 +325,7 @@ const layer = Layer.effect(
       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
         inputEstimate = {
-          ...Token.estimateRequest(body, samples),
+          ...Token.estimateRequest(body, samples, system.sections),
           contextLimit: model.defaults?.limits?.context ?? model.route.defaults.limits?.context ?? 0,
         }
         // 使用实际已提升输入身份；较新的未提升 queue 不能接管这个请求。

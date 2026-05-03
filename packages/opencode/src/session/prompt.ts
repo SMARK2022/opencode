@@ -1368,6 +1368,12 @@ const layer = Layer.effect(
               permission: session.permission,
               sessionID,
               parentSessionID: session.parentID,
+              // 只交付已有 source 的原文归属；字符与 token 仍在唯一 prepared 回调计算。
+              inputSections: [
+                ...instructions.map(text => ({ kind: "instructions" as const, text })),
+                ...(lastUser.system ? [{ kind: "instructions" as const, text: lastUser.system }] : []),
+                ...(skills ? [{ kind: "skills" as const, text: skills }] : []),
+              ],
               system,
               messages: [
                 ...modelMsgs,

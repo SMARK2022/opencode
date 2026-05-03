@@ -5,7 +5,7 @@ import { optional } from "./schema"
 import { ProviderMetadata, ToolContent } from "./llm"
 import { Model } from "./model"
 import { FileAttachment, Prompt } from "./prompt"
-import { DateTimeUtcFromMillis, RelativePath, statics } from "./schema"
+import { DateTimeUtcFromMillis, NonNegativeInt, RelativePath, statics } from "./schema"
 import { SessionID } from "./session-id"
 import { ascending } from "./identifier"
 
@@ -161,6 +161,25 @@ export const AssistantContent = Schema.Union([AssistantText, AssistantReasoning,
 )
 export type AssistantContent = AssistantText | AssistantReasoning | AssistantTool
 
+// 五类共享同一份 prepared JSON 字符基数；消息子项不包含已归系统的 system/developer 消息。
+export interface InputBreakdown extends Schema.Schema.Type<typeof InputBreakdown> {}
+export const InputBreakdown = Schema.Struct({
+  system: NonNegativeInt,
+  instructions: NonNegativeInt,
+  skills: NonNegativeInt,
+  tools: NonNegativeInt,
+  messages: Schema.Struct({
+    userText: NonNegativeInt,
+    assistantText: NonNegativeInt,
+    reasoning: NonNegativeInt,
+    toolInput: NonNegativeInt,
+    toolOutput: NonNegativeInt,
+    attachments: NonNegativeInt,
+    // 包含归属消息的 JSON 结构开销，六个子项之和就是 total。
+    total: NonNegativeInt,
+  }),
+}).annotate({ identifier: "Session.Message.InputBreakdown" })
+
 // 请求体估算与 provider tokens 分离；confirmed 只说明校准样本已经结算。
 // bodyChars 保留实际请求体的字符基数，不能拿输出正文校准输入用量。
 export interface InputEstimate extends Schema.Schema.Type<typeof InputEstimate> {}
@@ -168,6 +187,9 @@ export const InputEstimate = Schema.Struct({
   input: Schema.Finite,
   bodyChars: Schema.Finite,
   confirmed: Schema.Boolean,
+  // 比率冻结在服务端准备时；客户端不再用被分页截断的历史重新校准。
+  charsPerToken: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
+  inputBreakdown: InputBreakdown.pipe(optional),
   afterPartID: Schema.String.pipe(optional),
   // 同轮解析出的显示预算独立于 token 校准样本，后续模型选择不能改写它。
   contextLimit: Schema.Finite.pipe(optional),

@@ -48,6 +48,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     // 参数只含当前助手尾部，不能把其他请求的缓存 parts 传给共享计算。
     const lastParts = last ? props.api.state.part(last.id) : []
     // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
+    // 插件读取同一冻结密度，不能另扫 sidebar 的消息窗口建立第二份历史估算。
     const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
     const tokens = input + output
     const totalTokens = totalInput + totalOutput

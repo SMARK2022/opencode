@@ -98,7 +98,17 @@ export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Sess
     cost: row.cost,
     // 复制请求快照供旧可变调用方使用；不能让插件改写查询结果的嵌套模型信息。
     // tokens 和 cost 仍是原有全局范围，request 只是并列的公开读投影。
-    request: row.request ? { ...row.request, model: row.request.model ? { ...row.request.model } : undefined } : undefined,
+    request: row.request ? {
+      ...row.request, model: row.request.model ? { ...row.request.model } : undefined,
+      // 兼容调用方可变；复制新细分对象，避免修改返回值时污染同一查询快照。
+      inputEstimate: row.request.inputEstimate ? {
+        ...row.request.inputEstimate,
+        inputBreakdown: row.request.inputEstimate.inputBreakdown ? {
+          ...row.request.inputEstimate.inputBreakdown,
+          messages: { ...row.request.inputEstimate.inputBreakdown.messages },
+        } : undefined,
+      } : undefined,
+    } : undefined,
     // cache 两项保持独立；消费方会加回输入流量，提前折入 input 会重复计数。
     tokens: {
       input: row.tokens_input,

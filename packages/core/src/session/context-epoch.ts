@@ -1,7 +1,7 @@
 export * as SessionContextEpoch from "./context-epoch"
 
 import { eq } from "drizzle-orm"
-import { DateTime, Effect, Schema } from "effect"
+import { DateTime, Effect, Option, Schema } from "effect"
 import type { Database } from "../database/database"
 import { EventV2 } from "../event"
 import { SystemContext } from "../system-context/index"
@@ -15,9 +15,25 @@ import { SessionContextEpochTable } from "./sql"
 
 type DatabaseService = Database.Interface["db"]
 
+// 同一 JSON 列保存 baseline/历史渲染归属，source comparison 快照与模型正文仍由原 owner 管理。
+const State = Schema.Struct({
+  sources: SystemContext.Snapshot,
+  sections: Schema.Array(Schema.Struct({ kind: Schema.Literals(["instructions", "skills"]), text: Schema.String })),
+})
+export type State = typeof State.Type
+
 interface Prepared {
   readonly baseline: string
   readonly baselineSeq: number
+  readonly sections: State["sections"]
+}
+
+function capture(sections: Array<State["sections"][number]>) {
+  return (key: SystemContext.Key, text: string) => {
+    // 只认实际领域 producer 的 key；文件正文里的同名标题不创造新的分类来源。
+    if (key === "core/instructions") sections.push({ kind: "instructions", text })
+    if (key === "core/skill-guidance") sections.push({ kind: "skills", text })
+  }
 }
 
 export function initialize(
@@ -47,34 +63,44 @@ const prepareOnce = Effect.fnUntraced(function* (
     [context, find(db, sessionID), SessionHistory.latestCompaction(db, sessionID)],
     { concurrency: "unbounded" },
   )
+  const sections: Array<State["sections"][number]> = []
   if (!stored) {
-    const generation = yield* SystemContext.initialize(value)
-    const baselineSeq = yield* insert(db, sessionID, generation)
-    return { baseline: generation.baseline, baselineSeq }
+    const generation = yield* SystemContext.initialize(value, capture(sections))
+    const baselineSeq = yield* insert(db, sessionID, generation, sections)
+    return { baseline: generation.baseline, baselineSeq, sections }
   }
 
-  const snapshot = yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
-    Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
-  )
+  // 已持久化的旧裸 Snapshot 没有片段归属，仍解码原契约；缺少证明的文本保守留在 system。
+  // 私有 wrapper 不改变 baseline_seq 或 source 的等价比较，现有 ContextEpoch admission 仍是唯一 owner。
+  const decoded = Schema.decodeUnknownOption(State)(stored.snapshot)
+  const snapshot = Option.isSome(decoded) ? decoded.value : {
+    sources: yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
+      Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
+    ), sections: [],
+  }
   const replacementSeq = compaction !== undefined && compaction.seq > stored.baseline_seq ? compaction.seq : undefined
   const result = replacementSeq
-    ? yield* SystemContext.replace(value, snapshot)
-    : yield* SystemContext.reconcile(value, snapshot)
+    ? yield* SystemContext.replace(value, snapshot.sources, capture(sections))
+    : yield* SystemContext.reconcile(value, snapshot.sources, capture(sections))
+  // 不可用来源继续保守复用原 baseline/证明，估算不能偷读当前文件生成替代正文。
   if (result._tag === "Unchanged" || result._tag === "ReplacementBlocked") {
-    return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
+    return { baseline: stored.baseline, baselineSeq: stored.baseline_seq, sections: snapshot.sections }
   }
+  // 压缩或不兼容 replacement 重新冻结本代片段，旧 epoch 历史不进入新一代分类。
   if (result._tag === "ReplacementReady") {
     const baselineSeq = replacementSeq ?? (yield* EventV2.latestSequence(db, sessionID))
-    yield* replace(db, sessionID, baselineSeq, result.generation)
-    return { baseline: result.generation.baseline, baselineSeq }
+    yield* replace(db, sessionID, baselineSeq, result.generation, sections)
+    return { baseline: result.generation.baseline, baselineSeq, sections }
   }
 
+  // 旧 baseline 与此前更新仍会发送；source 变更/删除不抹掉它们已经渲染的字符归属。
+  const state = { sources: result.snapshot, sections: [...snapshot.sections, ...sections] }
   yield* events.publish(
     SessionEvent.ContextUpdated,
     { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: result.text },
-    { commit: () => advance(db, sessionID, result.snapshot).pipe(Effect.orDie) },
+    { commit: () => advance(db, sessionID, state).pipe(Effect.orDie) },
   )
-  return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
+  return { baseline: stored.baseline, baselineSeq: stored.baseline_seq, sections: state.sections }
 })
 
 const initializeOnce = Effect.fnUntraced(function* (
@@ -83,9 +109,10 @@ const initializeOnce = Effect.fnUntraced(function* (
   sessionID: SessionSchema.ID,
 ) {
   if (yield* exists(db, sessionID)) return
-  const generation = yield* context.pipe(Effect.flatMap(SystemContext.initialize))
-  const baselineSeq = yield* insert(db, sessionID, generation)
-  return { baseline: generation.baseline, baselineSeq }
+  const sections: Array<State["sections"][number]> = []
+  const generation = yield* context.pipe(Effect.flatMap(value => SystemContext.initialize(value, capture(sections))))
+  const baselineSeq = yield* insert(db, sessionID, generation, sections)
+  return { baseline: generation.baseline, baselineSeq, sections }
 })
 
 const exists = Effect.fn("SessionContextEpoch.exists")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
@@ -123,6 +150,7 @@ const insert = Effect.fnUntraced(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
   generation: SystemContext.Generation,
+  sections: State["sections"],
 ) {
   const baselineSeq = yield* EventV2.latestSequence(db, sessionID)
   yield* db
@@ -130,7 +158,8 @@ const insert = Effect.fnUntraced(function* (
     .values({
       session_id: sessionID,
       baseline: generation.baseline,
-      snapshot: generation.snapshot,
+      // 片段与 baseline/source 快照同一次写入保存，后续 turn 不依赖尚未提交的内存来源。
+      snapshot: { sources: generation.snapshot, sections },
       baseline_seq: baselineSeq,
     })
     .run()
@@ -143,12 +172,13 @@ const replace = Effect.fnUntraced(function* (
   sessionID: SessionSchema.ID,
   baselineSeq: number,
   generation: SystemContext.Generation,
+  sections: State["sections"],
 ) {
   const updated = yield* db
     .update(SessionContextEpochTable)
     .set({
       baseline: generation.baseline,
-      snapshot: generation.snapshot,
+      snapshot: { sources: generation.snapshot, sections },
       baseline_seq: baselineSeq,
     })
     .where(eq(SessionContextEpochTable.session_id, sessionID))
@@ -161,7 +191,7 @@ const replace = Effect.fnUntraced(function* (
 const advance = Effect.fnUntraced(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
-  snapshot: SystemContext.Snapshot,
+  snapshot: State,
 ) {
   const updated = yield* db
     .update(SessionContextEpochTable)

@@ -24,7 +24,7 @@ export type RuntimeStatus =
   | { readonly type: "supported"; readonly apiKey: string; readonly baseURL?: string }
   | { readonly type: "unsupported"; readonly reason: string }
 export type StreamResult =
-  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown>; readonly body: unknown }
+  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown> }
   | { readonly type: "unsupported"; readonly reason: string }
 
 type StreamInput = {
@@ -42,6 +42,7 @@ type StreamInput = {
   readonly providerOptions?: Record<string, any>
   readonly headers: Record<string, string>
   readonly abort: AbortSignal
+  readonly onRequestPrepared?: (body: unknown) => Effect.Effect<void>
 }
 
 export function status(input: Pick<StreamInput, "model" | "provider" | "auth">): RuntimeStatus {
@@ -109,7 +110,8 @@ export function stream(input: StreamInput): StreamResult {
         const settlements = yield* FiberSet.make<void>()
         const results = yield* Queue.unbounded<LLMEvent, Cause.Done>()
         const provider = input.llmClient
-          .stream(advertised)
+          // native 与 V2 使用同一 compile 回调，模型默认 system 不得在提前估算时漏掉。
+          .stream(advertised, input.onRequestPrepared)
           .pipe(
             Stream.flatMap((event) =>
               event.type !== "tool-call" || event.providerExecuted
@@ -140,7 +142,6 @@ export function stream(input: StreamInput): StreamResult {
 
   return {
     ...current,
-    body: { system: advertised.system, messages: advertised.messages, tools: advertised.tools, providerOptions: advertised.providerOptions },
     stream: fetch ? stream.pipe(Stream.provideService(
       FetchHttpClient.Fetch,
       Object.assign(
