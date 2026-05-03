@@ -26,7 +26,7 @@ async function pingRegistry(registry: string) {
     const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
       purpose: "npm",
       method: "GET",
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(3000),
     })
     return response.ok
   } catch {
@@ -36,10 +36,13 @@ async function pingRegistry(registry: string) {
 
 async function selectRegistry() {
   const candidates = [defaultRegistry, mirrorRegistry]
-  for (const candidate of candidates) {
-    if (await pingRegistry(candidate)) return candidate
-  }
-  return defaultRegistry
+  const results = await Promise.all(
+    candidates.map(async (candidate) => {
+      const ok = await pingRegistry(candidate)
+      return ok ? candidate : undefined
+    }),
+  )
+  return results.find((r): r is string => r !== undefined) ?? defaultRegistry
 }
 
 function defaultRegistryForNetwork() {

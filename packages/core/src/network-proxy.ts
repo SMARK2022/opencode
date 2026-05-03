@@ -4,10 +4,11 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
 
 export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 
-const TTL = 120_000
+const TTL = 15_000
 const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
 
 let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
+let globalFetchInstalled = false
 
 type SystemProxy = {
   http?: string
@@ -122,8 +123,9 @@ async function macProxy(): Promise<SystemProxy | undefined> {
   return { http, https, socks, bypass: [] }
 }
 
-async function currentSystemProxy() {
+async function currentSystemProxy(refresh = false) {
   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
+  if (refresh) cache = undefined
   if (!cache || cache.expires < Date.now()) {
     cache = {
       expires: Date.now() + TTL,
@@ -133,9 +135,9 @@ async function currentSystemProxy() {
   return cache.value
 }
 
-async function configuredProxy(url: URL) {
+async function configuredProxy(url: URL, refresh = false) {
   if (process.platform === "win32" || process.platform === "darwin") {
-    const sys = await currentSystemProxy()
+    const sys = await currentSystemProxy(refresh)
     if (!sys || bypass(url, sys.bypass)) return
     return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
   }
@@ -144,12 +146,12 @@ async function configuredProxy(url: URL) {
   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
 }
 
-export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
+export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
   const url = input instanceof URL ? input : new URL(input)
   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
-  const proxy = await configuredProxy(url)
-  if (proxy) return { type: "proxy", proxy, reason: "system" }
-  return { type: "direct", reason: "no-proxy" }
+  const proxy = await configuredProxy(url, refresh)
+  if (proxy) return { type: "proxy", proxy, reason: refresh ? "system-refresh" : "system" }
+  return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
 }
 
 export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
@@ -158,20 +160,46 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
 
 export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : input.toString())
-  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
-  const route = await resolveProxyRoute(url, purpose)
-  if (route.type === "direct") return fetchFn(input, rest)
-  try {
-    return await fetchFn(input, { ...rest, proxy: route.proxy })
-  } catch (error) {
-    return fetchFn(input, rest).catch(() => {
+  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
+  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
+  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
+  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
+
+  if (route.type === "direct") {
+    try {
+      return await direct()
+    } catch (error) {
+      if (signal?.aborted) throw error
+      const refreshed = await resolveProxyRoute(url, purpose, true)
+      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
       throw error
-    })
+    }
+  }
+
+  try {
+    return await proxy(route.proxy)
+  } catch (error) {
+    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
+    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
+      return proxy(refreshed.proxy).catch(() => { throw error })
+    }
+    // When the proxy attempt consumed the abort signal, retry direct without it
+    // so the fallback has a chance to succeed.
+    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
+    return direct().catch(() => { throw error })
   }
 }
 
+export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
+  if (globalFetchInstalled) return
+  const original = globalThis.fetch.bind(globalThis) as FetchFn
+  globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
+    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
+  globalFetchInstalled = true
+}
+
 export async function npmProxyOptions(registry: string) {
-  const route = await resolveProxyRoute(registry, "npm")
+  const route = await resolveProxyRoute(registry, "npm", true)
   if (route.type === "direct") return {}
   return {
     proxy: route.proxy,

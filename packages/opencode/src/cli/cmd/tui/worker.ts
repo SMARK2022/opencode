@@ -18,8 +18,10 @@ import { onSseClientCountChange } from "@/server/routes/global"
 import path from "path"
 import { Global } from "@opencode-ai/core/global"
 import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 ensureProcessMetadata("worker")
+NetworkProxy.installGlobalFetch()
 
 await Log.init({
   print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",

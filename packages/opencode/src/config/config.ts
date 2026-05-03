@@ -5,6 +5,7 @@ import os from "os"
 import z from "zod"
 import { mergeDeep } from "remeda"
 import { Global } from "@opencode-ai/core/global"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import fsNode from "fs/promises"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -498,7 +499,9 @@ export const layer = Layer.effect(
             const url = key.replace(/\/+$/, "")
             process.env[value.key] = value.token
             log.debug("fetching remote config", { url: `${url}/.well-known/opencode` })
-            const response = yield* Effect.promise(() => fetch(`${url}/.well-known/opencode`))
+            const response = yield* Effect.promise(() =>
+              NetworkProxy.routedFetch(`${url}/.well-known/opencode`, { purpose: "infrastructure" }),
+            )
             if (!response.ok) {
               throw new Error(`failed to fetch remote config from ${url}: ${response.status}`)
             }

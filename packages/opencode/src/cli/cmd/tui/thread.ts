@@ -60,8 +60,9 @@ function applyProxyEnv(env: Record<string, string>) {
   env.no_proxy = no
 
   if (process.platform === "win32" || process.platform === "darwin") {
-    // NetworkProxy reads system proxy per-request; strip inherited shell
-    // proxy env so Bun never routes fetch through a stale/dead proxy.
+    // The daemon installs a global fetch wrapper that resolves system proxy
+    // dynamically per request. Strip inherited shell proxy env so Bun doesn't
+    // freeze routing to stale variables captured before the proxy app started.
     for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
       delete env[key]
     return
