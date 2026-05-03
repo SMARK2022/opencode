@@ -1135,12 +1135,13 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
     toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: Math.round(bd.messages.attachments / ratio), compactionSummary: 0,
   } : msg.details
-  // 工具返回内容会成为下一轮输入，即使部件归助手消息也不能挪入 Output Messages。
-  const inputMessageTokens = messageDetails.userText + messageDetails.toolResults + messageDetails.attachments
-  // 摘要本身仍是窗口内输出载荷；已裁剪的旧正文不能因 summary 还有父 ID 又被重新计入。
-  const outputMessageTokens =
-    messageDetails.assistantText + messageDetails.reasoning + messageDetails.toolCalls + messageDetails.compactionSummary
-  const messageTotal = inputMessageTokens + outputMessageTokens
+  const userMessageTokens = messageDetails.userText + messageDetails.attachments
+  const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
+  // 源消息分类已区分工具入参与返回；部件归助手不能把工具结果并入助手正文，工具定义也只归广告开销。
+  const toolCallTokens = messageDetails.toolCalls
+  const toolResultTokens = messageDetails.toolResults
+  // 四桶只重组同一份冻结整数，直接相加才能保留拆分前 used；逐桶重估会引入额外舍入误差。
+  const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens
   const window = windowDetails(input, windowModel, maxTokens)
   // used 只包含发送载荷；free、模型预留与压缩缓冲不是 token 消费，不能再次加入分子。
   // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
@@ -1154,8 +1155,10 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     { name: "Skills", tokens: skillTokens, color: "success" },
     // 工具定义与输入消息分别用 secondary/warning，保留两种分类的视觉辨识。
     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
-    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
+    { name: "User Messages", tokens: userMessageTokens, color: "warning" },
+    { name: "Tool Results", tokens: toolResultTokens, color: "warning" },
+    { name: "Assistant Messages", tokens: assistantMessageTokens, color: "accent" },
+    { name: "Tool Calls", tokens: toolCallTokens, color: "accent" },
     // free 非零也不能进入 used；isDeferred 只影响网格可见性门槛，不改变百分比分子。
     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
     ...(window.providerReserve > 0

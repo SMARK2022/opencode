@@ -49,8 +49,10 @@ function categoryMarker(name: string) {
   if (name === "Instructions") return "◇"
   if (name === "Skills") return "●"
   if (name === "Tool definitions") return "◦"
-  if (name === "Input Messages") return "▰"
-  if (name === "Output Messages") return "▱"
+  if (name === "User Messages") return "▰"
+  if (name === "Tool Results") return "▾"
+  if (name === "Assistant Messages") return "▱"
+  if (name === "Tool Calls") return "▴"
   if (name === "Free space") return "·"
   return "×"
 }
@@ -128,7 +130,9 @@ function CategoryList(props: { data: ContextUsageData }) {
     },
     {
       title: "Conversation",
-      categories: props.data.categories.filter((item) => ["Input Messages", "Output Messages"].includes(item.name)),
+      categories: props.data.categories.filter((item) =>
+        ["User Messages", "Tool Results", "Assistant Messages", "Tool Calls"].includes(item.name),
+      ),
     },
     {
       title: "Window",

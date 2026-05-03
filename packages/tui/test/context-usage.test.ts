@@ -346,11 +346,13 @@ describe("context usage", () => {
     expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
     // 自定义 schema 不关闭环境/系统载荷，不能通过减少分类项让整体占用看似更低。
     expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
-    // 输入分类包含 synthetic 正文和工具结果，两者来自不同角色，不应按 message.role 粗分。
-    expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(6)
-    // 助手文本 3、调用输入 4、推理 1 都归输出；工具结果仍只归输入。
     expect(data.details.messages.reasoning).toBe(1)
-    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(8)
+    // 同一助手同时承载正文、推理与工具，分桶断言才能发现按外层角色归类导致的正文膨胀。
+    expect(data.categories.find((item) => item.name === "User Messages")?.tokens).toBe(2)
+    expect(data.categories.find((item) => item.name === "Tool Results")?.tokens).toBe(4)
+    expect(data.categories.find((item) => item.name === "Assistant Messages")?.tokens).toBe(4)
+    expect(data.categories.find((item) => item.name === "Tool Calls")?.tokens).toBe(4)
+    expect(data.categories.slice(4, 8).map(item => item.name)).toEqual(["User Messages", "Tool Results", "Assistant Messages", "Tool Calls"])
     // 有 input 上限时缓冲抵消 provider reserve；小输出限额不能替代下一轮输入余量。
     expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(19_900)
     // providerReserve 只反映 catalog 的输入差额，不能再把 100 输出限额叠加进来。
@@ -794,6 +796,11 @@ describe("context usage", () => {
     expect(legacy.details.messages.toolResults).toBe(1000)
     // 确认输出600与费用来自 step-finish；细分的17000输入估算不能重写普通输入或抹掉缓存两栏。
     expect(legacy.details.usage).toMatchObject({ input: 12000, cacheRead: 3000, cacheWrite: 2000, output: 600, cost: 0.001 })
+    expect(legacy.categories.slice(4, 8).map(item => [item.name, item.tokens])).toEqual([
+      ["User Messages", 4000], ["Tool Results", 1000], ["Assistant Messages", 4000], ["Tool Calls", 1000],
+    ])
+    expect(legacy.totalTokens).toBe(17000)
+    expect(legacy.details.usage.total).toBe(17600)
     // 小额与超过输入上限的 reserved 分别验证显式覆盖和可用窗口归零，不能沿用缺省缓冲公式。
     for (const reserved of [100, 20000]) {
       const explicit = await computeContextData({ ...input, config: { compaction: { reserved } } })
@@ -809,11 +816,14 @@ describe("context usage", () => {
     const native = await computeContextData({ ...input, messages: [], parts: {}, session,
       instructionFiles: [{ path: "a", content: "abcd" }, { path: "b", content: "abcdefgh" }],
       toolDefinitions: [{ name: "a", text: "abcd" }, { name: "b", text: "abcdefgh" }] })
-    expect(native.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([4000, 500, 0, 2500, 5000, 5000])
+    expect(native.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([4000, 500, 0, 2500, 4000, 1000, 4000, 1000])
     expect(native.totalTokens).toBe(17000)
     // 4:8的本地权重不能整除500或2500，明细总额断言可捕获逐项舍入导致的余数丢失。
     expect(native.details.instructions.reduce((sum, item) => sum + item.tokens, 0)).toBe(500)
     expect(native.details.toolDefs.reduce((sum, item) => sum + item.tokens, 0)).toBe(2500)
+    // 不对称本地权重要求按比例分摊且保住服务端总额，逐项独立舍入可能在明细中制造或丢失余数。
+    expect(native.details.instructions).toEqual([{ path: "a", tokens: 167 }, { path: "b", tokens: 333 }])
+    expect(native.details.toolDefs).toEqual([{ name: "a", tokens: 833 }, { name: "b", tokens: 1667 }])
     expect(native.details.usage.total).toBe(0)
     expect(native.maxTokens).toBe(8000)
     expect(native.model).toBe("test/api-model")
@@ -825,6 +835,40 @@ describe("context usage", () => {
     const missing = await computeContextData({ ...input, session: { ...session, request: {
       messageID: "new", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 } } })
     expect(missing.categories.find(item => item.name === "Instructions")?.tokens).toBe(0)
+    // 两例仅有 prepared 输入，零估算也未获 provider 确认，必须显式保留未确认状态。
+    const edges = await computeContextData({ ...input, messages: [], parts: {},
+      session: { ...session, request: { ...request,
+        inputEstimate: { ...request.inputEstimate, confirmed: false, input: 7258, bodyChars: 29032, charsPerToken: 4,
+          inputBreakdown: { ...inputBreakdown, skills: 12, tools: 20 } } } },
+      instructionFiles: [{ path: "a", content: "" }, { path: "b", content: "" }],
+      skills: [{ name: "a", description: "a", path: "a" }, { name: "b", description: "b", path: "b" }],
+      toolDefinitions: [{ name: "a", text: "a" }, { name: "b", text: "b" }],
+    })
+    // 空指令正文只有路径展示权，没有可分摊的内容证明；清零明细仍须保留服务端指令分类总额。
+    expect(edges.details.instructions).toEqual([{ path: "a", tokens: 0 }, { path: "b", tokens: 0 }])
+    expect(edges.categories.find(item => item.name === "Instructions")?.tokens).toBe(250)
+    // 工具本地估值全零时仍须承接服务端广告总额，均分后的余数只能按累计边界归属，不能每项再 round。
+    expect(edges.details.toolDefs).toEqual([{ name: "a", tokens: 3 }, { name: "b", tokens: 2 }])
+    // 技能正文长度不代表服务端公告份额，各技能等权分摊同一总额；奇数总量能揭示遗漏余数或重复分配。
+    expect(edges.details.skills.map(item => item.tokens)).toEqual([2, 1])
+    expect(edges.totalTokens).toBe(7258)
+    const cleared = await computeContextData({ ...input, messages: [], parts: {},
+      session: { ...session, request: { ...request,
+        inputEstimate: { ...request.inputEstimate, confirmed: false, input: 0, bodyChars: 0, charsPerToken: 4,
+          inputBreakdown: { system: 0, instructions: 0, skills: 0, tools: 0,
+            messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: 0 } } } } },
+      instructionFiles: [{ path: "a", content: "abcd" }, { path: "b", content: "abcdefgh" }],
+      skills: [{ name: "a", description: "a", path: "a" }, { name: "b", description: "b", path: "b" }],
+      toolDefinitions: [{ name: "a", text: "abcd" }, { name: "b", text: "abcdefgh" }],
+    })
+    // 服务端明确的零细分必须压过本地非空文件和定义，否则旧估值会在已清空窗口中残留。
+    expect(cleared.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
+    expect(cleared.details.messages).toEqual({ userText: 0, assistantText: 0, reasoning: 0, toolCalls: 0, toolResults: 0, attachments: 0, compactionSummary: 0 })
+    expect(cleared.details.instructions).toEqual([{ path: "a", tokens: 0 }, { path: "b", tokens: 0 }])
+    expect(cleared.details.skills.map(item => item.tokens)).toEqual([0, 0])
+    expect(cleared.details.toolDefs).toEqual([{ name: "a", tokens: 0 }, { name: "b", tokens: 0 }])
+    expect(cleared.totalTokens).toBe(0)
+    expect(cleared.details.usage.total).toBe(0)
   })
 
   test("ratio=2.5 tracks JSON-heavy input and ignores user or other-model calibration", async () => {
@@ -838,7 +882,7 @@ describe("context usage", () => {
       parts: { "1": [text("1", longText), { ...finish, messageID: "1", inputChars: 100000 }], "2": [finish] },
       providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [] }
     const data = await computeContextData(input)
-    const tokens = data.categories.find(item => item.name === "Input Messages")?.tokens ?? 0
+    const tokens = data.categories.find(item => item.name === "User Messages")?.tokens ?? 0
     expect(Math.abs(tokens - confirmed) / confirmed).toBeLessThan(0.02)
     expect(tokens).toBeGreaterThan(Math.round(longText.length / 4))
     // 异模型样本的十万字符足以主导比率，追加后结果不变才能证明过滤使用实际执行模型。
