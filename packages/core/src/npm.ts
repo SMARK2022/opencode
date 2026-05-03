@@ -9,6 +9,7 @@ import { Global } from "./global"
 import { EffectFlock } from "./util/effect-flock"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import { NetworkProxy } from "./network-proxy"
 
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
@@ -80,7 +81,13 @@ export const layer = Layer.effect(
         yield* flock.acquire(`npm-install:${input.dir}`)
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
-        const npmOptions = yield* NpmConfig.load(input.dir)
+        const loadedOptions = yield* NpmConfig.load(input.dir)
+        const npmOptions = {
+          ...loadedOptions,
+          ...(yield* Effect.promise(() => NetworkProxy.npmProxyOptions(String(loadedOptions.registry ?? "https://registry.npmjs.org")))),
+          fetchRetries: 0,
+          fetchTimeout: 10_000,
+        }
         const arborist = new Arborist({
           ...npmOptions,
           path: input.dir,

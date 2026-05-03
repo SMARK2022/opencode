@@ -23,6 +23,7 @@ import { validateSession } from "./validate-session"
 import { ServerLock } from "@/cli/cmd/tui/server-lock"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "@opencode-ai/core/global"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -51,21 +52,28 @@ async function input(value?: string) {
   return piped + "\n" + value
 }
 
-function proxyEnv() {
-  const http = process.env.HTTP_PROXY ?? process.env.http_proxy
-  const https = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? http
-  const all = process.env.ALL_PROXY ?? process.env.all_proxy
-  const no = process.env.NO_PROXY ?? process.env.no_proxy
+function applyProxyEnv(env: Record<string, string>) {
+  // Merge loopback addresses into NO_PROXY so the daemon never proxies its own server.
+  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+  const no = NetworkProxy.noProxyString(parts)
+  env.NO_PROXY = no
+  env.no_proxy = no
 
-  return {
-    ...(http ? { HTTP_PROXY: http, http_proxy: http } : {}),
-    ...(https ? { HTTPS_PROXY: https, https_proxy: https } : {}),
-    ...(all ? { ALL_PROXY: all, all_proxy: all } : {}),
-    ...(no ? { NO_PROXY: no, no_proxy: no } : {}),
-    ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-    ...(process.env.SSL_CERT_FILE ? { SSL_CERT_FILE: process.env.SSL_CERT_FILE } : {}),
-    ...(process.env.SSL_CERT_DIR ? { SSL_CERT_DIR: process.env.SSL_CERT_DIR } : {}),
+  if (process.platform === "win32" || process.platform === "darwin") {
+    // NetworkProxy reads system proxy per-request; strip inherited shell
+    // proxy env so Bun never routes fetch through a stale/dead proxy.
+    for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
+      delete env[key]
+    return
   }
+
+  // Linux: normalize proxy env — ensure both casings, HTTPS falls back to HTTP.
+  const http = env.HTTP_PROXY ?? env.http_proxy
+  const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
+  const all = env.ALL_PROXY ?? env.all_proxy
+  if (http) { env.HTTP_PROXY = http; env.http_proxy = http }
+  if (https) { env.HTTPS_PROXY = https; env.https_proxy = https }
+  if (all) { env.ALL_PROXY = all; env.all_proxy = all }
 }
 
 export function resolveThreadDirectory(project?: string, envPWD = process.env.PWD, cwd = process.cwd()) {
@@ -137,13 +145,13 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
-      const env = {
-        ...sanitizedProcessEnv({
-          [OPENCODE_PROCESS_ROLE]: "worker",
-          [OPENCODE_RUN_ID]: ensureRunID(),
-        }),
-        ...proxyEnv(),
-      }
+      const env = sanitizedProcessEnv({
+        [OPENCODE_PROCESS_ROLE]: "worker",
+        [OPENCODE_RUN_ID]: ensureRunID(),
+      })
+      applyProxyEnv(env)
+      process.env.NO_PROXY = env.NO_PROXY
+      process.env.no_proxy = env.no_proxy
 
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()

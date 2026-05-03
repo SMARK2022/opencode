@@ -48,4 +48,16 @@ describe("NpmConfig.registry", () => {
 
     await expect(Effect.runPromise(NpmConfig.registry(tmp.path))).resolves.toBe("https://registry.example.test")
   })
+
+  test("uses OPENCODE_NPM_REGISTRY override", async () => {
+    await using tmp = await tmpdir()
+    const prev = process.env.OPENCODE_NPM_REGISTRY
+    process.env.OPENCODE_NPM_REGISTRY = "https://registry.override.test/"
+    try {
+      await expect(Effect.runPromise(NpmConfig.registry(tmp.path))).resolves.toBe("https://registry.override.test")
+    } finally {
+      if (prev === undefined) delete process.env.OPENCODE_NPM_REGISTRY
+      else process.env.OPENCODE_NPM_REGISTRY = prev
+    }
+  })
 })

@@ -23,6 +23,7 @@ import { Effect, Layer, Context, Schema, Types } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { isRecord } from "@/util/record"
 import { optionalOmitUndefined, withStatics } from "@/util/schema"
 
@@ -1548,8 +1549,9 @@ const layer: Layer.Layer<
             }
           }
 
-          const res = await fetchFn(input, {
+          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
             ...opts,
+            purpose: "provider",
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
             timeout: false,
           })

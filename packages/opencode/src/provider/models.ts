@@ -8,6 +8,7 @@ import { lazy } from "@/util/lazy"
 import { Filesystem } from "@/util/filesystem"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Hash } from "@opencode-ai/core/util/hash"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 // Try to import bundled snapshot (generated at build time)
 // Falls back to undefined in dev mode when snapshot doesn't exist
@@ -114,7 +115,8 @@ function skip(force: boolean) {
 }
 
 const fetchApi = async () => {
-  const result = await fetch(`${url()}/api.json`, {
+  const result = await NetworkProxy.routedFetch(`${url()}/api.json`, {
+    purpose: "infrastructure",
     headers: { "User-Agent": Installation.USER_AGENT },
     signal: AbortSignal.timeout(10000),
   })
@@ -164,7 +166,7 @@ export async function refresh(force = false) {
 }
 
 if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-  void refresh()
+  setTimeout(() => void refresh(), ttl).unref?.()
   setInterval(
     async () => {
       await refresh()

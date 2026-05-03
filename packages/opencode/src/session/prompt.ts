@@ -123,6 +123,44 @@ export const layer = Layer.effect(
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* elog.info("cancel", { sessionID })
       yield* state.cancel(sessionID)
+      yield* abortPendingAssistant(sessionID)
+    })
+
+    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {
+      const match = yield* sessions.findMessage(
+        sessionID,
+        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
+      )
+      if (Option.isNone(match)) return
+
+      const now = Date.now()
+      const assistant = match.value.info
+      if (assistant.role !== "assistant" || assistant.time.completed) return
+      assistant.time.completed = now
+      assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
+      yield* sessions.updateMessage(assistant)
+
+      yield* Effect.forEach(
+        match.value.parts,
+        (part) => {
+          if (part.type !== "tool") return Effect.void
+          if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
+          return sessions.updatePart({
+            ...part,
+            state: {
+              status: "error",
+              input: part.state.input,
+              error: "Tool execution aborted",
+              metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
+              time: {
+                start: part.state.status === "running" ? part.state.time.start : now,
+                end: now,
+              },
+            },
+          } satisfies MessageV2.ToolPart).pipe(Effect.asVoid)
+        },
+        { discard: true },
+      )
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {

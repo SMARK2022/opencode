@@ -1008,9 +1008,6 @@ async function load(input: { api: Api; config: TuiConfig.Info }) {
           })
         }
 
-        const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
-        await addExternalPluginEntries(next, ready)
-
         applyInitialPluginEnabledState(next, config)
         for (const plugin of next.plugins) {
           if (!plugin.enabled) continue
@@ -1020,6 +1017,18 @@ async function load(input: { api: Api; config: TuiConfig.Info }) {
           // and hook chains rely on stable plugin ordering.
           await activatePluginEntry(next, plugin, false)
         }
+
+        void (async () => {
+          const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+          const added = await addExternalPluginEntries(next, ready)
+          applyInitialPluginEnabledState(next, config)
+          for (const plugin of added.plugins) {
+            if (!plugin.enabled) continue
+            await activatePluginEntry(next, plugin, false)
+          }
+        })().catch((error) => {
+          fail("failed to load external tui plugins", { directory: cwd, error })
+        })
       },
     })
   } catch (error) {

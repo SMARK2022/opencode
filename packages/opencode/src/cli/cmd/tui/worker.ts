@@ -44,16 +44,9 @@ process.on("uncaughtException", (e) => {
   })
 })
 
-// Pre-warm external plugin imports BEFORE the HTTP server goes live.
-//
-// Bun synchronously transpiles the entire dependency graph on the first
-// `import()` of an unbundled TypeScript plugin (e.g. opencode-gemini-auth)
-// which can stall the event loop for 20-30 seconds.  Doing this here means
-// the stall is over before the lock file is written, so by the time the
-// launching TUI starts polling the server is already fully responsive.
-//
-// This is a best-effort warm-up: every error is swallowed so a missing or
-// incompatible plugin cannot prevent the server from starting.
+// Pre-warm external plugin imports without making daemon health depend on
+// package installation or network access.  This is purely a latency
+// optimization: the real plugin loader still owns correctness and errors.
 async function warmupExternalPlugins() {
   if (Flag.OPENCODE_PURE) return
   try {
@@ -78,8 +71,6 @@ async function warmupExternalPlugins() {
   } catch {}
 }
 
-await warmupExternalPlugins()
-
 // Always start the internal loopback HTTP server first.
 const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
 
@@ -99,6 +90,10 @@ if (externalPort !== undefined) {
 
 // Write the lock file atomically (internal port + optional external URL).
 const lockToken = await ServerLock.write(internalServer.port, externalUrl)
+
+// Start the best-effort warm-up only after the lock is visible so a slow npm
+// registry or proxy cannot keep the launcher stuck waiting for daemon health.
+setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
 
 // ── Graceful shutdown ──────────────────────────────────────────────────────
 let shutdownInProgress = false

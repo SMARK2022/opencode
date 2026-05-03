@@ -109,7 +109,7 @@ export const make = <A, E = never>(
     Effect.gen(function* () {
       if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)
       yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
-      yield* Fiber.interrupt(shell.fiber)
+      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
     })
 
   const ensureRunning = (work: Effect.Effect<A, E>) =>
@@ -180,8 +180,8 @@ export const make = <A, E = never>(
       case "Running":
         return [
           Effect.gen(function* () {
-            yield* Fiber.interrupt(st.run.fiber)
-            yield* Deferred.await(st.run.done).pipe(Effect.exit, Effect.asVoid)
+            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
+            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
             yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,
