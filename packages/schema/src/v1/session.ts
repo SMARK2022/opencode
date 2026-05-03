@@ -255,6 +255,9 @@ export const StepFinishPart = Schema.Struct({
       write: Schema.Finite,
     }),
   }),
+  // V1 历史的确认点引用同一个当前 Schema，禁止维护第二份细分定义。
+  inputChars: optional(NonNegativeInt),
+  inputBreakdown: optional(SessionMessage.InputBreakdown),
 }).annotate({ identifier: "StepFinishPart" })
 export type StepFinishPart = Types.DeepMutable<Schema.Schema.Type<typeof StepFinishPart>>
 

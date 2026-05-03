@@ -88,4 +88,28 @@ test("prepared input yields to confirmation and preserves projected request tota
   expect(getContextLimit(providers, "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
   expect(getContextLimit(providers, "p", "api-test-model", 0)).toBe(0)
   expect(getContextLimit([], "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
+  // 固定prepared输入777，仅改变尾部密度；未确认字符应变而请求的4000/30确认累计必须保持。
+  const dense = { ...prepared, inputEstimate: { input: 777, bodyChars: 1943, confirmed: false, charsPerToken: 2.5 } }
+  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense)).toEqual({ input: 777, output: 3, totalInput: 4777, totalOutput: 33 })
+  expect(computeFinalTokens(nextAssistant, [tool], dense)).toEqual({ input: 780, output: 1, totalInput: 4780, totalOutput: 31 })
+  // captured的游标已覆盖该工具结果，新密度不能把同一份结果再次追加到prepared输入。
+  expect(computeFinalTokens(captured, [tool], dense)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
+  expect(computeFinalTokens(undefined, [], dense)).toEqual({ input: 777, output: 0, totalInput: 4777, totalOutput: 30 })
+  // 零确认part可先于Session快照到达，必须立即遮掉尚在投影中的777估算而保留请求历史累计。
+  expect(computeFinalTokens(nextAssistant, [finish], dense)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
+  const pending: Part = { id: "pending", sessionID: "s", messageID: "next", type: "tool", callID: "call", tool: "bash",
+    state: { status: "pending", input: {}, raw: "pending-raw-text" } }
+  const before = { ...text, text: "ab", messageID: "next" }
+  const after = { ...text, id: "after", text: "cd", messageID: "next" }
+  // raw参数16字符与两段正文共20字符，8与5的差值能发现pending输入被丢弃或密度未传入。
+  expect(computeFinalTokens(nextAssistant, [before, pending, after], dense).output).toBe(8)
+  expect(computeFinalTokens(nextAssistant, [before, pending, after], prepared).output).toBe(5)
+  // 非法密度只影响显示估算，沿默认密度得到有限尾部值，不得产生Infinity/NaN污染整帧用量。
+  for (const density of [0, -1, NaN, Infinity]) {
+    expect(computeFinalTokens(nextAssistant, [text], { ...dense, inputEstimate: { ...dense.inputEstimate, charsPerToken: density } }).output).toBe(2)
+  }
+  const bodyEstimate = Token.estimateRequest(body, [{ bodyChars: 1000, input: 400 }], [])
+  expect(bodyEstimate.input).toBe(33)
+  expect(bodyEstimate.bodyChars).toBe(82)
+  expect(bodyEstimate.inputBreakdown?.messages.attachments).toBe(0)
 })

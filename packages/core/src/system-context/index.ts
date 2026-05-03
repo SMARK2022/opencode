@@ -195,19 +195,21 @@ const observe = (value: SystemContext) =>
   )
 
 /** Creates the immutable baseline and durable snapshot for a new generation. */
-export function initialize(value: SystemContext): Effect.Effect<Generation, InitializationBlocked> {
+export function initialize(value: SystemContext, rendered?: (key: Key, text: string) => void): Effect.Effect<Generation, InitializationBlocked> {
   return observe(value).pipe(
     Effect.flatMap((entries) => {
       const unavailable = entries.flatMap((entry) => (entry._tag === "Unavailable" ? [entry.key] : []))
       if (unavailable.length > 0) return new InitializationBlocked({ keys: unavailable })
-      return Effect.succeed(initializeObservation(entries))
+      return Effect.succeed(initializeObservation(entries, rendered))
     }),
   )
 }
 
-function initializeObservation(entries: ReadonlyArray<Entry>): Generation {
+function initializeObservation(entries: ReadonlyArray<Entry>, emitted?: (key: Key, text: string) => void): Generation {
   const available = entries.filter((entry): entry is AvailableEntry => entry._tag === "Available")
   const rendered = available.map((entry) => [entry.key, entry.baseline()] as const)
+  // 已完成的 source 渲染顺带交付归属，不能为估算第二次 load 或生成另一份 baseline。
+  rendered.forEach(([key, result]) => emitted?.(key, result.text))
   return {
     baseline: render(rendered.map(([, result]) => result.text)),
     snapshot: Object.fromEntries(rendered.map(([key, result]) => [key, result.snapshot])),
@@ -215,12 +217,12 @@ function initializeObservation(entries: ReadonlyArray<Entry>): Generation {
 }
 
 /** Reconciles current source values with one active generation. */
-export function reconcile(value: SystemContext, previous: Snapshot): Effect.Effect<ReconcileResult> {
+export function reconcile(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReconcileResult> {
   return observe(value).pipe(
     Effect.map((entries): ReconcileResult => {
-      const result = reconcileObservation(entries, previous)
+      const result = reconcileObservation(entries, previous, rendered)
       if (result._tag === "Unchanged" || result._tag === "Updated") return result
-      return replaceObservation(entries, previous)
+      return replaceObservation(entries, previous, rendered)
     }),
   )
 }
@@ -228,6 +230,7 @@ export function reconcile(value: SystemContext, previous: Snapshot): Effect.Effe
 function reconcileObservation(
   entries: ReadonlyArray<Entry>,
   previous: Snapshot,
+  emitted?: (key: Key, text: string) => void,
 ): { readonly _tag: "Unchanged" } | Updated | { readonly _tag: "Replace" } {
   const keys = new Set(entries.map((entry) => entry.key))
   const comparisons = new Map<Key, Compared>()
@@ -254,6 +257,7 @@ function reconcileObservation(
     }
     if (!stored) {
       const rendered = entry.baseline()
+      emitted?.(entry.key, rendered.text)
       updates.push(rendered.text)
       snapshot[entry.key] = rendered.snapshot
       continue
@@ -266,6 +270,7 @@ function reconcileObservation(
       continue
     }
     const rendered = compared.render()
+    emitted?.(entry.key, rendered.text)
     updates.push(rendered.text)
     snapshot[entry.key] = rendered.snapshot
   }
@@ -273,6 +278,7 @@ function reconcileObservation(
     if (keys.has(Key.make(key))) continue
     const removed = previous[key].removed
     if (removed === undefined) throw new Error(`Missing removal rendering for system context source ${key}`)
+    emitted?.(Key.make(key), removed)
     updates.push(removed)
   }
   if (updates.length === 0) return { _tag: "Unchanged" }
@@ -280,14 +286,14 @@ function reconcileObservation(
 }
 
 /** Creates a complete replacement generation or blocks while admitted context is unavailable. */
-export function replace(value: SystemContext, previous: Snapshot): Effect.Effect<ReplacementResult> {
-  return observe(value).pipe(Effect.map((entries) => replaceObservation(entries, previous)))
+export function replace(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReplacementResult> {
+  return observe(value).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
 }
 
-function replaceObservation(entries: ReadonlyArray<Entry>, previous: Snapshot): ReplacementResult {
+function replaceObservation(entries: ReadonlyArray<Entry>, previous: Snapshot, rendered?: (key: Key, text: string) => void): ReplacementResult {
   if (entries.some((entry) => entry._tag === "Unavailable" && getSnapshot(previous, entry.key) !== undefined))
     return { _tag: "ReplacementBlocked" }
-  return { _tag: "ReplacementReady", generation: initializeObservation(entries) }
+  return { _tag: "ReplacementReady", generation: initializeObservation(entries, rendered) }
 }
 
 function context(sources: ReadonlyArray<PackedSource>): SystemContext {

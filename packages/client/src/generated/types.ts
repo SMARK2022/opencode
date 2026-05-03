@@ -249,6 +249,29 @@ export type SessionsListOutput = {
       readonly stepOutput: number
       readonly pendingInput?: number
       readonly estimatedInput?: number
+      readonly inputEstimate?: {
+        readonly input: number
+        readonly bodyChars: number
+        readonly confirmed: boolean
+        readonly charsPerToken?: number
+        readonly inputBreakdown?: {
+          readonly system: number
+          readonly instructions: number
+          readonly skills: number
+          readonly tools: number
+          readonly messages: {
+            readonly userText: number
+            readonly assistantText: number
+            readonly reasoning: number
+            readonly toolInput: number
+            readonly toolOutput: number
+            readonly attachments: number
+            readonly total: number
+          }
+        }
+        readonly afterPartID?: string
+        readonly contextLimit?: number
+      }
       readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
     }
     readonly tokens: {
@@ -323,6 +346,29 @@ export type SessionsCreateOutput = {
       readonly stepOutput: number
       readonly pendingInput?: number
       readonly estimatedInput?: number
+      readonly inputEstimate?: {
+        readonly input: number
+        readonly bodyChars: number
+        readonly confirmed: boolean
+        readonly charsPerToken?: number
+        readonly inputBreakdown?: {
+          readonly system: number
+          readonly instructions: number
+          readonly skills: number
+          readonly tools: number
+          readonly messages: {
+            readonly userText: number
+            readonly assistantText: number
+            readonly reasoning: number
+            readonly toolInput: number
+            readonly toolOutput: number
+            readonly attachments: number
+            readonly total: number
+          }
+        }
+        readonly afterPartID?: string
+        readonly contextLimit?: number
+      }
       readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
     }
     readonly tokens: {
@@ -373,6 +419,29 @@ export type SessionsGetOutput = {
       readonly stepOutput: number
       readonly pendingInput?: number
       readonly estimatedInput?: number
+      readonly inputEstimate?: {
+        readonly input: number
+        readonly bodyChars: number
+        readonly confirmed: boolean
+        readonly charsPerToken?: number
+        readonly inputBreakdown?: {
+          readonly system: number
+          readonly instructions: number
+          readonly skills: number
+          readonly tools: number
+          readonly messages: {
+            readonly userText: number
+            readonly assistantText: number
+            readonly reasoning: number
+            readonly toolInput: number
+            readonly toolOutput: number
+            readonly attachments: number
+            readonly total: number
+          }
+        }
+        readonly afterPartID?: string
+        readonly contextLimit?: number
+      }
       readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
     }
     readonly tokens: {
@@ -627,6 +696,22 @@ export type SessionsContextOutput = {
           readonly input: number
           readonly bodyChars: number
           readonly confirmed: boolean
+          readonly charsPerToken?: number
+          readonly inputBreakdown?: {
+            readonly system: number
+            readonly instructions: number
+            readonly skills: number
+            readonly tools: number
+            readonly messages: {
+              readonly userText: number
+              readonly assistantText: number
+              readonly reasoning: number
+              readonly toolInput: number
+              readonly toolOutput: number
+              readonly attachments: number
+              readonly total: number
+            }
+          }
           readonly afterPartID?: string
           readonly contextLimit?: number
         }
@@ -863,6 +948,22 @@ export type SessionsHistoryOutput = {
             readonly input: number
             readonly bodyChars: number
             readonly confirmed: boolean
+            readonly charsPerToken?: number
+            readonly inputBreakdown?: {
+              readonly system: number
+              readonly instructions: number
+              readonly skills: number
+              readonly tools: number
+              readonly messages: {
+                readonly userText: number
+                readonly assistantText: number
+                readonly reasoning: number
+                readonly toolInput: number
+                readonly toolOutput: number
+                readonly attachments: number
+                readonly total: number
+              }
+            }
             readonly afterPartID?: string
             readonly contextLimit?: number
           }
@@ -937,6 +1038,22 @@ export type SessionsHistoryOutput = {
             readonly input: number
             readonly bodyChars: number
             readonly confirmed: boolean
+            readonly charsPerToken?: number
+            readonly inputBreakdown?: {
+              readonly system: number
+              readonly instructions: number
+              readonly skills: number
+              readonly tools: number
+              readonly messages: {
+                readonly userText: number
+                readonly assistantText: number
+                readonly reasoning: number
+                readonly toolInput: number
+                readonly toolOutput: number
+                readonly attachments: number
+                readonly total: number
+              }
+            }
             readonly afterPartID?: string
             readonly contextLimit?: number
           }
@@ -1412,6 +1529,22 @@ export type SessionsEventsOutput =
           readonly input: number
           readonly bodyChars: number
           readonly confirmed: boolean
+          readonly charsPerToken?: number
+          readonly inputBreakdown?: {
+            readonly system: number
+            readonly instructions: number
+            readonly skills: number
+            readonly tools: number
+            readonly messages: {
+              readonly userText: number
+              readonly assistantText: number
+              readonly reasoning: number
+              readonly toolInput: number
+              readonly toolOutput: number
+              readonly attachments: number
+              readonly total: number
+            }
+          }
           readonly afterPartID?: string
           readonly contextLimit?: number
         }
@@ -1486,6 +1619,22 @@ export type SessionsEventsOutput =
           readonly input: number
           readonly bodyChars: number
           readonly confirmed: boolean
+          readonly charsPerToken?: number
+          readonly inputBreakdown?: {
+            readonly system: number
+            readonly instructions: number
+            readonly skills: number
+            readonly tools: number
+            readonly messages: {
+              readonly userText: number
+              readonly assistantText: number
+              readonly reasoning: number
+              readonly toolInput: number
+              readonly toolOutput: number
+              readonly attachments: number
+              readonly total: number
+            }
+          }
           readonly afterPartID?: string
           readonly contextLimit?: number
         }
@@ -1894,6 +2043,22 @@ export type SessionsMessageOutput = {
           readonly input: number
           readonly bodyChars: number
           readonly confirmed: boolean
+          readonly charsPerToken?: number
+          readonly inputBreakdown?: {
+            readonly system: number
+            readonly instructions: number
+            readonly skills: number
+            readonly tools: number
+            readonly messages: {
+              readonly userText: number
+              readonly assistantText: number
+              readonly reasoning: number
+              readonly toolInput: number
+              readonly toolOutput: number
+              readonly attachments: number
+              readonly total: number
+            }
+          }
           readonly afterPartID?: string
           readonly contextLimit?: number
         }
@@ -2073,6 +2238,22 @@ export type MessagesListOutput = {
           readonly input: number
           readonly bodyChars: number
           readonly confirmed: boolean
+          readonly charsPerToken?: number
+          readonly inputBreakdown?: {
+            readonly system: number
+            readonly instructions: number
+            readonly skills: number
+            readonly tools: number
+            readonly messages: {
+              readonly userText: number
+              readonly assistantText: number
+              readonly reasoning: number
+              readonly toolInput: number
+              readonly toolOutput: number
+              readonly attachments: number
+              readonly total: number
+            }
+          }
           readonly afterPartID?: string
           readonly contextLimit?: number
         }

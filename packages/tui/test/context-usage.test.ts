@@ -768,4 +768,83 @@ describe("context usage", () => {
     expect(contextUsageFooter(data, 180)).toContain("Reason 10")
     expect(contextUsageFooter(data, 180)).toContain("Cost $0.0100")
   })
+
+  test("uses daemon inputBreakdown for every category and keeps confirmed usage separate", async () => {
+    const inputBreakdown = {
+      system: 8000, instructions: 1000, skills: 0, tools: 5000,
+      messages: { userText: 7800, assistantText: 8000, reasoning: 0, toolInput: 2000, toolOutput: 2000, attachments: 200, total: 20000 },
+    }
+    const finish: Part = {
+      id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.001,
+      tokens: { input: 12000, output: 600, reasoning: 0, cache: { read: 3000, write: 2000 } }, inputChars: 34000, inputBreakdown,
+    }
+    // 可见正文刻意远小于服务端细分，能发现面板仍用短消息重建分类、覆盖 prepared 证明的回归。
+    const input: ComputeContextDataInput = {
+      messages: [user("1"), assistant("2", "1")], parts: { "1": [text("1", "short")], "2": [finish] },
+      providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
+    }
+    // Source 的 ratio=2.0 保留输入/cache分母；attachments 必须实际进入生产分类。
+    const legacy = await computeContextData(input)
+    expect(legacy.categories.find(item => item.name === "System prompt")?.tokens).toBe(4000)
+    expect(legacy.categories.find(item => item.name === "Instructions")?.tokens).toBe(500)
+    expect(legacy.categories.find(item => item.name === "Tool definitions")?.tokens).toBe(2500)
+    expect(legacy.categories.find(item => item.name === "Skills")?.tokens).toBe(0)
+    expect(legacy.details.messages.attachments).toBe(100)
+    expect(legacy.details.messages.toolCalls).toBe(1000)
+    expect(legacy.details.messages.toolResults).toBe(1000)
+    // 确认输出600与费用来自 step-finish；细分的17000输入估算不能重写普通输入或抹掉缓存两栏。
+    expect(legacy.details.usage).toMatchObject({ input: 12000, cacheRead: 3000, cacheWrite: 2000, output: 600, cost: 0.001 })
+    // 小额与超过输入上限的 reserved 分别验证显式覆盖和可用窗口归零，不能沿用缺省缓冲公式。
+    for (const reserved of [100, 20000]) {
+      const explicit = await computeContextData({ ...input, config: { compaction: { reserved } } })
+      expect(explicit.details.window.usableInput).toBe(Math.max(0, 19900 - reserved))
+      expect(explicit.details.window.compactionBuffer).toBe(Math.min(19900, reserved))
+      expect(explicit.details.window.providerReserve).toBe(100)
+    }
+    const request: NonNullable<Session["request"]> = { messageID: "1", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0,
+      model: { providerID: "test", modelID: "api-model", contextLimit: 8000 },
+      inputEstimate: { input: 17000, bodyChars: 34000, confirmed: false, charsPerToken: 2, inputBreakdown } }
+    const session: Session = { id: "s", slug: "s", projectID: "p", directory: ".", title: "s", version: "1", time: { created: 0, updated: 0 }, request }
+    // native 首包前或分页淘汰后可没有任何可见消息；空 transcript 仍须从同一请求投影得到五类占用。
+    const native = await computeContextData({ ...input, messages: [], parts: {}, session,
+      instructionFiles: [{ path: "a", content: "abcd" }, { path: "b", content: "abcdefgh" }],
+      toolDefinitions: [{ name: "a", text: "abcd" }, { name: "b", text: "abcdefgh" }] })
+    expect(native.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([4000, 500, 0, 2500, 5000, 5000])
+    expect(native.totalTokens).toBe(17000)
+    // 4:8的本地权重不能整除500或2500，明细总额断言可捕获逐项舍入导致的余数丢失。
+    expect(native.details.instructions.reduce((sum, item) => sum + item.tokens, 0)).toBe(500)
+    expect(native.details.toolDefs.reduce((sum, item) => sum + item.tokens, 0)).toBe(2500)
+    expect(native.details.usage.total).toBe(0)
+    expect(native.maxTokens).toBe(8000)
+    expect(native.model).toBe("test/api-model")
+    // 字典仍有20000窗口，冻结预算零若被当成缺失值就会错误借用该 Catalog 上限。
+    const zero = await computeContextData({ ...input, session: { ...session, request: { ...request,
+      model: { providerID: "test", modelID: "api-model", contextLimit: 0 } } } })
+    expect(zero.maxTokens).toBe(0)
+    // parts 中保留上一请求的完整细分；新请求没有 carrier 时必须阻止旧确认点接管分类。
+    const missing = await computeContextData({ ...input, session: { ...session, request: {
+      messageID: "new", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 } } })
+    expect(missing.categories.find(item => item.name === "Instructions")?.tokens).toBe(0)
+  })
+
+  test("ratio=2.5 tracks JSON-heavy input and ignores user or other-model calibration", async () => {
+    const longText = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ role: "user", content: `message ${i} with JSON, code and tool results`.repeat(4) })))
+    const confirmed = Math.round(longText.length / 2.5)
+    const finish: Part = { id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.01,
+      tokens: { input: confirmed, output: 100, reasoning: 0, cache: { read: 0, write: 0 } }, inputChars: longText.length,
+      inputBreakdown: { system: 0, instructions: 0, skills: 0, tools: 0,
+        messages: { userText: longText.length, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: longText.length } } }
+    const input: ComputeContextDataInput = { messages: [user("1"), assistant("2", "1")],
+      parts: { "1": [text("1", longText), { ...finish, messageID: "1", inputChars: 100000 }], "2": [finish] },
+      providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [] }
+    const data = await computeContextData(input)
+    const tokens = data.categories.find(item => item.name === "Input Messages")?.tokens ?? 0
+    expect(Math.abs(tokens - confirmed) / confirmed).toBeLessThan(0.02)
+    expect(tokens).toBeGreaterThan(Math.round(longText.length / 4))
+    // 异模型样本的十万字符足以主导比率，追加后结果不变才能证明过滤使用实际执行模型。
+    const other = { ...assistant("3", "1"), modelID: "other" }
+    const unchanged = await computeContextData({ ...input, messages: [...input.messages, other],
+      parts: { ...input.parts, "3": [{ ...finish, messageID: "3", inputChars: 100000 }] } })
+    expect(unchanged.details.messages.userText).toBe(data.details.messages.userText)
+  })
 })

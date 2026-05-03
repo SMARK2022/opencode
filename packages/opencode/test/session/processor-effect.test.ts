@@ -404,7 +404,8 @@ it.live("session.processor effect tests stop after token overflow requests compa
           sessionID: chat.id,
           model: mdl,
           agent: agent(),
-          system: [],
+          system: ["fixture-instructions".repeat(40)],
+          inputSections: [{ kind: "instructions", text: "fixture-instructions".repeat(40) }],
           messages: [{ role: "user", content: "compact" }],
           tools: {},
         })
@@ -414,6 +415,16 @@ it.live("session.processor effect tests stop after token overflow requests compa
         expect(value).toBe("compact")
         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
         expect(parts.some((part) => part.type === "step-finish")).toBe(true)
+        const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+        expect(finish?.inputChars).toBe(handle.message.inputEstimate?.bodyChars)
+        expect(finish?.inputBreakdown?.instructions).toBe(800)
+        const prepared = (yield* session.get(chat.id)).request?.inputEstimate
+        expect(prepared?.confirmed).toBe(true)
+        expect(prepared?.charsPerToken).toBe(4)
+        expect(prepared?.inputBreakdown).toEqual(finish?.inputBreakdown)
+        // 800字符的真实系统片段提高准备估算，但provider只确认100输入，公开账本必须服从后者。
+        expect((yield* session.get(chat.id)).request?.input).toBe(100)
+        expect(yield* llm.calls).toBe(1)
       }),
     { config: (url) => providerCfg(url) },
   ),

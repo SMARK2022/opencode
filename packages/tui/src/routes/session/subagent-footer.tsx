@@ -73,6 +73,7 @@ export function SubagentFooter() {
     // footer 的缓存只供未确认尾部，助手淘汰后不能丢掉已确认请求累计。
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
     // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
+    // 子会话的 prepared 密度只随它自己的请求读取，父会话与旧模型确认样本不参与。
     const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput

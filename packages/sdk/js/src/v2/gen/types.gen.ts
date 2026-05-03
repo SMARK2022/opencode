@@ -576,6 +576,8 @@ export type StepFinishPart = {
       write: number
     }
   }
+  inputChars?: number
+  inputBreakdown?: SessionMessageInputBreakdown
 }
 
 export type SnapshotPart = {
@@ -3158,6 +3160,32 @@ export type MoveSessionDestination = {
   directory: string
 }
 
+export type SessionMessageInputBreakdown = {
+  system: number
+  instructions: number
+  skills: number
+  tools: number
+  messages: {
+    userText: number
+    assistantText: number
+    reasoning: number
+    toolInput: number
+    toolOutput: number
+    attachments: number
+    total: number
+  }
+}
+
+export type SessionMessageInputEstimate = {
+  input: number
+  bodyChars: number
+  confirmed: boolean
+  charsPerToken?: number
+  inputBreakdown?: SessionMessageInputBreakdown
+  afterPartID?: string
+  contextLimit?: number
+}
+
 export type SessionRequestUsage = {
   messageID: string
   input: number
@@ -3168,19 +3196,12 @@ export type SessionRequestUsage = {
   stepOutput: number
   pendingInput?: number
   estimatedInput?: number
+  inputEstimate?: SessionMessageInputEstimate
   model?: {
     providerID: string
     modelID: string
     contextLimit?: number
   }
-}
-
-export type SessionMessageInputEstimate = {
-  input: number
-  bodyChars: number
-  confirmed: boolean
-  afterPartID?: string
-  contextLimit?: number
 }
 
 export type ModelRef = {

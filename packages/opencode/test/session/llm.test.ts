@@ -1538,6 +1538,7 @@ describe("session.llm.stream", () => {
           temperature: 0.2,
         } satisfies Agent.Info
 
+        const prepared: unknown[] = []
         yield* drainWith(llmLayerWithExecutor({ flags: { experimentalNativeLlm: true } }), {
           user: {
             id: MessageID.make("msg_user-native"),
@@ -1553,12 +1554,17 @@ describe("session.llm.stream", () => {
           system: ["You are a helpful assistant."],
           messages: [{ role: "user", content: "Hello" }],
           tools: {},
+          onRequestPrepared: body => Effect.sync(() => { prepared.push(body) }),
         })
 
         const capture = yield* Effect.promise(() => request)
         expect(capture.url.pathname.endsWith("/responses")).toBe(true)
         expect(capture.headers.get("Authorization")).toBe("Bearer test-openai-key")
         expect(capture.body.model).toBe(model.id)
+        // native 的回调必须收到真正 Responses lowering 后的同一正文，而非预编译 LLMRequest。
+        expect(prepared).toHaveLength(1)
+        expect(prepared[0]).toEqual(capture.body)
+        expect(prepared[0]).not.toHaveProperty("messages")
         expect(capture.body.stream).toBe(true)
         expect((capture.body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
         expect(capture.body.include).toEqual(["reasoning.encrypted_content"])

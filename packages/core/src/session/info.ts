@@ -137,6 +137,10 @@ export const selection = {
           AND (a.kind = 'v1' OR json_extract(a.data, '$.tokens') IS NULL)
           AND NOT EXISTS (SELECT 1 FROM last_step p WHERE a.kind = 'v1'
             AND p.id > coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), '')))),
+      -- 准备元数据跟随相同请求/助手边界；确认后保留细分，不能借用更旧请求的历史样本。
+      'inputEstimate', json(coalesce((SELECT json_extract(e.data, '$.inputEstimate') FROM native_estimate e
+        WHERE e.seq > coalesce((SELECT position FROM last_assistant), -1)),
+        (SELECT json_extract(data, '$.inputEstimate') FROM last_assistant))),
       -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
       'model', json(coalesce((SELECT json_object(
         'providerID', json_extract(data, '$.model.providerID'), 'modelID', json_extract(data, '$.model.id'),
@@ -159,6 +163,7 @@ export const selection = {
       stepInput: Schema.Finite, stepOutput: Schema.Finite,
       pendingInput: Schema.NullOr(Schema.Finite),
       estimatedInput: Schema.NullOr(Schema.Finite),
+      inputEstimate: Schema.NullOr(SessionMessage.InputEstimate),
       model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String, contextLimit: Schema.NullOr(Schema.Finite) })),
     }))(parsed)
     return Session.RequestUsage.make({
@@ -166,6 +171,7 @@ export const selection = {
       assistantID: fields.assistantID ?? undefined,
       pendingInput: fields.pendingInput ?? undefined,
       estimatedInput: fields.estimatedInput ?? undefined,
+      inputEstimate: fields.inputEstimate ?? undefined,
       model: fields.model ? { ...fields.model, contextLimit: fields.model.contextLimit ?? undefined } : undefined,
     })
   }),

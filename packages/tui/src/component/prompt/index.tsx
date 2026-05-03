@@ -298,6 +298,7 @@ export function Prompt(props: PromptProps) {
     // 当前助手缺失时仍显示 native 或已分页淘汰的确认投影，不恢复窗口累计。
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
     // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
+    // 密度随完整 request.inputEstimate 投影到达，100条窗口不再重新校准或累加确认点。
     const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput

@@ -28,6 +28,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import type { Token } from "@opencode-ai/core/util/token"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -46,6 +47,7 @@ export type StreamInput = {
   toolChoice?: "auto" | "required" | "none"
   // 回调属于 processor，LLM 只交付已解析的最终请求体，不写账本。
   onRequestPrepared?: (body: unknown) => Effect.Effect<void>
+  inputSections?: ReadonlyArray<Token.SystemSection>
 }
 
 export type StreamRequest = StreamInput & {
@@ -240,10 +242,9 @@ const live: Layer.Layer<
           providerOptions: prepared.params.options,
           headers: prepared.headers,
           abort: input.abort,
+          onRequestPrepared: input.onRequestPrepared,
         })
         if (native.type === "supported") {
-          // native adapter 已完成消息 lowering 和实际工具广告，运输尚未开始。
-          if (input.onRequestPrepared) yield* input.onRequestPrepared(native.body)
           yield* Effect.logInfo("llm runtime selected", {
             "llm.runtime": "native",
             "llm.provider": input.model.providerID,

@@ -9,6 +9,7 @@ import { DateTimeUtcFromMillis, optional, RelativePath } from "./schema"
 import { SessionEvent } from "./session-event"
 import { SessionID } from "./session-id"
 import { Revert } from "./revert"
+import { SessionMessage } from "./session-message"
 
 export const ID = SessionID
 export type ID = SessionID
@@ -33,6 +34,8 @@ export const RequestUsage = Schema.Struct({
   // 实际请求体的 provisional input 优先于继承基数；零也是有效估算。
   // 此字段不进入 input/output/cost，不表示 provider 已确认或已计费。
   estimatedInput: Schema.Finite.pipe(optional),
+  // 同一请求的 prepared 元数据在确认后仍可读，绝不参与确认 input/output/cost 累加。
+  inputEstimate: SessionMessage.InputEstimate.pipe(optional),
   model: Schema.Struct({
     providerID: Schema.String,
     modelID: Schema.String,

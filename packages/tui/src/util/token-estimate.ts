@@ -77,9 +77,11 @@ export function computeFinalTokens(
         return sum
       }, 0)
 
-  // 字符数 / 4 是通用 token 估算比率，适用于英文为主的代码和文本
-  const pendingInputTokens = Math.round(pendingIn / 4)
-  const pendingOutputTokens = Math.round(streamingOut / 4)
+  // 三个消费者只校准未确认尾部；prepared input 与零确认继续沿原投影/游标优先级取值。
+  const density = request.inputEstimate?.charsPerToken
+  const ratio = density !== undefined && Number.isFinite(density) && density > 0 ? density : 4
+  const pendingInputTokens = Math.round(pendingIn / ratio)
+  const pendingOutputTokens = Math.round(streamingOut / ratio)
   // 可见尾部可能先于 Session 快照到达；立即遮掉旧 step，保留请求历史累计。
   const hasInFlightTail = !!lastAssistant && lastAssistant.time.completed === undefined && lastParts.some((_, i) => i > lastSFIdx)
   const lastStepFinish = lastParts[lastSFIdx]

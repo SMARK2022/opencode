@@ -163,10 +163,14 @@ describe("SessionProjector", () => {
       // 每轮给五项不同的非零计数，能发现只累加最后一轮、遗漏 reasoning 或合并 cache 的错误。
       const records = yield* Effect.forEach([1, 2], (factor) => Effect.gen(function* () {
         const assistantMessageID = SessionMessage.ID.make(`msg_native_usage_${factor}`)
+        const inputEstimate = { input: 777, bodyChars: 3108, confirmed: false, charsPerToken: 4,
+          contextLimit: factor === 1 ? 2000 : 8000,
+          inputBreakdown: { system: 2000, instructions: 108, skills: 0, tools: 200,
+            messages: { userText: 500, assistantText: 100, reasoning: 50, toolInput: 50, toolOutput: 100, attachments: 0, total: 800 } } }
         // 首包前估算使用真实请求身份，不创建助手，也不重置历史确认累计。
         yield* events.publish(SessionEvent.RequestEstimated, {
           sessionID, messageID: SessionMessage.ID.make("msg_native_request"), timestamp: DateTime.makeUnsafe(factor),
-          model, inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
+          model, inputEstimate,
         })
         expect((yield* sessions.get(sessionID)).request).toMatchObject({
           messageID: "msg_native_request", input: factor === 1 ? 0 : 14, output: factor === 1 ? 0 : 4,
@@ -174,9 +178,12 @@ describe("SessionProjector", () => {
         })
         expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
         expect((yield* sessions.get(sessionID)).request?.model).toEqual({ providerID: model.providerID, modelID: model.id, contextLimit: factor === 1 ? 2000 : 8000 })
+        // 此刻还没有本轮Started助手，get/list仍须从RequestEstimated持久事件得到同一carrier，不能靠消息窗口补值。
+        expect((yield* sessions.get(sessionID)).request?.inputEstimate).toEqual(inputEstimate)
+        expect((yield* sessions.list({ project: Project.ID.global })).find(item => item.id === sessionID)?.request?.inputEstimate).toEqual(inputEstimate)
         yield* events.publish(SessionEvent.Step.Started, {
           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
-          inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
+          inputEstimate,
         })
         // 第二个原生助手没有 tokens；首轮 14 输入和 4 输出仍是本请求的在途基数。
         expect((yield* sessions.get(sessionID)).request).toMatchObject({ assistantID: assistantMessageID, stepInput: 0, stepOutput: 0 })
@@ -210,6 +217,8 @@ describe("SessionProjector", () => {
       })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
       expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
+      // 确认停止 provisional input，但字段证明与冻结预算仍随同一末步投影保留。
+      expect((yield* sessions.get(sessionID)).request?.inputEstimate).toMatchObject({ confirmed: true, bodyChars: 3108, charsPerToken: 4, inputBreakdown: { system: 2000 } })
       const selected = ModelV2.Ref.make({
         providerID: model.providerID, id: ModelV2.ID.make("other-alias"), variant: ModelV2.VariantID.make("later"),
       })

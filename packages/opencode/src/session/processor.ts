@@ -551,6 +551,9 @@ const layer = Layer.effect(
               sessionID: ctx.assistantMessage.sessionID,
               type: "step-finish",
               tokens: usage.tokens,
+              // 同一次准备的字符证明附在确认点；确认 tokens 与原子 publishAssistant owner 保持原值。
+              inputChars: ctx.assistantMessage.inputEstimate?.bodyChars,
+              inputBreakdown: ctx.assistantMessage.inputEstimate?.inputBreakdown,
               cost: usage.cost,
             })
             // 先保存 step part，再在消息 commit 中读取确认 parts，仍按同一 parentID 聚合。
@@ -753,14 +756,18 @@ const layer = Layer.effect(
               const samples = history.toReversed().flatMap((message) => {
                 const info = message.info
                 // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
-                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id
-                  || !info.inputEstimate?.confirmed) return []
+                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id) return []
+                // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
+                const steps = message.parts.flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
+                  ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
+                if (steps.length > 0) return steps.toReversed()
+                if (!info.inputEstimate?.confirmed) return []
                 return [{ bodyChars: info.inputEstimate.bodyChars,
                   input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
               })
               // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
               ctx.assistantMessage.inputEstimate = {
-                ...Token.estimateRequest(body, samples),
+                ...Token.estimateRequest(body, samples, streamInput.inputSections ?? []),
                 contextLimit: ctx.model.limit.context,
                 // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
                 afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,

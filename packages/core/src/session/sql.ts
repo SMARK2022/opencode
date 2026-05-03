@@ -12,6 +12,7 @@ import type { MessageID, PartID, SessionV1 } from "../v1/session"
 import { WorkspaceV2 } from "../workspace"
 import { Timestamps } from "../database/schema.sql"
 import type { SystemContext } from "../system-context/index"
+import type { SessionContextEpoch } from "./context-epoch"
 import { AgentV2 } from "../agent"
 import type { Revert } from "@opencode-ai/schema/revert"
 
@@ -171,6 +172,6 @@ export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
     .primaryKey()
     .references(() => SessionTable.id, { onDelete: "cascade" }),
   baseline: text().notNull(),
-  snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
+  snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot | SessionContextEpoch.State>(),
   baseline_seq: integer().notNull(),
 })
