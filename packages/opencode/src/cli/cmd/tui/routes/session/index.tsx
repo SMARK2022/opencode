@@ -1138,7 +1138,7 @@ export function Session() {
                           }
                         }
 
-                        return (
+  return (
                           <box
                             onMouseOver={() => setHover(true)}
                             onMouseOut={() => setHover(false)}
@@ -1417,7 +1417,13 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const keybind = useKeybind()
 
   return (
-    <>
+    <box
+      id={props.message.id}
+      border={["left"]}
+      customBorderChars={SplitBorder.customBorderChars}
+      borderColor={theme.backgroundElement}
+      marginTop={1}
+    >
       <For each={props.parts}>
         {(part, index) => {
           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
@@ -1481,7 +1487,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           </box>
         </Match>
       </Switch>
-    </>
+    </box>
   )
 }
 
@@ -1494,10 +1500,19 @@ const PART_MAPPING = {
 function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
+  const renderer = useRenderer()
+  const [expanded, setExpanded] = createSignal(false)
   const content = createMemo(() => {
     // Filter out redacted reasoning chunks from OpenRouter
     // OpenRouter sends encrypted reasoning data that appears as [REDACTED]
     return props.part.text.replace("[REDACTED]", "").trim()
+  })
+  const lines = createMemo(() => content().split("\n"))
+  const PREVIEW = 5
+  const overflow = createMemo(() => lines().length > PREVIEW)
+  const preview = createMemo(() => {
+    if (expanded() || !overflow()) return content()
+    return [...lines().slice(0, PREVIEW), "…"].join("\n")
   })
   return (
     <Show when={content() && ctx.showThinking()}>
@@ -1509,16 +1524,32 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         border={["left"]}
         customBorderChars={SplitBorder.customBorderChars}
         borderColor={theme.backgroundElement}
+        onMouseUp={() => {
+          if (renderer.getSelection()?.getSelectedText()) return
+          setExpanded((prev) => !prev)
+        }}
       >
+        <code
+          filetype="markdown"
+          drawUnstyledText={false}
+          streaming={false}
+          syntaxStyle={subtleSyntax()}
+          content={"_Thinking (" + content().length.toLocaleString() + " chars):_"}
+          conceal={ctx.conceal()}
+          fg={theme.textMuted}
+        />
         <code
           filetype="markdown"
           drawUnstyledText={false}
           streaming={true}
           syntaxStyle={subtleSyntax()}
-          content={"_Thinking:_ " + content()}
+          content={preview()}
           conceal={ctx.conceal()}
           fg={theme.textMuted}
         />
+        <Show when={overflow()}>
+          <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
+        </Show>
       </box>
     </Show>
   )
