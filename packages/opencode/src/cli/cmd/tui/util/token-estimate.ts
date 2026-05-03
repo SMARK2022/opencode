@@ -1,6 +1,8 @@
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { estimate as estimateTokens } from "@/util/token"
 
+const DEFAULT_CHARS_PER_TOKEN = 4
+
 export type UsageInfo = {
   input: number
   output: number
@@ -19,6 +21,34 @@ export function estimateDataUrlInputTokens(url: string, mime: string) {
   if (mime.startsWith("image/")) return Math.max(1, Math.min(1600, Math.round(payloadLength / 750)))
   if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
   return Math.max(1, estimateTokens(url.slice(comma + 1)))
+}
+
+/**
+ * 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token 比值。
+ * 输入含大量 JSON/schema/code，密度与自然语言输出（~4 chars/token）差异很大，
+ * 因此必须从输入侧数据校准。若无历史数据则回退到默认值 4。
+ */
+export function charsPerTokenFromHistory(
+  allMessages: ReadonlyArray<{ role: string; id: string }>,
+  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
+): number {
+  let totalChars = 0
+  let totalTokens = 0
+  for (let i = allMessages.length - 1; i >= 0 && totalChars < 100_000; i--) {
+    const msg = allMessages[i]
+    if (msg.role !== "assistant") continue
+    for (const p of getParts(msg.id)) {
+      if (p.type !== "step-finish") continue
+      const chars = p.inputChars as number | undefined
+      if (!chars || chars < 100) continue
+      const tokens = (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)
+      if (tokens <= 0) continue
+      totalChars += chars
+      totalTokens += tokens
+    }
+  }
+  if (totalTokens > 0 && totalChars > 500) return totalChars / totalTokens
+  return DEFAULT_CHARS_PER_TOKEN
 }
 
 /** 累加所有已完成 request 的 step-finish 确认 token（不含当前 step 的流式追加） */
@@ -48,12 +78,15 @@ export function sumConfirmed(
 /**
  * 合并 step-finish 真实值、流式追加估算，以及 assistant message 上的服务端请求体估算。
  * finish-step 到达前，prompt.ts 会先把真实请求体估算写入 lastAssistant.tokens.input。
+ * @param ratio - 从 charsPerTokenFromHistory 计算得到的输入侧 chars/token 比值
  */
 export function computeFinalTokens(
   lastAssistant: AssistantMessage,
   lastParts: ReadonlyArray<{ type: string; [key: string]: any }>,
   requestConfirmed: { input: number; output: number },
+  ratio?: number,
 ) {
+  const cpt = ratio ?? DEFAULT_CHARS_PER_TOKEN
   const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
   const streamingOut = lastAssistant.time.completed
     ? 0
@@ -73,8 +106,8 @@ export function computeFinalTokens(
         return sum
       }, 0)
 
-  const pendingInputTokens = Math.round(pendingIn / 4)
-  const pendingOutputTokens = Math.round(streamingOut / 4)
+  const pendingInputTokens = Math.round(pendingIn / cpt)
+  const pendingOutputTokens = Math.round(streamingOut / cpt)
   const hasInFlightTail = !lastAssistant.time.completed && lastParts.some((_, i) => i > lastSFIdx)
   const lastStepFinish =
     lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined

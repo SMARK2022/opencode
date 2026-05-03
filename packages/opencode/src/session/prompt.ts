@@ -1539,13 +1539,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-            // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，
-            // 按累积字符量停止（≥16000），不按轮数，代替固定 /4
-            const systemText = [
-              ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),
-              ...system,
-              ...(lastUser.system ? [lastUser.system] : []),
-            ].join("\n")
+            // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
+            const baseSystemText = (agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n")
+            const envText = env.join("\n")
+            const instructionsText = [...instructions, ...(lastUser.system ? [lastUser.system] : [])].join("\n")
+            const skillsText = skills ?? ""
+            const mcpText = mcpInstr ?? ""
+            const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
             const messagesText = JSON.stringify(messages)
             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
             const toolsText = Object.entries(tools)
@@ -1556,25 +1556,85 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               })
               .join("\n")
             const inputChars = [systemText, messagesText, toolsText].join("\n").length
-            let historyOutputTokens = 0
-            let historyOutputChars = 0
-            for (let i = msgs.length - 1; i >= 0 && historyOutputChars < 16000; i--) {
+            // 从原始 parts 计算 messages 子组件字符数，供 TUI /context 面板直接使用
+            let msgUserChars = 0
+            let msgAssistantChars = 0
+            let msgReasoningChars = 0
+            let msgToolInputChars = 0
+            let msgToolOutputChars = 0
+            let msgAttachmentChars = 0
+            for (const m of msgs) {
+              for (const p of m.parts) {
+                switch (p.type) {
+                  case "text":
+                    if (p.synthetic || p.ignored) continue
+                    if (m.info.role === "user") msgUserChars += p.text.length
+                    else if (m.info.role === "assistant" && m.info.summary === true) msgAssistantChars += p.text.length
+                    else msgAssistantChars += p.text.length
+                    break
+                  case "reasoning":
+                    msgReasoningChars += p.text.length
+                    break
+                  case "tool": {
+                    msgToolInputChars += JSON.stringify(p.state.input).length
+                    if (p.state.status === "completed") {
+                      msgToolOutputChars += p.state.output.length
+                      for (const att of p.state.attachments ?? [])
+                        msgAttachmentChars += att.url.length
+                    }
+                    if (p.state.status === "pending") msgToolInputChars += p.state.raw.length
+                    if (p.state.status === "error") msgToolOutputChars += p.state.error.length
+                    break
+                  }
+                  case "file":
+                    msgAttachmentChars += p.url.length
+                    break
+                  case "subtask":
+                    msgUserChars += `${(p as any).prompt}\n${(p as any).description}`.length
+                    break
+                }
+              }
+            }
+            const inputBreakdown = {
+              system: baseSystemText.length + envText.length + mcpText.length,
+              instructions: instructionsText.length,
+              skills: (skillsText as string).length,
+              tools: toolsText.length,
+              messages: {
+                userText: msgUserChars,
+                assistantText: msgAssistantChars,
+                reasoning: msgReasoningChars,
+                toolInput: msgToolInputChars,
+                toolOutput: msgToolOutputChars,
+                attachments: msgAttachmentChars,
+                total: messagesText.length,
+              },
+            }
+            // 从本 session 历史 step-finish 的 inputChars / inputTokens 推算真实 chars-per-token 比值，
+            // 使用 *输入* 侧数据（而非输出侧），因为输入含 JSON/schema/code，密度与自然语言输出截然不同。
+            let historyInputTokens = 0
+            let historyInputChars = 0
+            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 50000; i--) {
               const m = msgs[i]
               if (m.info.role !== "assistant") continue
-              const sf = m.parts.findLast((p) => p.type === "step-finish")
-              if (!sf) continue
-              const chars = m.parts
-                .filter((p) => p.type === "text" || p.type === "reasoning")
-                .reduce((sum, p) => sum + ((p as any).text?.length ?? 0), 0)
-              const tokens = (sf.tokens.output ?? 0) + (sf.tokens.reasoning ?? 0)
-              historyOutputTokens += tokens
-              historyOutputChars += chars
+              for (let j = m.parts.length - 1; j >= 0; j--) {
+                const p = m.parts[j]
+                if (p.type !== "step-finish") continue
+                const chars = (p as any).inputChars as number | undefined
+                if (!chars || chars < 100) continue
+                const tokens = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
+                if (tokens <= 0) continue
+                historyInputChars += chars
+                historyInputTokens += tokens
+              }
             }
-            const charsPerToken = historyOutputTokens > 0 && historyOutputChars > 500
-              ? historyOutputChars / historyOutputTokens
+            const charsPerToken = historyInputTokens > 0 && historyInputChars > 500
+              ? historyInputChars / historyInputTokens
               : 4
             const estimatedInput = Math.round(inputChars / charsPerToken)
             handle.message.tokens.input = estimatedInput
+            handle.inputChars = inputChars
+            handle.inputBreakdown = inputBreakdown
             yield* sessions.updateMessage(handle.message)
             const result = yield* handle.process({
               user: lastUser,

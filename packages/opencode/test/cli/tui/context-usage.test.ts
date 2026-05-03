@@ -106,7 +106,7 @@ describe("context usage", () => {
       messages,
       parts,
       providers: [provider],
-      config: {},
+      config: { compaction: { reserved: 100 } },
       agents: [],
       paths: { cwd: process.cwd(), worktree: process.cwd() },
       columns: 100,
@@ -149,7 +149,7 @@ describe("context usage", () => {
         "2": [text("2", "world")],
       },
       providers: [constrained],
-      config: {},
+      config: { compaction: { reserved: 20_000 } },
       agents: [],
       paths: { cwd: process.cwd(), worktree: process.cwd() },
       columns: 180,
@@ -344,5 +344,121 @@ describe("context usage", () => {
 
     const result = filterCompactedMessages(messages.toReversed()).map((item) => item.info.id)
     expect(result).toEqual(["3", "4", "5", "6"])
+  })
+
+  test("uses daemon inputBreakdown when available for accurate per-category estimation", async () => {
+    // 模拟 daemon 记录的 step-finish 含 inputBreakdown
+    const messages = [user("1"), assistant("2", "1")]
+    const parts: Record<string, Part[]> = {
+      "1": [text("1", "hello world user question about code")],
+      "2": [
+        text("2", "here is the answer with some code"),
+        {
+          id: "sf1",
+          sessionID: "s",
+          messageID: "2",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0.001,
+          tokens: { input: 12000, output: 600, reasoning: 0, cache: { read: 3000, write: 2000 } },
+          inputChars: 34000,
+          inputBreakdown: {
+            system: 8000,
+            instructions: 1000,
+            skills: 0,
+            tools: 5000,
+            messages: {
+              userText: 8000,
+              assistantText: 8000,
+              reasoning: 0,
+              toolInput: 2000,
+              toolOutput: 2000,
+              attachments: 0,
+              total: 20000,
+            },
+          },
+        } as unknown as Part,
+      ],
+    }
+
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [],
+    })
+
+    // 用 daemon breakdown + 校准 ratio 估算：ratio = 34000/17000 = 2.0
+    // system: 8000/2.0 = 4000
+    // instructions: 1000/2.0 = 500
+    // tools: 5000/2.0 = 2500
+    expect(data.categories.find((c) => c.name === "System prompt")?.tokens).toBe(4000)
+    expect(data.categories.find((c) => c.name === "Instructions")?.tokens).toBe(500)
+    expect(data.categories.find((c) => c.name === "Tool definitions")?.tokens).toBe(2500)
+    expect(data.categories.find((c) => c.name === "Skills")?.tokens).toBe(0)
+  })
+
+  test("ratio=2.5 gives consistently higher estimates than ratio=4 for JSON-heavy content", async () => {
+    // 用大段 JSON 验证校准差值
+    const longText = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({
+      role: "user",
+      content: `message number ${i} with repeated text to simulate conversation history and tool outputs containing JSON data structures`,
+    })))
+
+    const messages = [user("1"), assistant("2", "1")]
+    const parts: Record<string, Part[]> = {
+      "1": [text("1", longText)],
+      "2": [{
+        id: "sf1",
+        sessionID: "s",
+        messageID: "2",
+        type: "step-finish",
+        reason: "stop",
+        cost: 0.01,
+        tokens: { input: Math.round(longText.length / 2.5), output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+        inputChars: longText.length,
+          inputBreakdown: {
+            system: 0,
+            instructions: 0,
+            skills: 0,
+            tools: 0,
+            messages: {
+              userText: longText.length,
+              assistantText: 0,
+              reasoning: 0,
+              toolInput: 0,
+              toolOutput: 0,
+              attachments: 0,
+              total: longText.length,
+            },
+          },
+      } as unknown as Part],
+    }
+
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [],
+    })
+
+    // 使用校准 ratio=2.5
+    const inputTokens = data.categories.find((c) => c.name === "Input Messages")?.tokens ?? 0
+    const confirmed = Math.round(longText.length / 2.5)
+
+    // 估算应接近确认值 (误差 < 2%)
+    expect(Math.abs(inputTokens - confirmed) / confirmed).toBeLessThan(0.02)
   })
 })

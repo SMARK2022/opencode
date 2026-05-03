@@ -3,7 +3,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import { createEffect, createMemo, createSignal } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
-import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
 
 const id = "internal:sidebar-context"
 
@@ -44,6 +44,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
     // 显示规则：外面是最后一个 step 的累计（真实上下文大小）；括号里是当前 user request / agent loop 的累计。
     const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+    const ratio = charsPerTokenFromHistory(messages, getParts)
 
     // Add streaming estimates from the last (potentially in-flight) message of current request
     const last = requestAssistants.at(-1)!
@@ -53,7 +54,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       output,
       totalInput,
       totalOutput,
-    } = computeFinalTokens(last, lastParts, requestConfirmed)
+    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]

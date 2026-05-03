@@ -279,6 +279,34 @@ export const StepFinishPart = Schema.Struct({
       write: NonNegativeInt,
     }),
   }),
+  /** Character count of the full request body (system + messages + tools) sent to the provider.
+   *  Used together with confirmed tokens to compute a session-specific chars-per-token ratio. */
+  inputChars: Schema.optional(NonNegativeInt),
+  /** Per-component character counts of the request body as assembled by the daemon.
+   *  The TUI reads these to show accurate per-category context usage instead of
+   *  re-constructing prompt text independently. */
+  inputBreakdown: Schema.optional(Schema.Struct({
+    system: NonNegativeInt,
+    instructions: NonNegativeInt,
+    skills: NonNegativeInt,
+    tools: NonNegativeInt,
+    messages: Schema.Struct({
+      /** User message text (part text from user role messages) */
+      userText: NonNegativeInt,
+      /** Assistant message text (part text from assistant role messages) */
+      assistantText: NonNegativeInt,
+      /** Reasoning/thinking content character count */
+      reasoning: NonNegativeInt,
+      /** Tool call input (JSON arguments) character count */
+      toolInput: NonNegativeInt,
+      /** Tool call output (result text) character count */
+      toolOutput: NonNegativeInt,
+      /** File/image attachment URLs (data: or path) character count */
+      attachments: NonNegativeInt,
+      /** Total serialized JSON character count — must equal the wire-format length */
+      total: NonNegativeInt,
+    }),
+  })),
 })
   .annotate({ identifier: "StepFinishPart" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))

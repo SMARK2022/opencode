@@ -4,7 +4,6 @@ import path from "path"
 import matter from "gray-matter"
 import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { estimate as estimateTokens } from "@/util/token"
 import { toJsonSchema } from "@/util/effect-zod"
 import { Schema } from "effect"
 import { Shell } from "@/shell/shell"
@@ -139,8 +138,63 @@ const INSTRUCTION_FILES = [
   "CONTEXT.md",
 ]
 
-function estimate(input: unknown) {
-  return estimateTokens(typeof input === "string" ? input : stableJson(input))
+const DEFAULT_CHARS_PER_TOKEN = 4
+
+function estimate(input: unknown, ratio = DEFAULT_CHARS_PER_TOKEN) {
+  const text = typeof input === "string" ? input : stableJson(input)
+  return Math.max(0, Math.round((text || "").length / ratio))
+}
+
+/** 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token。 */
+function computeInputRatio(messages: WithParts[]): number {
+  let totalChars = 0
+  let totalTokens = 0
+  for (let i = messages.length - 1; i >= 0 && totalChars < 100_000; i--) {
+    const msg = messages[i]
+    if (msg.info.role !== "assistant") continue
+    for (const p of msg.parts) {
+      if (p.type !== "step-finish") continue
+      const chars = (p as any).inputChars as number | undefined
+      if (!chars || chars < 100) continue
+      const tokens = (p as any).tokens?.input + (p as any).tokens?.cache?.read + (p as any).tokens?.cache?.write
+      if (!tokens || tokens <= 0) continue
+      totalChars += chars
+      totalTokens += tokens
+    }
+  }
+  if (totalTokens > 0 && totalChars > 500) return totalChars / totalTokens
+  return DEFAULT_CHARS_PER_TOKEN
+}
+
+type InputBreakdown = {
+  system: number
+  instructions: number
+  skills: number
+  tools: number
+  messages: {
+    userText: number
+    assistantText: number
+    reasoning: number
+    toolInput: number
+    toolOutput: number
+    attachments: number
+    total: number
+  }
+}
+
+/** 从 session 历史取最近一个由 daemon 记录的 per-component 字符数，用于替代 TUI 自行重建。 */
+function latestBreakdown(messages: WithParts[]): InputBreakdown | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.info.role !== "assistant") continue
+    for (let j = msg.parts.length - 1; j >= 0; j--) {
+      const p = msg.parts[j] as any
+      if (p.type !== "step-finish") continue
+      const bd = p.inputBreakdown as InputBreakdown | undefined
+      if (bd && bd.system >= 0 && bd.messages && bd.messages.total >= 0) return bd
+    }
+  }
+  return undefined
 }
 
 function stableJson(input: unknown): string {
@@ -155,9 +209,9 @@ function stableJson(input: unknown): string {
   }
 }
 
-function estimateFileToken(url: string, mime: string) {
+function estimateFileToken(url: string, mime: string, ratio = DEFAULT_CHARS_PER_TOKEN) {
   if (url.startsWith("data:")) return estimateDataUrlInputTokens(url, mime)
-  return estimate(url)
+  return estimate(url, ratio)
 }
 
 export function filterCompactedMessages(msgs: Iterable<WithParts>) {
@@ -186,7 +240,7 @@ export function filterCompactedMessages(msgs: Iterable<WithParts>) {
   return result
 }
 
-function messageTokens(messages: WithParts[]) {
+function messageTokens(messages: WithParts[], ratio: number) {
   const details: ContextUsageData["details"]["messages"] = {
     userText: 0,
     assistantText: 0,
@@ -206,39 +260,39 @@ function messageTokens(messages: WithParts[]) {
         case "text": {
           if (part.ignored || part.synthetic) continue
           text.push(part.text)
-          const tokens = estimate(part.text)
+          const tokens = estimate(part.text, ratio)
           if (msg.info.role === "user") details.userText += tokens
           else if (msg.info.role === "assistant" && msg.info.summary === true) details.compactionSummary += tokens
           else details.assistantText += tokens
           break
         }
         case "reasoning":
-          details.reasoning += estimate(part.text)
+          details.reasoning += estimate(part.text, ratio)
           break
         case "tool": {
           toolNames.add(part.tool)
-          details.toolCalls += estimate(part.state.input)
+          details.toolCalls += estimate(part.state.input, ratio)
           if (part.state.status === "completed") {
             const loaded = part.tool === "read" ? part.state.metadata?.loaded : undefined
             if (Array.isArray(loaded)) {
               for (const item of loaded) if (typeof item === "string") loadedInstructionPaths.add(item)
             }
             details.toolResults += part.state.time.compacted
-              ? estimate("[Old tool result content cleared]")
-              : estimate(part.state.output)
+              ? estimate("[Old tool result content cleared]", ratio)
+              : estimate(part.state.output, ratio)
             for (const attachment of part.state.attachments ?? []) {
-              details.attachments += estimateFileToken(attachment.url, attachment.mime)
+              details.attachments += estimateFileToken(attachment.url, attachment.mime, ratio)
             }
           }
-          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw)
-          if (part.state.status === "error") details.toolResults += estimate(part.state.error)
+          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw, ratio)
+          if (part.state.status === "error") details.toolResults += estimate(part.state.error, ratio)
           break
         }
         case "file":
-          details.attachments += estimateFileToken(part.url, part.mime)
+          details.attachments += estimateFileToken(part.url, part.mime, ratio)
           break
         case "subtask":
-          details.userText += estimate(`${part.prompt}\n${part.description}`)
+          details.userText += estimate(`${part.prompt}\n${part.description}`, ratio)
           break
       }
     }
@@ -647,13 +701,14 @@ async function toolDefinitionTokens(
   skills: Array<{ name: string; description: string; path: string }>,
   lastUser: Message | undefined,
   modelInfo: ReturnType<typeof currentModel>,
+  ratio: number,
 ) {
   const definitions = baseToolDefinitions(input, modelInfo, lastUser)
   const byName = new Map(definitions.map((item) => [item.name, item.text]))
   return activeToolNames(definitions, lastUser)
     .map((name) => ({
       name,
-      tokens: estimate([byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n")),
+      tokens: estimate([byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n"), ratio),
     }))
     .toSorted((a, b) => a.name.localeCompare(b.name))
 }
@@ -811,39 +866,97 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const modelInfo = currentModel(input, lastUser)
   const maxTokens = modelInfo.model?.limit.context ?? 0
 
-  const msg = messageTokens(compacted)
+  // 从历史 step-finish 校准输入侧 chars-per-token 比值
+  const ratio = computeInputRatio(raw)
+
+  // 从历史 step-finish 取最近一次 daemon 记录的真实组件字符数
+  const bd = latestBreakdown(raw)
+
+  // 消息部分始终用 TUI 实时迭代（messages 内容随每轮变化）
+  const msg = messageTokens(compacted, ratio)
   const usage = usageTotals(raw)
-  const instructions = await gatherInstructionFiles(input)
-  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
-  const messageText = msg.text.join("\n")
-  const loadedInstructions = [] as Array<{ path: string; tokens: number }>
-  for (const filepath of msg.loadedInstructionPaths) {
-    if (messageText.includes(`Instructions from: ${filepath}`)) continue
-    const content = await readText(filepath)
-    if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`) })
+
+  // ── 各组件 token 估算 ──
+  let envTokens: number
+  let instructionTokens: number
+  let loadedInstructionTokens = 0
+  let skillTokens: number
+  let toolDefTokens: number
+  let inputMessageTokens: number
+  let outputMessageTokens: number
+  let instructionDetails: Array<{ path: string; tokens: number }>
+  let loadedInstructions: Array<{ path: string; tokens: number }> = []
+  let skillDetails: Array<{ name: string; tokens: number; path: string }>
+  let toolDefs: Array<{ name: string; tokens: number }>
+
+  if (bd) {
+    // Daemon 的 breakdown 直接给出各组件字符数，除以校准 ratio 即得准确 token 估算
+    envTokens = Math.round(bd.system / ratio)
+    instructionTokens = Math.round(bd.instructions / ratio)
+    skillTokens = Math.round(bd.skills / ratio)
+    toolDefTokens = Math.round(bd.tools / ratio)
+
+    // 消息子组件也使用 daemon 的真实 char 数（而非 TUI 自行从 parts 估算）
+    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput + bd.messages.attachments) / ratio)
+    outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)
+
+    // detail 列表仍需文件内容（用于展示），但 token 用 breakdown 等比分配
+    const instructions = await gatherInstructionFiles(input)
+    const instructionCharsTotal = instructions.reduce((s, i) => s + i.content.length, 0)
+    instructionDetails = instructions.map((item) => ({
+      path: item.path,
+      tokens: instructionCharsTotal > 0
+        ? Math.round((item.content.length / instructionCharsTotal) * instructionTokens)
+        : 0,
+    }))
+
+    const skills = await gatherSkills(input)
+    skillDetails = skills.map((skill) => ({
+      name: skill.name,
+      path: skill.path,
+      tokens: skills.length > 0 ? Math.round(skillTokens / skills.length) : 0,
+    }))
+
+    const rawToolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, ratio)
+    const rawToolCharsTotal = rawToolDefs.reduce((s, t) => s + t.tokens * ratio, 0)
+    toolDefs = rawToolDefs.map((t) => ({
+      name: t.name,
+      tokens: rawToolCharsTotal > 0
+        ? Math.round((t.tokens * ratio / rawToolCharsTotal) * toolDefTokens)
+        : t.tokens,
+    }))
+  } else {
+    // 降级路径：TUI 自行重建（无历史 breakdown 时，如 session 第一轮）
+    const instructions = await gatherInstructionFiles(input)
+    instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
+    const messageText = msg.text.join("\n")
+    for (const filepath of msg.loadedInstructionPaths) {
+      if (messageText.includes(`Instructions from: ${filepath}`)) continue
+      const content = await readText(filepath)
+      if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
+    }
+    const skills = await gatherSkills(input)
+    const skillListing = systemSkillsSection(skillInfo(skills))
+    skillTokens = estimate(skillListing, ratio)
+    skillDetails = skills.map((skill) => ({
+      name: skill.name,
+      path: skill.path,
+      tokens: estimate(systemSkillsSection(skillInfo([skill])), ratio),
+    }))
+    toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, ratio)
+    const systemText = [
+      baseSystemPrompt(input, lastUser, modelInfo.model),
+      environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
+      lastUser?.role === "user" ? lastUser.system : undefined,
+    ].filter(Boolean).join("\n")
+    envTokens = estimate(systemText, ratio)
+    instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+    loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
+    toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+    inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
+    outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
   }
 
-  const skills = await gatherSkills(input)
-  const skillListing = systemSkillsSection(skillInfo(skills))
-  const skillTokens = estimate(skillListing)
-  const skillDetails = skills.map((skill) => ({
-    name: skill.name,
-    path: skill.path,
-    tokens: estimate(systemSkillsSection(skillInfo([skill]))),
-  }))
-  const toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo)
-  const systemText = [
-    baseSystemPrompt(input, lastUser, modelInfo.model),
-    environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
-    lastUser?.role === "user" ? lastUser.system : undefined,
-  ].filter(Boolean).join("\n")
-  const envTokens = estimate(systemText)
-  const instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
-  const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
-  const toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-  const inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
-  const outputMessageTokens =
-    msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
   const messageTotal = inputMessageTokens + outputMessageTokens
   const window = windowDetails(input, modelInfo.model)
   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
@@ -875,7 +988,17 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
       loadedInstructions,
       skills: skillDetails,
       toolDefs,
-      messages: msg.details,
+      messages: bd
+        ? {
+            userText: Math.round(bd.messages.userText / ratio),
+            assistantText: Math.round(bd.messages.assistantText / ratio),
+            reasoning: Math.round(bd.messages.reasoning / ratio),
+            toolCalls: Math.round(bd.messages.toolInput / ratio),
+            toolResults: Math.round(bd.messages.toolOutput / ratio),
+            attachments: Math.round(bd.messages.attachments / ratio),
+            compactionSummary: 0,
+          }
+        : msg.details,
       usage,
       window,
     },

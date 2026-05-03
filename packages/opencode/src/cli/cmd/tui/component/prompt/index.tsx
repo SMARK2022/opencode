@@ -30,7 +30,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
-import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
 import { formatDuration, formatDurationCompact } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
@@ -256,6 +256,7 @@ export function Prompt(props: PromptProps) {
 
     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
     const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+    const ratio = charsPerTokenFromHistory(msg, getParts)
 
     // Add streaming estimates from the last (potentially in-flight) message of current request
     const last = requestAssistants.at(-1)!
@@ -265,7 +266,7 @@ export function Prompt(props: PromptProps) {
       output: currentOutput,
       totalInput,
       totalOutput,
-    } = computeFinalTokens(last, lastParts, requestConfirmed)
+    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
     const requestTokens = currentInput + currentOutput
     const actualTotalTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput

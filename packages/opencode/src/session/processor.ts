@@ -31,6 +31,8 @@ export type Event = LLM.Event
 
 export interface Handle {
   readonly message: MessageV2.Assistant
+  inputChars: number | undefined
+  inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
@@ -73,6 +75,8 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
+  inputChars: number | undefined
+  inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
 }
 
 type StreamEvent = Event
@@ -124,6 +128,8 @@ export const layer: Layer.Layer<
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        inputChars: undefined,
+        inputBreakdown: undefined,
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -400,6 +406,8 @@ export const layer: Layer.Layer<
               type: "step-finish",
               tokens: usage.tokens,
               cost: usage.cost,
+              inputChars: ctx.inputChars,
+              inputBreakdown: ctx.inputBreakdown,
             })
             yield* session.updateMessage(ctx.assistantMessage)
             const reqUsage1 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
@@ -637,6 +645,18 @@ export const layer: Layer.Layer<
       return {
         get message() {
           return ctx.assistantMessage
+        },
+        get inputChars() {
+          return ctx.inputChars
+        },
+        set inputChars(value: number | undefined) {
+          ctx.inputChars = value
+        },
+        get inputBreakdown() {
+          return ctx.inputBreakdown
+        },
+        set inputBreakdown(value: MessageV2.StepFinishPart["inputBreakdown"]) {
+          ctx.inputBreakdown = value
         },
         updateToolCall,
         completeToolCall,
