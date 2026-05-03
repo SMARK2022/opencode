@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -19,7 +20,7 @@ import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
 import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
-import { HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
@@ -204,17 +205,29 @@ const layer = Layer.effect(
       schema: S,
       loginOrigin: string,
     ) {
+      // 状态与瞬态重试留给 HttpClient；代理只换本次运输，认证拒绝不能被手写重试。
       const response = yield* HttpClient.filterStatusOk(withTransientReadRetry(http))
         .execute(
           HttpClientRequest.get(url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers ?? {})),
         )
         .pipe(
+          // 只覆盖远程配置这次运输，复用原 HttpClient 的请求头、重试与取消 signal。
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            Object.assign(
+              (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+                NetworkProxy.routedFetch(input, { ...init, purpose: "infrastructure" }),
+              // 沿 ModelsDev 的局部接缝保留 Bun preconnect，避免用类型断言伪造 fetch 接口。
+              { preconnect: fetch.preconnect },
+            ),
+          ),
           Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
         )
+      // 响应正文保留 Effect 读取错误与作用域取消，不能改成脱离请求作用域的 Promise。
       const body = yield* response.text.pipe(
         Effect.catch((error) => Effect.die(new Error(`failed to read remote config from ${url}: ${String(error)}`))),
       )
-      // An auth proxy can answer with an HTML login page at HTTP 200 (passes filterStatusOk); treat it as a re-auth error, not a decode failure.
+      // 认证代理可能以 HTTP 200 返回 HTML 登录页；沿原契约报重新认证，不能误归为 JSON 解码失败。
       const contentType = (response.headers["content-type"] ?? "").toLowerCase()
       if (contentType.includes("html") || /^\s*<!doctype|^\s*<html/i.test(body)) {
         return yield* Effect.die(new RemoteAuthError({ url: loginOrigin, remote: url }))

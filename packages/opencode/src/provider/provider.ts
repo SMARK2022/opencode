@@ -34,6 +34,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
+// 总超时约束握手后的整个请求，不能靠连续首包或分块活动无限续期。
+const DEFAULT_TIMEOUT_MS = 300_000
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -111,7 +113,9 @@ function timeoutFetch(options: Record<string, any>) {
     if (opts.signal) signals.push(opts.signal)
     if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
     if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
-    if (timeout !== undefined && timeout !== null && timeout !== false) signals.push(AbortSignal.timeout(timeout))
+    // 总期限加入既有取消链，显式 false 仍关闭此期限；路由恢复必须保留同一组合信号。
+    if (timeout !== false)
+      signals.push(AbortSignal.timeout(typeof timeout === "number" ? timeout : DEFAULT_TIMEOUT_MS))
 
     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
     if (combined) opts.signal = combined

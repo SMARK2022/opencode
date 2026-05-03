@@ -1,4 +1,5 @@
 import { Server } from "@/server/server"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { InstanceRuntime } from "@/project/instance-runtime"
 import { Rpc } from "@/util/rpc"
 import { upgrade } from "@/cli/upgrade"
@@ -103,6 +104,8 @@ if (!isDaemon) Rpc.listen(rpc)
 
 // 线程入口不创建第二个 HTTP listener，也不安装 daemon 的 idle 退出回调。
 if (isDaemon) {
+  // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
+  NetworkProxy.installGlobalFetch()
   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
   let internalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
 

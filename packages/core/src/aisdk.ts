@@ -87,8 +87,9 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
     const signals = [
       opts.signal,
       typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined,
-      options.timeout !== undefined && options.timeout !== null && options.timeout !== false
-        ? AbortSignal.timeout(options.timeout)
+      // 沿 SDK 原 options 合并顺序补总期限，false 不添信号，连续 SSE 活动不能延长请求。
+      options.timeout !== false
+        ? AbortSignal.timeout(typeof options.timeout === "number" ? options.timeout : 300_000)
         : undefined,
     ].filter((item): item is AbortSignal | AbortController => Boolean(item))
     const chunkAbortCtl = signals.find((item): item is AbortController => item instanceof AbortController)

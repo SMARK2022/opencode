@@ -5,12 +5,17 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
 
 export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 
-const TTL = 120_000
+// 系统代理缓存缩至十五秒，代理应用重启后不长期沿用失效端口。
+const TTL = 15_000
 // URL 会将 mapped IPv4 规范为十六进制 IPv6，两种表示都必须保持回环直连。
 const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1"])
 
 // 共享探测 Promise 防止并发请求各自拉起 reg/scutil 子进程。
 let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
+// 记录本模块包装函数的身份，后来替换的全局自定义 fetch 不能被误解包。
+let globalFetchInstalled: FetchFn | undefined
+// 显式路由复用安装前的运输函数，不能再次进入全局代理包装。
+let savedOriginal: FetchFn | undefined
 
 type SystemProxy = {
   http?: string
@@ -143,9 +148,11 @@ async function macProxy(): Promise<SystemProxy | undefined> {
   return { http, https, socks, bypass: [] }
 }
 
-async function currentSystemProxy() {
+// 失败后的刷新必须绕过缓存，否则会再次选择同一失效代理。
+async function currentSystemProxy(refresh = false) {
   // Linux 的代理来源是 env，不能为它执行 Windows/macOS 系统探测。
   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
+  if (refresh) cache = undefined
   if (!cache || cache.expires < Date.now()) {
     // 探测失败也缓存本轮结果，避免短时系统错误让每个请求重复 spawn。
     cache = {
@@ -156,12 +163,12 @@ async function currentSystemProxy() {
   return cache.value
 }
 
-async function configuredProxy(url: URL) {
+async function configuredProxy(url: URL, refresh = false) {
   // 桌面平台以系统设置为准，shell 的旧代理不应覆盖代理工具当前的开关。
   if (process.platform === "win32" || process.platform === "darwin") {
-    const sys = await currentSystemProxy()
-    // 系统 bypass 与代理必须来自同一次快照，防止混用切换前后的规则。
-    if (!sys || bypass(url, sys.bypass)) return
+    const sys = await currentSystemProxy(refresh)
+    // 系统代理与其 bypass 保持同一快照，叠加用户 NO_PROXY 以对齐实际运输。
+    if (!sys || bypass(url, [...sys.bypass, ...(process.env.NO_PROXY || process.env.no_proxy || "").split(",")])) return
     return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
   }
   const env = envProxy(url)
@@ -170,12 +177,12 @@ async function configuredProxy(url: URL) {
 }
 
 // 回环在系统探测之前直连，健康检查不承担探测耗时或受外部 bypass 配置影响。
-export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
+export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
   const url = input instanceof URL ? input : new URL(input)
   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
-  const proxy = await configuredProxy(url)
-  if (proxy) return { type: "proxy", proxy, reason: "system" }
-  return { type: "direct", reason: "no-proxy" }
+  const proxy = await configuredProxy(url, refresh)
+  if (proxy) return { type: "proxy", proxy, reason: refresh ? "system-refresh" : "system" }
+  return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
 }
 
 // 明确 routed 入口可用于 CLI/测试，不能要求调用方先安装全局 fetch 才能应用代理。
@@ -186,23 +193,66 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
 // provider 的自定义 fetch 可能负责鉴权，必须在原 transport 上加路由而非换成裸 fetch。
 export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : input.toString())
-  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
-  const route = await resolveProxyRoute(url, purpose)
-  // 无代理时保持一次原请求，不为普通直连失败引入第二次 provider 调用。
-  if (route.type === "direct") return fetchFn(input, rest)
+  // 只解开本模块安装的全局入口；调用方传入的自定义 fetch 保持原运输职责。
+  const original = savedOriginal && fetchFn === globalFetchInstalled ? savedOriginal : fetchFn
+  // Request 自带取消信号也须参与失败判断，显式 init.signal 仍优先。
+  const { purpose = "unknown", signal = input instanceof Request ? input.signal : undefined, ...rest } = (init ?? {}) as RoutedInit
+  // 提供者与安装请求首次刷新，避免仍在 TTL 内的旧代理拖延交互。
+  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
+  // 路由探测期间也可能取消；开始网络运输前须结算同一个信号。
+  signal?.throwIfAborted()
+  // 恢复运输仍沿原取消信号，不能通过改写用户代理环境制造直连。
+  const direct = () => original(input, { ...rest, signal })
+  const proxy = (value: string) => original(input, { ...rest, signal, proxy: value })
+
+  // 无代理失败只允许重新发现新代理，不能再次发送相同直连请求。
+  if (route.type === "direct") {
+    try {
+      return await direct()
+    } catch (error) {
+      // 取消是请求终点，保留首次错误对象，不能转成代理重发。
+      if (signal?.aborted) throw error
+      const refreshed = await resolveProxyRoute(url, purpose, true)
+      // 刷新等待期间的取消同样禁止第二次运输。
+      if (signal?.aborted) throw error
+      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
+      throw error
+    }
+  }
+
   try {
-    return await fetchFn(input, { ...rest, proxy: route.proxy })
+    return await proxy(route.proxy)
   } catch (error) {
     // 代理不可用可尝试原直连，但两路都失败时保留最初代理错误以便诊断。
-    return fetchFn(input, rest).catch(() => {
-      throw error
-    })
+    // provider 的组合信号包含调用方取消与超时，不能去掉信号或换一个窗口。
+    if (signal?.aborted) throw error
+    const refreshed = await resolveProxyRoute(url, purpose, true)
+    // 取消可能发生在系统代理探测中，继续回退前须再次检查。
+    if (signal?.aborted) throw error
+    if (refreshed.type === "proxy" && refreshed.proxy !== route.proxy) {
+      return proxy(refreshed.proxy).catch(() => { throw error })
+    }
+    // 环境代理仍未变化时，裸 fetch 会重进同一代理；终止恢复并保留首次错误。
+    if (process.platform !== "win32" && process.platform !== "darwin" && refreshed.type === "proxy") throw error
+    return direct().catch(() => { throw error })
   }
+}
+
+// 插件直接使用全局 fetch 时也共享路由；显式用途不得被默认用途覆盖。
+export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
+  if (globalFetchInstalled) return
+  const original = globalThis.fetch.bind(globalThis) as FetchFn
+  savedOriginal = original
+  globalFetchInstalled = (input: FetchInput, init?: RoutedInit) =>
+    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })
+  // 局部 Fetch 适配复用 Bun 的 preconnect，安装全局包装不能丢掉这个运输成员。
+  globalThis.fetch = Object.assign(globalFetchInstalled, { preconnect: globalThis.fetch.preconnect })
 }
 
 export async function npmProxyOptions(registry: string) {
   // registry 与安装请求共用用途，避免 ping 走代理而 Arborist 下载仍走旧 shell 路径。
-  const route = await resolveProxyRoute(registry, "npm")
+  // npm 子进程不共享 fetch 包装，每次安装前须读取当前代理设置。
+  const route = await resolveProxyRoute(registry, "npm", true)
   if (route.type === "direct") return {}
   return {
     // npm config 的扁平与连字符字段都需运输，不能只给原生 fetch 的 proxy 键。
