@@ -109,7 +109,9 @@ export const make = <A, E = never>(
     Effect.gen(function* () {
       if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)
       yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
-      yield* Fiber.interrupt(shell.fiber)
+      // 取消通知先发出，再等原 shell 保存输出与工具终态，queued loop 不能读到运行中的旧快照。
+      // 中断等待在 ref 的串行更新之外，replacement work 可进入；终态发布仍跳过普通阻塞 listener。
+      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.asVoid)
     })
 
   const ensureRunning = (work: Effect.Effect<A, E>) =>
@@ -175,8 +177,9 @@ export const make = <A, E = never>(
       case "Running":
         return [
           Effect.gen(function* () {
-            yield* Fiber.interrupt(st.run.fiber)
-            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
+            // 原 work 的退出 owner 提交后才释放结果；先 fail done 会让调用方返回未中止的快照。
+            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.asVoid)
+            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
             yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,

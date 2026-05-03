@@ -7,6 +7,7 @@ import { asSchema, type ModelMessage, type Tool } from "ai"
 import { Cause, Effect, FiberSet, Queue } from "effect"
 import * as Stream from "effect/Stream"
 import { FetchHttpClient } from "effect/unstable/http"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import {
   LLMRequest,
   Tool as NativeTool,
@@ -140,7 +141,14 @@ export function stream(input: StreamInput): StreamResult {
   return {
     ...current,
     body: { system: advertised.system, messages: advertised.messages, tools: advertised.tools, providerOptions: advertised.providerOptions },
-    stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
+    stream: fetch ? stream.pipe(Stream.provideService(
+      FetchHttpClient.Fetch,
+      Object.assign(
+        (value: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => NetworkProxy.fetchWithRoute(fetch, value, { ...init, purpose: "provider" }),
+        // OAuth fetch 仍负责鉴权；局部 reference 取代默认 transport，不能再绕过代理或改写信号。
+        { preconnect: fetch.preconnect },
+      ),
+    )) : stream,
   }
 }
 

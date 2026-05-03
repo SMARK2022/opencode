@@ -1,116 +1,82 @@
-import { describe, expect, beforeAll, beforeEach, afterAll } from "bun:test"
+import { describe, expect, beforeEach, afterAll, spyOn } from "bun:test"
 import { Effect, Layer, Ref } from "effect"
-import { HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
-import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { it } from "./lib/effect"
 import { readFile, rm, writeFile, utimes, mkdir } from "fs/promises"
 import path from "path"
 
-// test/preload.ts pins OPENCODE_MODELS_PATH to a fixture so other tests can
-// resolve providers without network. These tests need to drive the on-disk
-// cache themselves and silence the eager refresh fork. Save/restore around
-// the suite — never leak the mutation to subsequent test files in the same
-// bun process.
-const ORIGINAL_MODELS_PATH = Flag.OPENCODE_MODELS_PATH
-const ORIGINAL_DISABLE_FETCH = Flag.OPENCODE_DISABLE_MODELS_FETCH
-beforeAll(() => {
-  Flag.OPENCODE_MODELS_PATH = undefined
-  Flag.OPENCODE_DISABLE_MODELS_FETCH = true
-})
-afterAll(() => {
-  Flag.OPENCODE_MODELS_PATH = ORIGINAL_MODELS_PATH
-  Flag.OPENCODE_DISABLE_MODELS_FETCH = ORIGINAL_DISABLE_FETCH
-})
-
+// 清空 preload 指定路径后，磁盘读取与原子回写必须验证同一个 production cache 文件。
 const cacheFile = path.join(Global.Path.cache, "models.json")
 
-const fixture: Record<string, ModelsDev.Provider> = {
-  acme: {
-    id: "acme",
-    name: "Acme",
-    env: ["ACME_API_KEY"],
-    models: {
-      "acme-1": {
-        id: "acme-1",
-        name: "Acme One",
-        release_date: "2026-01-01",
-        attachment: false,
-        reasoning: false,
-        temperature: true,
-        tool_call: true,
-        limit: { context: 128000, output: 8192 },
-      },
-    },
-  },
+const fixture = {
+  acme: { id: "acme", name: "Acme", env: [] as string[], models: {} as Record<string, never> },
+}
+const fixture2 = {
+  acme: { id: "acme", name: "Acme Updated", env: [] as string[], models: {} as Record<string, never> },
 }
 
-const fixture2: Record<string, ModelsDev.Provider> = {
-  beta: {
-    id: "beta",
-    name: "Beta",
-    env: ["BETA_API_KEY"],
-    models: {
-      "beta-1": {
-        id: "beta-1",
-        name: "Beta One",
-        release_date: "2026-02-01",
-        attachment: false,
-        reasoning: true,
-        temperature: false,
-        tool_call: false,
-        limit: { context: 64000, output: 4096 },
-      },
-    },
-  },
-}
-
-interface MockState {
+type MockState = {
   body: string
   status: number
   calls: Array<{ url: string; userAgent: string | null }>
 }
 
-const makeMockClient = (state: Ref.Ref<MockState>) =>
-  HttpClient.make((request) =>
-    Effect.gen(function* () {
-      yield* Ref.update(state, (s) => ({
-        ...s,
-        calls: [...s.calls, { url: request.url, userAgent: request.headers["user-agent"] ?? null }],
-      }))
-      const s = yield* Ref.get(state)
-      return HttpClientResponse.fromWeb(request, new Response(s.body, { status: s.status }))
+// 拦真实 routed transport 而非全局 fetch，后续代理包装不能让测试漏到外网。
+const installRoutedFetchMock = (state: Ref.Ref<MockState>) =>
+  Effect.sync(() =>
+    spyOn(NetworkProxy, "routedFetch").mockImplementation(async (input: Request | string | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+      const headers = new Headers(init?.headers)
+      const userAgent = headers.get("user-agent")
+      await Effect.runPromise(
+        Ref.update(state, (s) => ({
+          ...s,
+          calls: [...s.calls, { url, userAgent }],
+        })),
+      )
+      const s = await Effect.runPromise(Ref.get(state))
+      return new Response(s.body, { status: s.status })
     }),
   )
 
-const buildLayer = (state: Ref.Ref<MockState>) =>
-  // Layer.fresh is required because the ModelsDev implementation is a module-level Layer constant,
-  // and Effect.provide uses a process-global MemoMap by default — without fresh,
-  // every test would reuse the cachedInvalidateWithTTL state from the first run.
-  Layer.fresh(
-    AppNodeBuilder.build(ModelsDev.node, [
-      [LayerNodePlatform.httpClient, Layer.succeed(HttpClient.HttpClient, makeMockClient(state))],
-    ]),
-  )
+// 每例使用新 layer memo，避免上例的 cachedGet 掩盖本例的磁盘或网络行为。
+const buildLayer = () => Layer.fresh(AppNodeBuilder.build(ModelsDev.node, []))
 
 const writeCacheText = (text: string, mtimeMs?: number) =>
   Effect.promise(async () => {
-    await mkdir(Global.Path.cache, { recursive: true })
+    await mkdir(path.dirname(cacheFile), { recursive: true })
     await writeFile(cacheFile, text)
-    if (mtimeMs !== undefined) {
-      const t = mtimeMs / 1000
-      await utimes(cacheFile, t, t)
-    }
+    if (mtimeMs !== undefined) await utimes(cacheFile, mtimeMs / 1000, mtimeMs / 1000)
   })
 
-const writeCache = (data: object, mtimeMs?: number) => writeCacheText(JSON.stringify(data), mtimeMs)
+const writeCache = (data: unknown, mtimeMs?: number) => writeCacheText(JSON.stringify(data), mtimeMs)
 
+// fixture flags 与 transport 必须覆盖 layer 生命周期，不能在请求 fork 尚未退出时提前 restore。
 const provided = <A, E>(state: Ref.Ref<MockState>, eff: Effect.Effect<A, E, ModelsDev.Service>) =>
-  eff.pipe(Effect.provide(buildLayer(state)))
+  Effect.acquireUseRelease(
+    Effect.gen(function* () {
+      const prevPath = Flag.OPENCODE_MODELS_PATH
+      const prevDisable = Flag.OPENCODE_DISABLE_MODELS_FETCH
+      // 在禁用 fetch 时先建 layer，再打开显式 get，后台刷新不会与用例争抢缓存锁。
+      Flag.OPENCODE_MODELS_PATH = undefined
+      Flag.OPENCODE_DISABLE_MODELS_FETCH = true
+      const spy = yield* installRoutedFetchMock(state)
+      const context = yield* Layer.build(buildLayer())
+      Flag.OPENCODE_DISABLE_MODELS_FETCH = false
+      return { prevPath, prevDisable, spy, context }
+    }),
+    (env) => eff.pipe(Effect.provide(env.context)),
+    (env) =>
+      Effect.sync(() => {
+        env.spy.mockRestore()
+        Flag.OPENCODE_MODELS_PATH = env.prevPath
+        Flag.OPENCODE_DISABLE_MODELS_FETCH = env.prevDisable
+      }),
+  ).pipe(Effect.scoped)
 
 beforeEach(async () => {
   await rm(cacheFile, { force: true })
@@ -131,10 +97,7 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       yield* writeCache(fixture)
       const state = yield* Ref.make(initialState)
-      const result = yield* provided(
-        state,
-        ModelsDev.Service.use((s) => s.get()),
-      )
+      const result = yield* provided(state, ModelsDev.Service.use((s) => s.get()))
       expect(result).toEqual(fixture)
       const final = yield* Ref.get(state)
       expect(final.calls).toEqual([])
@@ -144,9 +107,22 @@ describe("ModelsDev Service", () => {
   it.live("get() returns empty catalog when disk empty, fetch disabled, and no bundled snapshot is injected", () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(initialState)
-      const result = yield* provided(
-        state,
-        ModelsDev.Service.use((s) => s.get()),
+      const result = yield* Effect.acquireUseRelease(
+        Effect.gen(function* () {
+          const prevPath = Flag.OPENCODE_MODELS_PATH
+          const prevDisable = Flag.OPENCODE_DISABLE_MODELS_FETCH
+          Flag.OPENCODE_MODELS_PATH = undefined
+          Flag.OPENCODE_DISABLE_MODELS_FETCH = true
+          const spy = yield* installRoutedFetchMock(state)
+          return { prevPath, prevDisable, spy }
+        }),
+        () => ModelsDev.Service.use((s) => s.get()).pipe(Effect.provide(buildLayer())),
+        (env) =>
+          Effect.sync(() => {
+            env.spy.mockRestore()
+            Flag.OPENCODE_MODELS_PATH = env.prevPath
+            Flag.OPENCODE_DISABLE_MODELS_FETCH = env.prevDisable
+          }),
       )
       expect(result).toEqual({})
       const final = yield* Ref.get(state)
@@ -158,17 +134,7 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       yield* writeCacheText("{")
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
-      const context = yield* Layer.build(buildLayer(state))
-      const result = yield* Effect.acquireUseRelease(
-        Effect.sync(() => {
-          Flag.OPENCODE_DISABLE_MODELS_FETCH = false
-        }),
-        () => ModelsDev.Service.use((s) => s.get()).pipe(Effect.provide(context)),
-        () =>
-          Effect.sync(() => {
-            Flag.OPENCODE_DISABLE_MODELS_FETCH = true
-          }),
-      )
+      const result = yield* provided(state, ModelsDev.Service.use((s) => s.get()))
       expect(result).toEqual(fixture2)
       expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe(JSON.stringify(fixture2))
       const final = yield* Ref.get(state)
@@ -176,9 +142,9 @@ describe("ModelsDev Service", () => {
     }),
   )
 
+  // 缺盘并发才真正经过 transport；每个 get 都独立 fetch 会被调用数断言捕获。
   it.live("get() is single-flight under concurrent calls", () =>
     Effect.gen(function* () {
-      yield* writeCache(fixture)
       const state = yield* Ref.make(initialState)
       const results = yield* provided(
         state,
@@ -190,9 +156,11 @@ describe("ModelsDev Service", () => {
         }),
       )
       for (const result of results) expect(result).toEqual(fixture)
+      expect((yield* Ref.get(state)).calls.length).toBe(1)
     }),
   )
 
+  // 同一 service 内改磁盘不能改变 cachedGet；每次重建 layer 会让这个缓存契约失去意义。
   it.live("get() caches across calls (later disk writes are ignored until invalidate)", () =>
     Effect.gen(function* () {
       yield* writeCache(fixture)
@@ -213,7 +181,8 @@ describe("ModelsDev Service", () => {
     }),
   )
 
-  it.live("refresh(true) fetches via HttpClient and updates the cache", () =>
+  // 强刷既要替换缓存文件又要 invalidate 内存，否则随后 get 仍会隐藏网络的新结果。
+  it.live("refresh(true) fetches via routed fetch and updates the cache", () =>
     Effect.gen(function* () {
       yield* writeCache(fixture)
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
@@ -231,28 +200,26 @@ describe("ModelsDev Service", () => {
       expect(result.after).toEqual(fixture2)
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBe(1)
+      // URL 和 User-Agent 均来自真实 HttpClient 请求，证明 transport override 没丢请求身份。
       expect(final.calls[0].url).toContain("/api.json")
       expect(final.calls[0].userAgent).toContain("/cli")
+      expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe(JSON.stringify(fixture2))
     }),
   )
 
   it.live("refresh(false) skips fetch when on-disk file is fresh", () =>
     Effect.gen(function* () {
-      // Fresh: mtime within the 5-minute TTL.
       yield* writeCache(fixture, Date.now() - 1000)
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
-      yield* provided(
-        state,
-        ModelsDev.Service.use((s) => s.refresh(false)),
-      )
+      yield* provided(state, ModelsDev.Service.use((s) => s.refresh(false)))
       const final = yield* Ref.get(state)
       expect(final.calls).toEqual([])
     }),
   )
 
+  // 陈旧缓存必须触发真实 routed transport 的 spy，单测不能只从已保存文件得到期望结果。
   it.live("refresh(false) fetches when on-disk file is stale", () =>
     Effect.gen(function* () {
-      // Stale: mtime 10 minutes ago, beyond the 5-minute TTL.
       yield* writeCache(fixture, Date.now() - 10 * 60 * 1000)
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
       const after = yield* provided(
@@ -263,12 +230,13 @@ describe("ModelsDev Service", () => {
           return yield* svc.get()
         }),
       )
+      expect(after).toEqual(fixture2)
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBe(1)
-      expect(after).toEqual(fixture2)
     }),
   )
 
+  // 重试耗尽也不能破坏旧缓存，refresh 的 best-effort 契约同时包含内存和磁盘。
   it.live("refresh swallows HTTP errors and leaves cache intact", () =>
     Effect.gen(function* () {
       yield* writeCache(fixture)
@@ -282,9 +250,10 @@ describe("ModelsDev Service", () => {
         }),
       )
       expect(result).toEqual(fixture)
-      // retryTransient retries 5xx, so calls may be > 1.
+      // 固定 500 必须走原 transient 策略的两次重试，不能靠 refresh 吞错伪装恢复。
       const final = yield* Ref.get(state)
-      expect(final.calls.length).toBeGreaterThanOrEqual(1)
+      expect(final.calls.length).toBe(3)
+      expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe(JSON.stringify(fixture))
     }),
   )
 })

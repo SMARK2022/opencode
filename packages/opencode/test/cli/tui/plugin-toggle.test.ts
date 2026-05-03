@@ -4,7 +4,7 @@ import path from "path"
 import { pathToFileURL } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
-import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import { createTuiResolvedConfig, waitForTuiPlugins } from "../../fixture/tui-runtime"
 import { TuiConfig } from "../../../src/config/tui"
 
 const { TuiPluginRuntime } = await import("../../../src/plugin/tui/runtime")
@@ -59,6 +59,8 @@ test("toggles plugin runtime state by exported id", async () => {
 
   try {
     await TuiPluginRuntime.init({ api, config })
+    // disabled 也须等 entry 登记完成，缺 marker 只能证明没有激活，不能证明禁用配置被读取。
+    await waitForTuiPlugins()
 
     await expect(fs.readFile(tmp.extra.marker, "utf8")).rejects.toThrow()
     expect(TuiPluginRuntime.list().find((item) => item.id === "demo.toggle")).toEqual({
@@ -140,6 +142,7 @@ test("deactivating plugin pops pushed mode", async () => {
 
   try {
     await TuiPluginRuntime.init({ api, config })
+    await waitForTuiPlugins()
 
     expect(api.mode.current()).toBe("demo.mode")
     expect(popCount).toBe(0)
@@ -203,6 +206,8 @@ test("kv plugin_enabled overrides tui config on startup", async () => {
 
   try {
     await TuiPluginRuntime.init({ api, config })
+    // 等应用 KV 覆盖后的真实激活，避免只观察到 config 的初始 disabled 状态。
+    await waitForTuiPlugins()
 
     await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("on")
     expect(TuiPluginRuntime.list().find((item) => item.id === "demo.startup")).toEqual({

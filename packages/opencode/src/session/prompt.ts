@@ -152,7 +152,63 @@ const layer = Layer.effect(
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
+      // runner 取消会先发布 Idle，必须在释放前冻结旧助手，不能随后 newest-first 选中新运行。
+      const match = yield* sessions.findMessage(
+        sessionID,
+        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
+      ).pipe(Effect.catch(() => Effect.succeed(Option.none())))
       yield* state.cancel(sessionID)
+      // 消息已被删除或 owner 已结算时只结束本次取消；不能扫描其他 pending 助手补位。
+      if (Option.isSome(match)) yield* abortPendingAssistant(sessionID, match.value.info.id).pipe(Effect.ignore)
+    })
+
+    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID, messageID: MessageID) {
+      // 仅重读冻结 ID 的最新快照，processor/ownAssistant 的终态不得被取消前的旧对象覆盖。
+      const match = yield* MessageV2.get({ sessionID, messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.option,
+      )
+      if (Option.isNone(match)) return
+
+      const now = Date.now()
+      const assistant = match.value.info
+      // 真实 owner 若已完成收尾就保留其 error/finish 与账本提交，不做第二次终态写入。
+      if (assistant.role !== "assistant" || assistant.time.completed) return
+      assistant.time.completed = now
+      assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
+      // 用户取消不是 provider finish，准备窗口只保存 AbortedError/completed，不伪造模型结束原因。
+
+      // 只关闭旧消息仍未终态的工具，已成功完成的结果不能因取消被改写成 error。
+      yield* Effect.forEach(
+        match.value.parts,
+        (part) => {
+          if (part.type !== "tool") return Effect.void
+          if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
+          // 重读 parts 保留运行时已提交的 input 与 metadata，不使用取消前的工具快照。
+          // 退出发布沿用同一 durable part 事件，跳过可能阻塞的普通 listener，实时流仍收到终态。
+          return events.publish(SessionV1.Event.PartUpdated, {
+            sessionID,
+            time: now,
+            part: structuredClone({
+              ...part,
+              state: {
+                status: "error",
+                input: part.state.input,
+                error: "Tool execution aborted",
+                metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
+                // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
+                time: {
+                  start: part.state.status === "running" ? part.state.time.start : now,
+                  end: now,
+                },
+              },
+            } satisfies SessionV1.ToolPart),
+          }, { finalizer: true }).pipe(Effect.asVoid, Effect.uninterruptible)
+        },
+        { discard: true },
+      )
+      // 工具先终态，再原子提交助手与 recordAssistant；准备窗口退出也不会留下 running 账本。
+      yield* SessionProcessor.publishAssistant(assistant, events, true).pipe(Effect.uninterruptible)
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {

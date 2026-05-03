@@ -1563,6 +1563,15 @@ it.instance(
       expect(Exit.isSuccess(exitB)).toBe(true)
       if (Exit.isSuccess(exitA) && Exit.isSuccess(exitB)) {
         expect(exitA.value.info.id).toBe(exitB.value.info.id)
+        // 同一 ID 不代表已收尾，两个等待者都必须得到中止错误和完成时间，不能只比较旧快照身份。
+        expect(exitA.value.info.role).toBe("assistant")
+        expect(exitB.value.info.role).toBe("assistant")
+        if (exitA.value.info.role === "assistant" && exitB.value.info.role === "assistant") {
+          expect(exitA.value.info.error?.name).toBe("MessageAbortedError")
+          expect(exitB.value.info.error?.name).toBe("MessageAbortedError")
+          expect(exitA.value.info.time.completed).toBeNumber()
+          expect(exitB.value.info.time.completed).toBeNumber()
+        }
       }
     }),
   { git: true },

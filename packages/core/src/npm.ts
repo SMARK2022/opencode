@@ -1,3 +1,4 @@
+// Arborist 使用自己的网络栈，须明确运输代理配置而不能依赖全局 fetch 包装。
 export * as Npm from "./npm"
 
 import path from "path"
@@ -14,6 +15,7 @@ import { filesystem } from "./effect/app-node-platform"
 import { LayerNode } from "./effect/layer-node"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import { NetworkProxy } from "./network-proxy"
 
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
@@ -90,7 +92,16 @@ const layer = Layer.effect(
         yield* flock.acquire(`npm-install:${input.dir}`)
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
-        const npmOptions = yield* NpmConfig.load(input.dir)
+        const loadedOptions = yield* NpmConfig.load(input.dir)
+        // 保留用户 npm 配置再覆盖本次路由，registry 选源与包下载必须使用同一路径。
+        const npmOptions = {
+          ...loadedOptions,
+          ...(yield* Effect.promise(() => NetworkProxy.npmProxyOptions(String(loadedOptions.registry ?? "https://registry.npmjs.org")))),
+          // npm 自身不做长串重试，安装错误交回插件 loader 的现有重试与报告 owner。
+          fetchRetries: 0,
+          // 下载有独立上限，慢代理不能让后台插件任务永远占有安装锁。
+          fetchTimeout: 10_000,
+        }
         const arborist = new Arborist({
           ...npmOptions,
           path: input.dir,
@@ -264,6 +275,7 @@ export const node = makeGlobalNode({
 
 const { runPromise } = makeRuntime(Service, LayerNode.compile(node))
 
+// 调用仍进入同一个安装 service，代理适配不能绕过已有跨进程 flock 和错误类型。
 export async function install(...args: Parameters<Interface["install"]>) {
   return runPromise((svc) => svc.install(...args))
 }

@@ -4,7 +4,7 @@ import path from "path"
 import { pathToFileURL } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
-import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import { createTuiResolvedConfig, waitForTuiPlugins } from "../../fixture/tui-runtime"
 import { TuiConfig } from "../../../src/config/tui"
 import { Npm } from "@opencode-ai/core/npm"
 
@@ -61,6 +61,8 @@ test("loads npm tui plugin from package ./tui export", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    // npm mock 只替换安装目录，仍等真实入口解析与激活完成后检验 marker。
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("called")
     const hit = TuiPluginRuntime.list().find((item) => item.id === "demo.tui.export")
     expect(hit?.enabled).toBe(true)
@@ -122,6 +124,7 @@ test("does not use npm package exports dot for tui entry", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).rejects.toThrow()
     expect(TuiPluginRuntime.list().some((item) => item.spec === tmp.extra.spec)).toBe(false)
   } finally {
@@ -184,6 +187,8 @@ test("rejects npm tui export that resolves outside plugin directory", async () =
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    // 安全负断言要发生在 resolver 完成后，不能用尚未开始的后台任务证明越界被拒。
+    await waitForTuiPlugins()
     // plugin code never ran
     await expect(fs.readFile(tmp.extra.marker, "utf8")).rejects.toThrow()
     // plugin not listed
@@ -246,6 +251,7 @@ test("rejects npm tui plugin that exports server and tui together", async () => 
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).rejects.toThrow()
     expect(TuiPluginRuntime.list().some((item) => item.spec === tmp.extra.spec)).toBe(false)
   } finally {
@@ -306,6 +312,7 @@ test("does not use npm package main for tui entry", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).rejects.toThrow()
     expect(TuiPluginRuntime.list().some((item) => item.spec === tmp.extra.spec)).toBe(false)
     expect(error).not.toHaveBeenCalled()
@@ -368,6 +375,7 @@ test("does not use directory package main for tui entry", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).rejects.toThrow()
     expect(TuiPluginRuntime.list().some((item) => item.spec === tmp.extra.spec)).toBe(false)
   } finally {
@@ -415,6 +423,7 @@ test("uses directory index fallback for tui when package.json is missing", async
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("called")
     expect(TuiPluginRuntime.list().find((item) => item.id === "demo.dir.index")?.active).toBe(true)
   } finally {
@@ -473,6 +482,7 @@ test("uses npm package name when tui plugin id is omitted", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("called")
     expect(TuiPluginRuntime.list().find((item) => item.spec === tmp.extra.spec)?.id).toBe("acme-plugin")
   } finally {

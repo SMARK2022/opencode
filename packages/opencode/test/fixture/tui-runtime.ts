@@ -1,5 +1,7 @@
 import { spyOn } from "bun:test"
 import path from "path"
+import { Effect } from "effect"
+import { awaitWithTimeout } from "../lib/effect"
 import { resolve, type Info, type Resolved } from "@opencode-ai/tui/config"
 import { TuiConfig } from "../../src/config/tui"
 import { TuiKeybind } from "@opencode-ai/tui/config/keybind"
@@ -53,4 +55,13 @@ export function mockTuiRuntime(dir: string, plugin: PluginSpec[], opts?: { plugi
       delete process.env.OPENCODE_PLUGIN_META_FILE
     },
   }
+}
+
+// 测试断言完整外部状态时等真实任务完成，不能通过 file 特例让生产首屏重新 await。
+export async function waitForTuiPlugins() {
+  const { TuiPluginRuntime } = await import("../../src/plugin/tui/runtime")
+  // deadline 只检出任务卡住，不用固定 sleep 猜测 import/install/init 的耗时。
+  await Effect.runPromise(awaitWithTimeout(
+    Effect.promise(() => TuiPluginRuntime.ready()), "TUI plugins did not finish loading", "5 seconds",
+  ))
 }

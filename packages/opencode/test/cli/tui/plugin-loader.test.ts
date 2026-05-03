@@ -6,7 +6,7 @@ import { createTestKeymap } from "@opentui/keymap/testing"
 import type { TuiAttentionSoundPack } from "@opencode-ai/plugin/tui"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
-import { createTuiResolvedConfig, mockTuiRuntime } from "../../fixture/tui-runtime"
+import { createTuiResolvedConfig, mockTuiRuntime, waitForTuiPlugins } from "../../fixture/tui-runtime"
 import { Global } from "@opencode-ai/core/global"
 import { TuiConfig } from "../../../src/config/tui"
 import { Filesystem } from "@/util/filesystem"
@@ -533,6 +533,8 @@ export default {
       }),
       config,
     })
+    // marker 与安装主题属于外部任务，init 返回仅说明首屏内置插件就绪。
+    await waitForTuiPlugins()
     const local = await row(tmp.extra.localMarker)
     const global = await row(tmp.extra.globalMarker)
     const invalid = await row(tmp.extra.invalidMarker)
@@ -649,6 +651,7 @@ test("continues loading when a plugin is missing config metadata", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    await waitForTuiPlugins()
     // bad plugin was skipped (no metadata entry)
     await expect(fs.readFile(path.join(tmp.path, "bad.txt"), "utf8")).rejects.toThrow()
     // good plugin loaded fine
@@ -714,6 +717,8 @@ test("does not wait on permanent tui plugin startup failures", async () => {
       }),
     })
 
+    // 必须等加载管线真正结束，空列表或缺 marker 不能被早到的负断言误当永久失败处理正确。
+    await waitForTuiPlugins()
     expect(wait).toHaveBeenCalledTimes(0)
     await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("called")
     expect(TuiPluginRuntime.list().find((item) => item.id === "demo.good.after-bad")?.active).toBe(true)
@@ -797,6 +802,8 @@ export default {
       ],
     })
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config })
+    // 等整个任务后比较顺序，init 首屏返回时间与插件内部延迟不构成顺序证据。
+    await waitForTuiPlugins()
     const lines = (await fs.readFile(tmp.extra.marker, "utf8")).trim().split("\n")
     expect(lines).toEqual(["a-start", "a-end", "b"])
   } finally {
@@ -840,6 +847,7 @@ test("does not bootstrap server plugins while initializing tui plugins", async (
   const mock = mockTuiRuntime(tmp.path, [])
   try {
     await TuiPluginRuntime.init({ api: createTuiPluginApi(), config: mock.config })
+    await waitForTuiPlugins()
     await expect(fs.stat(tmp.extra.marker)).rejects.toThrow()
   } finally {
     await TuiPluginRuntime.dispose()
@@ -966,6 +974,8 @@ test("auto-disposes plugin keymap layers", async () => {
       }),
     })
 
+    // 注册计数在 async init 后才稳定，退出前必须先验证 scope 的正向创建。
+    await waitForTuiPlugins()
     expect(command_add).toBe(1)
     expect(command_drop).toBe(0)
   } finally {
@@ -1014,6 +1024,7 @@ test("plugin keymap proxy preserves real keymap receiver", async () => {
       }),
     })
 
+    await waitForTuiPlugins()
     await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("ok")
     expect(harness.keymap.getData("demo.receiver")).toBe("ok")
   } finally {
@@ -1082,6 +1093,7 @@ test("auto-disposes plugin attention sound packs and resolves sound paths", asyn
       }),
     })
 
+    await waitForTuiPlugins()
     expect(packs).toEqual([
       {
         id: "demo.pack",
@@ -1154,6 +1166,7 @@ test("auto-disposes plugin keymap transformers", async () => {
       }),
     })
 
+    await waitForTuiPlugins()
     expect(add).toBe(4)
     expect(drop).toBe(0)
   } finally {
@@ -1210,6 +1223,7 @@ test("manual onDispose for plugin keymap layers stays idempotent", async () => {
         plugin_origins: [{ spec: tmp.extra.spec, scope: "local", source: path.join(tmp.path, "tui.json") }],
       }),
     })
+    await waitForTuiPlugins()
   } finally {
     await TuiPluginRuntime.dispose()
     expect(command_drop).toBe(1)
@@ -1295,6 +1309,7 @@ test("updates installed theme when plugin metadata changes", async () => {
 
   try {
     await TuiPluginRuntime.init({ api: mkApi(), config: mkConfig() })
+    await waitForTuiPlugins()
     await TuiPluginRuntime.dispose()
     await expect(fs.readFile(tmp.extra.dest, "utf8")).resolves.toContain("#111111")
 
@@ -1316,6 +1331,8 @@ test("updates installed theme when plugin metadata changes", async () => {
     await fs.utimes(tmp.extra.themePath, stamp, stamp)
 
     await TuiPluginRuntime.init({ api: mkApi(), config: mkConfig() })
+    // 二次加载必须完成主题替换再读文件，mtime 改动本身不代表后台任务已结束。
+    await waitForTuiPlugins()
     const text = await fs.readFile(tmp.extra.dest, "utf8")
     expect(text).toContain("#222222")
     expect(text).not.toContain("#111111")
