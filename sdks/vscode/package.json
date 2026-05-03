@@ -51,10 +51,6 @@
         "title": "Show opencode Bridge Log"
       },
       {
-        "command": "opencode.runVscodeTool",
-        "title": "Run VS Code LM Tool"
-      },
-      {
         "command": "opencode.notebookBridgeTools",
         "title": "opencode Notebook Bridge Tools"
       }
