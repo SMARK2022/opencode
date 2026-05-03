@@ -957,9 +957,18 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
   }
 
-  const messageTotal = inputMessageTokens + outputMessageTokens
+  // 从 messages 拆出 tool call input 和 tool result output 作为独立 category
+  const toolCallTokens = bd
+    ? Math.round(bd.messages.toolInput / ratio)
+    : msg.details.toolCalls
+  const toolResultTokens = bd
+    ? Math.round(bd.messages.toolOutput / ratio)
+    : msg.details.toolResults
+  const userMessageTokens = inputMessageTokens - toolResultTokens
+  const assistantMessageTokens = outputMessageTokens - toolCallTokens
   const window = windowDetails(input, modelInfo.model)
-  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
+  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens
+    + userMessageTokens + assistantMessageTokens + toolCallTokens + toolResultTokens
   const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
 
   const categories: ContextCategory[] = [
@@ -967,8 +976,10 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
     { name: "Skills", tokens: skillTokens, color: "success" },
     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
-    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
+    { name: "Input Messages", tokens: userMessageTokens, color: "warning" },
+    { name: "Tool results", tokens: toolResultTokens, color: "warning" },
+    { name: "Output Messages", tokens: assistantMessageTokens, color: "accent" },
+    { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
     ...(window.providerReserve > 0
       ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
