@@ -9,10 +9,12 @@ import * as Stream from "effect/Stream"
 import { FetchHttpClient } from "effect/unstable/http"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import {
+  LLMError,
   LLMRequest,
   Tool as NativeTool,
   ToolFailure,
   ToolRuntime,
+  TransportReason,
   toDefinitions,
   type JsonSchema,
   type LLMEvent,
@@ -77,6 +79,8 @@ export function stream(input: StreamInput): StreamResult {
   const fetch = providerFetch(input)
   const current = statusWithFetch(input, fetch)
   if (current.type === "unsupported") return current
+  // native 沿 V1 SDK 工厂的 provider.options 期限，不把协议正文选项误当运输配置。
+  const timeout = input.provider.options.timeout
 
   // Integration point with @opencode-ai/llm: native-request lowers session data
   // into an LLMRequest, then LLMClient handles route selection and transport.
@@ -113,6 +117,14 @@ export function stream(input: StreamInput): StreamResult {
           // native 与 V2 使用同一 compile 回调，模型默认 system 不得在提前估算时漏掉。
           .stream(advertised, input.onRequestPrepared)
           .pipe(
+            // 固定总期限只包 provider 流，活跃 chunks 不续期，结束后的本地工具等待仍归 settlement。
+            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 300_000).pipe(
+              Effect.andThen(Effect.fail(new LLMError({
+                module: "LLMNativeRuntime",
+                method: "stream",
+                reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
+              }))),
+            )),
             Stream.flatMap((event) =>
               event.type !== "tool-call" || event.providerExecuted
                 ? Stream.make(event)

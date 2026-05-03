@@ -63,7 +63,8 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
+import { TestClock } from "effect/testing"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import PROMPT_DEFAULT from "../src/system-context/prompt/default.txt"
@@ -664,6 +665,74 @@ const verifyPartialFlushOnInterruption = (kind: FragmentKind) =>
   })
 
 describe("SessionRunnerLLM", () => {
+  it.effect("bounds active provider streams by total timeout and respects explicit timeout or false", () =>
+    Effect.gen(function* () {
+      // 后续原用例读取 requests[0]；本用例的模块级捕获须随现有测试 scope 清空。
+      yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
+      const session = yield* SessionV2.Service
+      const runner = yield* SessionRunner.Service
+      for (const timeout of [undefined, 120_000, false] as const) {
+        yield* setup
+        // 使用真实 resolver 的既有 settings 边界，正文同名字段不能变成运输期限。
+        currentModel = yield* SessionRunnerModel.resolve(yield* session.get(sessionID), ModelV2.Info.make({
+          id: ModelV2.ID.make("timed-model"),
+          providerID: ProviderV2.ID.make("fake"),
+          name: "Timed model",
+          api: { type: "aisdk", package: "@ai-sdk/openai", id: ModelV2.ID.make("timed-model"), settings: { timeout } },
+          capabilities: { tools: true, input: ["text"], output: ["text"] },
+          request: { headers: {}, body: { timeout: 1 } },
+          variants: [],
+          time: { released: 0 },
+          cost: [],
+          status: "active",
+          enabled: true,
+          limit: { context: 128_000, output: 32_000 },
+        }))
+        expect(currentModel.route.defaults.http?.body).toHaveProperty("timeout", 1)
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep streaming" }), resume: false })
+        requests.length = 0
+        const waiting = yield* Queue.unbounded<void>()
+        let chunks = 0
+        let stopped = false
+        responseStream = Stream.concat(
+          Stream.fromIterable([LLMEvent.stepStart({ index: 0 }), LLMEvent.textStart({ id: "timed-text" })]),
+          Stream.unfold(0, (index) => Effect.gen(function* () {
+            // 每次推进前等真实 pull 注册，避免虚拟时间越过尚未启动的生产者。
+            yield* Queue.offer(waiting, undefined)
+            yield* Effect.sleep("1 minute")
+            chunks++
+            return [LLMEvent.textDelta({ id: "timed-text", text: "." }), index + 1] as const
+          })),
+        ).pipe(Stream.ensuring(Effect.sync(() => { stopped = true })))
+        const fiber = yield* runner.run({ sessionID, force: true }).pipe(Effect.forkChild)
+        const minutes = timeout === false ? 7 : (timeout ?? 300_000) / 60_000
+        for (let minute = 0; minute < minutes; minute++) {
+          yield* Queue.take(waiting)
+          yield* TestClock.adjust("1 minute")
+        }
+        expect(chunks).toBeGreaterThanOrEqual(minutes - 1)
+        expect(requests).toHaveLength(1)
+        if (timeout === false) {
+          expect(stopped).toBe(false)
+          yield* Fiber.interrupt(fiber)
+          expect(stopped).toBe(true)
+          continue
+        }
+        const exit = yield* Fiber.await(fiber)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isSuccess(exit)) throw new Error("Provider deadline unexpectedly succeeded")
+        expect(Cause.squash(exit.cause)).toMatchObject({ _tag: "LLM.Error", reason: { kind: "timeout" } })
+        expect(stopped).toBe(true)
+        // 到期仍经原 owner 结算失败和已收到的文本，不把 partial 数据当成功 EOF。
+        expect((yield* session.context(sessionID)).findLast((message) => message.type === "assistant")).toMatchObject({
+          finish: "error",
+          error: { message: "Provider request timed out" },
+          content: [expect.objectContaining({ type: "text", text: expect.stringContaining(".") })],
+        })
+      }
+    }),
+  )
+
   it.effect("advertises and executes a globally attached application tool", () =>
     Effect.gen(function* () {
       yield* setup

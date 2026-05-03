@@ -5,6 +5,7 @@ import {
   LLMEvent,
   Message,
   SystemPart,
+  TransportReason,
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
@@ -382,6 +383,16 @@ const layer = Layer.effect(
             ).pipe(FiberSet.run(toolFibers))
           }),
         ),
+        // 对整个消费 Effect 计一次总期限，不能用会被 chunks 重置的 Stream.timeout。
+        (effect) => model.timeout === false ? effect : Effect.timeoutOrElse(effect, {
+          duration: model.timeout ?? 300_000,
+          // 只创建本次到期的运输错误；原 provider cause 与既有 flush/助手/用量结算保持。
+          orElse: () => Effect.fail(new LLMError({
+            module: "SessionRunner",
+            method: "stream",
+            reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
+          })),
+        }),
         // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
       )

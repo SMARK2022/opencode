@@ -72,7 +72,8 @@ export type Error =
   | Integration.AuthorizationError
 
 export interface Interface {
-  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model; readonly pricing: ModelV2.Info["cost"] }, Error>
+  // 期限仅在 Core resolver/runner 间携带，不进入公开 Model Schema 或 provider JSON。
+  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model & { readonly timeout?: number | false }; readonly pricing: ModelV2.Info["cost"] }, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionRunnerModel") {}
@@ -227,7 +228,15 @@ export const fromCatalogModel = (
 }
 
 export const resolve = (session: SessionSchema.Info, model: ModelV2.Info, credential?: Credential.Value) =>
-  withVariant(model, session.model?.variant).pipe(Effect.flatMap((model) => fromCatalogModel(model, credential)))
+  withVariant(model, session.model?.variant).pipe(
+    Effect.flatMap((model) => fromCatalogModel(model, credential).pipe(
+      Effect.map((resolved) => {
+        // V1 lowerer 已把运输 timeout 放入 api.settings；request.body 保持独立协议语义。
+        const timeout = model.api.settings?.timeout
+        return Object.assign(resolved, { timeout: timeout === false || typeof timeout === "number" ? timeout : undefined } as const)
+      }),
+    )),
+  )
 
 export const supported = (model: ModelV2.Info) =>
   model.api.type === "aisdk" &&

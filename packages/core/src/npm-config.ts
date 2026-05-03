@@ -31,7 +31,8 @@ async function pingRegistry(registry: string) {
     const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
       purpose: "npm",
       method: "GET",
-      signal: AbortSignal.timeout(1500),
+      // 三秒覆盖整个路由请求，代理失败不能另开超时窗口拖延安装。
+      signal: AbortSignal.timeout(3000),
     })
     return response.ok
   } catch {
@@ -39,13 +40,12 @@ async function pingRegistry(registry: string) {
   }
 }
 
-// 先验证官方源再尝试镜像，两者都不可用时仍交给 npm 的正常错误路径报告失败。
+// 并行只缩短等待，仍按候选顺序选择，避免镜像抢先返回改变默认优先级。
 async function selectRegistry() {
   const candidates = [defaultRegistry, mirrorRegistry]
-  for (const candidate of candidates) {
-    if (await pingRegistry(candidate)) return candidate
-  }
-  return defaultRegistry
+  const results = await Promise.all(candidates.map(async (c) => ({ registry: c, ok: await pingRegistry(c) })))
+  const first = results.find((r) => r.ok)
+  return first?.registry ?? defaultRegistry
 }
 
 // 共享选源 Promise 可合并并发安装的探测，而过期后必须允许网络切换重新选择。
