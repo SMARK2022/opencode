@@ -16,6 +16,7 @@ import {
   alwaysSeparate,
   toolDisplay,
 } from "../../../src/routes/session"
+import { layoutGroups } from "../../../src/util/layout"
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
 
@@ -83,9 +84,10 @@ function UserMessage() {
 function Fixture(props: { errorExpanded?: boolean; before?: "shell" | "user" }) {
   return (
     <box flexDirection="column" width={72}>
-      <box flexDirection="column">
-        {props.before === "shell" && <ShellOutput />}
-        {props.before === "user" && <UserMessage />}
+      {props.before === "shell" && <ShellOutput />}
+      {props.before === "user" && <UserMessage />}
+      {/* 用户和工具分属不同消息，沿用旧快照才能捕获新增分组吞掉边界空行。 */}
+      <box flexDirection="column" flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
         <For each={tools}>
           {(item) => (
             <InlineToolRow

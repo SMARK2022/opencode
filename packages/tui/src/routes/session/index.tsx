@@ -78,7 +78,7 @@ import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
 import { sessionEpilogue } from "../../util/presentation"
-import { setPreLayoutSiblingMargin } from "../../util/layout"
+import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
 import { useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
 import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
@@ -1477,8 +1477,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const childShortcut = useCommandShortcut("session.child.first")
   const backgroundShortcut = useCommandShortcut("session.background")
 
+  // 消息导航只匹配滚动容器直接子节点的 ID；整条助手消息共用锚点，保留内部各分块的间距。
   return (
-    <>
+    <box id={props.message.id} flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
       <For each={props.parts}>
         {(part, index) => {
           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
@@ -1559,7 +1560,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           </box>
         </Match>
       </Switch>
-    </>
+    </box>
   )
 }
 
@@ -1574,6 +1575,7 @@ const INLINE_TOOL_ICON_WIDTH = 2
 function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
   const { theme } = useTheme()
   const ctx = use()
+  const renderer = useRenderer()
   // Collapsed by default in hide mode: a single line throughout, so the
   // layout never shifts. Click to open the full markdown block, click to close.
   const [expanded, setExpanded] = createSignal(false)
@@ -1594,6 +1596,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   const summary = createMemo(() => reasoningSummary(content()))
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
 
+  // 选区只拦截鼠标入口；共享 toggle 保留模式与加密判断，键盘切换思考模式不应受残留选区影响。
   const toggle = () => {
     if (!inMinimal() || opaque()) return
     setExpanded((prev) => !prev)
@@ -1607,17 +1610,42 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         marginTop={1}
         flexDirection="column"
         flexShrink={0}
+        onMouseUp={() => {
+          // 拖选推理内容时保留展开状态，让外层应用复制选区，避免重排正文打断复制。
+          if (renderer.getSelection()?.getSelectedText()) return
+          toggle()
+        }}
       >
-        <box onMouseUp={toggle}>
+        <box>
           <ReasoningHeader
             toggleable={inMinimal() && !opaque()}
             open={!inMinimal() || expanded()}
             done={isDone()}
             title={summary().title}
+            characters={opaque() ? undefined : content().length}
             duration={isDone() ? Locale.duration(duration()) : undefined}
             encrypted={opaque()}
           />
         </box>
+        {/* 折叠推理：保留 5 行预览，避免 hide 模式只剩标题不可窥 */}
+        <Show when={inMinimal() && !expanded() && content()}>
+          <box paddingLeft={2} marginTop={1}>
+            {/* 用 content() 而非 summary().body：summary 可能只剩标题体为空 */}
+            <code
+              filetype="markdown"
+              drawUnstyledText={false}
+              streaming={true}
+              syntaxStyle={syntax()}
+              content={content().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
+              conceal={ctx.conceal()}
+              fg={theme.textMuted}
+            />
+            {/* 超出预览行时提示可展开；点击由外层推理区统一处理 */}
+            <Show when={content().split(String.fromCharCode(10)).length > 5}>
+              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
+            </Show>
+          </box>
+        </Show>
         <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
           <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
             <code
@@ -1641,6 +1669,7 @@ function ReasoningHeader(props: {
   open: boolean
   done: boolean
   title: string | null
+  characters?: number
   duration?: string
   encrypted?: boolean
 }) {
@@ -1649,9 +1678,11 @@ function ReasoningHeader(props: {
     props.open
       ? RGBA.fromValues(theme.warning.r, theme.warning.g, theme.warning.b, theme.thinkingOpacity)
       : theme.warning
+  // 统计清理后全文，不受预览或摘要截断影响；加密块不传此值，标题不推测密文长度。
+  const characters = () => (props.characters === undefined ? "" : `${props.characters.toLocaleString()} chars`)
   const completed = () => {
     if (props.encrypted) return `Thought${props.duration ? ` · ${props.duration}` : ""}`
-    const detail = [props.title, props.duration].filter(Boolean).join(" · ")
+    const detail = [props.title, characters(), props.duration].filter(Boolean).join(" · ")
     return `${props.toggleable ? (props.open ? "- " : "+ ") : ""}Thought${detail ? `: ${detail}` : ""}`
   }
 
@@ -1659,7 +1690,9 @@ function ReasoningHeader(props: {
     <Switch>
       <Match when={!props.done}>
         <box flexDirection="row">
-          <Spinner color={fg()}>{props.title ? "Thinking: " + props.title : "Thinking"}</Spinner>
+          <Spinner color={fg()}>
+            {[props.title ? "Thinking: " + props.title : "Thinking", characters()].filter(Boolean).join(" · ")}
+          </Spinner>
         </box>
       </Match>
       <Match when={true}>
