@@ -32,6 +32,15 @@ import { ModelID, ProviderID } from "./schema"
 
 const log = Log.create({ service: "provider" })
 const DEFAULT_TIMEOUT_MS = 300_000
+const SDK_DEFAULT_API_URL: Record<string, string> = {
+  "@ai-sdk/anthropic": "https://api.anthropic.com/v1",
+  "@ai-sdk/google": "https://generativelanguage.googleapis.com/v1beta",
+  "@ai-sdk/openai": "https://api.openai.com/v1",
+}
+
+function apiUrl(input: { npm?: string; api?: string }) {
+  return input.api ?? (input.npm ? SDK_DEFAULT_API_URL[input.npm] : undefined) ?? ""
+}
 
 function shouldUseCopilotResponsesApi(modelID: string): boolean {
   const match = /^gpt-(\d+)/.exec(modelID)
@@ -1014,6 +1023,7 @@ function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
 }
 
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
+  const npm = model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"
   const base: Model = {
     id: ModelID.make(model.id),
     providerID: ProviderID.make(provider.id),
@@ -1021,8 +1031,8 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     family: model.family,
     api: {
       id: model.id,
-      url: model.provider?.api ?? provider.api ?? "",
-      npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
+      url: apiUrl({ npm, api: model.provider?.api ?? provider.api }),
+      npm,
     },
     status: model.status ?? "active",
     headers: {},
@@ -1210,7 +1220,10 @@ const layer: Layer.Layer<
                 ...model.api,
                 // If new provider specifies npm/api, use them
                 npm: provider.npm ?? model.api.npm,
-                url: provider.api ?? model.api.url,
+                url: apiUrl({
+                  npm: provider.npm ?? model.api.npm,
+                  api: provider.api ?? model.api.url,
+                }),
               },
             }
           }
@@ -1246,7 +1259,10 @@ const layer: Layer.Layer<
               api: {
                 id: apiID,
                 npm: apiNpm,
-                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[lookupProviderID]?.api ?? "",
+                url: apiUrl({
+                  npm: apiNpm,
+                  api: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[lookupProviderID]?.api,
+                }),
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,
