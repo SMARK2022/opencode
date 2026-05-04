@@ -1,6 +1,6 @@
 // run 只经原生命令执行给定文档的保留格，响应复用 output 的同一捕获与导出边界。
 import vscode from "vscode"
-import { isRecord, stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
+import { stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
 import {
   c1,
   copilotLikeCellId,
@@ -15,8 +15,8 @@ import { captureNotebookCellOutput, serializeNotebookOutputItem } from "./output
 
 /**
  * 通过 notebook.cell.execute 串行执行保留格，文档 URI 和半开 ranges 明确传给原生命令。
- * filePath 保留可省略契约；单格主定位参数为 cellId 或 target.cellId。
- * target.type 为 all | range | cell，只有省略 type 才默认 cell；range 为零基 [start,end)。
+ * filePath 与 cellId 必填；可选 endCellId 指定包含两端的范围，不接受 all 或数字索引。
+ * 顶层 type 可省略或为 cell | range；endCellId 是范围信号，不依赖 type 决定范围。
  * 每格观察超时默认为 300000 毫秒；超时停止后续格，但不取消正在运行的内核。
  * 首个原生失败停止后续执行，未执行格标为 skipped；历史输出标为 stale。
  * completed 表示等待边界，不补成 execution.status 的成功证据。
@@ -24,15 +24,19 @@ import { captureNotebookCellOutput, serializeNotebookOutputItem } from "./output
  * summary 与 data 共享捕获值，并保留完整 artifactURI/artifactPath。
  */
 export async function runNotebook(input: Record<string, unknown>) {
-  // 文档和范围先绑定到局部变量，所有 await 之后仍使用这一组目标。
-  const notebook = await resolveNotebook(stringProp(input, "filePath"))
-  const target = isRecord(input.target) ? input.target : {}
+  const filePath = stringProp(input, "filePath")
+  if (!filePath) throw new Error("filePath is required")
+  const type = input.type
+  // 显式非字符串、null 或未知类型仍按原严格边界拒绝，不能被 stringProp 隐去。
+  if (type !== undefined && type !== "cell" && type !== "range") throw new Error(`Invalid run type: ${String(type)}. Expected one of: cell, range.`)
+  const cellId = stringProp(input, "cellId")
+  if (!cellId) throw new Error("cellId is required")
+  const notebook = await resolveNotebook(filePath)
   // UI 等待前按共享 resolver 固定格对象，不能在每次执行时按漂移索引重新选格。
-  const cells = resolveRunTarget(notebook, target, stringProp(input, "cellId"))
+  const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
   const positions = cells.map((cell) => cell.index)
   // await 前保留目标格对象；其它格的源码或输出变化不应阻止本次执行。
   // showNotebookDocument 为官方 URI 解析提供已打开的编辑器，不把焦点当身份。
-  // 空 all/range 仍可打开文档，不能访问不存在的 cells[0] 制造另一种目标。
   const editor = await vscode.window.showNotebookDocument(notebook, {
     selections: cells.map((cell) => new vscode.NotebookRange(cell.index, cell.index + 1)),
   })
@@ -73,11 +77,11 @@ export async function runNotebook(input: Record<string, unknown>) {
 
     // 提交前注册等待器，快速执行的完成事件不能落在命令 await 与订阅之间。
     const wait = waitForSingleCell(notebook, cell, timeoutMs)
-    let completed: boolean
+    let executionSummary: vscode.NotebookCellExecutionSummary | undefined
     try {
       // 每格仍显式传文档 URI 和半开范围，UI 聚焦只能辅助显示，不能成为执行身份。
       await vscode.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cell.index, end: cell.index + 1 }], document: notebook.uri, autoReveal: false })
-      completed = await wait.promise
+      executionSummary = await wait.promise
       // 等待器因目标失效唤醒时仍由原身份守卫报错，不把它降级成超时结果。
       if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target)) throw new Error("Notebook target cells changed during execution")
     } finally {
@@ -85,23 +89,23 @@ export async function runNotebook(input: Record<string, unknown>) {
       wait.dispose()
     }
 
-    if (!completed) {
+    if (!executionSummary) {
       // 观察超时不能继续提交下一格；它也不证明当前内核执行已被取消。
       stopped = true
-    } else {
-      // 停止判定沿原生 success 派生状态，不解析 exec 文案或借用保存的 error MIME。
-      const exec = executionState(cell)
-      if (exec.status === "failed") {
-        stopped = true
-        failedIndex = cell.index
-      }
+      failedIndex = cell.index
+    } else if (executionSummary.success === false) {
+      stopped = true
+      failedIndex = cell.index
     }
 
     // 每次执行结算后先同步捕获字节与状态，文件 I/O 不能把第二次输出贴到这一格的结果上。
-    results.push(await compactRunCell(notebook, cell, captureNotebookCellOutput(notebook, cell)))
+    const result = await compactRunCell(notebook, cell, captureNotebookCellOutput(notebook, cell))
+    // 超时文案只改展示字段，原生执行状态及已捕获输出不能补成成功或取消。
+    if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
+    results.push(result)
   }
 
-  const targetDesc = describeRunTarget(cells, notebook.cellCount)
+  const targetDesc = describeRunTarget(cells)
   return await compactRunResult(notebook, targetDesc, !stopped, cells, results, failedIndex)
 }
 
@@ -132,31 +136,19 @@ async function compactRunResult(notebook: vscode.NotebookDocument, target: strin
   }
 }
 
-function resolveRunTarget(
-  notebook: vscode.NotebookDocument,
-  target: Record<string, unknown>,
-  cellId?: string,
-): vscode.NotebookCell[] {
-  // 延续 notebookRange 的严格 type 契约，显式非字符串或拼错类型不能降级执行首格。
-  const type = target.type === undefined ? "cell" : target.type
-
-  if (type === "all") return notebook.getCells().slice()
-
-  if (type === "range") {
-    const start = Math.max(0, numberProp(target, "start") ?? 0)
-    const end = Math.min(notebook.cellCount, numberProp(target, "end") ?? start + 1)
-    // 数字范围仍是零基排他终点，与面板 end+1 的转换只衔接一次。
-    return notebook.getCells().slice(start, Math.max(start + 1, end))
-  }
-
-  if (type !== "cell") throw new Error(`Invalid notebook target type: ${String(type)}`)
-  // 顶层与 target.cellId 沿源参数优先级交给同一个 resolver，不另设前缀匹配器。
-  const resolved = resolveNotebookCell(notebook, undefined, cellId ?? stringProp(target, "cellId"))
-  return [resolved]
+function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {
+  // 两端都经完整别名解析器定位，同格的不同 ID 写法仍只选择同一格。
+  const startCell = resolveNotebookCell(notebook, undefined, cellId)
+  // endCellId 才是范围信号，省略它时即使提示 type=range 也沿源规则执行单格。
+  if (!endCellId) return [startCell]
+  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
+  // 逆序直接拒绝，不能让空 slice 被当作一次成功执行。
+  if (endCell.index < startCell.index) throw new Error("endCellId must refer to the same cell or a later cell than cellId")
+  return notebook.getCells().slice(startCell.index, endCell.index + 1)
 }
 
-function describeRunTarget(cells: vscode.NotebookCell[], cellCount: number) {
-  if (cells.length === cellCount) return "all"
+function describeRunTarget(cells: vscode.NotebookCell[]) {
+  // 覆盖全本的 ID 范围仍报告 range，不能重新引入已删除的 all 目标。
   if (cells.length === 1) return `cell ${c1(cells[0])}`
   const indices = cells.map((c) => c1(c))
   return `range ${indices[0]}-${indices[indices.length - 1]}`
@@ -223,11 +215,11 @@ function waitForSingleCell(
   let subscription: vscode.Disposable | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   // 目标失效交由命令结算后守卫抛错，避免命令 pending 时产生悬空拒绝。
-  const promise = new Promise<boolean>((resolve) => {
+  const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
     timer = setTimeout(() => {
-      // 超时 dispose 后返回 false 只表示观察期限结束，不宣称已中断内核。
+      // 超时只结束摘要观察，不证明内核取消，也不能把旧结果标成这次完成。
       subscription?.dispose()
-      resolve(false)
+      resolve(undefined)
     }, timeoutMs)
     subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
       // 工作区事件来自所有 notebook，必须先匹配完整 URI 再检查本请求的格范围。
@@ -235,7 +227,7 @@ function waitForSingleCell(
       if (!valid()) {
         clearTimeout(timer)
         subscription?.dispose()
-        resolve(false)
+        resolve(undefined)
         return
       }
       if (event.notebook.version <= version) return
@@ -245,16 +237,13 @@ function waitForSingleCell(
         // 摘要字段只在执行摘要变更时提供，输出事件不能借用 cell 的历史摘要。
         const summary = change.executionSummary
         if (!summary) continue
-        const timing = summary.timing
-        // success 与 timing 都可省略；未知成败只接受有限且有序的结束时序。
-        if (
-          typeof summary.success !== "boolean" &&
-          (!timing || !Number.isFinite(timing.startTime) || !Number.isFinite(timing.endTime) || timing.endTime < timing.startTime)
-        ) continue
+        // 时间戳不能证明执行成败，未知结果继续等待，不能推进后续代码格。
+        if (typeof summary.success !== "boolean") continue
         // 满足条件时同时 clearTimeout 和 dispose，不能让已返回请求继续持有监听器。
         clearTimeout(timer)
         subscription?.dispose()
-        resolve(true)
+        // 保留原生成功或失败摘要，交由串行调用方决定是否继续。
+        resolve(summary)
         return
       }
     })

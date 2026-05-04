@@ -11,7 +11,7 @@ import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./fo
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 /**
- * filePath 保留可省略契约，主定位参数为完整规范化 cellId。
+ * filePath 必填，主定位参数为完整规范化 cellId。
  * offset 默认 1，所选格默认从其全局起点读取；越界时警告并重置到格起点。
  * limit 默认 400，源码长行仍在 2000 字符处标为预览；未编号格头不占正文行预算。
  * 12 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
@@ -19,7 +19,9 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
  */
 export async function notebookSource(input: Record<string, unknown>) {
   // source 复用身份解析接口并独占虚拟行分页，读取源码不能调用 run 模块。
-  const notebook = await resolveNotebook(stringProp(input, "filePath"))
+  const filePath = stringProp(input, "filePath")
+  if (!filePath) throw new Error("filePath is required")
+  const notebook = await resolveNotebook(filePath)
   // limit 与字节预算分别约束正文数量和 UTF-8 输出，400 只作为缺省页大小。
   const limit = Math.max(1, numberProp(input, "limit") ?? 400)
   // 行数预算与字节预算互补，大量空行或短行虽少占字节也不能无限占用提示版面。

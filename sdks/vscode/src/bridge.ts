@@ -10,8 +10,8 @@
  *   POST /notebook/edit        - 通过 WorkspaceEdit 插入、删除、替换内容或替换结构
  *   POST /notebook/output      - 将已有输出按原始字节导出为文件
  *   POST /notebook/cell-output - /notebook/output 的别名，使用相同认证
- *   POST /notebook/env         - 只读元数据及扩展、命令能力快照
- * filePath 仍可省略；提供的路径或 URI 绑定目标文档，不由当前编辑器焦点决定。
+ *   POST /notebook/env         - 实际活动内核与保存的元数据分列报告
+ * 所有 notebook 端点要求 filePath；路径或 URI 绑定目标文档，不由当前编辑器焦点决定。
  * 导出文件响应同时保留 artifactPath 与 artifactURI，包括远程 scheme 和 authority。
  */
 import http from "node:http"
@@ -101,8 +101,8 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
       if (request.method !== "POST" || !NOTEBOOK_ROUTES.has(url.pathname)) return writeJson(response, 404, { ok: false, error: "Not found" })
       // 只解析一次请求体；鉴权先完成，语法错误仍由原 500 边界处理。
       const body = await readJson(request)
-      // 五个严格对象路由及输出别名保留源 400，不能把客户端参数错误当服务器故障。
-      if (url.pathname !== "/notebook/env" && !isRecord(body)) {
+      // env 也需要提交明确路径，非对象请求与其它 notebook 路由共用既有 400 边界。
+      if (!isRecord(body)) {
         return writeJson(response, 400, { ok: false, error: "Expected JSON object body" })
       }
       const result = await routeRequest(request.method ?? "", url.pathname, body, output)
@@ -157,15 +157,20 @@ async function routeRequest(
   if (method !== "POST" || !NOTEBOOK_ROUTES.has(pathname)) return undefined
   // undefined 是未匹配路由的判别值，不能被 HTTP 层序列化成成功的空结果。
 
-  // env 保留源无路径快照契约，非对象 JSON 不得被严格路由的校验误拦截。
-  if (pathname === "/notebook/env") return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
   if (!isRecord(body)) {
     throw new Error("Expected JSON object body")
   }
 
+  const filePath = stringProp(body, "filePath")
+  // 已鉴权路由共享必填路径检查，不能用类型断言把缺失路径送入新的严格接口。
+  if (!filePath) throw new Error("filePath is required")
+
   switch (pathname) {
+    case "/notebook/env":
+      return await notebookEnv(filePath)
+
     case "/notebook/summary":
-      return await notebookSummary(stringProp(body, "filePath"))
+      return await notebookSummary(filePath)
 
     case "/notebook/source":
       return await notebookSource(body)
@@ -179,10 +184,9 @@ async function routeRequest(
     case "/notebook/output":
     case "/notebook/cell-output": {
       // 输出别名复用前置鉴权路径，70 删除 LM 路由不改变其余 notebook 能力。
-      const filePath = typeof body.filePath === "string" ? body.filePath : undefined
       const cellId = typeof body.cellId === "string" ? body.cellId : undefined
       // HTTP 输出契约只传 cellId；数字位置不能覆盖调用方选中的稳定格身份。
-      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
+      output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
       return await readNotebookCellOutput(filePath, undefined, cellId)
     }
 
