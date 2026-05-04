@@ -78,7 +78,8 @@ const layer = Layer.effect(
     }
 
     const projectModel = (model: ModelV2.Info, provider: ProviderV2.Info) => {
-      const api =
+      // 先完成提供者继承再补默认地址，保留自定义提供者的端点优先级。
+      const inherited =
         model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0
           ? { ...provider.api, id: model.api.id }
           : model.api.type === "aisdk" && provider.api.type === "aisdk" && !model.api.url
@@ -86,6 +87,11 @@ const layer = Layer.effect(
             : model.api.type === "aisdk" && provider.api.type === "aisdk"
               ? { ...model.api, settings: { ...provider.api.settings, ...model.api.settings } }
               : model.api
+      // 合并后的 SDK baseURL 保持优先；无效设置仍由 SDK 校验，不能用默认值掩盖配置错误。
+      const api = inherited.type === "aisdk" && inherited.url === undefined &&
+        (inherited.settings?.baseURL === undefined || typeof inherited.settings?.baseURL === "string")
+        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : undefined }) || undefined }
+        : inherited
       const request = {
         headers: { ...provider.request.headers, ...model.request.headers },
         body: { ...provider.request.body, ...model.request.body },

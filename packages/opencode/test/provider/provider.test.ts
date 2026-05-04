@@ -1508,6 +1508,23 @@ test("models.dev normalization fills required response fields", () => {
   expect(model.capabilities.toolcall).toBe(true)
   expect(model.capabilities.interleaved).toEqual({ field: "reasoning_text" })
   expect(model.release_date).toBe("")
+
+  // 调用真实规范化 owner 验证默认地址，原未知包 fixture 继续约束不猜测端点的行为。
+  for (const [npm, url] of [
+    ["@ai-sdk/anthropic", "https://api.anthropic.com/v1"],
+    ["@ai-sdk/google", "https://generativelanguage.googleapis.com/v1beta"],
+    ["@ai-sdk/openai", "https://api.openai.com/v1"],
+  ]) {
+    const parsed = Provider.fromModelsDevProvider({ ...provider, npm }).models["gpt-5.4"]
+    expect(parsed.api.url).toBe(url)
+    expect(parsed.api.npm).toBe(npm)
+    // 显式地址和显式空串都保持原值，补默认不能改写调用者的配置意图。
+    expect(Provider.fromModelsDevProvider({ ...provider, npm, api: "https://custom.example.com/v1" }).models["gpt-5.4"].api.url).toBe("https://custom.example.com/v1")
+    expect(Provider.fromModelsDevProvider({ ...provider, npm, api: "" }).models["gpt-5.4"].api.url).toBe("")
+    // 模型覆盖仍高于提供者地址，固定两者同时存在的用例避免颠倒优先级。
+    const overridden = Provider.fromModelsDevProvider({ ...provider, npm, api: "https://provider.example.com/v1", models: { "gpt-5.4": { ...provider.models["gpt-5.4"], provider: { npm, api: "https://model.example.com/v1" } } } }).models["gpt-5.4"]
+    expect(overridden.api.url).toBe("https://model.example.com/v1")
+  }
 })
 
 test("models.dev reasoning options replace generated variants and unsupported toggles fall back", () => {
