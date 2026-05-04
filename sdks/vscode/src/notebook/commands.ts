@@ -42,7 +42,7 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
       },
       {
         label: "vscode_notebook_run",
-        description: "run one cell, range, or all via native notebook command",
+        description: "run one cell or a cell-id range via native notebook command",
         run: async () => await runNotebookCommand(),
       },
       {
@@ -64,8 +64,8 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
         label: "vscode_notebook_env",
         description: "kernel/environment capability snapshot",
         run: async () => {
-          const notebook = await selectNotebook(false)
-          return await notebookEnv(notebook?.uri.toString())
+          const notebook = await selectNotebook()
+          return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
         },
       },
     ],
@@ -173,32 +173,29 @@ async function runNotebookCommand() {
   const target = await vscode.window.showQuickPick(
     [
       { label: "cell", description: "run one selected cell" },
-      { label: "range", description: "run inclusive zero-based start/end cell range" },
-      { label: "all", description: "run all cells" },
+      { label: "range", description: "run from one selected cell through another selected cell" },
     ],
     { title: "vscode_notebook_run", placeHolder: "Select run target" },
   )
   if (!target) return undefined
 
-  if (target.label === "all") {
-    return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "all" } })
-  }
   if (target.label === "cell") {
     const cell = await pickNotebookCell(notebook, "vscode_notebook_run")
     return cell
-      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellId: copilotLikeCellId(cell) } })
+      ? await runNotebook({ filePath: notebook.uri.toString(), type: "cell", cellId: copilotLikeCellId(cell) })
       : undefined
   }
 
-  const rangeText = await vscode.window.showInputBox({
-    title: "vscode_notebook_run range",
-    prompt: "Enter start,end zero-based indices. End is inclusive in this prompt.",
-    value: "0,0",
-    ignoreFocusOut: true,
+  const startCell = await pickNotebookCell(notebook, "vscode_notebook_run range start")
+  if (!startCell) return undefined
+  const endCell = await pickNotebookCell(notebook, "vscode_notebook_run range end")
+  if (!endCell) return undefined
+  return await runNotebook({
+    filePath: notebook.uri.toString(),
+    type: "range",
+    cellId: copilotLikeCellId(startCell),
+    endCellId: copilotLikeCellId(endCell),
   })
-  if (!rangeText) return undefined
-  const [start, end] = rangeText.split(",").map((value) => Number(value.trim()))
-  return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "range", start, end: end + 1 } })
 }
 
 async function editNotebookCommand() {

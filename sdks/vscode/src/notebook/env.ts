@@ -57,10 +57,10 @@ type SavedMetadata = {
 const PROBE_TIMEOUT_MS = 8_000
 const decoder = new TextDecoder("utf-8")
 
-export async function notebookEnv(filePath?: string) {
-  const notebook = await resolveNotebook(filePath).catch(() => undefined)
-  const activeRuntime = notebook ? await getActiveRuntime(notebook.uri) : null
-  const savedMetadata = notebook ? await readSavedNotebookMetadata(notebook.uri) : null
+export async function notebookEnv(filePath: string) {
+  const notebook = await resolveNotebook(filePath)
+  const activeRuntime = await getActiveRuntime(notebook.uri)
+  const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
 
   return {
     ran: false,
@@ -73,7 +73,7 @@ export async function notebookEnv(filePath?: string) {
       activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
     ].filter(Boolean).join("\n"),
     data: {
-      path: notebook?.uri.fsPath || notebook?.uri.toString(),
+      path: notebook.uri.fsPath || notebook.uri.toString(),
       runtime: activeRuntime,
       saved_metadata: savedMetadata,
       active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),

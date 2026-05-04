@@ -3,13 +3,13 @@
  * `notebook.cell.execute` command, waits for completion, and returns per-cell
  * execution results with artifact-first output.
  *
- * For `range` and `all` targets, cells are executed **sequentially** one-by-one.
+ * For `range` targets, cells are executed **sequentially** one-by-one.
  * Execution stops immediately if any cell fails — remaining cells are skipped.
  *
  * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
  */
 import * as vscode from "vscode"
-import { isRecord, stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
+import { stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
 import {
   c1,
   copilotLikeCellId,
@@ -27,26 +27,33 @@ import { serializeNotebookOutputItem } from "./output"
 
 /**
  * Bridge endpoint handler: runs notebook cells and returns execution results.
- * Accepts `target: { type: "all" | "range" | "cell", cellId?, start?, end? }`.
+ * Accepts `cellId` and optional `endCellId`.
  * Default timeout: 300 000 ms (5 minutes).
  */
 export async function runNotebook(input: Record<string, unknown>) {
-  const notebook = await resolveNotebook(stringProp(input, "filePath"))
+  const filePath = stringProp(input, "filePath")
+  if (!filePath) throw new Error("filePath is required")
+  const type = stringProp(input, "type")
+  if (type !== undefined && type !== "cell" && type !== "range") throw new Error("type must be one of: cell, range")
+  const cellId = stringProp(input, "cellId")
+  if (!cellId) throw new Error("cellId is required")
+
+  const notebook = await resolveNotebook(filePath)
   const commands = await vscode.commands.getCommands(true)
   if (!commands.includes("notebook.cell.execute")) {
     throw new Error("VS Code command notebook.cell.execute is not available")
   }
 
   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
-  const target = isRecord(input.target) ? input.target : {}
 
-  // Resolve target cells via cellId (only stable identifier; no cellIndex in schema)
-  const cells = resolveRunTarget(notebook, target, stringProp(input, "cellId"))
+  // Resolve target cells via stable cell IDs. No cellIndex or "all" mode is accepted.
+  const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
 
   // Open notebook and reveal first cell
   const editor = await vscode.window.showNotebookDocument(notebook, {
     selections: [new vscode.NotebookRange(cells[0].index, cells[0].index + 1)],
   })
+  editor.revealRange(new vscode.NotebookRange(cells[0].index, cells[0].index + 1))
 
   // Execute sequentially, stop on first error
   const results: Array<Awaited<ReturnType<typeof compactRunCell>>> = []
@@ -67,25 +74,29 @@ export async function runNotebook(input: Record<string, unknown>) {
     editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
     editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
 
-    const startedAt = Date.now()
-    await vscode.commands.executeCommand("notebook.cell.execute")
-    const completed = await waitForSingleCell(notebook, cell.index, startedAt, timeoutMs)
-
-    if (!completed) {
-      stopped = true
-    } else {
-      // Check if the cell execution failed
-      const exec = executionText(cell)
-      if (exec.includes("failed")) {
-        stopped = true
-        failedIndex = cell.index
-      }
+    const wait = waitForSingleCell(cell, timeoutMs)
+    let executionSummary: vscode.NotebookCellExecutionSummary | undefined
+    try {
+      await vscode.commands.executeCommand("notebook.cell.execute")
+      executionSummary = await wait.promise
+    } finally {
+      wait.dispose()
     }
 
-    results.push(await compactRunCell(notebook, cell))
+    if (!executionSummary) {
+      stopped = true
+      failedIndex = cell.index
+    } else if (executionSummary.success === false) {
+      stopped = true
+      failedIndex = cell.index
+    }
+
+    const result = await compactRunCell(notebook, cell)
+    if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
+    results.push(result)
   }
 
-  const targetDesc = describeRunTarget(cells, notebook.cellCount)
+  const targetDesc = describeRunTarget(cells)
   return {
     ran: true,
     summary: runSummaryText(notebook, targetDesc, !stopped, results),
@@ -105,28 +116,18 @@ export async function runNotebook(input: Record<string, unknown>) {
 // Target resolution
 // ---------------------------------------------------------------------------
 
-function resolveRunTarget(
-  notebook: vscode.NotebookDocument,
-  target: Record<string, unknown>,
-  cellId?: string,
-): vscode.NotebookCell[] {
-  const type = stringProp(target, "type") ?? "cell"
+function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {
+  const startCell = resolveNotebookCell(notebook, undefined, cellId)
+  if (!endCellId) return [startCell]
 
-  if (type === "all") return notebook.getCells().slice()
-
-  if (type === "range") {
-    const start = Math.max(0, numberProp(target, "start") ?? 0)
-    const end = Math.min(notebook.cellCount, numberProp(target, "end") ?? start + 1)
-    return notebook.getCells().slice(start, Math.max(start + 1, end))
+  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
+  if (endCell.index < startCell.index) {
+    throw new Error("endCellId must refer to the same cell or a later cell than cellId")
   }
-
-  // type === "cell" or missing — resolve by cellId (no cellIndex fallback)
-  const resolved = resolveNotebookCell(notebook, undefined, cellId ?? stringProp(target, "cellId"))
-  return [resolved]
+  return notebook.getCells().slice(startCell.index, endCell.index + 1)
 }
 
-function describeRunTarget(cells: vscode.NotebookCell[], cellCount: number) {
-  if (cells.length === cellCount) return "all"
+function describeRunTarget(cells: vscode.NotebookCell[]) {
   if (cells.length === 1) return `cell ${c1(cells[0])}`
   const indices = cells.map((c) => c1(c))
   return `range ${indices[0]}-${indices[indices.length - 1]}`
@@ -184,36 +185,38 @@ function runSummaryText(
 // ---------------------------------------------------------------------------
 
 /**
- * Waits for a single code cell to finish executing by watching
- * `executionSummary.timing.endTime`. Returns `false` on timeout.
+ * Waits for a single code cell to publish a fresh execution summary.
+ * The waiter is created before invoking `notebook.cell.execute`, matching the
+ * VS Code/Copilot pattern so fast executions are not missed.
  */
-async function waitForSingleCell(
-  notebook: vscode.NotebookDocument,
-  cellIndex: number,
-  startedAt: number,
-  timeoutMs: number,
-) {
-  const cell = notebook.cellAt(cellIndex)
-  if (cell.kind !== vscode.NotebookCellKind.Code) return true
-
-  const done = () => {
-    const timing = cell.executionSummary?.timing
-    return timing?.endTime !== undefined && timing.endTime >= startedAt
-  }
-
-  if (done()) return true
-
-  return await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      subscription.dispose()
-      resolve(false)
+function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
+  let subscription: vscode.Disposable | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
+    timer = setTimeout(() => {
+      subscription?.dispose()
+      resolve(undefined)
     }, timeoutMs)
-    const subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
-      if (event.notebook.uri.toString() !== notebook.uri.toString()) return
-      if (!done()) return
-      clearTimeout(timer)
-      subscription.dispose()
-      resolve(true)
+    subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
+      if (event.notebook.uri.toString() !== cell.notebook.uri.toString()) return
+      for (const change of event.cellChanges) {
+        if (change.cell !== cell || typeof change.executionSummary?.success !== "boolean") continue
+        const summary = change.executionSummary
+        clearTimeout(timer)
+        subscription?.dispose()
+        resolve(summary)
+        return
+      }
     })
   })
+  return {
+    promise,
+    dispose() {
+      if (timer) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      subscription?.dispose()
+    },
+  }
 }

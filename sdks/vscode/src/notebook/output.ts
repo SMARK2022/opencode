@@ -24,7 +24,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
 // ---------------------------------------------------------------------------
 
 /** Bridge endpoint handler: reads and serializes all outputs for a specific cell. */
-export async function readNotebookCellOutput(filePath?: string, cellIndex?: number, cellId?: string) {
+export async function readNotebookCellOutput(filePath: string, cellIndex?: number, cellId?: string) {
   const notebook = await resolveNotebook(filePath)
   const cell = resolveNotebookCell(notebook, cellIndex, cellId)
   return await serializeNotebookCellOutput(notebook, cell)

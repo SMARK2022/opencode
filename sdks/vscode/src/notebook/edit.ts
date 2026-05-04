@@ -28,6 +28,7 @@ import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./fo
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 const EDIT_TYPES = new Set(["insert", "edit", "delete"])
+const EDIT_SYNC_TIMEOUT_MS = 10_000
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -39,7 +40,9 @@ export async function editNotebook(input: Record<string, unknown>) {
   const notebook = await resolveNotebook(filePath)
   const editType = stringProp(input, "editType")
   if (!editType || !EDIT_TYPES.has(editType)) {
-    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Must be one of: insert, edit, delete`)
+    throw new Error(
+      `Invalid editType: ${editType ?? "<missing>"}. Expected one of: insert, edit, delete.`,
+    )
   }
 
   const cellId = stringProp(input, "cellId")
@@ -69,7 +72,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
 
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
-  const applied = await vscode.workspace.applyEdit(edit)
+  const applied = await applyNotebookEditAndWait(notebook, edit)
 
   let shiftedCell: vscode.NotebookCell | undefined
   let shiftedOldIdx: number | undefined
@@ -116,7 +119,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   const newCell = new vscode.NotebookCellData(kind, source, lang)
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
-  const applied = await vscode.workspace.applyEdit(edit)
+  const applied = await applyNotebookEditAndWait(notebook, edit)
   const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
   return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
 }
@@ -154,7 +157,7 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
 
   const edit = new vscode.WorkspaceEdit()
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
-  const applied = await vscode.workspace.applyEdit(edit)
+  const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
 }
 
@@ -193,8 +196,10 @@ async function handleTypeChange(
   const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(targetCell.index, targetCell.index + 1), [newCell])])
-  const applied = await vscode.workspace.applyEdit(edit)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
+  const targetIndex = targetCell.index
+  const applied = await applyNotebookEditAndWait(notebook, edit)
+  const updatedCell = notebook.cellAt(targetIndex)
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +212,7 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
 
   const edit = new vscode.WorkspaceEdit()
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
-  const applied = await vscode.workspace.applyEdit(edit)
+  const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
 }
 
@@ -351,6 +356,58 @@ function stripCodeFence(source: string) {
   return match ? match[1] : source
 }
 
+async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
+  const beforeVersion = notebook.version
+  const applied = await vscode.workspace.applyEdit(edit)
+  if (!applied) throw new Error("VS Code notebook edit was not applied")
+  await waitForNotebookVersionChange(notebook, beforeVersion, EDIT_SYNC_TIMEOUT_MS)
+  return applied
+}
+
+async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.WorkspaceEdit, expectContentChange: boolean) {
+  const beforeVersion = document.version
+  const applied = await vscode.workspace.applyEdit(edit)
+  if (!applied) throw new Error("VS Code text edit was not applied")
+  if (expectContentChange) await waitForTextDocumentVersionChange(document, beforeVersion, EDIT_SYNC_TIMEOUT_MS)
+  return applied
+}
+
+async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, beforeVersion: number, timeoutMs: number) {
+  if (notebook.version !== beforeVersion) return
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
+      if (event.notebook.uri.toString() !== notebook.uri.toString()) return
+      if (event.notebook.version === beforeVersion) return
+      finish()
+    })
+    const finish = (error?: Error) => {
+      if (timer) clearTimeout(timer)
+      subscription.dispose()
+      error ? reject(error) : resolve()
+    }
+    timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code notebook edit events to finish")), timeoutMs)
+  })
+}
+
+async function waitForTextDocumentVersionChange(document: vscode.TextDocument, beforeVersion: number, timeoutMs: number) {
+  if (document.version !== beforeVersion) return
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const subscription = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document.uri.toString() !== document.uri.toString()) return
+      if (event.document.version === beforeVersion) return
+      finish()
+    })
+    const finish = (error?: Error) => {
+      if (timer) clearTimeout(timer)
+      subscription.dispose()
+      error ? reject(error) : resolve()
+    }
+    timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code cell text edit events to finish")), timeoutMs)
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Edit result
 // ---------------------------------------------------------------------------
@@ -418,7 +475,7 @@ function compactEditResult(
     summary: lines.join("\n"),
     data: {
       applied: info.applied,
-      operation: info.editType,
+      editType: info.editType,
       cellCountBefore: info.beforeCount,
       cellCountAfter: info.afterCount,
       anchorCellIndex: info.anchorCell?.index,

@@ -26,7 +26,9 @@ import { resolveNotebook } from "./resolve"
  * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 12 KB.
  */
 export async function notebookSource(input: Record<string, unknown>) {
-  const notebook = await resolveNotebook(stringProp(input, "filePath"))
+  const filePath = stringProp(input, "filePath")
+  if (!filePath) throw new Error("filePath is required")
+  const notebook = await resolveNotebook(filePath)
   const limit = Math.max(1, numberProp(input, "limit") ?? 400)
   const offset = Math.max(1, numberProp(input, "offset") ?? 1)
 

@@ -12,7 +12,7 @@ import { resolveNotebook } from "./resolve"
 // ---------------------------------------------------------------------------
 
 /** Bridge endpoint handler: builds a compact notebook summary for LLM consumption. */
-export async function notebookSummary(filePath?: string) {
+export async function notebookSummary(filePath: string) {
   const notebook = await resolveNotebook(filePath)
   return compactNotebookResult(notebook, false)
 }
