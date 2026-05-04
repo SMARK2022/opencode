@@ -205,15 +205,14 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
 // ---------------------------------------------------------------------------
 
 /**
- * Computes 1-based inclusive physical line ranges for every cell in the virtual document.
- * Headers (`--: ...`) do NOT consume line numbers; only source lines and blank separators do.
+ * Computes 1-based inclusive source line ranges for every cell in the virtual document.
+ * Headers (`--: ...`) and visual separators do NOT consume line numbers.
  *
  * Layout per cell:
  *   --:  header line            (no line number)
  *   N:   source line 0          (numbered)
  *   ...
  *   N+k: source line last       (numbered)
- *   N+k+1: (blank separator)    (numbered)
  *
  * Returns a Map from cell index to `{ start, end }` where both are 1-based inclusive.
  */
@@ -227,7 +226,7 @@ export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
     } else {
       ranges.set(cell.index, { start: next, end: next }) // empty cell — point range
     }
-    next += count + 1 // source lines + blank separator
+    next += Math.max(1, count)
   }
   return ranges
 }

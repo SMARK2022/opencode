@@ -56,7 +56,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
     `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
     `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
     "",
-    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document.`,
+    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
     "",
     'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
     ...cells.map((cell) => {

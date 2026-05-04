@@ -7,10 +7,10 @@
  *   A: <source line 0>                                          (1-based global)
  *   ...
  *   B: <source line last>
- *   B+1: (blank line)
  *
- * Cell headers do NOT consume line numbers. Line ranges in headers are
- * 1-based inclusive. Target a cell with `cellId` (Copilot-style #VSC-xxxxxxxx).
+ * Cell headers and visual separators do NOT consume line numbers. Line ranges
+ * in headers are 1-based inclusive. Target a cell with `cellId`
+ * (Copilot-style #VSC-xxxxxxxx).
  */
 import * as vscode from "vscode"
 import { stringProp, numberProp } from "../util"
@@ -70,7 +70,6 @@ export async function notebookSource(input: Record<string, unknown>) {
   let bytes = 0
   let rendered = 0
   let cut = false
-  let globalLineNum = 0
   let lastRenderedLine = 0
   const outputCells: string[] = []
 
@@ -83,8 +82,6 @@ export async function notebookSource(input: Record<string, unknown>) {
     const srcEnd = Math.min(globalEnd, cellRange.end)
 
     if (srcStart > srcEnd) {
-      // No source lines from this cell in range — skip cell entirely
-      globalLineNum = cellRange.end // advance counter
       continue
     }
 
@@ -104,21 +101,20 @@ export async function notebookSource(input: Record<string, unknown>) {
     rendered++
 
     // Render source lines
-    const sourceLines = cell.document.getText().split(/\r?\n/)
-    for (let i = 0; i < sourceLines.length; i++) {
-      globalLineNum++
+    for (let i = 0; i < cell.document.lineCount; i++) {
+      const globalLineNum = cellRange.start + i
       if (globalLineNum < globalStart) continue
       if (globalLineNum > globalEnd) {
-        globalLineNum = cellRange.end
         break
       }
       if (rendered >= limit) {
         cut = true
         break
       }
-      const src = sourceLines[i].length > 2000
-        ? sourceLines[i].substring(0, 2000) + "... (line truncated to 2000 chars)"
-        : sourceLines[i]
+      const sourceLine = cell.document.lineAt(i).text
+      const src = sourceLine.length > 2000
+        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
+        : sourceLine
       const outLine = `${globalLineNum}: ${src}`
       const outBytes = Buffer.byteLength(outLine, "utf8")
       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
@@ -132,24 +128,9 @@ export async function notebookSource(input: Record<string, unknown>) {
     }
 
     if (cut) break
-
-    // Blank separator
-    globalLineNum++
-    if (globalLineNum >= globalStart && globalLineNum <= globalEnd) {
-      if (rendered < limit) {
-        const blankLine = `${globalLineNum}: `
-        const blBytes = Buffer.byteLength(blankLine, "utf8")
-        if (bytes + blBytes <= maxBytes) {
-          outputCells.push(blankLine)
-          bytes += blBytes
-          rendered++
-          lastRenderedLine = globalLineNum
-        }
-      }
-    }
   }
 
-  if (!cut) lastRenderedLine = Math.min(globalEnd, globalLineNum)
+  if (!cut) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
   const more = lastRenderedLine < globalEnd
 
   let output = warning ? `${warning}\n\n` : ""
@@ -163,8 +144,6 @@ export async function notebookSource(input: Record<string, unknown>) {
     output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
-  } else {
-    output += `\n\n(End of file — total ${totalLines} lines)`
   }
   output += "\n</content>"
 
