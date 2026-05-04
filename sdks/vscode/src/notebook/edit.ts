@@ -3,24 +3,22 @@
  * via the `vscode.WorkspaceEdit` + `vscode.NotebookEdit` API.
  *
  * Three operations via `editType`:
- *   insert – new cell after cellId ("TOP"|"BOTTOM" for edges; default "TOP" if empty)
- *   edit   – TextEdit when language unchanged; full cell replacement when language changes
- *   delete – remove a cell
+ *   insert — new cell after cellId ("TOP"|"BOTTOM" for edges)
+ *   edit   — TextEdit (oldCode/newCode string match); full cell replacement when language changes
+ *   delete — remove a cell
  *
  * Required: filePath, editType, cellId.
- * newCode required for insert and for edit (unless pure type-change).
  * language determines cell kind: "markdown" → Markup; anything else → Code.
  *
- * Edit summary conventions:
- *   Anchor  – target cell; type-change shows old→new; delete shows ~~strikethrough~~
- *   Affected – insert: NEW->cN; delete: c(old)→c(new) shifted cell
- *   Context  – only with range edits, showing surrounding lines
+ * Edit via string matching (like opencode's edit tool):
+ *   oldCode: exact string to find within the target cell
+ *   newCode: replacement string
+ *   Falls back through line-trimmed → boundary-trimmed matching.
+ *   No line numbers — immune to index shift from parallel edits.
  */
 import * as vscode from "vscode"
 import {
-  isRecord,
   stringProp,
-  numberProp,
   sourceProp,
   fullDocumentRange,
   documentEol,
@@ -73,30 +71,18 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
   edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
   const applied = await vscode.workspace.applyEdit(edit)
 
-  // Capture the cell that shifted into the deleted cell's place (if any)
-  let shiftedOldIdx: number | undefined
   let shiftedCell: vscode.NotebookCell | undefined
+  let shiftedOldIdx: number | undefined
   if (hasNext) {
     shiftedOldIdx = deletedIndex + 1
     shiftedCell = notebook.cellAt(deletedIndex)
   }
 
   return compactEditResult(notebook, {
-    applied,
-    editType: "delete",
-    opIndex: `~~${deletedIndex + 1}~~`,
-    beforeCount,
-    afterCount: notebook.cellCount,
-    anchorCell: targetCell,
-    deletedCellIndex: deletedIndex,
-    deletedKind,
-    deletedLang,
-    deletedId,
-    deletedLineCount,
-    deletedFirst,
-    shiftedCell,
-    shiftedOldIdx,
-    sourcePreview: deletedPreview,
+    applied, editType: "delete", opIndex: `~~${deletedIndex + 1}~~`, beforeCount, afterCount: notebook.cellCount,
+    anchorCell: targetCell, deletedCellIndex: deletedIndex,
+    deletedKind, deletedLang, deletedId, deletedLineCount, deletedFirst,
+    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview,
   })
 }
 
@@ -126,8 +112,8 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
     insertIndex = anchorCell.index + 1
   }
 
-  const newCell = new vscode.NotebookCellData(kind, source, lang)
   const shiftedOldIdx = insertIndex < notebook.cellCount ? insertIndex : undefined
+  const newCell = new vscode.NotebookCellData(kind, source, lang)
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
   const applied = await vscode.workspace.applyEdit(edit)
@@ -142,21 +128,26 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
 async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
   const targetCell = resolveNotebookCell(notebook, undefined, cellId)
   const language = stringProp(input, "language")
-  const range = readLineRange(input)
+  const oldCodeRaw = sourceProp(input, "oldCode")
   const typeChange = language !== undefined && language !== targetCell.document.languageId
 
   if (typeChange) {
     const newKind = kindFromLang(language!)
     const oldKind = cellTypeLabel(targetCell.kind)
     const oldLang = targetCell.document.languageId
-    return await handleTypeChange(notebook, targetCell, input, range, newKind, language!, oldKind, oldLang, beforeCount)
+    return await handleTypeChange(notebook, targetCell, input, newKind, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
   }
 
-  // language unchanged → TextEdit only
-  if (range) {
-    return await handleTextEditSource(notebook, targetCell, input, range, beforeCount)
+  // --- TextEdit (no type change) ---
+
+  // string-match edit (oldCode → newCode within cell)
+  if (oldCodeRaw) {
+    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+    if (sourceRaw === undefined) throw new Error("newCode is required with oldCode")
+    return await handleStringEdit(notebook, targetCell, oldCodeRaw, sourceRaw, beforeCount)
   }
 
+  // full cell replace (newCode only, no oldCode)
   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
   if (sourceRaw === undefined) throw new Error("newCode is required for edit")
   const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
@@ -175,28 +166,28 @@ async function handleTypeChange(
   notebook: vscode.NotebookDocument,
   targetCell: vscode.NotebookCell,
   input: Record<string, unknown>,
-  range: { start: number; end: number } | undefined,
   newKind: vscode.NotebookCellKind,
   newLang: string,
   oldKind: string,
   oldLang: string,
+  oldCode: string | undefined,
   beforeCount: number,
 ) {
   let newSource: string
   let contextSummary: string | undefined
 
-  if (range) {
-    const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
-    if (!result) throw new Error("newCode is required for edit with range")
+  const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+
+  if (oldCode) {
+    // string-match on old source, then create new cell with changed type
+    if (sourceRaw === undefined) throw new Error("newCode is required with oldCode")
+    const result = matchAndReplace(targetCell, oldCode, sourceRaw)
     newSource = result.source
-    contextSummary = result.context
+    contextSummary = buildContext(notebook, targetCell, result, sourceRaw)
+  } else if (sourceRaw !== undefined) {
+    newSource = newKind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
   } else {
-    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
-    if (sourceRaw !== undefined) {
-      newSource = newKind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
-    } else {
-      newSource = targetCell.document.getText()
-    }
+    newSource = targetCell.document.getText()
   }
 
   const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
@@ -207,62 +198,144 @@ async function handleTypeChange(
 }
 
 // ---------------------------------------------------------------------------
-// TextEdit — line range (no type change)
+// String-match edit (oldCode → newCode within cell, TextEdit only)
 // ---------------------------------------------------------------------------
 
-async function handleTextEditSource(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, input: Record<string, unknown>, range: { start: number; end: number }, beforeCount: number) {
-  const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
-  if (!result) throw new Error("newCode is required for edit with range")
+async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number) {
+  const result = matchAndReplace(targetCell, oldCode, newCode)
+  const contextSummary = buildContext(notebook, targetCell, result, newCode)
 
   const edit = new vscode.WorkspaceEdit()
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
   const applied = await vscode.workspace.applyEdit(edit)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: result.source, contextSummary: result.context })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
 }
 
 // ---------------------------------------------------------------------------
-// Shared: apply a line range to a cell's source + capture context
+// String matching (openCode-style: exact → line-trimmed → boundary-trimmed)
 // ---------------------------------------------------------------------------
 
-function applyRangeEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, range: { start: number; end: number }, newCode: string | undefined) {
-  if (newCode === undefined) return undefined
+function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCode: string) {
+  const content = targetCell.document.getText()
+  const eol = documentEol(targetCell.document)
+  const normalize = (s: string) => s.replace(/\r\n/g, "\n")
+  const src = normalize(content)
+  const old = normalize(oldCode)
+  const rep = normalize(newCode)
 
-  const vr = computeVirtualRanges(notebook)
-  const cellRange = vr.get(targetCell.index)
-  if (!cellRange) throw new Error(`Cell c${c1(targetCell)} has no virtual range`)
+  let matchIdx = -1
+  let matchLen = 0
+  let strategy = ""
 
-  const globalStart = Math.max(cellRange.start, range.start)
-  const globalEnd = Math.min(cellRange.end, range.end)
-  if (globalStart > globalEnd) {
-    throw new Error(`Global range [${range.start},${range.end}] out of bounds for cell c${c1(targetCell)}`)
+  // 1. Exact match
+  matchIdx = src.indexOf(old)
+  if (matchIdx !== -1) {
+    matchLen = old.length
+    strategy = "exact"
   }
 
-  const localStart = globalStart - cellRange.start + 1
-  const localEnd = globalEnd - cellRange.start + 1
-  const cellLines = targetCell.document.getText().split(/\r?\n/)
+  // 2. Line-trimmed match (trim each line's whitespace)
+  if (matchIdx === -1) {
+    const result = lineTrimmedMatch(src, old)
+    if (result) {
+      matchIdx = result.index
+      matchLen = result.length
+      strategy = "line-trimmed"
+    }
+  }
 
-  const aboveIdx = localStart - 2
-  const belowIdx = localEnd
-  const aboveLine = aboveIdx >= 0 ? cellLines[aboveIdx] : undefined
-  const belowLine = belowIdx < cellLines.length ? cellLines[belowIdx] : undefined
+  // 3. Boundary-trimmed match (trim leading/trailing whitespace from oldCode)
+  if (matchIdx === -1) {
+    const trimmedOld = old.trim()
+    matchIdx = src.indexOf(trimmedOld)
+    if (matchIdx !== -1) {
+      matchLen = trimmedOld.length
+      strategy = "border-trimmed"
+    }
+  }
+
+  if (matchIdx === -1) {
+    throw new Error(`oldCode not found in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`)
+  }
+
+  // Check for duplicates
+  const secondIdx = src.indexOf(old, matchIdx + 1)
+  if (secondIdx !== -1 && strategy === "exact") {
+    throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
+  }
+
+  const source = content.substring(0, matchIdx) + rep + content.substring(matchIdx + matchLen)
+
+  // Compute 1-based (local) line range of the match for context
+  const preMatch = content.substring(0, matchIdx)
+  const preLines = preMatch.split(/\r?\n/)
+  const matchStartLine = preLines.length
+  const matchLines = oldCode.split(/\r?\n/)
+  const matchEndLine = matchStartLine + matchLines.length - 1
+
+  return { source, matchStartLine, matchEndLine, strategy }
+}
+
+function lineTrimmedMatch(src: string, old: string) {
+  const oldLines = old.split("\n")
+  const srcLines = src.split("\n")
+  if (oldLines.length > srcLines.length) return undefined
+
+  for (let i = 0; i <= srcLines.length - oldLines.length; i++) {
+    let matches = true
+    for (let j = 0; j < oldLines.length; j++) {
+      if (srcLines[i + j].trim() !== oldLines[j].trim()) {
+        matches = false
+        break
+      }
+    }
+    if (matches) {
+      // Build the exact substring from source
+      let start = 0
+      for (let k = 0; k < i; k++) start += srcLines[k].length + 1
+      let end = start
+      for (let k = 0; k < oldLines.length; k++) {
+        end += srcLines[i + k].length
+        if (k < oldLines.length - 1) end += 1
+      }
+      return { index: start, length: end - start }
+    }
+  }
+  return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Context builder (surrounding lines for summary)
+// ---------------------------------------------------------------------------
+
+function buildContext(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, result: { matchStartLine: number; matchEndLine: number; strategy: string }, newCode: string) {
+  const cellLines = targetCell.document.getText().split(/\r?\n/)
+  const vr = computeVirtualRanges(notebook)
+  const globalOffset = (vr.get(targetCell.index)?.start ?? 1) - 1
+  const gStart = result.matchStartLine + globalOffset
+  const gEnd = result.matchEndLine + globalOffset
 
   const ctxLines: string[] = []
-  if (aboveLine !== undefined) {
-    ctxLines.push(`${globalStart - 1}: ${aboveLine}`)
+
+  // Above line
+  if (result.matchStartLine > 1) {
+    ctxLines.push(`${gStart - 1}: ${cellLines[result.matchStartLine - 2]}`)
   } else {
     ctxLines.push(`--: <cell_top> --- c${c1(targetCell)} ${cellTypeLabel(targetCell.kind)}/${targetCell.document.languageId}`)
   }
-  const modifiedLabel = globalStart === globalEnd ? `${globalStart}` : `${globalStart}~${globalEnd}`
-  ctxLines.push(`${modifiedLabel}: ${previewText(newCode, 50)}`)
-  if (belowLine !== undefined) {
-    ctxLines.push(`${globalEnd + 1}: ${belowLine}`)
+
+  // Match indicator
+  const label = gStart === gEnd ? `${gStart}` : `${gStart}~${gEnd}`
+  ctxLines.push(`${label} (${result.strategy}): ${previewText(newCode, 50)}`)
+
+  // Below line
+  if (result.matchEndLine < cellLines.length) {
+    ctxLines.push(`${gEnd + 1}: ${cellLines[result.matchEndLine]}`)
   } else {
     ctxLines.push(`--: <cell_end>`)
   }
 
-  const eol = documentEol(targetCell.document)
-  const source = [...cellLines.slice(0, localStart - 1), newCode, ...cellLines.slice(localEnd)].join(eol)
-  return { source, context: ctxLines.join("\n") }
+  return ctxLines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -271,15 +344,6 @@ function applyRangeEdit(notebook: vscode.NotebookDocument, targetCell: vscode.No
 
 function kindFromLang(language?: string) {
   return language === "markdown" ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code
-}
-
-function readLineRange(input: Record<string, unknown>) {
-  const range = input.range
-  if (!isRecord(range)) return undefined
-  const start = numberProp(range, "start")
-  const end = numberProp(range, "end")
-  if (start === undefined || end === undefined) return undefined
-  return { start, end }
 }
 
 function stripCodeFence(source: string) {
@@ -336,11 +400,7 @@ function compactEditResult(
   }
 
   // --- Affected ---
-  if (info.editType === "delete" && info.shiftedCell) {
-    const oldIdx = (info.shiftedOldIdx ?? 0) + 1
-    const newIdx = c1(info.shiftedCell)
-    lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
-  } else if (info.editType === "insert" && info.shiftedCell) {
+  if ((info.editType === "delete" || info.editType === "insert") && info.shiftedCell) {
     const oldIdx = (info.shiftedOldIdx ?? 0) + 1
     const newIdx = c1(info.shiftedCell)
     lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
