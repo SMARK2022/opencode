@@ -230,8 +230,10 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: st
       ? { tools: info.tool_call ?? false, input: info.modalities?.input ?? [], output: info.modalities?.output ?? [] }
       : undefined
   return {
-    // 迁移标记只包含尚未 lowering 的输入，显式 npm 的原路径保持不变。
-    v1: deferred ? { options: info.options, variants: info.variants } : undefined,
+    // 能力开关随未决输入到配置 owner；显式 npm 的 options/variants 仍沿原路径转换。
+    v1: deferred || info.reasoning !== undefined
+      ? { options: deferred ? info.options : undefined, variants: deferred ? info.variants : undefined, reasoning: info.reasoning }
+      : undefined,
     family: info.family,
     name: info.name,
     api: info.provider?.npm

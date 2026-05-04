@@ -88,9 +88,10 @@ const layer = Layer.effect(
               ? { ...model.api, settings: { ...provider.api.settings, ...model.api.settings } }
               : model.api
       // 合并后的 SDK baseURL 保持优先；无效设置仍由 SDK 校验，不能用默认值掩盖配置错误。
+      // 专用缺省只补合并后仍缺失的地址，显式 URL/settings 继续领取 75 的优先级。
       const api = inherited.type === "aisdk" && inherited.url === undefined &&
         (inherited.settings?.baseURL === undefined || typeof inherited.settings?.baseURL === "string")
-        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : undefined }) || undefined }
+        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : ProviderV2.isClaudeCode({ providerID: model.providerID, api: inherited }) ? process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com" : undefined }) || undefined }
         : inherited
       const request = {
         headers: { ...provider.request.headers, ...model.request.headers },

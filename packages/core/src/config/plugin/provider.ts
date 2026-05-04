@@ -101,9 +101,9 @@ export const Plugin = define({
             for (const item of layers) {
               catalog.provider.update(providerID, (provider) => {
                 if (item.name !== undefined) provider.name = item.name
-                // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
-                if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
-                  provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
+                // 未指定协议的直接继承领取父类型的 SDK，部分 URL/settings 不能阻断缺省协议。
+                if ((baseType ?? providerID) === "claudecode" && item.api?.type === undefined && provider.api.type === "native")
+                  provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url, settings: provider.api.settings }
                 // 继承与部分 API 覆盖保留基础 settings；完整非继承配置仍保持上游替换语义。
                 if (item.api !== undefined) {
                   const api = item.api.type === undefined ? provider.api : item.api
@@ -152,6 +152,14 @@ export const Plugin = define({
                 }
               })
             }
+            const claudeCode = providerID === "claudecode" || baseType === "claudecode" ||
+              (copy?.provider.api.type === "aisdk" && copy.provider.api.package === "@ai-sdk/anthropic" && copy.provider.api.settings?.claudeCode === true)
+            catalog.provider.update(providerID, (provider) => {
+              if (provider.api.type !== "aisdk" || provider.api.package !== "@ai-sdk/anthropic") return
+              // 继承证明由此 owner 拥有，普通配置不能靠同名 settings 冒充 ClaudeCode。
+              const settings = Object.fromEntries(Object.entries(provider.api.settings ?? {}).filter(([key]) => key !== "claudeCode"))
+              provider.api.settings = claudeCode ? { ...settings, claudeCode: true } : settings
+            })
             // 模型层保留原顺序；未决转换读取最后显式 model API，否则使用已经定型的默认 API。
             const models = layers.flatMap((layer) => Object.entries(layer.models ?? {}))
             for (const [id, config] of models) {
@@ -174,9 +182,12 @@ export const Plugin = define({
                     : { ...model.api, ...config.api }
                 }
                 // 仅有模型 ID/URL 的配置仍需继承 ClaudeCode 默认协议；显式 type/package 完整保留。
-                if (providerID === "claudecode" && item.api === undefined &&
+                if ((baseType ?? providerID) === "claudecode" && item.api?.type === undefined &&
                   (config.api === undefined || config.api.type === undefined) && model.api.type === "native")
                   model.api = { type: "aisdk", package: "@ai-sdk/anthropic", id: model.api.id, url: model.api.url, settings: model.api.settings }
+                // 模型专用设置也不能伪造继承证明，投影随后合并提供者的已验证标记。
+                if (model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic")
+                  model.api.settings = Object.fromEntries(Object.entries(model.api.settings ?? {}).filter(([key]) => key !== "claudeCode"))
                 if (config.capabilities !== undefined) {
                   model.capabilities = {
                     tools: config.capabilities.tools,
@@ -233,10 +244,39 @@ export const Plugin = define({
                     },
                   }))
                 }
+                // 显式能力跟随原模型层覆盖并参与继承，后层 false 不再等默认表生成后才补记。
+                if (v1?.reasoning !== undefined) model.request.body.__opencodeReasoning = v1.reasoning
                 if (config.disabled !== undefined) model.enabled = !config.disabled
                 if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
               })
             }
+          }
+        }
+        // 全部文档和继承结算后只推断一次，此时 variants 只含真实显式配置，旧默认预算不能伪装成用户覆盖。
+        for (const [providerID] of configured) {
+          const record = catalog.provider.get(providerID)
+          for (const model of record?.models.values() ?? []) {
+            const id = model.id
+            const providerApi = record?.provider.api
+            const api = model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 && providerApi ? providerApi : model.api
+            const reasoning = model.request.body.__opencodeReasoning
+            if (reasoning === false || api.type !== "aisdk" || api.package !== "@ai-sdk/anthropic" || (reasoning !== true && !ProviderV2.isAnthropicThinkingModel(model.api.id))) continue
+            const lowerer = ConfigProviderOptionsV1.get(api.package)
+            const generated = Object.entries(ProviderV2.anthropicThinkingVariants({ apiID: model.api.id, providerID, output: model.limit.output }))
+              .map(([id, options]) => ({ id: ModelV2.VariantID.make(id), headers: {}, body: lowerer.request(options) }))
+            catalog.model.update(providerID, id, (draft) => {
+              const explicit = new Map(draft.variants.map((variant) => [variant.id, variant]))
+              draft.variants = [
+                ...generated.map((variant) => ({
+                  // 默认 body 推断不能丢弃显式变体的请求头，认证与路由覆盖仍由该变体拥有。
+                  ...variant, headers: { ...variant.headers, ...explicit.get(variant.id)?.headers },
+                  // 同一 SDK 的原生 lowerer 和既有深合并同时保留用户覆盖，不另建配置解析器。
+                  body: mergeJsonRecords(variant.body, explicit.get(variant.id)?.body) ?? {},
+                })),
+                // 没有默认同名项的用户变体仍属于完整配置集合，不能被推断表替换掉。
+                ...draft.variants.filter((variant) => !generated.some((item) => item.id === variant.id)),
+              ]
+            })
           }
         }
       }),

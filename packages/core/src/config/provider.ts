@@ -58,6 +58,8 @@ class Model extends Schema.Class<Model>("ConfigV2.Model")({
     options: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
     // variant 同模型等待实际基础 SDK，不能在 npm 缺省时提前按 raw 转换。
     variants: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)).pipe(Schema.optional),
+    // 显式 false 只抑制缺省变体推断，不把能力元数据改写成请求的 disabled thinking。
+    reasoning: Schema.Boolean.pipe(Schema.optional),
   }).pipe(Schema.optional),
   api: ModelApi.pipe(Schema.optional),
   capabilities: ModelV2.Capabilities.pipe(Schema.optional),

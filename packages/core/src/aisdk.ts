@@ -78,6 +78,9 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
     ...model.request.body,
   }
   if (model.api.type === "aisdk" && model.api.url) options.baseURL = model.api.url
+  // 能力与继承标志属于配置 owner，不是 SDK 工厂选项，更不能由 SDK 带上 wire。
+  delete options.__opencodeReasoning
+  delete options.claudeCode
 
   const customFetch = options.fetch
   const chunkTimeout = options.chunkTimeout

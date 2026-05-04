@@ -114,6 +114,8 @@ function applyModel(
   }
   Object.assign(draft.request.headers, input.request?.headers ?? {})
   Object.assign(draft.request.body, input.request?.body ?? {})
+  // 目录能力随模型副本继承，显式 false 不能在新别名上被型号推断重新开启。
+  draft.request.body.__opencodeReasoning = model.reasoning ?? false
 }
 
 export const ModelsDevPlugin = define({

@@ -94,7 +94,8 @@ describe("ModelsDevPlugin", () => {
       const fast = yield* catalog.model.get(providerID, ModelV2.ID.make("gpt-5.4-fast"))
 
       expect(base?.variants).toEqual([])
-      expect(base?.request.body).toEqual({})
+      expect(base?.request.body).toEqual({ __opencodeReasoning: true })
+      expect(fast?.request.body).toEqual({ service_tier: "priority", __opencodeReasoning: true })
       expect(fast).toMatchObject({
         id: "gpt-5.4-fast",
         providerID: "acme",
