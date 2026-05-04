@@ -68,8 +68,9 @@ export function quoteForSummary(s: string) {
   return `"${s.replace(/\n/g, "\\n")}"`
 }
 
-export function previewText(text: string) {
-  return text.length > 500 ? `${text.slice(0, 500)}...` : text
+// max 是显示字符预算；完整源码与输出仍从原文档或 artifact 读取。
+export function previewText(text: string, max = 500) {
+  return text.length > max ? `${text.slice(0, max)}...` : text
 }
 
 export function formatBytes(n: number) {

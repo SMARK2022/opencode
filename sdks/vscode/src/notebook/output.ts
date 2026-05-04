@@ -2,7 +2,7 @@
 import vscode from "vscode"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
-import { previewText } from "../util"
+/** 输出主定位参数为 Copilot 风格的 cellId；原始字节保留在 notebook-outputs 导出文件中。 */
 import {
   compactCell,
   runtimeLabel,
@@ -15,7 +15,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
 export async function readNotebookCellOutput(filePath?: string, cellIndex?: number, cellId?: string) {
   // output 先通过 resolve 确定文档和格，序列化边界不得重新选择另一份 notebook。
   const notebook = await resolveNotebook(filePath)
-  // index 保留源优先级，canonical ID 与 summary 同源；后续写入不得重选文档或格。
+  // 混合参数优先验证 cellId，不能让数字位置绕过无效或歧义身份的拒绝。
   const cell = resolveNotebookCell(notebook, cellIndex, cellId)
   // 此端点只导出已有输出，不能为了补齐缺失输出而启动内核执行。
   return await serializeNotebookCellOutput(notebook, cell)
@@ -56,9 +56,11 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
     )
   ).flat()
 
+  // ID 与标题同取 I/O 前快照，导出期间插格或第二次运行不能改变本次输出身份。
+  const cellId = snapshot.data.cell.id
   const summaryLines = [
     // 标题只读取快照格编号与 MIME，即使写入期间发生插格或第二次运行也保持 A 的描述。
-    `Cell ${snapshot.data.cell.i} existing outputs: ${snapshot.data.cell.existing_outs.join(", ") || "none"}.`,
+    `Cell c${snapshot.data.cell.i} id=${cellId} existing outputs: ${snapshot.data.cell.existing_outs.join(", ") || "none"}.`,
     `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
     "",
     "Artifacts:",
@@ -94,8 +96,8 @@ export async function serializeNotebookOutputItem(
     // MIME、字节数和输出序号一起返回，让消费者无需靠扩展名猜测真实内容。
     mime: item.mime,
     bytes: item.data.byteLength,
-    // previewText 的字符预算与原始 byteLength 不同，中文和 emoji 不能按字符估字节。
-    preview: previewText(text ?? `<${item.mime} ${item.data.byteLength} bytes>`),
+    // 预览保留原换行并裁剪 500 字符；该显示预算不能裁掉 writer 捕获的原始字节。
+    preview: text !== undefined ? text.slice(0, 500) : `<${item.mime} ${item.data.byteLength} bytes>`,
     // 8192 字节只限制内联 text，超过上限或零字节输出仍须完整导出真实 artifact。
     text: text && item.data.byteLength <= 8_192 ? text : undefined,
   }
