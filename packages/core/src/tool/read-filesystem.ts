@@ -9,7 +9,8 @@ import { makeLocationNode } from "../effect/app-node"
 import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
 
 // 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
-export const DEFAULT_READ_LINES = 1_000
+// 短文件是否分页与目录缺省页复用这个常量，400 行不能只作用于大文件分支。
+export const DEFAULT_READ_LINES = 400
 export const MAX_READ_LINES = 2_000
 // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
 export const MAX_READ_BYTES = 24 * 1024

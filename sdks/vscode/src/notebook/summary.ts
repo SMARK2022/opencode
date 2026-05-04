@@ -1,7 +1,7 @@
 // summary 只读取结构化状态与实时文档，不根据显示文本推断执行成功。
 import vscode from "vscode"
 import { toPosixPath, quoteForSummary } from "../util"
-import { compactCell, runtimeLabel } from "./format"
+import { compactCell, runtimeLabel, computeVirtualRanges } from "./format"
 import { resolveNotebook } from "./resolve"
 
 export async function notebookSummary(filePath?: string) {
@@ -12,6 +12,7 @@ export async function notebookSummary(filePath?: string) {
   return compactNotebookResult(notebook, false)
 }
 
+/** 返回笔记本快照的 summary/data 双层响应。 */
 export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: boolean, extra?: Record<string, unknown>) {
   const cells = notebook.getCells().map(compactCell)
   return {
@@ -29,6 +30,8 @@ export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: bo
 }
 
 function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnType<typeof compactCell>[]) {
+  // 范围与格快照在同一同步读取中投影，不根据摘要文本反推可编辑行号。
+  const virtualRanges = computeVirtualRanges(notebook)
   // 总计只统计 code 格，markdown 格不需要原生代码执行摘要。
   const code = cells.filter((cell) => cell.kind === "code")
   // 有输出但 success 未知的格不计入已执行数量，保存结果不冒充本次执行。
@@ -40,20 +43,23 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
     ? `${failed.length} failed`
     // 没有代码格时保留零比零统计，不能用空数组 every 的真值宣称全部执行成功。
     : executed.length === code.length && code.length > 0
-      ? "All code cells executed successfully."
+      ? "All code cells have successful session execution state."
       : `${executed.length}/${code.length} code cells executed`
 
   return [
     `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
-    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
+    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
     "",
-    'Cells (format: i id=<canonical stable cell id> <kind>/<lang> lines=<line count> exec="<provenance: unknown/saved, order, status, duration, end time>" existing_outs="<output MIME summary>" first="<first source line>"):',
-    ...cells.map(
-      // first 是有预算的预览，完整源码应通过 source 读取，不能反解摘要。
-      (cell) =>
-        `${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`,
-    ),
+    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定；range=[A,B] 是虚拟源码的一基闭区间。`,
     "",
-    "Next: use vscode_notebook_source with cellIndex=N, offset=1, limit=120 for source; use vscode_notebook_output for outputs.",
+    'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
+    ...cells.map((cell) => {
+      // compactCell.i 已是一基显示值，查 Map 时必须还原为内部零基索引。
+      const range = virtualRanges.get(cell.i - 1)
+      const rangeText = range ? `range=[${range.start},${range.end}]` : "range=?"
+      return `c${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} ${rangeText} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`
+    }),
+    "",
+    "后续：用 vscode_notebook_source 的 cellId=#VSC-xxx、offset=1、limit=120 读取源码；用 vscode_notebook_run 执行、vscode_notebook_output 读取输出、vscode_notebook_edit 修改。",
   ].join("\n")
 }

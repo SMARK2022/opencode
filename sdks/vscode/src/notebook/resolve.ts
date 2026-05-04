@@ -26,9 +26,6 @@ export async function resolveNotebook(filePath?: string) {
 
 // resolve 接口在调用方给定的文档内匹配 canonical ID，不能跨文档借用全局选区。
 export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex?: number, cellId?: string) {
-  // cellAt 保留 VS Code 的边界检查，index 只表示当前位置，不是稳定身份。
-  if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
-
   if (cellId) {
     const normalized = cellId.replace(/^#/, "")
     // 仅在给定文档内以 summary 同款 canonical ID 匹配，不比较截短显示片段。
@@ -40,6 +37,10 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
     throw new Error(`Notebook cell not found: ${cellId}`)
   }
 
+  // 显式 ID 的不命中或歧义先拒绝，不能被同时传入的数字位置掩盖。
+  if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
+
+  // 缺省选择只沿既有同文档选区路径，不把 cN 显示文本新增为另一种 ID。
   const active = vscode.window.activeNotebookEditor
   // 仅在缺省格参数时考虑选区，并先验证活动编辑器的完整 notebook URI。
   if (active?.notebook.uri.toString() === notebook.uri.toString()) {

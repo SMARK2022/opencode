@@ -1,5 +1,6 @@
 // format 提供共享的纯投影规则，不反向依赖执行或 artifact 写入模块。
 import vscode from "vscode"
+import crypto from "node:crypto"
 import {
   isRecord,
   stringProp,
@@ -30,7 +31,14 @@ export function extensionForMime(mime: string) {
   if (mime === "image/jpeg") return ".jpg"
   if (mime === "image/svg+xml") return ".svg"
   if (mime === "text/html") return ".html"
+  if (mime === "text/plain") return ".txt"
   if (mime === "application/json") return ".json"
+  // 结构化 notebook 输出没有 text/ 前缀，不能被导出成无法辨识的默认 .bin。
+  if (mime.includes("datawrangler")) return ".json"
+  if (mime === "application/vnd.code.notebook.error") return ".json"
+  // stdout/stderr 是原始文本流，文件后缀不应误导后续读取为二进制。
+  if (mime === "application/vnd.code.notebook.stdout") return ".txt"
+  if (mime === "application/vnd.code.notebook.stderr") return ".txt"
   if (mime.startsWith("text/")) return ".txt"
   return ".bin"
 }
@@ -52,9 +60,28 @@ export function shortId(id: string) {
   return `#VSC-${id.replace(/^#?VSC-/, "").replace(/^#/, "")}`
 }
 
+/**
+ * Copilot 风格 ID 为 #VSC- 加 SHA1(cell.document.uri.toString()) 的前八位十六进制。
+ * 与 Copilot 的 getCellId 算法一致，同一打开格的插入、删除或移动不改变文档 URI。
+ * 它不是会漂移的 cell.index，也不是保存的 .ipynb metadata.id。
+ */
+export function copilotLikeCellId(cell: vscode.NotebookCell) {
+  return (
+    "#VSC-" +
+    crypto
+      .createHash("sha1")
+      // 完整 URI 保留 scheme、authority 与 fragment，不能仅哈希同名文件的 fsPath。
+      .update(cell.document.uri.toString(), "utf8")
+      .digest("hex")
+      .slice(0, 8)
+  )
+}
+
 export function cellIdentifiers(cell: vscode.NotebookCell) {
   // URI 身份先于可被 serializer 改写的 metadata 别名；解析器仍检查全部别名并拒绝跨格冲突。
   return [
+    // 新展示身份加入既有完整别名集合，碰撞仍由 resolver 的多格拒绝处理。
+    copilotLikeCellId(cell),
     cell.document.uri.fragment || cell.document.uri.toString(),
     stringProp(cell.metadata, "id"),
     stringProp(cell.metadata, "cellId"),
@@ -63,7 +90,10 @@ export function cellIdentifiers(cell: vscode.NotebookCell) {
   ].filter((value): value is string => !!value)
 }
 
-export function cellKindLabel(kind: vscode.NotebookCellKind) {
+/** LLM 可见的 cN 显示编号为一基，内部 VS Code 索引仍为零基。 */
+export const c1 = (cell: vscode.NotebookCell) => cell.index + 1
+
+export function cellTypeLabel(kind: vscode.NotebookCellKind) {
   return kind === vscode.NotebookCellKind.Markup ? "markdown" : "code"
 }
 
@@ -151,11 +181,32 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
   return languageName ?? null
 }
 
+/**
+ * 为每格计算虚拟源码中的一基闭区间，Map 的键仍为内部零基 cell.index。
+ * --: 格头不占编号；源码行与格间空分隔行占编号。
+ * 每格布局为未编号格头、N..N+k 正文和 N+k+1 空分隔行。
+ */
+export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
+  const ranges = new Map<number, { start: number; end: number }>()
+  let next = 1
+  for (const cell of notebook.getCells()) {
+    const count = cell.document.lineCount
+    if (count > 0) {
+      ranges.set(cell.index, { start: next, end: next + count - 1 })
+    } else {
+      // 空格仍占一个可定位的点区间，不能与下一格共用 start。
+      ranges.set(cell.index, { start: next, end: next })
+    }
+    // 分隔空行只推动下一格起点，不进入当前格的可编辑闭区间。
+    next += Math.max(1, count) + 1
+  }
+  return ranges
+}
+
 export function compactCell(cell: vscode.NotebookCell) {
   return {
-    i: cell.index,
-    // URI 兜底绑定格文档，不以会随插入删除漂移的索引生成摘要身份。
-    id: shortId(cellIdentifiers(cell)[0] ?? cell.document.uri.toString()),
+    i: c1(cell),
+    id: copilotLikeCellId(cell),
     kind: cell.kind === vscode.NotebookCellKind.Code ? "code" : "markdown",
     // 语言和行数来自实时 cell.document，不用保存 metadata 覆盖未保存编辑。
     lang: cell.document.languageId,
@@ -165,7 +216,7 @@ export function compactCell(cell: vscode.NotebookCell) {
     // existing_outs 列出 MIME 能力，不作为成功或失败的业务判定输入。
     existing_outs: existingOuts(cell),
     // 首行预览取真实源码后截短，不执行代码或剥离 markdown 正文。
-    first: previewText((cell.document.getText().split("\n")[0] ?? "").trim()).slice(0, 120),
+    first: previewText((cell.document.getText().split("\n")[0] ?? "").trim(), 50),
     execution: executionState(cell),
   }
 }
@@ -197,26 +248,27 @@ type NotebookArtifact = {
   artifactURI?: string
 }
 
+/**
+ * 文本不超过 1024 字符时，多行以 full_content 标签内联，单行使用 JSON 转义。
+ * 长文本或二进制仅展示短预览与文件名；完整内容保留在导出文件中。
+ * 所有条目都带 -> filename，模型不因看到内联正文而忽略导出文件。
+ */
 export function formatArtifactSummary(a: NotebookArtifact, cellIndex?: number) {
   // output/item 序号可在不同格内重复，多格 run 需要格前缀；单格导出已由标题绑定身份。
   const prefix = cellIndex !== undefined ? `c${cellIndex} ` : ""
   // MIME 短标签只用于显示，真实 MIME 和字节数仍保留在结构化数据中。
-  const baseInfo = `${prefix}output=${a.output} item=${a.item} ${shortMime(a.mime)} ${formatBytes(a.bytes)}`
+  const filename = artifactName(a.artifactPath)
+  const baseInfo = `${prefix}output=${a.output} item=${a.item} ${shortMime(a.mime)} ${formatBytes(a.bytes)} -> ${filename}`
 
   // 1024 字符只控制内联展示，完整内容已写入 artifact，不能误作文件字节上限。
   if (isTextLikeMime(a.mime) && a.text !== undefined && a.text.length <= 1024) {
     if (a.text.includes("\n")) {
       // 多行展示保留真实换行便于读回，单行用 JSON 转义防止引号或控制字符破坏条目边界。
-      return `${baseInfo}\n<content>\n${a.text}\n</content>`
+      return `${baseInfo}\n<full_content>\n${a.text}\n</full_content>`
     }
     return `${baseInfo} ${JSON.stringify(a.text)}`
   }
 
-  if (isTextLikeMime(a.mime)) {
-    // 缺省 text 的大输出只展示 preview，完整内容须读取返回路径。
-    const content = a.text !== undefined ? a.text.slice(0, 1024) : a.preview
-    return `${baseInfo} -> ${artifactName(a.artifactPath)}\n<content>\n${content}\n... (truncated, full output in the file)\n</content>`
-  }
-
-  return `${baseInfo} -> ${artifactName(a.artifactPath)}${a.preview ? ` ${quoteForSummary(a.preview)}` : ""}`
+  // 路径已在 baseInfo 中统一加入，长文本分支不能再拼一次文件名或重复大段正文。
+  return `${baseInfo}${a.preview ? ` ${quoteForSummary(a.preview)}` : ""}`
 }

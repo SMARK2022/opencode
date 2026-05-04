@@ -1,7 +1,7 @@
 // palette 与 HTTP 路由复用处理器；此模块只收集用户参数，不拥有执行或编辑资源。
 import vscode from "vscode"
 import { openJsonDocument } from "../util"
-import { cellKindLabel, cellIdentifiers, shortId } from "./format"
+import { c1, copilotLikeCellId } from "./format"
 import { notebookSummary } from "./summary"
 import { notebookSource } from "./source"
 import { runNotebook } from "./run"
@@ -106,13 +106,13 @@ async function pickNotebookCell(notebook: vscode.NotebookDocument, title = "open
   // 候选格来自传入文档，不从另一个活动 notebook 读取全局选区。
   const picked = await vscode.window.showQuickPick(
     notebook.getCells().map((cell) => ({
-      label: `Cell ${cell.index}`,
-      // 首行与语言仅供人工辨识，不作为身份或执行成功证据；零基编号随结构编辑改变。
+      label: `Cell ${c1(cell)}`,
+      // 一基序号与 summary 一致，但仍只作显示；跨 UI 等待的定位沿捕获的 cellId。
       description: cell.kind === vscode.NotebookCellKind.Code ? "code" : "markup",
       detail: `${cell.outputs.length} outputs · ${cell.document.languageId} · ${cell.document.getText().split("\n")[0] ?? ""}`,
       cell,
       // picker 等待前捕获完整 ID，删除后的 index=-1 或插格后的新位置不能替换用户所选的身份。
-      cellId: shortId(cellIdentifiers(cell)[0] ?? cell.document.uri.toString()),
+      cellId: copilotLikeCellId(cell),
     })),
     {
       title,
@@ -192,39 +192,56 @@ async function editNotebookCommand() {
   const notebook = await selectNotebook()
   if (!notebook) return undefined
 
-  const operation = await vscode.window.showQuickPick(
-    ["insert_before", "insert_after", "insert_top", "insert_bottom", "replace_source", "replace_cell", "delete"],
-    { title: "vscode_notebook_edit", placeHolder: "Select edit operation" },
-  )
-  if (!operation) return undefined
+  // 面板提交与 HTTP 相同的三元契约，不能继续生成已移除的 operation 名称。
+  const editType = await vscode.window.showQuickPick(["insert", "edit", "delete"], {
+    title: "vscode_notebook_edit", placeHolder: "选择编辑类型",
+  })
+  if (!editType) return undefined
 
-  const isPositional = operation === "insert_top" || operation === "insert_bottom"
-  // 顶部和底部插入不需要锚点，删除和替换必须保留已选格的定位信息。
-  const cell = isPositional ? undefined : await pickNotebookCell(notebook, "vscode_notebook_edit")
-  if (!isPositional && !cell) return undefined
+  // cell 保留 picker 的文档对象和预先捕获的 ID，不在输入源码后重算选中身份。
+  let cellId: string
+  let cell: Awaited<ReturnType<typeof pickNotebookCell>>
 
-  const source =
-    operation === "delete"
-      ? undefined
-      : await vscode.window.showInputBox({
-          title: "vscode_notebook_edit source",
-          prompt: "Cell source. Use literal \\n for newlines in this quick test input.",
-          value: operation === "replace_source" && cell ? cell.cell.document.getText().replace(/\n/g, "\\n") : "",
-          ignoreFocusOut: true,
-        })
+  if (editType === "insert") {
+    // 位置哨兵只属于 insert，编辑与删除仍必须经过真实格选择。
+    const pos = await vscode.window.showQuickPick(["TOP", "BOTTOM", "所选格之后"], {
+      title: "插入位置", placeHolder: "选择插入位置",
+    })
+    if (!pos) return undefined
+    if (pos === "TOP") {
+      cellId = "TOP"
+    } else if (pos === "BOTTOM") {
+      cellId = "BOTTOM"
+    } else {
+      // 插入锚点与后续 newCode 输入分离，焦点切换不能改成另一个文档的格。
+      cell = await pickNotebookCell(notebook, "vscode_notebook_edit")
+      if (!cell) return undefined
+      cellId = cell.cellId
+    }
+  } else {
+    cell = await pickNotebookCell(notebook, "vscode_notebook_edit")
+    if (!cell) return undefined
+    cellId = cell.cellId
+  }
 
-  // delete 没有 source 参数也可执行，不能强迫用户提供将被忽略的内容。
-  // undefined 表示取消，空字符串是合法清空内容，不能被当作取消。
-  if (operation !== "delete" && source === undefined) return undefined
+  // 编辑框预填实时格源码；空字符串是显式清空，不能伪装成仅修改类型。
+  const newCode = editType === "delete"
+    ? undefined
+    : await vscode.window.showInputBox({
+        title: "vscode_notebook_edit newCode",
+        prompt: "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。",
+        value: editType === "edit" && cell ? cell.cell.document.getText().replace(/\n/g, "\\n") : "",
+        ignoreFocusOut: true,
+      })
+  // 取消输入不进入编辑 owner，避免 undefined 意外触发纯类型变更路径。
+  if (editType !== "delete" && newCode === undefined) return undefined
 
   return await editNotebook({
     // 交互层只收集参数，所有写入交给 editNotebook，避免再建立一个编辑 owner。
     filePath: notebook.uri.toString(),
-    operation,
-    cellId: cell?.cellId,
+    editType,
+    cellId,
     // literal \\n 只属于手工快速输入语法，HTTP 源码字符串不经这层替换。
-    source: source?.replace(/\\n/g, "\n"),
-    // languageId 标识 VS Code 语法模式，不能用内核 display_name 或版本标签替代所选格的语言标识。
-    language: cell?.cell.document.languageId,
+    newCode: newCode?.replace(/\\n/g, "\n"),
   })
 }

@@ -180,10 +180,10 @@ async function routeRequest(
     case "/notebook/cell-output": {
       // 输出别名复用前置鉴权路径，70 删除 LM 路由不改变其余 notebook 能力。
       const filePath = typeof body.filePath === "string" ? body.filePath : undefined
-      const cellIndex = typeof body.cellIndex === "number" ? body.cellIndex : undefined
       const cellId = typeof body.cellId === "string" ? body.cellId : undefined
-      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} ${cellId ?? cellIndex ?? "<active cell>"}`)
-      return await readNotebookCellOutput(filePath, cellIndex, cellId)
+      // HTTP 输出契约只传 cellId；数字位置不能覆盖调用方选中的稳定格身份。
+      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
+      return await readNotebookCellOutput(filePath, undefined, cellId)
     }
 
   }
