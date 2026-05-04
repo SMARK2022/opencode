@@ -34,12 +34,10 @@ export async function resolveNotebook(filePath?: string) {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves a single cell inside a notebook by index, cell ID, or falls back
- * to the active editor's selection / cell 0.
+ * Resolves a single cell inside a notebook by cell ID (primary) or index (fallback).
+ * Falls back to the active editor's selection / cell 0.
  */
 export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex?: number, cellId?: string) {
-  if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
-
   if (cellId) {
     const normalized = cellId.replace(/^#/, "")
     const cell = notebook
@@ -48,6 +46,8 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
     if (cell) return cell
     throw new Error(`Notebook cell not found: ${cellId}`)
   }
+
+  if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
 
   const active = vscode.window.activeNotebookEditor
   if (active?.notebook.uri.toString() === notebook.uri.toString()) {

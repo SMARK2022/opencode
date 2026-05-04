@@ -132,10 +132,9 @@ async function routeRequest(
     case "/notebook/output":
     case "/notebook/cell-output": {
       const filePath = typeof body.filePath === "string" ? body.filePath : undefined
-      const cellIndex = typeof body.cellIndex === "number" ? body.cellIndex : undefined
       const cellId = typeof body.cellId === "string" ? body.cellId : undefined
-      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} ${cellId ?? cellIndex ?? "<active cell>"}`)
-      return await readNotebookCellOutput(filePath, cellIndex, cellId)
+      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
+      return await readNotebookCellOutput(filePath, undefined, cellId)
     }
 
     case "/notebook/env":

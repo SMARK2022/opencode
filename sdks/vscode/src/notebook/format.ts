@@ -2,10 +2,12 @@
  * Notebook cell formatting, metadata extraction, and summary serialization.
  *
  * Provides compact cell representations, execution state text, MIME helpers,
- * artifact summary formatting, and runtime/kernel label extraction.
- * These are shared across all notebook handler modules.
+ * artifact summary formatting, runtime label extraction, and virtual-document
+ * line range computation.
+ * Shared across all notebook handler modules.
  */
 import * as vscode from "vscode"
+import * as crypto from "node:crypto"
 import {
   isRecord,
   stringProp,
@@ -42,7 +44,12 @@ export function extensionForMime(mime: string) {
   if (mime === "image/jpeg") return ".jpg"
   if (mime === "image/svg+xml") return ".svg"
   if (mime === "text/html") return ".html"
+  if (mime === "text/plain") return ".txt"
   if (mime === "application/json") return ".json"
+  if (mime.includes("datawrangler")) return ".json"
+  if (mime === "application/vnd.code.notebook.error") return ".json"
+  if (mime === "application/vnd.code.notebook.stdout") return ".txt"
+  if (mime === "application/vnd.code.notebook.stderr") return ".txt"
   if (mime.startsWith("text/")) return ".txt"
   return ".bin"
 }
@@ -63,14 +70,30 @@ export function isTextLikeMime(mime: string) {
 // Cell identity & metadata
 // ---------------------------------------------------------------------------
 
-/** Truncates a cell identifier to its first 8 chars, stripping the `#VSC-` / `#` prefix. */
-export function shortId(id: string) {
-  return id.replace(/^#?VSC-/, "").replace(/^#/, "").slice(0, 8)
+/**
+ * Generates a Copilot-compatible stable cell identifier: `#VSC-` + first 8 hex chars
+ * of SHA1(cell.document.uri.toString()). This is the same algorithm Copilot uses
+ * (`getCellId` in platform/notebook/common/helpers.ts), making the ID stable across
+ * insert/delete/move operations since it's derived from the cell's VS Code document URI.
+ *
+ * ≠ cell.index (which shifts on insert/delete)
+ * ≠ cell.metadata.id (the .ipynb id field)
+ */
+export function copilotLikeCellId(cell: vscode.NotebookCell) {
+  return (
+    "#VSC-" +
+    crypto
+      .createHash("sha1")
+      .update(cell.document.uri.toString(), "utf8")
+      .digest("hex")
+      .slice(0, 8)
+  )
 }
 
-/** Gathers all possible identifiers for a notebook cell (fragment, metadata id, etc.). */
+/** Gathers all possible identifiers for a notebook cell, with Copilot-style ID first. */
 export function cellIdentifiers(cell: vscode.NotebookCell) {
   return [
+    copilotLikeCellId(cell),
     cell.document.uri.fragment,
     stringProp(cell.metadata, "id"),
     stringProp(cell.metadata, "cellId"),
@@ -79,8 +102,11 @@ export function cellIdentifiers(cell: vscode.NotebookCell) {
   ].filter((value): value is string => !!value)
 }
 
+/** Returns 1-based display index for summary text. All LLM-facing cN MUST use this. */
+export const c1 = (cell: vscode.NotebookCell) => cell.index + 1
+
 /** Returns "markdown" or "code" for a cell kind enum value. */
-export function cellKindLabel(kind: vscode.NotebookCellKind) {
+export function cellTypeLabel(kind: vscode.NotebookCellKind) {
   return kind === vscode.NotebookCellKind.Markup ? "markdown" : "code"
 }
 
@@ -117,10 +143,6 @@ export function executionText(cell: vscode.NotebookCell) {
   return `${state} #${order} ${status}${duration}${ended}`
 }
 
-/**
- * Reconstructs execution metadata from saved cell/output metadata.
- * Used when `executionSummary` is unavailable but the cell has persisted outputs.
- */
 function savedExecution(cell: vscode.NotebookCell) {
   const outputMetadata = cell.outputs.map((output) => output.metadata).filter(isRecord)
   const endedRaw = firstString(
@@ -179,20 +201,52 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
 }
 
 // ---------------------------------------------------------------------------
+// Virtual document line ranges
+// ---------------------------------------------------------------------------
+
+/**
+ * Computes 1-based inclusive physical line ranges for every cell in the virtual document.
+ * Headers (`--: ...`) do NOT consume line numbers; only source lines and blank separators do.
+ *
+ * Layout per cell:
+ *   --:  header line            (no line number)
+ *   N:   source line 0          (numbered)
+ *   ...
+ *   N+k: source line last       (numbered)
+ *   N+k+1: (blank separator)    (numbered)
+ *
+ * Returns a Map from cell index to `{ start, end }` where both are 1-based inclusive.
+ */
+export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
+  const ranges = new Map<number, { start: number; end: number }>()
+  let next = 1
+  for (const cell of notebook.getCells()) {
+    const count = cell.document.lineCount
+    if (count > 0) {
+      ranges.set(cell.index, { start: next, end: next + count - 1 })
+    } else {
+      ranges.set(cell.index, { start: next, end: next }) // empty cell — point range
+    }
+    next += count + 1 // source lines + blank separator
+  }
+  return ranges
+}
+
+// ---------------------------------------------------------------------------
 // Compact cell representation
 // ---------------------------------------------------------------------------
 
 /** Builds a compact summary object for a single cell (used in summary / run / output responses). */
 export function compactCell(cell: vscode.NotebookCell) {
   return {
-    i: cell.index,
-    id: shortId(cellIdentifiers(cell)[0] ?? `cell-${cell.index}`),
+    i: c1(cell),                                 // 1-based display index
+    id: copilotLikeCellId(cell),                  // #VSC-xxxxxxxx — stable across insert/delete
     kind: cell.kind === vscode.NotebookCellKind.Code ? "code" : "markdown",
     lang: cell.document.languageId,
     lines: cell.document.lineCount,
     exec: executionText(cell),
     existing_outs: existingOuts(cell),
-    first: previewText((cell.document.getText().split("\n")[0] ?? "").trim()).slice(0, 120),
+    first: previewText((cell.document.getText().split("\n")[0] ?? "").trim(), 50),
   }
 }
 
@@ -208,25 +262,22 @@ function artifactName(p: string) {
 /**
  * Formats a single output artifact for inclusion in the LLM summary text.
  *
- * - Short text-like content (≤1024 chars) is inlined via `<content>` tags or `JSON.stringify`.
- * - Large text shows a 1024-char preview plus a pointer to the artifact file.
- * - Binary content (images, etc.) only references the artifact file path.
+ * - Short text-like content (≤1024 chars) is inlined via `<full_content>` tag (or `JSON.stringify` for single-line).
+ * - Larger text / binary shows only the artifact path + a short preview; full content is in the artifact file.
+ * - All entries include the `-> filename` path for model awareness.
  */
 export function formatArtifactSummary(a: any, cellIndex?: number) {
   const prefix = cellIndex !== undefined ? `c${cellIndex} ` : ""
-  const baseInfo = `${prefix}output=${a.output} item=${a.item} ${shortMime(a.mime)} ${formatBytes(a.bytes)}`
+  const filename = artifactName(a.artifactPath)
+  const baseInfo = `${prefix}output=${a.output} item=${a.item} ${shortMime(a.mime)} ${formatBytes(a.bytes)} -> ${filename}`
 
   if (isTextLikeMime(a.mime) && a.text !== undefined && a.text.length <= 1024) {
     if (a.text.includes("\n")) {
-      return `${baseInfo}\n<content>\n${a.text}\n</content>`
+      return `${baseInfo}\n<full_content>\n${a.text}\n</full_content>`
     }
     return `${baseInfo} ${JSON.stringify(a.text)}`
   }
 
-  if (isTextLikeMime(a.mime)) {
-    const content = a.text !== undefined ? a.text.slice(0, 1024) : a.preview
-    return `${baseInfo} -> ${artifactName(a.artifactPath)}\n<content>\n${content}\n... (truncated, full output in the file)\n</content>`
-  }
-
-  return `${baseInfo} -> ${artifactName(a.artifactPath)}${a.preview ? ` ${quoteForSummary(a.preview)}` : ""}`
+  // Large text or binary — only preview, no inline content
+  return `${baseInfo}${a.preview ? ` ${quoteForSummary(a.preview)}` : ""}`
 }

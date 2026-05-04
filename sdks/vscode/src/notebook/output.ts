@@ -2,15 +2,17 @@
  * `vscode_notebook_output` — reads cell outputs, writes them to artifact files
  * under `.opencode/cache/notebook-outputs/`, and returns a summary pointing
  * to the artifact paths. Short text outputs are inlined in the summary.
+ *
+ * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
  */
 import * as vscode from "vscode"
 import * as path from "node:path"
-import { previewText } from "../util"
 import {
+  c1,
+  copilotLikeCellId,
   existingOuts,
   compactCell,
   runtimeLabel,
-  shortMime,
   isTextLikeMime,
   extensionForMime,
   formatArtifactSummary,
@@ -43,8 +45,9 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
     )
   ).flat()
 
+  const cellId = copilotLikeCellId(cell)
   const summaryLines = [
-    `Cell ${cell.index} existing outputs: ${existingOuts(cell).join(", ") || "none"}.`,
+    `Cell c${c1(cell)} id=${cellId} existing outputs: ${existingOuts(cell).join(", ") || "none"}.`,
     `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
     "",
     "Artifacts:",
@@ -68,11 +71,6 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
 // Single output item
 // ---------------------------------------------------------------------------
 
-/**
- * Serializes a single output item: writes the raw data to an artifact file
- * and returns metadata + optional text content for inline display.
- * Exported so that `run.ts` can reuse it for per-cell run results.
- */
 export async function serializeNotebookOutputItem(
   notebook: vscode.NotebookDocument,
   cell: vscode.NotebookCell,
@@ -87,13 +85,12 @@ export async function serializeNotebookOutputItem(
     item: itemIndex,
     mime: item.mime,
     bytes: item.data.byteLength,
-    preview: previewText(text ?? `<${item.mime} ${item.data.byteLength} bytes>`),
+    preview: text !== undefined ? text.slice(0, 500) : `<${item.mime} ${item.data.byteLength} bytes>`,
     text: text && item.data.byteLength <= 8_192 ? text : undefined,
     artifactPath: artifact.fsPath,
   }
 }
 
-/** Attempts to decode an output item as UTF-8 text for text-like MIME types. */
 function outputItemText(item: vscode.NotebookCellOutputItem) {
   if (isTextLikeMime(item.mime)) {
     return Buffer.from(item.data).toString("utf8")
@@ -105,10 +102,6 @@ function outputItemText(item: vscode.NotebookCellOutputItem) {
 // Artifact writing
 // ---------------------------------------------------------------------------
 
-/**
- * Writes a single output item's raw data to a file under
- * `.opencode/cache/notebook-outputs/` in the workspace folder.
- */
 async function writeArtifact(
   notebook: vscode.NotebookDocument,
   cell: vscode.NotebookCell,

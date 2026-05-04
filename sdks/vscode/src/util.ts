@@ -93,9 +93,9 @@ export function quoteForSummary(s: string) {
   return `"${s.replace(/\n/g, "\\n")}"`
 }
 
-/** Truncates text to 500 chars with `...` suffix for preview display. */
-export function previewText(text: string) {
-  return text.length > 500 ? `${text.slice(0, 500)}...` : text
+/** Truncates text to `max` chars with `...` suffix. Default max = 500. */
+export function previewText(text: string, max = 500) {
+  return text.length > max ? `${text.slice(0, max)}...` : text
 }
 
 /** Human-readable byte size: B / KB / MB. */

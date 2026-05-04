@@ -7,7 +7,7 @@
  */
 import * as vscode from "vscode"
 import { openJsonDocument } from "../util"
-import { cellKindLabel } from "./format"
+import { c1, copilotLikeCellId } from "./format"
 import { notebookSummary } from "./summary"
 import { notebookSource } from "./source"
 import { runNotebook } from "./run"
@@ -124,7 +124,7 @@ async function selectNotebook(required = true) {
 async function pickNotebookCell(notebook: vscode.NotebookDocument, title = "opencode Notebook Bridge Tools") {
   const picked = await vscode.window.showQuickPick(
     notebook.getCells().map((cell) => ({
-      label: `Cell ${cell.index}`,
+      label: `Cell ${c1(cell)}`,
       description: cell.kind === vscode.NotebookCellKind.Code ? "code" : "markup",
       detail: `${cell.outputs.length} outputs · ${cell.document.languageId} · ${cell.document.getText().split("\n")[0] ?? ""}`,
       cell,
@@ -162,7 +162,7 @@ async function notebookSourceCommand() {
   if (target.label === "cell") {
     const cell = await pickNotebookCell(notebook, "vscode_notebook_source cell")
     if (!cell) return undefined
-    return await notebookSource({ filePath: notebook.uri.toString(), cellIndex: cell.index })
+    return await notebookSource({ filePath: notebook.uri.toString(), cellId: copilotLikeCellId(cell) })
   }
 }
 
@@ -186,7 +186,7 @@ async function runNotebookCommand() {
   if (target.label === "cell") {
     const cell = await pickNotebookCell(notebook, "vscode_notebook_run")
     return cell
-      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellIndex: cell.index } })
+      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellId: copilotLikeCellId(cell) } })
       : undefined
   }
 
@@ -205,33 +205,47 @@ async function editNotebookCommand() {
   const notebook = await selectNotebook()
   if (!notebook) return undefined
 
-  const operation = await vscode.window.showQuickPick(
-    ["insert_before", "insert_after", "insert_top", "insert_bottom", "replace_source", "replace_cell", "delete"],
-    { title: "vscode_notebook_edit", placeHolder: "Select edit operation" },
-  )
-  if (!operation) return undefined
+  const editType = await vscode.window.showQuickPick(["insert", "edit", "delete"], {
+    title: "vscode_notebook_edit", placeHolder: "Select editType",
+  })
+  if (!editType) return undefined
 
-  const isPositional = operation === "insert_top" || operation === "insert_bottom"
-  const cell = isPositional ? undefined : await pickNotebookCell(notebook, "vscode_notebook_edit")
-  if (!isPositional && !cell) return undefined
+  let cellId: string
+  let cell: vscode.NotebookCell | undefined
 
-  const source =
-    operation === "delete"
-      ? undefined
-      : await vscode.window.showInputBox({
-          title: "vscode_notebook_edit source",
-          prompt: "Cell source. Use literal \\n for newlines in this quick test input.",
-          value: operation === "replace_source" && cell ? cell.document.getText().replace(/\n/g, "\\n") : "",
-          ignoreFocusOut: true,
-        })
+  if (editType === "insert") {
+    const pos = await vscode.window.showQuickPick(["TOP", "BOTTOM", "After cell..."], {
+      title: "Insert position", placeHolder: "Pick insert position",
+    })
+    if (!pos) return undefined
+    if (pos === "TOP") {
+      cellId = "TOP"
+    } else if (pos === "BOTTOM") {
+      cellId = "BOTTOM"
+    } else {
+      cell = await pickNotebookCell(notebook, "vscode_notebook_edit")
+      if (!cell) return undefined
+      cellId = copilotLikeCellId(cell)
+    }
+  } else {
+    cell = await pickNotebookCell(notebook, "vscode_notebook_edit")
+    if (!cell) return undefined
+    cellId = copilotLikeCellId(cell)
+  }
 
-  if (operation !== "delete" && source === undefined) return undefined
+  const newCode = editType === "delete"
+    ? undefined
+    : await vscode.window.showInputBox({
+        title: "vscode_notebook_edit newCode",
+        prompt: "newCode. Use \\n for newlines. Empty = type-only (edit) / no-source.",
+        value: editType === "edit" && cell ? cell.document.getText().replace(/\n/g, "\\n") : "",
+        ignoreFocusOut: true,
+      })
 
   return await editNotebook({
     filePath: notebook.uri.toString(),
-    operation,
-    cellIndex: cell?.index,
-    source: source?.replace(/\\n/g, "\n"),
-    language: cell?.document.languageId,
+    editType,
+    cellId,
+    newCode: newCode?.replace(/\\n/g, "\n"),
   })
 }
