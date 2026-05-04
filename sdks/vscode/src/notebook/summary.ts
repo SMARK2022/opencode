@@ -50,7 +50,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
     `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
     `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
     "",
-    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定；range=[A,B] 是虚拟源码的一基闭区间。`,
+    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定；range=[A,B] 是虚拟源码的一基闭区间；格头和视觉分隔行不占编号。`,
     "",
     'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
     ...cells.map((cell) => {
