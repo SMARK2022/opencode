@@ -183,8 +183,7 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
 
 /**
  * 为每格计算虚拟源码中的一基闭区间，Map 的键仍为内部零基 cell.index。
- * --: 格头不占编号；源码行与格间空分隔行占编号。
- * 每格布局为未编号格头、N..N+k 正文和 N+k+1 空分隔行。
+ * --: 格头和视觉分隔行均不占编号，只有源码行进入连续范围。
  */
 export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
   const ranges = new Map<number, { start: number; end: number }>()
@@ -197,8 +196,8 @@ export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
       // 空格仍占一个可定位的点区间，不能与下一格共用 start。
       ranges.set(cell.index, { start: next, end: next })
     }
-    // 分隔空行只推动下一格起点，不进入当前格的可编辑闭区间。
-    next += Math.max(1, count) + 1
+    // 分隔行不占号；空格至少占一个点，避免后续范围重叠。
+    next += Math.max(1, count)
   }
   return ranges
 }
