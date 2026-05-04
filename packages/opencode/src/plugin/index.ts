@@ -97,14 +97,36 @@ function getServerPlugin(value: unknown) {
 }
 
 function getLegacyPlugins(mod: Record<string, unknown>) {
+  // 默认导出是作者显式选择，混合模块的辅助导出不能被一并执行。
+  if (isServerPlugin(mod.default)) return [mod.default]
+
   const seen = new Set<unknown>()
   const result: PluginInstance[] = []
 
-  for (const entry of Object.values(mod)) {
-    if (seen.has(entry)) continue
-    seen.add(entry)
+  // 命名后缀提供显式插件选择，模块中的其他函数不会被误当插件。
+  const named = Object.entries(mod).filter(
+    ([name, entry]) => name !== "default" && name.endsWith("Plugin") && getServerPlugin(entry) !== undefined,
+  )
+  const candidates =
+    named.length > 0
+      ? named.map(([, entry]) => entry)
+      : Object.entries(mod)
+          .filter(([name, entry]) => name !== "default" && getServerPlugin(entry) !== undefined)
+          .map(([, entry]) => entry)
+
+  // 无显式选择且有多个函数时拒绝猜测，避免误执行非插件导出。
+  if (named.length === 0 && candidates.length > 1) {
+    throw new TypeError(
+      "Plugin module has multiple function exports; export a default plugin or name plugin exports with a Plugin suffix",
+    )
+  }
+
+  for (const entry of candidates) {
     const plugin = getServerPlugin(entry)
     if (!plugin) throw new TypeError("Plugin export is not a function")
+    // 别名导出可能引用同一插件，按函数身份去重避免双重初始化。
+    if (seen.has(plugin)) continue
+    seen.add(plugin)
     result.push(plugin)
   }
 
