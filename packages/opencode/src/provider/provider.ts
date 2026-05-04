@@ -149,13 +149,28 @@ function useLanguageModel(sdk: any) {
   return sdk.responses === undefined && sdk.chat === undefined
 }
 
+function isAnthropicThinkingModel(modelID: string) {
+  const id = modelID.toLowerCase()
+  return id.includes("claude-3-7") || id.includes("claude-3.7") || /claude-(haiku|sonnet|opus)-4/.test(id)
+}
+
+function defaultConfigProviderNpm(providerID: string, baseType?: string) {
+  if ((baseType ?? providerID) === "claudecode") return "@ai-sdk/anthropic"
+  return "@ai-sdk/openai-compatible"
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
     claudecode: Effect.fnUntraced(function* (provider: Info) {
       const auth = yield* dep.auth(provider.id)
       const env = yield* dep.env()
-      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
-      const baseURL = env["ANTHROPIC_BASE_URL"] || provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
+      const authKey = auth?.type === "api" ? auth.key : undefined
+      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDECODE_API_KEY"] || authKey || provider.options?.apiKey
+      const baseURL =
+        env["ANTHROPIC_BASE_URL"] ||
+        provider.options?.baseURL ||
+        env["CLAUDECODE_BASE_URL"] ||
+        "https://api.cubence.com"
 
       const autoload = Boolean(apiKey)
       if (!autoload) return { autoload: false }
@@ -1246,7 +1261,7 @@ const layer: Layer.Layer<
               provider.npm ??
               existingModel?.api.npm ??
               modelsDev[baseType ?? providerID]?.npm ??
-              (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
+              defaultConfigProviderNpm(providerID, baseType)
             const name = iife(() => {
               if (model.name) return model.name
               if (model.id && model.id !== modelID) return modelID
@@ -1269,7 +1284,10 @@ const layer: Layer.Layer<
               providerID: ProviderID.make(providerID),  // ⭐ Ensure correct providerID
               capabilities: {
                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
-                reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
+                reasoning:
+                  model.reasoning ??
+                  existingModel?.capabilities.reasoning ??
+                  (apiNpm === "@ai-sdk/anthropic" && isAnthropicThinkingModel(apiID)),
                 attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
                 toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
                 input: {
@@ -1372,13 +1390,14 @@ const layer: Layer.Layer<
           mergeProvider(providerID, patch)
         }
 
-        for (const [id, fn] of Object.entries(custom(dep))) {
+        const customLoaders = custom(dep)
+        const loadCustom = Effect.fn("Provider.loadCustom")(function* (id: string, fn: CustomLoader) {
           const providerID = ProviderID.make(id)
-          if (disabled.has(providerID)) continue
+          if (disabled.has(providerID)) return
           const data = database[providerID]
           if (!data) {
             log.error("Provider does not exist in model list " + providerID)
-            continue
+            return
           }
           const result = yield* fn(data)
           if (result && (result.autoload || providers[providerID])) {
@@ -1389,6 +1408,17 @@ const layer: Layer.Layer<
             const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
             mergeProvider(providerID, patch)
           }
+        })
+
+        for (const [id, fn] of Object.entries(customLoaders)) {
+          yield* loadCustom(id, fn)
+        }
+
+        for (const [id, provider] of configProviders) {
+          if (!provider.extends) continue
+          const fn = customLoaders[provider.extends]
+          if (!fn) continue
+          yield* loadCustom(id, fn)
         }
 
         // load config - re-apply with updated data

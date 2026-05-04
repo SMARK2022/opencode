@@ -94,6 +94,7 @@ import { formatTranscript } from "../../util/transcript"
 import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { getScrollAcceleration } from "../../util/scroll"
+import { createThrottledSignal } from "../../util/signal"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { SessionRetry } from "@/session/retry"
@@ -1405,6 +1406,21 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
+  const visibleParts = createMemo(() => {
+    return props.parts.some((part) => {
+      if (part.type === "text") return part.text.trim().length > 0
+      if (part.type === "reasoning") {
+        if (!ctx.showThinking()) return false
+        return part.text.replace("[REDACTED]", "").trim().length > 0
+      }
+      if (part.type === "tool") return true
+      return false
+    })
+  })
+  const footerVisible = createMemo(() => {
+    if (!visibleParts() && !props.message.error) return false
+    return final() || props.message.error?.name === "MessageAbortedError"
+  })
 
   const duration = createMemo(() => {
     if (!final()) return 0
@@ -1462,7 +1478,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         </box>
       </Show>
       <Switch>
-        <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
+        <Match when={footerVisible()}>
           <box paddingLeft={3}>
             <text marginTop={1}>
               <span
@@ -1507,11 +1523,14 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     // OpenRouter sends encrypted reasoning data that appears as [REDACTED]
     return props.part.text.replace("[REDACTED]", "").trim()
   })
-  const lines = createMemo(() => content().split("\n"))
+  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+  createEffect(() => setDisplayContent(content()))
+  const renderedContent = createMemo(() => displayContent() || content())
+  const lines = createMemo(() => renderedContent().split("\n"))
   const PREVIEW = 5
   const overflow = createMemo(() => lines().length > PREVIEW)
   const preview = createMemo(() => {
-    if (expanded() || !overflow()) return content()
+    if (expanded() || !overflow()) return renderedContent()
     return [...lines().slice(0, PREVIEW), "…"].join("\n")
   })
   return (
@@ -1529,15 +1548,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
           setExpanded((prev) => !prev)
         }}
       >
-        <code
-          filetype="markdown"
-          drawUnstyledText={false}
-          streaming={false}
-          syntaxStyle={subtleSyntax()}
-          content={"_Thinking (" + content().length.toLocaleString() + " chars):_"}
-          conceal={ctx.conceal()}
-          fg={theme.textMuted}
-        />
+        <text fg={theme.textMuted}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
         <code
           filetype="markdown"
           drawUnstyledText={false}

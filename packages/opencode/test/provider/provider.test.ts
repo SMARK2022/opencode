@@ -575,6 +575,79 @@ test("provider with baseURL from config", async () => {
   })
 })
 
+test("claudecode config models infer Anthropic thinking variants", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            claudecode: {
+              options: {
+                apiKey: "test-key",
+              },
+              models: {
+                "claude-opus-4-6": {
+                  name: "Claude Opus 4.6",
+                },
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const providers = await list()
+      const model = providers[ProviderID.make("claudecode")].models["claude-opus-4-6"]
+      expect(model.capabilities.reasoning).toBe(true)
+      expect(model.variants?.low?.thinking?.type).toBe("adaptive")
+      expect(model.variants?.max?.effort).toBe("max")
+    },
+  })
+})
+
+test("provider extending claudecode uses Anthropic SDK and ClaudeCode loader", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            Cubence: {
+              extends: "claudecode",
+              options: {
+                baseURL: "https://api-dmit.cubence.com/v1",
+                apiKey: "test-key",
+              },
+              models: {
+                "claude-opus-4-6": {
+                  name: "Claude Opus 4.6",
+                },
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const providers = await list()
+      const provider = providers[ProviderID.make("Cubence")]
+      const model = provider.models["claude-opus-4-6"]
+      expect(model.api.npm).toBe("@ai-sdk/anthropic")
+      expect(provider.options.baseURL).toBe("https://api-dmit.cubence.com/v1")
+      expect(typeof provider.options.fetch).toBe("function")
+    },
+  })
+})
+
 test("model cost defaults to zero when not specified", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
