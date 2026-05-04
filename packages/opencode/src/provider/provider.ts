@@ -1348,6 +1348,8 @@ function cloudflareGatewayNpm(providerID: string, modelID: string) {
 }
 
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
+  // 网关可能改写 SDK，先确定实际包再补端点和生成变体，避免套用原协议的默认值。
+  const npm = cloudflareGatewayNpm(provider.id, model.id) ?? model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"
   const base: Model = {
     id: ModelV2.ID.make(model.id),
     providerID: ProviderV2.ID.make(provider.id),
@@ -1355,12 +1357,8 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
     family: model.family,
     api: {
       id: model.id,
-      url: model.provider?.api ?? provider.api ?? "",
-      npm:
-        cloudflareGatewayNpm(provider.id, model.id) ??
-        model.provider?.npm ??
-        provider.npm ??
-        "@ai-sdk/openai-compatible",
+      url: ProviderV2.apiUrl({ npm, api: model.provider?.api ?? provider.api }),
+      npm,
     },
     status: model.status ?? "active",
     headers: {},
@@ -1570,7 +1568,16 @@ const layer = Layer.effect(
           const existing = baseType ? database[baseType] : database[providerID]
           // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
           const inheritedModels = existing
-            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => [mid, { ...model, providerID: ProviderV2.ID.make(providerID), api: { ...model.api, npm: provider.npm ?? model.api.npm, url: provider.api ?? model.api.url ?? "" } }]))
+            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => {
+                const npm = provider.npm ?? model.api.npm
+                return [mid, {
+                  ...model,
+                  providerID: ProviderV2.ID.make(providerID),
+                  api: { ...model.api, npm, url: ProviderV2.apiUrl({ npm, api: provider.api ?? model.api.url }) },
+                  // SDK 变化后须重新生成协议变体，不能复用父提供者原协议的推理参数。
+                  variants: npm === model.api.npm ? model.variants : undefined,
+                }]
+              }))
             : {}
           const parsed: Info = {
             id: ProviderV2.ID.make(providerID),
@@ -1606,7 +1613,8 @@ const layer = Layer.effect(
               api: {
                 id: apiID,
                 npm: apiNpm,
-                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api ?? "",
+                // 用合并后的包补默认地址，同时保留模型覆盖、提供者覆盖和继承地址的原优先级。
+                url: ProviderV2.apiUrl({ npm: apiNpm, api: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api }),
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,

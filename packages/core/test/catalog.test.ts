@@ -210,6 +210,32 @@ describe("CatalogV2", () => {
         package: "@ai-sdk/openai-compatible",
         url: "https://provider.example.com",
       })
+
+      // 通过真实继承与投影验证三个协议的默认端点，避免只测孤立地址表。
+      for (const [npm, url] of [
+        ["@ai-sdk/anthropic", "https://api.anthropic.com/v1"],
+        ["@ai-sdk/google", "https://generativelanguage.googleapis.com/v1beta"],
+        ["@ai-sdk/openai", "https://api.openai.com/v1"],
+      ]) {
+        yield* catalog.transform((catalog) => {
+          catalog.provider.update(providerID, (provider) => { provider.api = { type: "aisdk", package: npm } })
+          // 两个别名共享 wire ID，固定这个冲突才能发现用 API ID 反查 Catalog 键的错误。
+          catalog.model.update(providerID, modelID, (model) => { model.api.id = ModelV2.ID.make("wire-model") })
+          catalog.model.update(providerID, ModelV2.ID.make("alias"), (model) => {
+            model.api = { id: ModelV2.ID.make("wire-model"), type: "aisdk", package: npm, settings: { baseURL: "https://alias.example.com/v1" } }
+          })
+        })
+        // 公共投影应直接提供端点，读取展示元数据无需建立运输或解析凭证。
+        const model = required(yield* catalog.model.get(providerID, modelID))
+        expect(model.id).toBe(modelID)
+        expect(model.api.id).toBe(ModelV2.ID.make("wire-model"))
+        expect(model.api.url).toBe(url)
+        // 别名的 SDK 设置仍优先，不能被另一别名补入的默认地址覆盖。
+        const alias = required(yield* catalog.model.get(providerID, ModelV2.ID.make("alias")))
+        expect(alias.api.id).toBe(model.api.id)
+        expect(alias.api.url).toBe("https://alias.example.com/v1")
+        expect(alias.api.type === "aisdk" && alias.api.settings?.baseURL).toBe("https://alias.example.com/v1")
+      }
     }),
   )
 

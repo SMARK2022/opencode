@@ -1,11 +1,15 @@
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
-import { createEffect, createMemo, createSignal } from "solid-js"
+import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import { useLocal } from "../../context/local"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
 
 const id = "internal:sidebar-context"
+// 探测完成后再计下一秒，慢连接不会叠加并发请求。
+const PING_INTERVAL = 1_000
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -14,6 +18,7 @@ const money = new Intl.NumberFormat("en-US", {
 
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
+  const local = useLocal()
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   const session = createMemo(() => props.api.state.session.get(props.session_id))
 
@@ -79,6 +84,90 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   // sidebar 总有零值 state，零值到正值可触发增长；tokens/percent 的单独变化不会续期。
   const flow = createTokenFlowPulse(state)
 
+  // 沿源功能跟随当前选择；历史 API ID 不能唯一标识 Catalog 别名。
+  const targetApiUrl = createMemo(() => {
+    // 等待持久化选择就绪，避免冷启动时探测随后会被恢复状态替换的临时模型。
+    if (!local.model.ready) return null
+    const selected = local.model.current()
+    if (!selected) return null
+    const provider = props.api.state.provider.find((item) => item.id === selected.providerID)
+    const model = provider?.models[selected.modelID]
+    if (!model) return null
+    // 提供者 baseURL 沿实际 SDK/native 适配器的优先级，显示与发往的端点保持一致。
+    const configuredBaseUrl = provider?.options.baseURL
+    const baseUrl = typeof configuredBaseUrl === "string" && configuredBaseUrl !== "" ? configuredBaseUrl : model.api.url
+    // 配置缺失或地址非法时不创建探测，不能把未解析的配置误报为网络离线。
+    if (typeof baseUrl !== "string" || !URL.canParse(baseUrl)) return null
+    const url = new URL(baseUrl)
+    // 只探测 HTTP origin，避免协议路径的路由与处理耗时混入网络 RTT。
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null
+  })
+
+  const [latency, setLatency] = createSignal<number | null>(null)
+  const [pingStatus, setPingStatus] = createSignal<"ok" | "down" | "init">("init")
+  const [isProxy, setIsProxy] = createSignal(false)
+
+  createEffect(
+    on(targetApiUrl, (url) => {
+      // 切换 origin 时清除旧测量，不能把上一模型的 RTT 显示给新选择。
+      setLatency(null)
+      setPingStatus("init")
+      setIsProxy(false)
+      if (!url) return
+
+      let active = true
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const controller = new AbortController()
+      // 视图清理须中止在途请求；仅忽略迟到结果仍会留下提供者网络 IO。
+      onCleanup(() => {
+        active = false
+        controller.abort()
+        if (timer) clearTimeout(timer)
+      })
+
+      const ping = async () => {
+        if (!active) return
+        const t0 = Date.now()
+        // 从探测开始统一计三秒，后续请求沿同一信号，不因代理刷新重新开启超时窗口。
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(3000)])
+        try {
+          // provider 用途复用源系统代理策略，代理图标与所选路由保持一致。
+          const route = await NetworkProxy.resolveProxyRoute(url, "provider")
+          if (!active) return
+          setIsProxy(route.type === "proxy")
+          // 运输调用始终附回同一取消信号，避免代理重试移除调用方信号后留下在途请求。
+          const res = await NetworkProxy.fetchWithRoute(
+            (input, init?: RequestInit) => fetch(input, { ...init, signal }),
+            url,
+            { method: "HEAD", signal, purpose: "provider" },
+          )
+          if (!active) return
+          // 认证拒绝仍证明网络可达；按源语义仅将三类网关故障记为离线。
+          const down = res.status === 502 || res.status === 503 || res.status === 504
+          setPingStatus(down ? "down" : "ok")
+          setLatency(down ? null : Date.now() - t0)
+        } catch {
+          if (!active) return
+          setPingStatus("down")
+          setLatency(null)
+        }
+        // 当前探测结算后才排下一次，保留源功能的一秒串行间隔。
+        if (active) timer = setTimeout(ping, PING_INTERVAL)
+      }
+
+      void ping()
+    }),
+  )
+
+  // RTT 颜色只反映连接耗时，不把提供者认证状态混入延迟等级。
+  const latencyDisplay = createMemo(() => {
+    const icon = isProxy() ? "🌐" : "⚡"
+    if (pingStatus() === "down") return { text: `${icon} offline`, fg: theme().error }
+    const value = latency()
+    if (value === null) return { text: `${icon} ...`, fg: theme().textMuted }
+    return { text: `${icon} ${value}ms`, fg: value < 300 ? theme().success : value < 800 ? theme().warning : theme().error }
+  })
+
   return (
     <box>
       <text fg={theme().text}>
@@ -86,9 +175,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       </text>
       {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
       <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})</text>
-      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens</text>
-      <text fg={theme().textMuted}>{state().percent != null ? `${state().percent}% of ctx limit` : "—"}</text>
-      <text fg={theme().textMuted}>{money.format(state().cost)} spent</text>
+      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens{state().percent != null ? ` · ${state().percent}%` : ""}</text>
+      {/* 未解析到 origin 时隐藏探测，避免冷启动一直显示没有目标的等待状态。 */}
+      <text fg={theme().textMuted}>
+        {money.format(state().cost)} spent
+        {targetApiUrl() && <>{" · "}<span style={{ fg: latencyDisplay().fg }}>{latencyDisplay().text}</span></>}
+      </text>
     </box>
   )
 }
