@@ -46,6 +46,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
+import { createThrottledSignal } from "../../util/signal"
 import { webSearchProviderLabel } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
@@ -1465,6 +1466,25 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
+  // 只计实际正文、推理和工具，避免空助手消息先闪出模式与模型行。
+  const visibleParts = createMemo(() => {
+    return props.parts.some((part) => {
+      if (part.type === "text") return part.text.trim().length > 0
+      if (part.type === "reasoning") {
+        if (!ctx.showThinking()) return false
+        // 加密占位不算可见正文，否则空完成消息仍会露出 footer。
+        return part.text.replace("[REDACTED]", "").trim().length > 0
+      }
+      if (part.type === "tool") return true
+      return false
+    })
+  })
+  const footerVisible = createMemo(() => {
+    // 中断可能发生在首个正文之前，错误身份不能因消息为空而被这道可见性门槛吞掉。
+    if (!visibleParts() && !props.message.error) return false
+    // 最后一条仍在流式生成不等于完成，不能恢复原 props.last 触发的过早元信息。
+    return final() || props.message.error?.name === "MessageAbortedError"
+  })
 
   const duration = createMemo(() => {
     if (!final()) return 0
@@ -1535,7 +1555,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         </box>
       </Show>
       <Switch>
-        <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
+        <Match when={footerVisible()}>
           <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
             <text marginTop={1}>
               <span
@@ -1585,6 +1605,11 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     return props.part.text.replace("[REDACTED]", "").trim()
   })
   const opaque = createMemo(() => !content() && Boolean(props.part.metadata))
+  // 全文共用既有 50ms 首尾值窗口，预览与展开正文不另设刷新计时器。
+  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+  createEffect(() => setDisplayContent(content()))
+  // 首次 effect 尚未发布时沿源回退正文，已有节流值后不再逐字重排 markdown。
+  const renderedContent = createMemo(() => displayContent() || content())
   // Reasoning is finalized when the server sets `time.end` (see processor.ts).
   // Flips independently of the parent message completing.
   const isDone = createMemo(() => props.part.time.end !== undefined)
@@ -1593,7 +1618,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     const end = props.part.time.end
     return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
   })
-  const summary = createMemo(() => reasoningSummary(content()))
+  const summary = createMemo(() => reasoningSummary(renderedContent()))
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
 
   // 选区只拦截鼠标入口；共享 toggle 保留模式与加密判断，键盘切换思考模式不应受残留选区影响。
@@ -1617,12 +1642,13 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         }}
       >
         <box>
+          {/* 字数与正文使用同一节流快照，避免标题逐字刷新绕过 markdown 的 50ms 窗口。 */}
           <ReasoningHeader
             toggleable={inMinimal() && !opaque()}
             open={!inMinimal() || expanded()}
             done={isDone()}
             title={summary().title}
-            characters={opaque() ? undefined : content().length}
+            characters={opaque() ? undefined : renderedContent().length}
             duration={isDone() ? Locale.duration(duration()) : undefined}
             encrypted={opaque()}
           />
@@ -1636,12 +1662,13 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
               drawUnstyledText={false}
               streaming={true}
               syntaxStyle={syntax()}
-              content={content().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
+              content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
               conceal={ctx.conceal()}
               fg={theme.textMuted}
             />
             {/* 超出预览行时提示可展开；点击由外层推理区统一处理 */}
-            <Show when={content().split(String.fromCharCode(10)).length > 5}>
+            {/* 溢出提示也按同一快照判定，正文尾值发布前不能提前改变折叠布局。 */}
+            <Show when={renderedContent().split(String.fromCharCode(10)).length > 5}>
               <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
             </Show>
           </box>

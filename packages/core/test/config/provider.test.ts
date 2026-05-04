@@ -4,11 +4,12 @@ import { Catalog } from "@opencode-ai/core/catalog"
 import { Config } from "@opencode-ai/core/config"
 import { ConfigProviderPlugin } from "@opencode-ai/core/config/plugin/provider"
 import { Integration } from "@opencode-ai/core/integration"
+import { Credential } from "@opencode-ai/core/credential"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { PluginV2 } from "@opencode-ai/core/plugin"
 import { PluginHost } from "@opencode-ai/core/plugin/host"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { LLM, LLMClient, ModelID } from "@opencode-ai/llm"
+import { LLM, LLMClient, ModelID, ProviderID, type Model } from "@opencode-ai/llm"
 import { RequestExecutor } from "@opencode-ai/llm/route"
 import { AnthropicMessages } from "@opencode-ai/llm/protocols/anthropic-messages"
 import { HttpClientRequest } from "effect/unstable/http"
@@ -66,7 +67,7 @@ const decode = Schema.decodeUnknownSync(Config.Info)
 
 describe("ConfigProviderPlugin.Plugin", () => {
   it.effect("preserves configured API keys through availability and native authentication", () =>
-    withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: "fallback-key" }, () =>
+    Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
       Effect.gen(function* () {
         const catalog = yield* Catalog.Service
         const integrations = yield* Integration.Service
@@ -110,14 +111,16 @@ describe("ConfigProviderPlugin.Plugin", () => {
           const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input).pipe(Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))))
           const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
-          expect(web.headers.get(provider === "claudecode" ? "authorization" : "x-api-key")).toBe(provider === "claudecode" ? "Bearer configured-key" : "configured-key")
+          const claudecode = provider === "claudecode" || provider === "explicit-claudecode"
+          expect(web.headers.get(claudecode ? "authorization" : "x-api-key")).toBe(claudecode ? `Bearer ${cc ?? "configured-key"}` : "configured-key")
+          expect(web.headers.has(claudecode ? "x-api-key" : "authorization")).toBe(false)
           // 检查真正编码的请求，内部可用性信号不能成为发送给模型的密钥正文。
           const body = yield* Effect.promise(() => web.text())
           expect(body).not.toContain("configured-key")
           expect(body).not.toContain("fallback-key")
         }
       }),
-    ),
+    )),
   )
 
   it.effect("keeps configured model variant bodies unchanged", () =>
@@ -480,6 +483,7 @@ describe("ConfigProviderPlugin.Plugin", () => {
         const anthropic = required(yield* catalog.model.get(ProviderV2.ID.make("anthropic-copy"), ModelV2.ID.make("claude")))
         // 同一个已有 SDK lowerer 应同时转换模型与变体；中间配置和实际 wire 都无 camel userId。
         expect(anthropic.request.body).toEqual({ extension: { base: "keep", child: "add", shared: "high" }, items: ["high"], metadata: { base: "keep", user_id: "later-model-user" } })
+        // 未声明输出窗口时不推断 enabled 预算，用户显式 high 变体的完整 metadata 继续保留。
         expect(anthropic.variants[0]?.body).toEqual({ metadata: { user_id: "later-variant-user" } })
         // authToken 不能困在 settings/body；基础不变，高层 URL/settings/headers 均独立覆盖。
         expect(anthropic.api).toMatchObject({ type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic-high.test/v1", settings: { region: "high" } })
@@ -500,6 +504,11 @@ describe("ConfigProviderPlugin.Plugin", () => {
           const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
           const text = yield* Effect.promise(() => web.text())
+          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(text)
+          // 检查最终字节而非仅 Catalog 元数据，缺省上限必须来自协议且不能再携带负思考预算。
+          expect(body.max_tokens).toBe(4096)
+          expect(body).not.toHaveProperty("thinking")
+          expect(body.metadata).toEqual(variant === undefined ? { base: "keep", user_id: "later-model-user" } : { user_id: "later-variant-user" })
           expect(web.headers.get("authorization")).toBe("Bearer new-token")
           expect(web.url).toBe("https://anthropic-high.test/v1/messages")
           expect(text).toContain(variant === undefined ? '"user_id":"later-model-user"' : '"user_id":"later-variant-user"')
@@ -507,6 +516,172 @@ describe("ConfigProviderPlugin.Plugin", () => {
           expect(text).not.toContain('"authToken"')
           expect(text).not.toContain("old-token")
         }
+      }),
+    ),
+  )
+
+  it.effect("compiles claudecode thinking variants through the inherited Location model resolver", () =>
+    withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, CLAUDECODE_API_KEY: undefined, ANTHROPIC_BASE_URL: undefined, CLAUDECODE_BASE_URL: undefined }, () =>
+      Effect.gen(function* () {
+        const catalog = yield* Catalog.Service
+        const config = Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document",
+          info: decode(ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
+            claudecode: { options: { apiKey: "configured-key" }, models: {
+              "claude-opus-4-6": { name: "Claude Opus 4.6", limit: { context: 64000, output: 32000 } },
+              "claude-3-7-sonnet-20250219": { reasoning: false, limit: { context: 64000, output: 32000 } },
+              "budget-base": { id: "claude-3-7-sonnet", reasoning: true, limit: { context: 64000, output: 32000 }, variants: { high: { custom_extension: { source: "base" } } } },
+            } },
+            Cubence: { extends: "claudecode", options: { apiKey: "derived-key", baseURL: "https://api-dmit.cubence.com/v1" }, models: {
+              "opus-alias": { id: "claude-opus-4-6", variants: { low: { metadata: { userId: "explicit-variant" } } } },
+              "disabled-alias": { id: "claude-3-7-sonnet-20250219" },
+            } },
+            // 无 extends 的普通提供者刻意带同名设置，锁定专用身份必须来自真实继承证明。
+            ordinary: { npm: "@ai-sdk/anthropic", options: { apiKey: "ordinary-key", claudeCode: true }, models: {
+              "claude-4.7-opus": { reasoning: true, limit: { context: 64000, output: 32000 } },
+              deployment: { reasoning: true, limit: { context: 64000, output: 32000 } },
+              "claude-opus-4-6": { limit: { context: 64000, output: 32000 } },
+              "claude-sonnet-4-5": { limit: { context: 64000, output: 1024 } },
+              "claude-3-7-sonnet": { limit: { context: 64000, output: 1025 }, variants: { high: { metadata: { userId: "small-window" } } } },
+              lowered: { id: "claude-3-7-sonnet", reasoning: true, limit: { context: 64000, output: 32000 } },
+              off: { id: "claude-3-7-sonnet", reasoning: true, limit: { context: 64000, output: 32000 }, variants: { manual: { custom_extension: { source: "first" } } } },
+            } },
+            "sdk-switch": { extends: "claudecode" },
+          } }))),
+        }), new Config.Document({ type: "document",
+          // 后层不重述基础配置，预算、能力和协议必须共同按最终状态推断，不能消费上一层的默认表。
+          info: decode(ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
+            ordinary: { models: {
+              lowered: { limit: { context: 64000, output: 2048 } },
+              off: { reasoning: false, variants: { manual: { custom_extension: { source: "later" } } } },
+            } },
+            "sdk-switch": { npm: "@ai-sdk/openai", options: { apiKey: "sdk-key", baseURL: "https://openai.test/v1" }, models: { "budget-base": { id: "gpt-4.1" } } },
+          } }))),
+        })]) })
+        yield* addPlugin(config)
+        const compile = <Body = AnthropicMessages.AnthropicMessagesBody>(model: Model) => Effect.gen(function* () {
+          const requests: HttpClientRequest.HttpClientRequest[] = []
+          const route = model.route.with({ transport: { ...model.route.transport,
+            prepare: (input) => model.route.transport.prepare(input).pipe(Effect.tap((prepared) => Effect.sync(() => requests.push(prepared.request)))),
+          } })
+          const prepared = yield* LLMClient.prepare<Body>(LLM.request({ model: route.model({ id: model.id }), prompt: "hello", cache: "none" }))
+          // 截获同一次 compile 的真实请求，计数拦住重复 prepare，fixture 永不进入发送或 frames。
+          expect(requests).toHaveLength(1)
+          return { body: prepared.body, web: yield* HttpClientRequest.toWeb(required(requests[0])).pipe(Effect.orDie) }
+        })
+        const providerID = ProviderV2.ID.make("Cubence")
+        const alias = required(yield* catalog.model.get(providerID, ModelV2.ID.make("opus-alias")))
+        expect(alias.providerID).toBe(providerID)
+        expect(alias.id).toBe(ModelV2.ID.make("opus-alias"))
+        expect(alias.api).toMatchObject({ id: "claude-opus-4-6", type: "aisdk", package: "@ai-sdk/anthropic", url: "https://api-dmit.cubence.com/v1" })
+        expect(alias.variants.map((variant) => variant.id)).toEqual(["low", "medium", "high", "max"].map((id) => ModelV2.VariantID.make(id)))
+        // 完整低档 body 同时锁定默认 effort 与用户 metadata，部分匹配会漏掉合并丢项。
+        expect(alias.variants.find((variant) => variant.id === "low")?.body).toEqual({ thinking: { type: "adaptive" }, output_config: { effort: "low" }, metadata: { user_id: "explicit-variant" } })
+        expect((yield* catalog.model.get(ProviderV2.ID.make("claudecode"), ModelV2.ID.make("claude-3-7-sonnet-20250219")))?.variants).toEqual([])
+        const disabled = required(yield* catalog.model.get(providerID, ModelV2.ID.make("disabled-alias")))
+        expect(disabled.variants).toEqual([])
+        const disabledModel = yield* SessionRunnerModel.fromCatalogModel(disabled)
+        expect((yield* compile(disabledModel)).body).not.toHaveProperty("__opencodeReasoning")
+        expect((yield* catalog.model.get(ProviderV2.ID.make("claudecode"), ModelV2.ID.make("claude-opus-4-6")))?.api.url).toBe("https://api.cubence.com")
+        const session = SessionSchema.Info.make({ id: SessionSchema.ID.make("ses_claudecode_inference"), projectID: ProjectV2.ID.global, title: "test", cost: 0,
+          model: { providerID, id: alias.id, variant: ModelV2.VariantID.make("max") },
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
+        })
+        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
+        const selected = (yield* resolver.resolve(session)).model
+        // 真实 Location resolver 保留派生 provider 与 wire ID，冻结预算不随 Catalog 别名重写。
+        expect(selected.provider).toBe(ProviderID.make(providerID))
+        expect(selected.id).toBe(ModelID.make("claude-opus-4-6"))
+        expect(selected.route.defaults.limits).toEqual({ context: 64000, input: undefined, output: 32000 })
+        const prepared = yield* compile(selected)
+        expect(prepared.body.thinking).toEqual({ type: "adaptive" })
+        expect(prepared.body.output_config).toEqual({ effort: "max" })
+        expect(prepared.body.system?.[0]?.text).toStartWith("x-anthropic-billing-header:")
+        expect(prepared.web.url).toBe("https://api-dmit.cubence.com/v1/messages")
+        expect(prepared.web.headers.get("authorization")).toBe("Bearer derived-key")
+        expect(prepared.web.headers.has("x-api-key")).toBe(false)
+        expect(prepared.web.headers.get("x-app")).toBe("cli")
+        // 显式能力支持新版命名和自定义部署，不能再次被缺省型号推断否决。
+        for (const id of ["claude-4.7-opus", "deployment"]) {
+          const explicit = required(yield* catalog.model.get(ProviderV2.ID.make("ordinary"), ModelV2.ID.make(id)))
+          expect(explicit.variants.some((variant) => variant.id === "high")).toBe(true)
+          const resolved = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: explicit.providerID, id: explicit.id, variant: ModelV2.VariantID.make("high") } }), explicit)
+          expect(resolved.route.defaults.http?.body).not.toHaveProperty("thinking")
+          expect(resolved.route.defaults.http?.body).not.toHaveProperty("output_config")
+          const request = yield* compile(resolved)
+          expect(request.body.thinking?.type).toBe(id === "claude-4.7-opus" ? "adaptive" : "enabled")
+          expect(request.body.max_tokens).toBeGreaterThan(0)
+        }
+        // 只准备请求而不发送，四种来源验证源优先级，保存凭据属于当前派生身份。
+        for (const sample of [
+          { token: "env-token", cc: "cc-token", saved: "saved-key", expected: "env-token" },
+          { token: undefined, cc: "cc-token", saved: "saved-key", expected: "cc-token" },
+          { token: undefined, cc: undefined, saved: "saved-key", expected: "saved-key" },
+          { token: undefined, cc: undefined, saved: undefined, expected: "derived-key" },
+        ]) yield* withEnv({ ANTHROPIC_AUTH_TOKEN: sample.token, CLAUDECODE_API_KEY: sample.cc }, () => Effect.gen(function* () {
+          const resolved = yield* SessionRunnerModel.fromCatalogModel(alias, sample.saved === undefined ? undefined : Credential.Key.make({ type: "key", key: sample.saved }))
+          const prepared = yield* compile(resolved)
+          expect(prepared.web.headers.get("authorization")).toBe(`Bearer ${sample.expected}`)
+          expect(prepared.web.headers.has("x-api-key")).toBe(false)
+        }))
+        const ordinary = required(yield* catalog.model.get(ProviderV2.ID.make("ordinary"), ModelV2.ID.make("claude-opus-4-6")))
+        expect(ordinary.api.url).toBe("https://api.anthropic.com/v1")
+        const normal = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: ordinary.providerID, id: ordinary.id, variant: ModelV2.VariantID.make("low") } }), ordinary)
+        const normalBody = yield* compile(normal)
+        // 普通 Anthropic 仍有推断变体，绝不因为专用能力混入 ClaudeCode 的计费、占位工具或身份头。
+        expect(normalBody.body.thinking).toEqual({ type: "adaptive" })
+        expect(normalBody.body.output_config).toEqual({ effort: "low" })
+        expect(normalBody.body.system).toBeUndefined()
+        expect(normalBody.body.tools).toBeUndefined()
+        expect(normalBody.web.headers.get("x-api-key")).toBe("ordinary-key")
+        expect(normalBody.web.headers.has("x-app")).toBe(false)
+        // 两个相邻窗口分别验证不能容纳思考与恰能容纳最低预算，显式变体 metadata 不能被默认表丢掉。
+        for (const sample of [{ id: "claude-sonnet-4-5", output: 1024 }, { id: "claude-3-7-sonnet", output: 1025 }]) {
+          const edge = required(yield* catalog.model.get(ordinary.providerID, ModelV2.ID.make(sample.id)))
+          expect(edge.variants).toEqual(sample.output === 1024 ? [] : [
+            { id: ModelV2.VariantID.make("high"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 1024 }, metadata: { user_id: "small-window" } } },
+            { id: ModelV2.VariantID.make("max"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 1024 } } },
+          ])
+          const resolved = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: edge.providerID, id: edge.id, variant: sample.output === 1024 ? undefined : ModelV2.VariantID.make("high") } }), edge)
+          const prepared = yield* compile(resolved)
+          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => prepared.web.text()))
+          // wire 的 max_tokens 必须等于所选小窗口，1024 的思考预算只能出现在更大的 1025 窗口。
+          expect(body.max_tokens).toBe(sample.output)
+          expect(body.thinking).toEqual(sample.output === 1024 ? undefined : { type: "enabled", budget_tokens: 1024 })
+          expect(body.metadata).toEqual(sample.output === 1024 ? undefined : { user_id: "small-window" })
+          expect(prepared.web.headers.has("x-app")).toBe(false)
+        }
+        const lowered = required(yield* catalog.model.get(ordinary.providerID, ModelV2.ID.make("lowered")))
+        // 两档精确预算锁定第二层 2048 上限，不能只测变体名字而漏掉首层 32000 的残留。
+        expect(lowered.variants).toEqual([
+          { id: ModelV2.VariantID.make("high"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 1024 } } },
+          { id: ModelV2.VariantID.make("max"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 2047 } } },
+        ])
+        for (const variant of lowered.variants) {
+          const resolved = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: lowered.providerID, id: lowered.id, variant: variant.id } }), lowered)
+          const prepared = yield* compile(resolved)
+          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => prepared.web.text()))
+          expect(body.max_tokens).toBe(2048)
+          expect(body.thinking).toEqual(variant.body.thinking)
+        }
+        const off = required(yield* catalog.model.get(ordinary.providerID, ModelV2.ID.make("off")))
+        // false 只撤销自动推断，显式变体仍沿原分层流程接纳后层正文并继续可执行。
+        expect(off.variants).toEqual([{ id: ModelV2.VariantID.make("manual"), headers: {}, body: { custom_extension: { source: "later" } } }])
+        const offModel = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: off.providerID, id: off.id, variant: ModelV2.VariantID.make("manual") } }), off)
+        const offPrepared = yield* compile(offModel)
+        const offBody = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => offPrepared.web.text()))
+        expect(offBody).not.toHaveProperty("thinking")
+        expect(offBody.custom_extension).toEqual({ source: "later" })
+        const switched = required(yield* catalog.model.get(ProviderV2.ID.make("sdk-switch"), ModelV2.ID.make("budget-base")))
+        // SDK 切换后仍继承真实用户变体，首次推断的 Anthropic thinking 不得混进 Responses 的 HTTP overlay。
+        expect(switched.variants).toEqual([{ id: ModelV2.VariantID.make("high"), headers: {}, body: { custom_extension: { source: "base" } } }])
+        const switchedModel = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: switched.providerID, id: switched.id, variant: ModelV2.VariantID.make("high") } }), switched)
+        const switchedPrepared = yield* compile<Record<string, unknown>>(switchedModel)
+        expect(switchedModel.route.id).toBe("openai-responses")
+        const switchedBody = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => switchedPrepared.web.text()))
+        expect(switchedBody.model).toBe("gpt-4.1")
+        expect(switchedBody).not.toHaveProperty("thinking")
+        expect(switchedBody.custom_extension).toEqual({ source: "base" })
       }),
     ),
   )

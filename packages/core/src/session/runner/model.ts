@@ -98,12 +98,13 @@ export const cost = (pricing: ModelV2.Info["cost"], tokens: { input: number; out
 }
 
 const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
-  // ClaudeCode 的配置、环境、已保存 API key 顺序来自源 loader，不能继承通用 credential-first。
-  if (model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic") {
-    const configured = model.request.body.apiKey ?? model.api.settings?.apiKey
-    // ANTHROPIC_AUTH_TOKEN 必须在模型覆盖和保存凭据之前，不能只在 Catalog 启动时投影一次。
-    const value = process.env.ANTHROPIC_AUTH_TOKEN || (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
-      (credential?.type === "key" ? credential.key : undefined)
+  if (ProviderV2.isClaudeCode(model)) {
+    // V1 lowerer 把 apiKey 放进 x-api-key，只查 body/settings 会漏掉这份配置凭据。
+    const configured = model.request.body.apiKey ?? model.api.settings?.apiKey ??
+      Object.entries(model.request.headers).find(([key]) => key.toLowerCase() === "x-api-key")?.[1]
+    // 已验证的派生身份沿源读取两类环境密钥、自己的保存凭据，最后才用配置 lowerer 的密钥。
+    const value = process.env.ANTHROPIC_AUTH_TOKEN || process.env.CLAUDECODE_API_KEY ||
+      (credential?.type === "key" ? credential.key : undefined) || (typeof configured === "string" && configured)
     // OAuth access 不是源补丁支持的 API key，不在这里偷偷增加另一种认证来源。
     return value ? Auth.value(value) : undefined
   }
@@ -116,37 +117,44 @@ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
 const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
   const body = model.request.body
   // 只有专用 Anthropic 路由消费这些字段；其他协议的 body 投影不扩大本补丁范围。
-  const claudecode = model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic"
+  const claudecode = ProviderV2.isClaudeCode(model)
+  const anthropic = model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic" &&
+    (claudecode || body.__opencodeReasoning === true || ProviderV2.isAnthropicThinkingModel(model.api.id))
   // 源补丁按 provider ID 或 SDK package 识别 OpenAI 系列，不扩大普通兼容服务默认值。
   const parallel = model.providerID === "openai" || (model.api.type === "aisdk" &&
     ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/github-copilot"].includes(model.api.package))
   // model/variant 的并行参数进入 typed provider options，禁止 HTTP 后置 overlay 抢占协议字段。
-  const httpBody = Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey" &&
-    (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key))))
+  // 能力标志只服务配置继承，不能混入 72 观察的 prepared JSON 或实际提供者请求。
+  // 推断的 thinking/effort 同样交给唯一 typed lowering，不能由 HTTP 后置覆盖协议字段。
+  const httpBody = Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey" && key !== "__opencodeReasoning" &&
+    (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key)) && (!anthropic || !["thinking", "output_config"].includes(key)) && (!claudecode || !["system", "metadata"].includes(key))))
   return route.with({
     provider: model.providerID,
     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
     // protocol-owned 字段在 typed lowering 中处理，不能从 http.body 绕过校验覆盖 system/thinking。
     headers: claudecode ? Object.fromEntries(Object.entries(model.request.headers).filter(([key]) =>
       !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) : model.request.headers,
-    http: { body: claudecode ? Object.fromEntries(Object.entries(httpBody).filter(([key]) =>
-      !["system", "thinking", "metadata", "output_config"].includes(key))) : httpBody },
-    // metadata 不再出现在后置 overlay，保证最终 user_id 由专用 adapter 决定。
-    ...(claudecode ? { providerOptions: { anthropic: {
-      // 配置 beta 转入既有协议选项，HTTP 后置 overlay 不再覆盖专用 beta 或身份头。
-      betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
-      thinking: body.thinking,
-      // 原始 system 转交 typed 协议校验与合并，不能从 HTTP overlay 覆盖自有计费首块。
-      system: body.system,
-      metadata: body.metadata,
-      output_config: body.output_config,
-    } } } : {}),
-    // 空值采用源默认 true；显式 false 与已合并的 variant 配置完整保留。
-    ...(parallel ? { providerOptions: { openai: {
-      parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
-    } } } : {}),
+    http: { body: httpBody },
+    ...(anthropic || parallel ? { providerOptions: {
+      ...(anthropic ? { anthropic: {
+        thinking: body.thinking,
+        output_config: body.output_config,
+        ...(claudecode ? {
+          // 标记来自已验证的 Catalog 继承；保持真实 provider ID，校准与历史匹配不能改成父 ID。
+          claudeCode: true,
+          betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
+          system: body.system,
+          metadata: body.metadata,
+        } : {}),
+      } } : {}),
+      // 两个命名空间独立合并，不能为 ClaudeCode 或 Anthropic 丢弃其他提供者的并行参数。
+      ...(parallel ? { openai: {
+        parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
+      } } : {}),
+    } } : {}),
     // Catalog 的输入边界随同一解析 Model 交给压缩 owner，不放入 provider 请求正文。
-    limits: { context: model.limit.context, input: model.limit.input, output: model.limit.output },
+    // 零是 Catalog 的未声明值，eligible Anthropic 应由实际协议决定 max_tokens，不能把它发成零限额。
+    limits: { context: model.limit.context, input: model.limit.input, output: anthropic && model.limit.output === 0 ? undefined : model.limit.output },
   })
 }
 
@@ -188,7 +196,7 @@ export const fromCatalogModel = (
           Object.assign(draft.request.body, credential.metadata)
         })
   // credential metadata 可补充请求参数，但不能反过来抢占 ClaudeCode 的显式配置密钥。
-  const key = apiKey(model.providerID === "claudecode" ? model : resolved, credential)
+  const key = apiKey(ProviderV2.isClaudeCode(model) ? model : resolved, credential)
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
     return Effect.succeed(
       withDefaults(resolved, OpenAIResponses.route)
@@ -198,7 +206,7 @@ export const fromCatalogModel = (
   }
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
     // 仅在已经确认的 Anthropic API 分支配置 ClaudeCode，不按名称强改其他显式协议。
-    const claudecode = resolved.providerID === "claudecode"
+    const claudecode = ProviderV2.isClaudeCode(resolved)
     return Effect.succeed(
       withDefaults(resolved, AnthropicMessages.route)
         .with({

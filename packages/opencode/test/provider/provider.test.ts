@@ -411,6 +411,69 @@ it.instance(
 )
 
 it.instance(
+  "claudecode config models infer Anthropic thinking variants",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const model = providers[ProviderV2.ID.make("claudecode")].models["claude-opus-4-6"]
+    // 不填 reasoning:true 才能锁定缺省推断，避免 fixture 绕过本次新增的生产分支。
+    expect(model.capabilities.reasoning).toBe(true)
+    expect(model.variants?.low?.thinking?.type).toBe("adaptive")
+    expect(model.variants?.max?.effort).toBe("max")
+  }),
+  {
+    config: {
+      provider: {
+        claudecode: {
+          options: {
+            apiKey: "test-key",
+          },
+          models: {
+            "claude-opus-4-6": {
+              name: "Claude Opus 4.6",
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "provider extending claudecode uses Anthropic SDK and ClaudeCode loader",
+  Effect.gen(function* () {
+    // 环境值刻意不同于 options.apiKey，才能捕获后续重合并把 loader 选择覆盖回去。
+    yield* set("ANTHROPIC_AUTH_TOKEN", "env-test-key")
+    yield* remove("ANTHROPIC_BASE_URL")
+    const providers = yield* list
+    const provider = providers[ProviderV2.ID.make("Cubence")]
+    const model = provider.models["claude-opus-4-6"]
+    expect(model.api.npm).toBe("@ai-sdk/anthropic")
+    expect(provider.options.baseURL).toBe("https://api-dmit.cubence.com/v1")
+    expect(provider.options.apiKey).toBe("env-test-key")
+    // SDK 包正确仍不足以证明专用包装生效，fetch 断言锁定真实 ClaudeCode loader。
+    expect(typeof provider.options.fetch).toBe("function")
+  }),
+  {
+    config: {
+      provider: {
+        Cubence: {
+          extends: "claudecode",
+          options: {
+            baseURL: "https://api-dmit.cubence.com/v1",
+            apiKey: "test-key",
+          },
+          models: {
+            "claude-opus-4-6": {
+              name: "Claude Opus 4.6",
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "model cost defaults to zero when not specified",
   Effect.gen(function* () {
     const providers = yield* list

@@ -4,6 +4,7 @@ import type { JSONSchema7 } from "@ai-sdk/provider"
 import type * as Provider from "./provider"
 import type * as ModelsDev from "@opencode-ai/core/models-dev"
 import { iife } from "@/util/iife"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -670,17 +671,7 @@ function anthropicOpus45(apiId: string) {
 }
 
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
-  if (anthropicUsesModernAdaptiveThinking(apiId)) {
-    return ["low", "medium", "high", "xhigh", "max"]
-  }
-  if (
-    ["opus-4-6", "opus-4.6", "4-6-opus", "4.6-opus", "sonnet-4-6", "sonnet-4.6", "4-6-sonnet", "4.6-sonnet"].some((v) =>
-      apiId.includes(v),
-    )
-  ) {
-    return ["low", "medium", "high", "max"]
-  }
-  return null
+  return ProviderV2.anthropicThinkingEfforts(apiId)
 }
 
 function anthropicOmitsThinking(apiId: string) {
@@ -1046,49 +1037,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     // https://v5.ai-sdk.dev/providers/ai-sdk-providers/anthropic
     case "@ai-sdk/google-vertex/anthropic":
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-vertex#anthropic-provider
-      if (adaptiveEfforts) {
-        let efforts = [...adaptiveEfforts]
-        if (model.providerID === "github-copilot") {
-          if (model.api.id.includes("opus-4.7")) {
-            efforts = ["medium"]
-          }
-          // Efforts currently supported are: low, medium, high
-          efforts = efforts.filter((v) => v !== "max" && v !== "xhigh")
-        }
-        return Object.fromEntries(
-          efforts.map((effort) => [
-            effort,
-            {
-              thinking: {
-                type: "adaptive",
-                ...(adaptiveThinkingOmitted ? { display: "summarized" } : {}),
-              },
-              effort,
-            },
-          ]),
-        )
-      }
-
-      if (anthropicOpus45(model.api.id)) {
-        return Object.fromEntries(
-          WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, anthropicOpus45Effort(model, effort)]),
-        )
-      }
-
-      return {
-        high: {
-          thinking: {
-            type: "enabled",
-            budgetTokens: Math.min(16_000, Math.floor(model.limit.output / 2 - 1)),
-          },
-        },
-        max: {
-          thinking: {
-            type: "enabled",
-            budgetTokens: Math.min(31_999, model.limit.output - 1),
-          },
-        },
-      }
+      return ProviderV2.anthropicThinkingVariants({ apiID: model.api.id, providerID: model.providerID, output: model.limit.output })
 
     case "@ai-sdk/amazon-bedrock":
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/amazon-bedrock

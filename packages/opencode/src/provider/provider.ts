@@ -214,15 +214,27 @@ function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: string) {
   return sdk.responses?.(modelID) ?? sdk.languageModel(modelID)
 }
 
+function defaultConfigProviderNpm(providerID: string, baseType?: string) {
+  // 直接继承的类型决定缺省 SDK，显式 npm 与目录 SDK 仍由调用方先取。
+  if ((baseType ?? providerID) === "claudecode") return "@ai-sdk/anthropic"
+  return "@ai-sdk/openai-compatible"
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
     // claudecode 提供者：包装 Anthropic API，注入 Claude Code 风格的计费头和系统块
     claudecode: Effect.fnUntraced(function* (provider: Info) {
       const auth = yield* dep.auth(provider.id)
       const env = yield* dep.env()
-      // 优先使用 ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL，兼容 CLAUDECODE_* 环境变量
-      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
-      const baseURL = env["ANTHROPIC_BASE_URL"] || provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
+      const authKey = auth?.type === "api" ? auth.key : undefined
+      // 环境与该派生身份的已保存密钥先于配置，不能借用父提供者的账号。
+      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDECODE_API_KEY"] || authKey || provider.options?.apiKey
+      // 地址仍按源的独立优先级选择，不能随密钥顺序把配置端点移到环境之后。
+      const baseURL =
+        env["ANTHROPIC_BASE_URL"] ||
+        provider.options?.baseURL ||
+        env["CLAUDECODE_BASE_URL"] ||
+        "https://api.cubence.com"
 
       const autoload = Boolean(apiKey)
       if (!autoload) return { autoload: false }
@@ -1602,7 +1614,7 @@ const layer = Layer.effect(
               cloudflareGatewayNpm(providerID, apiID) ??
               modelsDev[baseType ?? providerID]?.npm ??
               // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
-              (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
+              defaultConfigProviderNpm(providerID, baseType)
             const name = iife(() => {
               if (model.name) return model.name
               if (model.id && model.id !== modelID) return modelID
@@ -1621,7 +1633,11 @@ const layer = Layer.effect(
               providerID: ProviderV2.ID.make(providerID),
               capabilities: {
                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
-                reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
+                // 显式 false 与目录能力先于推断，只有实际 Anthropic API ID 才补缺省能力。
+                reasoning:
+                  model.reasoning ??
+                  existingModel?.capabilities.reasoning ??
+                  (apiNpm === "@ai-sdk/anthropic" && ProviderV2.isAnthropicThinkingModel(apiID)),
                 attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
                 toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
                 input: {
@@ -1731,15 +1747,18 @@ const layer = Layer.effect(
           mergeProvider(providerID, patch)
         }
 
-        for (const [id, fn] of Object.entries(custom(dep))) {
+        const customLoaders = custom(dep)
+        const loadCustom = Effect.fn("Provider.loadCustom")(function* (id: string, fn: CustomLoader) {
           const providerID = ProviderV2.ID.make(id)
-          if (disabled.has(providerID)) continue
+          // 禁用检查针对派生 ID，父类型被禁用不能误删它的独立配置。
+          if (disabled.has(providerID)) return
           const data = database[providerID]
           if (!data) {
-            continue
+            return
           }
           const result = yield* fn(data)
           if (result && (result.autoload || providers[providerID])) {
+            // 各 ID 独立登记模型、变量与发现入口，派生加载不能覆盖父提供者的槽位。
             if (result.getModel) modelLoaders[providerID] = result.getModel
             if (result.vars) varsLoaders[providerID] = result.vars
             if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
@@ -1747,6 +1766,18 @@ const layer = Layer.effect(
             const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
             mergeProvider(providerID, patch)
           }
+        })
+
+        for (const [id, fn] of Object.entries(customLoaders)) {
+          yield* loadCustom(id, fn)
+        }
+
+        // 只沿显式 extends 复用父 loader，传入的仍是派生身份与派生配置。
+        for (const [id, provider] of configProviders) {
+          if (!provider.extends) continue
+          const fn = customLoaders[provider.extends]
+          if (!fn) continue
+          yield* loadCustom(id, fn)
         }
 
         // load config - re-apply with updated data
@@ -1756,7 +1787,7 @@ const layer = Layer.effect(
           if (provider.env) partial.env = provider.env
           if (provider.name) partial.name = provider.name
           // loader 已读取配置并选择凭据/地址；重合并不能把环境优先级或规范后的 URL 覆盖回去。
-          if (provider.options) partial.options = id === "claudecode"
+          if (provider.options) partial.options = id === "claudecode" || provider.extends === "claudecode"
             ? Object.fromEntries(Object.entries(provider.options).filter(([key]) => !["apiKey", "baseURL"].includes(key)))
             : provider.options
           mergeProvider(providerID, partial)

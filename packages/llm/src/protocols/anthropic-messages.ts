@@ -507,11 +507,12 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
 })
 
 const anthropicOptions = (request: LLMRequest) => request.providerOptions?.anthropic
+const isClaudeCode = (request: LLMRequest) => request.model.provider === "claudecode" || anthropicOptions(request)?.claudeCode === true
 
 const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
   const thinking = anthropicOptions(request)?.thinking
   // 专用策略由 provider 身份限定，普通 Anthropic 的预算验证仍沿用上游。
-  if (request.model.provider === "claudecode") {
+  if (isClaudeCode(request)) {
     if (thinking !== undefined && thinking !== null && !ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
     // disabled 优先于模型默认，不能把用户关闭思考的选择改成 adaptive。
     if (ProviderShared.isRecord(thinking) && thinking.type === "disabled") return { type: "disabled" as const }
@@ -534,6 +535,12 @@ const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (re
     // 非 nullish 的无效配置必须走 typed 错误，不能被 fromRequest 的缺省 enabled 掩盖。
     if (ProviderShared.isRecord(thinking) && thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
   }
+  // 普通 Anthropic 推断的变体也由同一 Schema 编码，不能为了专用策略把 adaptive 静默丢弃。
+  if (ProviderShared.isRecord(thinking) && thinking.type === "adaptive")
+    return { ...thinking, type: "adaptive" as const }
+  // disabled 不携带 budget/display，不能把旧 enabled 参数残留进这一有效关闭分支。
+  if (ProviderShared.isRecord(thinking) && thinking.type === "disabled")
+    return { type: "disabled" as const }
   if (!ProviderShared.isRecord(thinking) || thinking.type !== "enabled") return undefined
   const budget =
     typeof thinking.budgetTokens === "number"
@@ -572,7 +579,7 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
           text: part.text,
           cache_control: cacheControl(breakpoints, part.cache),
         }))
-  const rawSystem = request.model.provider === "claudecode" ? anthropicOptions(request)?.system : undefined
+  const rawSystem = isClaudeCode(request) ? anthropicOptions(request)?.system : undefined
   const originalSystem = rawSystem === undefined ? undefined : yield* decodeSystem(rawSystem)
   // 全部 system 必须先于 history 领取同一预算，原始块不能绕过四断点上限。
   const retainedSystem = originalSystem === undefined ? [] : typeof originalSystem === "string"
@@ -590,7 +597,7 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     )
   }
   // 原生 lowering 保持媒体、工具和 chronological system update 的上游处理，不经过 V1 fetch。
-  const claudecode = request.model.provider === "claudecode"
+  const claudecode = isClaudeCode(request)
   const metadata = anthropicOptions(request)?.metadata
   // 先保留已有 metadata，再替换 adapter 拥有的 user_id；不覆盖其他字段。
   const claudeCodeMetadata = {
@@ -613,7 +620,8 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     model: request.model.id,
     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
     // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
-    ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
+    // effort 已由同一 lowerer 转入 output_config，普通 Anthropic 也必须保留合法协议选项。
+    ...(ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
     messages,
     // ClaudeCode 的同一 wire 占位也适用于 native lowering；普通 Anthropic 与 none 保持上游语义。
     // unsupported 调用沿用 registry 的 Unknown tool 错误结果，不注册假执行器或提升为 hosted tool。
@@ -935,7 +943,7 @@ export const route = Route.make({
     const betas = anthropicOptions(request)?.betas
     return {
       "anthropic-version": "2023-06-01",
-      ...(request.model.provider === "claudecode" ? {
+      ...(isClaudeCode(request) ? {
         "anthropic-beta": [...new Set([
           // 23 原生恢复 redact；1M 仍只随 15 的三个型号添加，不改变 disabled/adaptive。
           "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27,redact-thinking-2026-02-12" +
