@@ -12,7 +12,7 @@
  * Anchor 报告所选格，类型变更显示旧到新，删除显示删除线。
  * Affected 报告新插入格或移位格，cN 为一基显示编号。
  * save=true 仍是显式保存请求，dirty 文档保存失败沿原错误边界传播。
- * 返回 applyEdit 状态与差分，不隐式保存或回传完整笔记本。
+ * 编辑拒绝或同步超时沿错误边界传播；差分只来自已同步修改，不隐式保存。
  */
 import vscode from "vscode"
 import {
@@ -27,6 +27,8 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 // 白名单先于编辑副作用校验，未知 editType 不能被当作整格修改。
 const EDIT_TYPES = new Set(["insert", "edit", "delete"])
+// 十秒仅约束编辑同步，不复用运行格的执行超时或取消内核。
+const EDIT_SYNC_TIMEOUT_MS = 10_000
 
 export async function editNotebook(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
@@ -35,7 +37,7 @@ export async function editNotebook(input: Record<string, unknown>) {
   const notebook = await resolveNotebook(filePath)
   const editType = stringProp(input, "editType")
   if (!editType || !EDIT_TYPES.has(editType)) {
-    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Must be one of: insert, edit, delete`)
+    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Expected one of: insert, edit, delete.`)
   }
 
   const cellId = stringProp(input, "cellId")
@@ -68,7 +70,8 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
   const edit = new vscode.WorkspaceEdit()
   // NotebookRange 的终点排他，宽度一只删除已解析的格，不吞掉继任格。
   edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
-  const applied = await vscode.workspace.applyEdit(edit)
+  // 删除后的槽位只在结构版本推进后读取，避免把旧格报告成继任格。
+  const applied = await applyNotebookEditAndWait(notebook, edit)
 
   let shiftedOldIdx: number | undefined
   let shiftedCell: vscode.NotebookCell | undefined
@@ -133,7 +136,8 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   const shiftedOldIdx = insertIndex < notebook.cellCount ? insertIndex : undefined
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
-  const applied = await vscode.workspace.applyEdit(edit)
+  // 新格和移位邻居取已同步的结构，不能先按旧 cellCount 读取 index+1。
+  const applied = await applyNotebookEditAndWait(notebook, edit)
   // 未应用时不能读取 index+1，特别是尾部附近的失败插入可能使它越界。
   const shiftedCell = applied && shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
   if (input.save === true) await saveNotebook(notebook)
@@ -171,7 +175,8 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   const edit = new vscode.WorkspaceEdit()
   // TextEdit 作用于格文档 URI，NotebookEdit 作用于 notebook URI，不能交换二者。
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
-  const applied = await vscode.workspace.applyEdit(edit)
+  // 内容不变的 TextEdit 不产生新版本，有效空操作不能等到同步超时。
+  const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
   if (input.save === true) await saveNotebook(notebook)
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
 }
@@ -211,7 +216,8 @@ async function handleTypeChange(
   const anchorCellIndex = targetCell.index
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(anchorCellIndex, anchorCellIndex + 1), [newCell])])
-  const applied = await vscode.workspace.applyEdit(edit)
+  // 新身份锚点沿同步后的原槽位获取，不按失效 targetCell.index 重新定位。
+  const applied = await applyNotebookEditAndWait(notebook, edit)
   // applyEdit=false 时原格仍是有效锚点，不能假造已经创建的新格。
   const anchorCell = applied ? notebook.cellAt(anchorCellIndex) : targetCell
   if (input.save === true) await saveNotebook(notebook)
@@ -226,7 +232,8 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
   const edit = new vscode.WorkspaceEdit()
   // result.source 已保留范围外的前后缀，整文档替换不会误丢邻接代码。
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
-  const applied = await vscode.workspace.applyEdit(edit)
+  // 变化判断比较完整合成源码，Preview 片段不能作为文档版本应推进的证据。
+  const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
   if (input.save === true) await saveNotebook(notebook)
   // Preview 只展示替换片段，完整合成源码由 TextEdit 写入而不塞进差分摘要。
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
@@ -372,6 +379,67 @@ function stripCodeFence(source: string) {
   return match ? match[1] : source
 }
 
+async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
+  // 提交前版本是本次修改的基线，不能在 applyEdit 的 await 返回后才采样。
+  const beforeVersion = notebook.version
+  const applied = await vscode.workspace.applyEdit(edit)
+  // 拒绝应用直接终止，不能返回已修改差分或继续执行显式保存。
+  if (!applied) throw new Error("VS Code notebook edit was not applied")
+  await waitForNotebookVersionChange(notebook, beforeVersion, EDIT_SYNC_TIMEOUT_MS)
+  return applied
+}
+
+async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.WorkspaceEdit, expectContentChange: boolean) {
+  const beforeVersion = document.version
+  const applied = await vscode.workspace.applyEdit(edit)
+  if (!applied) throw new Error("VS Code text edit was not applied")
+  // 文本仅观察格文档版本，notebook 的其它输出更新不能满足源码同步。
+  if (expectContentChange) await waitForTextDocumentVersionChange(document, beforeVersion, EDIT_SYNC_TIMEOUT_MS)
+  return applied
+}
+
+async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, beforeVersion: number, timeoutMs: number) {
+  // applyEdit 等待期间可能已收到事件，版本快检覆盖已经落地的结构修改。
+  if (notebook.version !== beforeVersion) return
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
+      // 工作区广播包含其它文档，只有本 notebook 的版本可以解除结构等待。
+      if (event.notebook.uri.toString() !== notebook.uri.toString()) return
+      // 同 URI 但仍为提交前版本的通知不能提前结束等待。
+      if (event.notebook.version === beforeVersion) return
+      finish()
+    })
+    const finish = (error?: Error) => {
+      // 成功和超时共用释放路径，返回后不能遗留监听器或迟到计时器。
+      if (timer) clearTimeout(timer)
+      subscription.dispose()
+      error ? reject(error) : resolve()
+    }
+    // applyEdit=true 只证明已接受修改，同步超时仍须拒绝而非发布旧结构摘要。
+    timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code notebook edit events to finish")), timeoutMs)
+  })
+}
+
+async function waitForTextDocumentVersionChange(document: vscode.TextDocument, beforeVersion: number, timeoutMs: number) {
+  if (document.version !== beforeVersion) return
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const subscription = vscode.workspace.onDidChangeTextDocument((event) => {
+      // 文本事件按完整格 URI 过滤，邻格源码变更不能满足当前替换等待。
+      if (event.document.uri.toString() !== document.uri.toString()) return
+      if (event.document.version === beforeVersion) return
+      finish()
+    })
+    const finish = (error?: Error) => {
+      if (timer) clearTimeout(timer)
+      subscription.dispose()
+      error ? reject(error) : resolve()
+    }
+    timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code cell text edit events to finish")), timeoutMs)
+  })
+}
+
 async function saveNotebook(notebook: vscode.NotebookDocument) {
   // 捕获调用 save 前的 dirty 状态；clean 文档返回 false 代表无需写盘，不能误报失败。
   const dirty = notebook.isDirty
@@ -455,7 +523,7 @@ function compactEditResult(
     summary: lines.join("\n"),
     data: {
       applied: info.applied,
-      operation: info.editType,
+      editType: info.editType,
       cellCountBefore: info.beforeCount,
       cellCountAfter: info.afterCount,
       anchorCellIndex: info.anchorCellIndex,

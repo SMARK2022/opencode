@@ -4,7 +4,7 @@ import { toPosixPath, quoteForSummary } from "../util"
 import { compactCell, runtimeLabel, computeVirtualRanges } from "./format"
 import { resolveNotebook } from "./resolve"
 
-export async function notebookSummary(filePath?: string) {
+export async function notebookSummary(filePath: string) {
   // summary 投影 format 提供的结构化状态，不能把显示字符串当跨模块的状态 API。
   const notebook = await resolveNotebook(filePath)
   // 读取打开文档的实时内容，不用磁盘版本覆盖用户尚未保存的编辑。

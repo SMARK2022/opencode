@@ -12,7 +12,7 @@ import {
 } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
-export async function readNotebookCellOutput(filePath?: string, cellIndex?: number, cellId?: string) {
+export async function readNotebookCellOutput(filePath: string, cellIndex?: number, cellId?: string) {
   // output 先通过 resolve 确定文档和格，序列化边界不得重新选择另一份 notebook。
   const notebook = await resolveNotebook(filePath)
   // 混合参数优先验证 cellId，不能让数字位置绕过无效或歧义身份的拒绝。

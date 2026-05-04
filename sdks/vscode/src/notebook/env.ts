@@ -62,11 +62,11 @@ type SavedMetadata = {
 const PROBE_TIMEOUT_MS = 8_000
 const decoder = new TextDecoder("utf-8")
 
-export async function notebookEnv(filePath?: string) {
-  const notebook = await resolveNotebook(filePath).catch(() => undefined)
-  // 解析失败不向别的活动文档探测；运行时与磁盘读取都绑定同一个 notebook URI。
-  const activeRuntime = notebook ? await getActiveRuntime(notebook.uri) : null
-  const savedMetadata = notebook ? await readSavedNotebookMetadata(notebook.uri) : null
+export async function notebookEnv(filePath: string) {
+  const notebook = await resolveNotebook(filePath)
+  // 路径无法打开时直接拒绝，不能把解析失败包装成 no-active-kernel 快照。
+  const activeRuntime = await getActiveRuntime(notebook.uri)
+  const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
 
   return {
     ran: false,
@@ -79,7 +79,7 @@ export async function notebookEnv(filePath?: string) {
       activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
     ].filter(Boolean).join("\n"),
     data: {
-      path: notebook?.uri.fsPath || notebook?.uri.toString(),
+      path: notebook.uri.fsPath || notebook.uri.toString(),
       runtime: activeRuntime,
       saved_metadata: savedMetadata,
       // active_notebook 只记录 UI 焦点；路径解析失败或焦点指向别的文档时，不能拿它补齐本次目标的 runtime。

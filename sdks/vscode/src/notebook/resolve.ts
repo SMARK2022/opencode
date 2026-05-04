@@ -1,16 +1,11 @@
-// resolve 在调用方指定的文档内解释路径、格身份和范围，不能跨文档借用活动选区。
+// resolve 在调用方指定的文档内解释路径和格身份，不能跨文档借用活动选区。
 import vscode from "vscode"
-import { stringProp, numberProp, uriFromInput } from "../util"
+import { uriFromInput } from "../util"
 import { cellIdentifiers, shortId } from "./format"
 
-export async function resolveNotebook(filePath?: string) {
-  // filePath 可选属于 69 的源行为，不能提前套用后续工具的强制路径规则。
-  if (!filePath) {
-    const active = vscode.window.activeNotebookEditor?.notebook
-    if (active) return active
-    if (vscode.workspace.notebookDocuments.length > 0) return vscode.workspace.notebookDocuments[0]
-    throw new Error("No active or open notebook document")
-  }
+export async function resolveNotebook(filePath: string) {
+  // 明确路径是所有工具的共同边界，缺失时不能借用活动文档或首个打开文档。
+  if (!filePath) throw new Error("filePath is required")
 
   const existing = vscode.workspace.notebookDocuments.find(
     // 匹配完整 URI 或 fsPath，同 basename 的多个文档不能互相替代。
@@ -51,24 +46,3 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
   return notebook.cellAt(0)
 }
 
-export function notebookRange(notebook: vscode.NotebookDocument, target: Record<string, unknown>, fallbackCellIndex?: number) {
-  // 只有未提供 type 才默认单格；显式 null、非字符串和拼错的类型必须保留给拒绝分支。
-  const type = target.type === undefined ? "cell" : target.type
-  // all 的终点取总 cellCount 而非代码格数量，Markup 也占原生索引；用代码格数量会截掉后面的代码格。
-  if (type === "all") return new vscode.NotebookRange(0, notebook.cellCount)
-  if (type === "range") {
-    const start = Math.max(0, numberProp(target, "start") ?? 0)
-    const end = Math.min(notebook.cellCount, numberProp(target, "end") ?? start + 1)
-    // target.end 是排他终点；至少一格的源钳制与手工闭区间转换分开。
-    return new vscode.NotebookRange(start, Math.max(start + 1, end))
-  }
-  // 未知目标不能降级执行首格；先拒绝再计算 cell 索引，避免认证输入的拼写错误触发错误代码。
-  if (type !== "cell") throw new Error(`Invalid notebook target type: ${String(type)}`)
-  const cellId = stringProp(target, "cellId")
-  // 文档 await 后先按选中 ID 定位，失效 ID 必须由 resolver 抛错，不能进入数字钳制而执行首格。
-  const index = cellId
-    ? resolveNotebookCell(notebook, undefined, cellId).index
-    // 只有数字定位仍按 target.cellIndex、顶层 fallback、零的源顺序钳制，不因 UI 竞态改变 HTTP 数字契约。
-    : Math.max(0, Math.min(notebook.cellCount - 1, numberProp(target, "cellIndex") ?? fallbackCellIndex ?? 0))
-  return new vscode.NotebookRange(index, index + 1)
-}

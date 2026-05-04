@@ -28,7 +28,7 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
       },
       {
         label: "vscode_notebook_run",
-        description: "run one cell, range, or all via native notebook command",
+        description: "run one cell or a cell-id range via native notebook command",
         run: async () => await runNotebookCommand(),
       },
       {
@@ -50,8 +50,9 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
         label: "vscode_notebook_env",
         description: "kernel/environment capability snapshot",
         run: async () => {
-          const notebook = await selectNotebook(false)
-          return await notebookEnv(notebook?.uri.toString())
+          // 环境探测也绑定已选文档，取消选择不能发布一个无目标快照。
+          const notebook = await selectNotebook()
+          return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
         },
       },
     ],
@@ -71,14 +72,14 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
   await openJsonDocument(result)
 }
 
-async function selectNotebook(required = true) {
+async function selectNotebook() {
   // 已打开文档按完整 URI 去重，同名文件不合并成同一个候选项。
   const notebooks = [
     ...new Map(vscode.workspace.notebookDocuments.map((nb) => [nb.uri.toString(), nb])).values(),
   ]
   if (notebooks.length === 0) {
-    // required=false 用于环境快照，允许在没有 notebook 时检查扩展能力。
-    if (required) void vscode.window.showWarningMessage("No open notebook documents found.")
+    // 所有入口都要求明确文档，无候选时提示并退出，不借用缺省运行时。
+    void vscode.window.showWarningMessage("No open notebook documents found.")
     return undefined
   }
   // 单候选自动返回保留原交互便利，多个候选必须让用户明确选择。
@@ -150,42 +151,37 @@ async function notebookSourceCommand() {
 }
 
 async function runNotebookCommand() {
-  // all、range 和 cell 共用同一文档 URI，选择过程中切换编辑器不改目标。
+  // 单格与范围共用同一文档 URI，选择过程中切换编辑器不改目标。
   const notebook = await selectNotebook()
   if (!notebook) return undefined
 
   const target = await vscode.window.showQuickPick(
     [
       { label: "cell", description: "run one selected cell" },
-      { label: "range", description: "run inclusive zero-based start/end cell range" },
-      { label: "all", description: "run all cells" },
+      { label: "range", description: "run from one selected cell through another selected cell" },
     ],
     { title: "vscode_notebook_run", placeHolder: "Select run target" },
   )
   if (!target) return undefined
 
-  if (target.label === "all") {
-    // 手工 UI 调用现有 runNotebook，不建立第二个原生执行入口。
-    return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "all" } })
-  }
   if (target.label === "cell") {
     const cell = await pickNotebookCell(notebook, "vscode_notebook_run")
     return cell
-      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellId: cell.cellId } })
+      ? await runNotebook({ filePath: notebook.uri.toString(), type: "cell", cellId: cell.cellId })
       : undefined
   }
 
-  const rangeText = await vscode.window.showInputBox({
-    title: "vscode_notebook_run range",
-    prompt: "Enter start,end zero-based indices. End is inclusive in this prompt.",
-    value: "0,0",
-    ignoreFocusOut: true,
+  // 两次选择沿 picker 预先捕获的 ID 提交，等待期间插格不能改变端点身份。
+  const startCell = await pickNotebookCell(notebook, "vscode_notebook_run range start")
+  if (!startCell) return undefined
+  const endCell = await pickNotebookCell(notebook, "vscode_notebook_run range end")
+  if (!endCell) return undefined
+  return await runNotebook({
+    filePath: notebook.uri.toString(),
+    type: "range",
+    cellId: startCell.cellId,
+    endCellId: endCell.cellId,
   })
-  // 取消文本输入直接退出，不能把缺失范围替换成当前活动选区执行。
-  if (!rangeText) return undefined
-  const [start, end] = rangeText.split(",").map((value) => Number(value.trim()))
-  // 此提示接受零基闭区间，仅此处 end 加一；HTTP target.end 已是排他终点，仍由 notebookRange 解释。
-  return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "range", start, end: end + 1 } })
 }
 
 async function editNotebookCommand() {
