@@ -774,6 +774,31 @@ describe("plugin.loader.shared", () => {
     ),
   )
 
+  it.live("loads named object exports without duplicate initialization", () =>
+    Effect.gen(function* () {
+      // 同时覆盖后缀选择与单一对象回退，别名应按解包后的函数去重。
+      for (const name of ["ExamplePlugin", "example"]) {
+        yield* withTmp(
+          async (dir) => {
+            const file = path.join(dir, "named-object.ts")
+            const mark = path.join(dir, "calls.txt")
+            await Bun.write(file, [
+              "let calls = 0",
+              `export const ${name} = { server: async () => { await Bun.write(${JSON.stringify(mark)}, String(++calls)); return {} } }`,
+              name.endsWith("Plugin") ? `export { ${name} as AliasPlugin }` : "",
+            ].join("\n"))
+            await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [pathToFileURL(file).href] }))
+            return { mark }
+          },
+          (tmp) => Effect.gen(function* () {
+            yield* load(tmp.path)
+            expect(yield* Effect.promise(() => Bun.file(tmp.extra.mark).text())).toBe("1")
+          }),
+        )
+      }
+    }),
+  )
+
   it.live("loads object plugin via plugin.server", () =>
     withTmp(
       async (dir) => {

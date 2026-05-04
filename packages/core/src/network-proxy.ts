@@ -5,8 +5,8 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
 
 export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 
-// 系统代理缓存缩至十五秒，代理应用重启后不长期沿用失效端口。
-const TTL = 15_000
+// 十秒只控制代理探测缓存的新鲜度，不能当作取消后重开请求的期限。
+const PROXY_TTL = 10_000
 // URL 会将 mapped IPv4 规范为十六进制 IPv6，两种表示都必须保持回环直连。
 const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1"])
 
@@ -156,7 +156,7 @@ async function currentSystemProxy(refresh = false) {
   if (!cache || cache.expires < Date.now()) {
     // 探测失败也缓存本轮结果，避免短时系统错误让每个请求重复 spawn。
     cache = {
-      expires: Date.now() + TTL,
+      expires: Date.now() + PROXY_TTL,
       value: (process.platform === "win32" ? windowsProxy() : macProxy()).catch(() => undefined),
     }
   }
@@ -196,19 +196,20 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
   // 只解开本模块安装的全局入口；调用方传入的自定义 fetch 保持原运输职责。
   const original = savedOriginal && fetchFn === globalFetchInstalled ? savedOriginal : fetchFn
   // Request 自带取消信号也须参与失败判断，显式 init.signal 仍优先。
-  const { purpose = "unknown", signal = input instanceof Request ? input.signal : undefined, ...rest } = (init ?? {}) as RoutedInit
-  // 提供者与安装请求首次刷新，避免仍在 TTL 内的旧代理拖延交互。
-  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
+  // 路由独占代理选择，调用方的显式代理不能泄漏到直连或恢复请求。
+  const { purpose = "unknown", signal = input instanceof Request ? input.signal : undefined, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: BunFetchRequestInit["proxy"] }
+  // 首次复用十秒缓存，失败仍强制刷新；高频提供者探测不应每次启动系统命令。
+  const route = await resolveProxyRoute(url, purpose, false)
   // 路由探测期间也可能取消；开始网络运输前须结算同一个信号。
   signal?.throwIfAborted()
   // 恢复运输仍沿原取消信号，不能通过改写用户代理环境制造直连。
-  const direct = () => original(input, { ...rest, signal })
+  const fetchDirect = () => original(input, { ...rest, signal })
   const proxy = (value: string) => original(input, { ...rest, signal, proxy: value })
 
   // 无代理失败只允许重新发现新代理，不能再次发送相同直连请求。
   if (route.type === "direct") {
     try {
-      return await direct()
+      return await fetchDirect()
     } catch (error) {
       // 取消是请求终点，保留首次错误对象，不能转成代理重发。
       if (signal?.aborted) throw error
@@ -234,7 +235,7 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
     }
     // 环境代理仍未变化时，裸 fetch 会重进同一代理；终止恢复并保留首次错误。
     if (process.platform !== "win32" && process.platform !== "darwin" && refreshed.type === "proxy") throw error
-    return direct().catch(() => { throw error })
+    return fetchDirect().catch(() => { throw error })
   }
 }
 
@@ -247,6 +248,11 @@ export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
     fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })
   // 局部 Fetch 适配复用 Bun 的 preconnect，安装全局包装不能丢掉这个运输成员。
   globalThis.fetch = Object.assign(globalFetchInstalled, { preconnect: globalThis.fetch.preconnect })
+}
+
+// 公开安装前的运输入口，适配器可避免再路由，自定义 fetch 无需被替换。
+export function originalFetch() {
+  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
 }
 
 export async function npmProxyOptions(registry: string) {
