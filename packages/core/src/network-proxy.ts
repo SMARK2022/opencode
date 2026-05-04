@@ -4,11 +4,12 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
 
 export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 
-const TTL = 15_000
+const PROXY_TTL = 10_000
 const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
 
 let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
 let globalFetchInstalled = false
+let savedOriginal: FetchFn | undefined
 
 type SystemProxy = {
   http?: string
@@ -128,7 +129,7 @@ async function currentSystemProxy(refresh = false) {
   if (refresh) cache = undefined
   if (!cache || cache.expires < Date.now()) {
     cache = {
-      expires: Date.now() + TTL,
+      expires: Date.now() + PROXY_TTL,
       value: (process.platform === "win32" ? windowsProxy() : macProxy()).catch(() => undefined),
     }
   }
@@ -160,14 +161,27 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
 
 export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : input.toString())
-  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
-  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
-  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
+  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: string }
+  const route = await resolveProxyRoute(url, purpose, false)
+  
+  // Bun caches proxy env at startup — explicit `proxy` param overrides it,
+  // but plain fetch still honours the cached env.  Setting NO_PROXY=* once
+  // disables that cached env so plain fetch goes direct.  The proxy() helper
+  // passes an explicit `proxy` param which Bun always respects regardless of
+  // NO_PROXY, so this is safe.
+  if (!process.env.__OPENCODE_NO_PROXY_SET) {
+    process.env.NO_PROXY = "*"
+    process.env.__OPENCODE_NO_PROXY_SET = "1"
+  }
+  
+  const fetchDirect = (overrideSignal?: AbortSignal) => 
+    fetchFn(input, { ...rest, signal: overrideSignal ?? signal })
+  
   const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
 
   if (route.type === "direct") {
     try {
-      return await direct()
+      return await fetchDirect()
     } catch (error) {
       if (signal?.aborted) throw error
       const refreshed = await resolveProxyRoute(url, purpose, true)
@@ -183,19 +197,23 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
     if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
       return proxy(refreshed.proxy).catch(() => { throw error })
     }
-    // When the proxy attempt consumed the abort signal, retry direct without it
-    // so the fallback has a chance to succeed.
-    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
-    return direct().catch(() => { throw error })
+    if (signal?.aborted)
+      return fetchDirect(AbortSignal.timeout(10_000)).catch(() => { throw error })
+    return fetchDirect().catch(() => { throw error })
   }
 }
 
 export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
   if (globalFetchInstalled) return
   const original = globalThis.fetch.bind(globalThis) as FetchFn
+  savedOriginal = original
   globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
     fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
   globalFetchInstalled = true
+}
+
+export function originalFetch() {
+  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
 }
 
 export async function npmProxyOptions(registry: string) {

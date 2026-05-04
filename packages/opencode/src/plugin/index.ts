@@ -77,14 +77,30 @@ function getServerPlugin(value: unknown) {
 }
 
 function getLegacyPlugins(mod: Record<string, unknown>) {
+  if (isServerPlugin(mod.default)) return [mod.default]
+
   const seen = new Set<unknown>()
   const result: PluginInstance[] = []
 
-  for (const entry of Object.values(mod)) {
-    if (seen.has(entry)) continue
-    seen.add(entry)
+  const named = Object.entries(mod).filter(
+    ([name, entry]) => name !== "default" && name.endsWith("Plugin") && isServerPlugin(entry),
+  )
+  const candidates =
+    named.length > 0
+      ? named.map(([, entry]) => entry)
+      : Object.entries(mod)
+          .filter(([name, entry]) => name !== "default" && isServerPlugin(entry))
+          .map(([, entry]) => entry)
+
+  if (named.length === 0 && candidates.length > 1) {
+    throw new TypeError("Plugin module has multiple function exports; export a default plugin or name plugin exports with a Plugin suffix")
+  }
+
+  for (const entry of candidates) {
     const plugin = getServerPlugin(entry)
     if (!plugin) throw new TypeError("Plugin export is not a function")
+    if (seen.has(plugin)) continue
+    seen.add(plugin)
     result.push(plugin)
   }
 
