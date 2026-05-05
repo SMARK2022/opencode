@@ -43,7 +43,8 @@ export function charsPerTokenFromHistory(
       if (!chars || chars < 100) continue
       const tokens = (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)
       if (tokens <= 0) continue
-      totalChars += chars
+      const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
+      totalChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
       totalTokens += tokens
     }
   }

@@ -47,7 +47,7 @@ import {
   toolUsageSection as systemToolUsageSection,
 } from "@/session/system"
 import { usable as overflowUsable } from "@/session/overflow"
-import { estimateDataUrlInputTokens } from "./token-estimate"
+import { charsPerTokenFromHistory, estimateDataUrlInputTokens } from "./token-estimate"
 
 type WithParts = {
   info: Message
@@ -145,25 +145,13 @@ function estimate(input: unknown, ratio = DEFAULT_CHARS_PER_TOKEN) {
   return Math.max(0, Math.round((text || "").length / ratio))
 }
 
-/** 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token。 */
+/** 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token。
+ *  委托给 token-estimate 的 charsPerTokenFromHistory，避免重复实现。 */
 function computeInputRatio(messages: WithParts[]): number {
-  let totalChars = 0
-  let totalTokens = 0
-  for (let i = messages.length - 1; i >= 0 && totalChars < 100_000; i--) {
-    const msg = messages[i]
-    if (msg.info.role !== "assistant") continue
-    for (const p of msg.parts) {
-      if (p.type !== "step-finish") continue
-      const chars = (p as any).inputChars as number | undefined
-      if (!chars || chars < 100) continue
-      const tokens = (p as any).tokens?.input + (p as any).tokens?.cache?.read + (p as any).tokens?.cache?.write
-      if (!tokens || tokens <= 0) continue
-      totalChars += chars
-      totalTokens += tokens
-    }
-  }
-  if (totalTokens > 0 && totalChars > 500) return totalChars / totalTokens
-  return DEFAULT_CHARS_PER_TOKEN
+  return charsPerTokenFromHistory(
+    messages.map((m) => ({ role: m.info.role, id: m.info.id })),
+    (id) => messages.find((m) => m.info.id === id)?.parts ?? [],
+  )
 }
 
 type InputBreakdown = {
@@ -897,7 +885,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     toolDefTokens = Math.round(bd.tools / ratio)
 
     // 消息子组件也使用 daemon 的真实 char 数（而非 TUI 自行从 parts 估算）
-    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput + bd.messages.attachments) / ratio)
+    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput) / ratio) + msg.details.attachments
     outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)
 
     // detail 列表仍需文件内容（用于展示），但 token 用 breakdown 等比分配
@@ -1006,7 +994,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
             reasoning: Math.round(bd.messages.reasoning / ratio),
             toolCalls: Math.round(bd.messages.toolInput / ratio),
             toolResults: Math.round(bd.messages.toolOutput / ratio),
-            attachments: Math.round(bd.messages.attachments / ratio),
+            attachments: msg.details.attachments,
             compactionSummary: 0,
           }
         : msg.details,

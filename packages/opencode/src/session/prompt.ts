@@ -1614,7 +1614,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // 使用 *输入* 侧数据（而非输出侧），因为输入含 JSON/schema/code，密度与自然语言输出截然不同。
             let historyInputTokens = 0
             let historyInputChars = 0
-            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 50000; i--) {
+            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 100000; i--) {
               const m = msgs[i]
               if (m.info.role !== "assistant") continue
               for (let j = m.parts.length - 1; j >= 0; j--) {
@@ -1624,7 +1624,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 if (!chars || chars < 100) continue
                 const tokens = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
                 if (tokens <= 0) continue
-                historyInputChars += chars
+                const bd = (p as any).inputBreakdown
+                historyInputChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
                 historyInputTokens += tokens
               }
             }
