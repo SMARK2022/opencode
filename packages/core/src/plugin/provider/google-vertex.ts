@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import { define } from "../internal"
 import { ProviderV2 } from "../../provider"
+import { NetworkProxy } from "../../network-proxy"
 
 function resolveProject(options: Record<string, any>) {
   // models.dev advertises GOOGLE_VERTEX_PROJECT for Vertex, while Google SDKs
@@ -50,7 +51,7 @@ function authFetch(fetchWithRuntimeOptions?: unknown) {
     headers.set("Authorization", `Bearer ${token.token}`)
     return typeof fetchWithRuntimeOptions === "function"
       ? fetchWithRuntimeOptions(input, { ...init, headers })
-      : fetch(input, { ...init, headers })
+      : NetworkProxy.fetch(input, { ...init, headers, purpose: "provider" })
   }
 }
 

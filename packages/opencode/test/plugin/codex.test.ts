@@ -1,7 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test, type Mock } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { createServer, type IncomingMessage } from "node:http"
 import { type AddressInfo } from "node:net"
 import { WebSocketServer } from "ws"
+import { OpenAIWebSocketPool } from "../../src/plugin/openai/ws-pool"
 import {
   CodexAuthPlugin,
   parseJwtClaims,
@@ -11,6 +13,13 @@ import {
   renderOAuthError,
   type IdTokenClaims,
 } from "../../src/plugin/openai/codex"
+
+let fetchSpy: Mock<typeof NetworkProxy.fetch> | undefined
+
+afterEach(() => {
+  fetchSpy?.mockRestore()
+  fetchSpy = undefined
+})
 
 function createTestJwt(payload: object): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
@@ -217,6 +226,7 @@ describe("plugin.codex", () => {
   })
 
   test("sends token residency only to the ChatGPT Codex backend", async () => {
+    fetchSpy = spyOn(NetworkProxy, "fetch")
     const requests: Array<{ path: string; residency: string | null }> = []
     using server = Bun.serve({
       port: 0,
@@ -230,6 +240,7 @@ describe("plugin.codex", () => {
     })
     const hooks = await CodexAuthPlugin({} as never, {
       codexApiEndpoint: new URL("/backend-api/codex/responses", server.url).toString(),
+      experimentalWebSockets: true,
     })
     const loaded = await hooks.auth!.loader!(
       async () =>
@@ -244,13 +255,27 @@ describe("plugin.codex", () => {
       {} as never,
     )
 
-    await loaded.fetch!("https://api.openai.com/v1/responses")
-    await loaded.fetch!(new URL("/other", server.url))
+    try {
+      const signal = new AbortController().signal
+      await loaded.fetch!("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { [OpenAIWebSocketPool.TITLE_HEADER]: "true", "session-id": "session-1" },
+        body: JSON.stringify({ stream: true, input: "hi" }),
+        signal,
+      })
+      await loaded.fetch!(new URL("/other", server.url), { signal })
 
-    expect(requests).toEqual([
-      { path: "/backend-api/codex/responses", residency: "eu" },
-      { path: "/other", residency: null },
-    ])
+      expect(fetchSpy).toHaveBeenCalledTimes(2)
+      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["provider", "provider"])
+      expect(fetchSpy.mock.calls.every(([, init]) => init?.signal === signal)).toBe(true)
+      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get(OpenAIWebSocketPool.TITLE_HEADER)).toBeNull()
+      expect(requests).toEqual([
+        { path: "/backend-api/codex/responses", residency: "eu" },
+        { path: "/other", residency: null },
+      ])
+    } finally {
+      await hooks.dispose?.()
+    }
   })
 
   test("sends token residency through the WebSocket transport", async () => {

@@ -1,4 +1,5 @@
-import { expect } from "bun:test"
+import { expect, spyOn } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Provider } from "../../src/provider/provider"
 
@@ -12,8 +13,10 @@ const it = testEffect(LayerNode.compile(Provider.node))
 const withEnv = <A, E, R>(values: Record<string, string>, effect: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
     Effect.sync(() => {
-      const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]] as const))
-      Object.assign(process.env, values)
+      // 刷新会保存凭据，其他用例必须使用显式空认证，避免读取前一用例写入的文件。
+      const vars = { OPENCODE_AUTH_CONTENT: "{}", ...values }
+      const previous = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]] as const))
+      Object.assign(process.env, vars)
       return previous
     }),
     () => effect,
@@ -61,7 +64,7 @@ it.instance(
 )
 
 it.instance(
-  "digitalocean provider.models surfaces cached routers from auth metadata",
+  "digitalocean provider.models refreshes stale routers through NetworkProxy",
   () =>
     withAuth(
       {
@@ -69,11 +72,20 @@ it.instance(
           { name: "my-router", uuid: "11f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
           { name: "other-router", uuid: "22f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
         ]),
-        routers_fetched_at: String(Date.now()),
+        routers_fetched_at: "0",
         oauth_access: "doo_v1_test",
         oauth_expires: String(Date.now() + 60 * 60 * 1000),
       },
       Effect.gen(function* () {
+        const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(
+          Response.json({
+            model_routers: [
+              { name: "my-router", uuid: "11f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
+              { name: "other-router", uuid: "22f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
+            ],
+          }),
+        )
+        yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
         const provider = yield* Provider.Service
         const providers = yield* provider.list()
         const models = providers[DIGITALOCEAN].models
@@ -82,6 +94,11 @@ it.instance(
         expect(models["router:my-router"].api.url).toBe("https://inference.do-ai.run/v1")
         expect(models["router:my-router"].api.npm).toBe("@ai-sdk/openai-compatible")
         expect(models["router:other-router"]).toBeDefined()
+        expect(fetchSpy).toHaveBeenCalledTimes(1)
+        expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("plugin")
+        expect(fetchSpy.mock.calls[0]?.[0]).toBe("https://api.digitalocean.com/v2/gen-ai/models/routers")
+        expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer doo_v1_test")
+        expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
       }),
     ),
   { config: {} },

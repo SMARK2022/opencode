@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Model } from "@opencode-ai/sdk/v2"
 import { Option, Schema } from "effect"
 
@@ -218,7 +219,8 @@ export async function get(
   headers: HeadersInit = {},
   existing: Record<string, Model> = {},
 ): Promise<{ models: Record<string, Model>; pickerEnabled: Set<string> }> {
-  const data = await fetch(`${baseURL}/models`, {
+  const data = await NetworkProxy.fetch(`${baseURL}/models`, {
+    purpose: "plugin",
     headers,
     signal: AbortSignal.timeout(5_000),
   }).then(async (res) => {

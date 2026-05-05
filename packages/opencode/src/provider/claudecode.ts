@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "crypto"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 // CLI 版本在请求头和指纹中共同使用，两处变化必须同步以免网关识别到不同客户端。
 export const VERSION = "2.1.117"
@@ -99,7 +100,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     // 只拦截向 /v1/messages 发送的请求
     if (!url.includes("/v1/messages")) {
-      return fetch(input, init)
+      return NetworkProxy.fetch(input, { ...init, purpose: "provider" })
     }
 
     const originalBody = init?.body
@@ -204,8 +205,9 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     }
 
     // 8. 透传所有 init 参数，只覆盖 body 和 headers，避免丢弃 signal/keepalive
-    return fetch(input, {
+    return NetworkProxy.fetch(input, {
       ...init,
+      purpose: "provider",
       headers: requestHeaders,
       body: finalBodyStr,
     })

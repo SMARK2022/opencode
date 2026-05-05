@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { chmod } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -160,10 +161,32 @@ describe("plugin.azure", () => {
     process.env.PATH = cli.bin
     delete process.env.AZURE_RESOURCE_NAME
 
-    const hooks = await AzureAuthPlugin()
-
-    expect(await cli.calls()).toEqual([])
-    expect(oauthMethod(hooks).prompts?.[0].type).toBe("text")
+    const runSpy = spyOn(Process, "run").mockResolvedValue({
+      code: 0,
+      stdout: Buffer.from(JSON.stringify({ accessToken: "test-token", expires_on: Math.floor(Date.now() / 1000) + 3600 })),
+      stderr: Buffer.alloc(0),
+    })
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response(null, { status: 200 }))
+    try {
+      const hooks = await AzureAuthPlugin()
+      expect(await cli.calls()).toEqual([])
+      expect(runSpy).not.toHaveBeenCalled()
+      expect(oauthMethod(hooks).prompts?.[0].type).toBe("text")
+      const signal = new AbortController().signal
+      await customFetch(await loader(hooks)(async () => oauth, provider))("http://127.0.0.1:9/openai/v1/responses", {
+        headers: { "api-key": OAUTH_DUMMY_KEY, "x-keep": "yes" },
+        signal,
+      })
+      expect(runSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
+      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer test-token")
+      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("x-keep")).toBe("yes")
+    } finally {
+      fetchSpy.mockRestore()
+      runSpy.mockRestore()
+    }
   })
 
   test("keeps the existing API-key method and adds Entra ID", () => {

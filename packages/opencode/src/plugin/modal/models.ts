@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Model } from "@opencode-ai/sdk/v2"
 import { Schema } from "effect"
 
@@ -48,7 +49,8 @@ function price(value: string | number | undefined, fallback: number) {
 }
 
 export async function get(baseURL: string, apiKey: string, existing: Record<string, Model>) {
-  const data = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
+  const data = await NetworkProxy.fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
+    purpose: "plugin",
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },

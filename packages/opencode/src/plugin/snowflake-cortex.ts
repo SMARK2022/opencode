@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { OAUTH_DUMMY_KEY } from "../auth"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -103,8 +104,9 @@ function buildAuthorizeUrl(account: string, role: string | undefined, state: str
 }
 
 async function exchangeCodeForToken(account: string, code: string, pkce: PkceCodes) {
-  const response = await fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
+  const response = await NetworkProxy.fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
     method: "POST",
+    purpose: "plugin",
     headers: {
       ...authHeaders(),
       Authorization: authBasicHeader(),
@@ -134,8 +136,9 @@ async function exchangeCodeForToken(account: string, code: string, pkce: PkceCod
 }
 
 async function refreshAccessToken(account: string, refreshToken: string) {
-  const response = await fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
+  const response = await NetworkProxy.fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
     method: "POST",
+    purpose: "plugin",
     headers: {
       ...authHeaders(),
       Authorization: authBasicHeader(),
@@ -321,7 +324,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
           apiKey: OAUTH_DUMMY_KEY,
           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
             let currentAuth = await getAuth()
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
+            if (currentAuth.type !== "oauth") return NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
             let currentOauth = currentAuth as typeof currentAuth & {
               refresh: string
               access: string
@@ -444,11 +447,14 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
 
             if (expiresSoon) await refresh()
 
-            const response = await fetch(requestInput, prepareRequest())
+            // 401 刷新仍沿原流程，仅替换两次模型请求的实际出口。
+            const response = await NetworkProxy.fetch(requestInput, { ...prepareRequest(), purpose: "provider" })
 
             if (response.status === 401) {
               await refresh()
-              return transformResponse(await fetch(requestInput, prepareRequest()))
+              return transformResponse(
+                await NetworkProxy.fetch(requestInput, { ...prepareRequest(), purpose: "provider" }),
+              )
             }
 
             return transformResponse(response)

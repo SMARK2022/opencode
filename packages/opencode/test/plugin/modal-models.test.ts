@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Model, Provider } from "@opencode-ai/sdk/v2"
 import { ModalPlugin } from "@/plugin/modal/modal"
 
@@ -122,12 +123,20 @@ test("discovers Modal workspace models", async () => {
   const provider = makeProvider(`${server.url}v1`)
 
   const plugin = await ModalPlugin()
-  const models = await plugin.provider!.models!(provider, {
-    auth: {
-      type: "api",
-      key: "test-token",
-    },
-  })
+  const fetchSpy = spyOn(NetworkProxy, "fetch")
+  const models = await (async () => {
+    try {
+      const result = await plugin.provider!.models!(provider, {
+        auth: { type: "api", key: "test-token" },
+      })
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("plugin")
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
+      return result
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })()
   const model = models[RUNTIME_MODEL_ID]
 
   expect(requests).toEqual([

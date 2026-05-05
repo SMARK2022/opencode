@@ -103,7 +103,6 @@ function timeoutFetch(options: Record<string, any>) {
   const timeout = options["timeout"]
 
   return async (input: any, init?: BunFetchRequestInit) => {
-    const fetchFn = customFetch ?? fetch
     const opts = init ?? {}
     const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
     const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
@@ -120,14 +119,17 @@ function timeoutFetch(options: Record<string, any>) {
     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
     if (combined) opts.signal = combined
 
-          // 鉴权 customFetch 和原有 signal 必须透传，只在同一 provider 请求上叠加代理路由。
-          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
-      ...opts,
-            // provider 用途保持与基础设施和 npm 区分，后续策略不能误改模型请求身份。
+    // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
+    const res = await (
+      customFetch
+        ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
+        : NetworkProxy.fetch(input, {
+            ...opts,
             purpose: "provider",
-      // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-      timeout: false,
-    }).finally(() => headerTimeoutCtl?.clear())
+            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+            timeout: false,
+          })
+    ).finally(() => headerTimeoutCtl?.clear())
 
     if (!chunkAbortCtl) return res
     return wrapSSE(res, chunkTimeout, chunkAbortCtl)
@@ -629,7 +631,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             const headers = new Headers(init?.headers)
             headers.set("Authorization", `Bearer ${token.token}`)
 
-            return fetch(input, { ...init, headers })
+            return NetworkProxy.fetch(input, { ...init, headers, purpose: "provider" })
           },
         },
         async getModel(sdk: any, modelID: string) {
@@ -1051,7 +1053,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             } catch {}
           }
 
-          const response = await fetch(url, init)
+          const response = await NetworkProxy.fetch(url, { ...init, purpose: "provider" })
 
           if (!response.ok && response.status === 400) {
             try {
