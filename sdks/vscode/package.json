@@ -1,9 +1,9 @@
 {
-  "name": "opencode",
-  "displayName": "opencode",
-  "description": "opencode for VS Code",
+  "name": "opencode-ide-bridge",
+  "displayName": "OpenCode VS Code Bridge",
+  "description": "VS Code bridge for OpenCode IDE integration, notebook tools, and workspace context.",
   "version": "1.14.31",
-  "publisher": "sst-dev",
+  "publisher": "SMARK2022",
   "repository": {
     "type": "git",
     "url": "https://github.com/anomalyco/opencode"
@@ -20,6 +20,12 @@
   "categories": [
     "Other"
   ],
+  "keywords": [
+    "opencode",
+    "bridge",
+    "notebook",
+    "ide"
+  ],
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -28,7 +34,7 @@
     "commands": [
       {
         "command": "opencode.openTerminal",
-        "title": "Open opencode",
+        "title": "Open OpenCode",
         "icon": {
           "light": "images/button-dark.svg",
           "dark": "images/button-light.svg"
@@ -36,7 +42,7 @@
       },
       {
         "command": "opencode.openNewTerminal",
-        "title": "Open opencode in new tab",
+        "title": "Open OpenCode in New Tab",
         "icon": {
           "light": "images/button-dark.svg",
           "dark": "images/button-light.svg"
@@ -48,11 +54,11 @@
       },
       {
         "command": "opencode.showBridgeLog",
-        "title": "Show opencode Bridge Log"
+        "title": "Show OpenCode Bridge Log"
       },
       {
         "command": "opencode.notebookBridgeTools",
-        "title": "opencode Notebook Bridge Tools"
+        "title": "OpenCode Notebook Bridge Tools"
       }
     ],
     "menus": {
@@ -66,7 +72,7 @@
     "keybindings": [
       {
         "command": "opencode.openTerminal",
-        "title": "Run opencode",
+        "title": "Run OpenCode",
         "key": "cmd+escape",
         "mac": "cmd+escape",
         "win": "ctrl+escape",
@@ -74,7 +80,7 @@
       },
       {
         "command": "opencode.openNewTerminal",
-        "title": "Run opencode",
+        "title": "Run OpenCode",
         "key": "cmd+shift+escape",
         "mac": "cmd+shift+escape",
         "win": "ctrl+shift+escape",
@@ -82,7 +88,7 @@
       },
       {
         "command": "opencode.addFilepathToTerminal",
-        "title": "opencode: Insert At-Mentioned",
+        "title": "OpenCode: Insert At-Mentioned",
         "key": "cmd+alt+k",
         "mac": "cmd+alt+k",
         "win": "ctrl+alt+K",
@@ -92,6 +98,7 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run package",
+    "vsix": "bun run package && npx @vscode/vsce package",
     "compile": "bun run check-types && bun run lint && node esbuild.js",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

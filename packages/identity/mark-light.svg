@@ -1,5 +1,14 @@
 <svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="512" height="512" fill="#FDFCFC"/>
-<path d="M320 224V352H192V224H320Z" fill="#E6E5E6"/>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="#17181C"/>
+    <rect width="512" height="512" fill="#EDE8E1" />
+    <path
+        fill-rule="evenodd"
+        clip-rule="evenodd"
+        d="M410 448H102V64H410V448ZM333 141H179V371H333V141Z"
+        fill="#1E2235"
+    />
+    <rect x="102" y="64" width="308" height="8" fill="#9B6435" />
+    <rect x="179" y="218" width="154" height="153" fill="#C9C2B6" />
+    <rect x="204" y="248" width="96" height="8" fill="#9B6435" />
+    <rect x="204" y="273" width="65" height="8" fill="#9B6435" opacity="0.55" />
+    <rect x="204" y="298" width="82" height="8" fill="#9B6435" opacity="0.3" />
 </svg>

@@ -6,6 +6,10 @@ src/**
 script/**
 .gitignore
 .yarnrc
+.env
+.env.*
+*.log
+*.vsix
 bun.lock
 esbuild.js
 vsc-extension-quickstart.md

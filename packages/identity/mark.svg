@@ -1,7 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512"><svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="512" height="512" fill="#131010"></rect>
-<path d="M320 224V352H192V224H320Z" fill="#5A5858"></path>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="white"></path>
-</svg><style>@media (prefers-color-scheme: light) { :root { filter: none; } }
-@media (prefers-color-scheme: dark) { :root { filter: none; } }
-</style></svg>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="512" height="512" fill="#191C2A" />
+    <path
+        fill-rule="evenodd"
+        clip-rule="evenodd"
+        d="M403 440H109V72H403V440ZM330 146H182V366H330V146Z"
+        fill="#DAD5CC"
+    />
+    <rect x="109" y="72" width="294" height="7" fill="#C58A4C" />
+    <rect x="182" y="219" width="148" height="147" fill="#353A52" />
+    <rect x="206" y="248" width="92" height="8" fill="#C58A4C" />
+    <rect x="206" y="272" width="62" height="8" fill="#C58A4C" opacity="0.55" />
+    <rect x="206" y="296" width="78" height="8" fill="#C58A4C" opacity="0.3" />
+</svg>
