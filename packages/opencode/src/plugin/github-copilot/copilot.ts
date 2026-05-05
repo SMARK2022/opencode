@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import type { Model } from "@opencode-ai/sdk/v2"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -101,7 +102,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
           apiKey: "",
           async fetch(request: RequestInfo | URL, init?: RequestInit) {
             const info = await getAuth()
-            if (info.type !== "oauth") return fetch(request, init)
+            if (info.type !== "oauth") return NetworkProxy.fetch(request, { ...init, purpose: "provider" })
 
             const url = request instanceof URL ? request.href : typeof request === "string" ? request : request.url
             const { isVision, isAgent } = iife(() => {
@@ -172,8 +173,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
             delete headers["x-api-key"]
             delete headers["authorization"]
 
-            return fetch(request, {
+            return NetworkProxy.fetch(request, {
               ...init,
+              purpose: "provider",
               headers,
             })
           },
@@ -231,8 +233,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
 
             const urls = getUrls(domain)
 
-            const deviceResponse = await fetch(urls.DEVICE_CODE_URL, {
+            const deviceResponse = await NetworkProxy.fetch(urls.DEVICE_CODE_URL, {
               method: "POST",
+              purpose: "plugin",
               headers: {
                 Accept: "application/json",
                 "Content-Type": "application/json",
@@ -261,8 +264,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
               method: "auto" as const,
               async callback() {
                 while (true) {
-                  const response = await fetch(urls.ACCESS_TOKEN_URL, {
+                  const response = await NetworkProxy.fetch(urls.ACCESS_TOKEN_URL, {
                     method: "POST",
+                    purpose: "plugin",
                     headers: {
                       Accept: "application/json",
                       "Content-Type": "application/json",

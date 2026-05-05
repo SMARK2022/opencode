@@ -5,6 +5,7 @@ import { Deferred, Effect } from "effect"
 import type { Scope } from "effect"
 import { Credential } from "../../credential"
 import { InstallationVersion } from "../../installation/version"
+import { NetworkProxy } from "../../network-proxy"
 import { Integration } from "../../integration"
 import { ModelV2 } from "../../model"
 import { OauthCallbackPage } from "../../oauth/page"
@@ -119,8 +120,9 @@ const headless = {
           while (true) {
             const response = yield* Effect.tryPromise({
               try: (signal) =>
-                fetch(`${issuer}/api/accounts/deviceauth/token`, {
+                NetworkProxy.fetch(`${issuer}/api/accounts/deviceauth/token`, {
                   method: "POST",
+                  purpose: "plugin",
                   headers: headers("application/json"),
                   body: JSON.stringify({ device_auth_id: device.device_auth_id, user_code: device.user_code }),
                   signal,
@@ -226,7 +228,7 @@ function refresh(methodID: Integration.MethodID, value: Pick<Credential.OAuth, "
 function request<A>(url: string, init: RequestInit) {
   return Effect.tryPromise({
     try: async (signal) => {
-      const response = await fetch(url, { ...init, signal })
+      const response = await NetworkProxy.fetch(url, { ...init, signal, purpose: "plugin" })
       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
       return response.json() as Promise<A>
     },

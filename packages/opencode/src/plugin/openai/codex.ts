@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { OAUTH_DUMMY_KEY } from "../../auth"
@@ -115,8 +116,9 @@ interface CodexAuthPluginOptions {
 }
 
 async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
-  const response = await fetch(`${ISSUER}/oauth/token`, {
+  const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
+    purpose: "plugin",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
@@ -133,8 +135,9 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
 }
 
 async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promise<TokenResponse> {
-  const response = await fetch(`${issuer}/oauth/token`, {
+  const response = await NetworkProxy.fetch(`${issuer}/oauth/token`, {
     method: "POST",
+    purpose: "plugin",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "refresh_token",
@@ -330,7 +333,14 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       async loader(getAuth) {
         const auth = await getAuth()
         const websocketFetch = options.experimentalWebSockets
-          ? OpenAIWebSocketPool.createWebSocketFetch({ httpFetch: fetch })
+          ? OpenAIWebSocketPool.createWebSocketFetch({
+              // 独立 serve 未安装全局包装，池内 HTTP 回退仍须统一选路。
+              httpFetch: Object.assign(
+                (request: RequestInfo | URL, init?: RequestInit) =>
+                  NetworkProxy.fetch(request, { ...init, purpose: "provider" }),
+                { preconnect: fetch.preconnect },
+              ),
+            })
           : undefined
         if (websocketFetch) {
           websocketFetches.push(websocketFetch)
@@ -362,7 +372,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
 
             const currentAuth = await getAuth()
             if (currentAuth.type !== "oauth")
-              return websocketFetch ? websocketFetch(requestInput, init) : fetch(requestInput, init)
+              return websocketFetch ? websocketFetch(requestInput, init) : NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
 
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
 
@@ -432,7 +442,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               headers,
             }
             if (websocketFetch && parsed.pathname.endsWith("/responses")) return websocketFetch(url, requestInit)
-            return fetch(url, OpenAIWebSocketPool.withoutInternalHeaders(requestInit))
+            return NetworkProxy.fetch(url, { ...OpenAIWebSocketPool.withoutInternalHeaders(requestInit), purpose: "provider" })
           },
         }
       },
@@ -471,8 +481,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
           label: "ChatGPT Pro/Plus (headless)",
           type: "oauth",
           authorize: async () => {
-            const deviceResponse = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+            const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
               method: "POST",
+              purpose: "plugin",
               headers: {
                 "Content-Type": "application/json",
                 "User-Agent": `opencode/${InstallationVersion}`,
@@ -495,8 +506,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               method: "auto" as const,
               async callback() {
                 while (true) {
-                  const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+                  const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
                     method: "POST",
+                    purpose: "plugin",
                     headers: {
                       "Content-Type": "application/json",
                       "User-Agent": `opencode/${InstallationVersion}`,
@@ -513,8 +525,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                       code_verifier: string
                     }
 
-                    const tokenResponse = await fetch(`${ISSUER}/oauth/token`, {
+                    const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
                       method: "POST",
+                      purpose: "plugin",
                       headers: { "Content-Type": "application/x-www-form-urlencoded" },
                       body: new URLSearchParams({
                         grant_type: "authorization_code",

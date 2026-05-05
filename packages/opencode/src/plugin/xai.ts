@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { OAUTH_DUMMY_KEY } from "../auth"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -75,8 +76,10 @@ export function accessTokenIsExpiring(
 }
 
 async function refreshAccessToken(refreshToken: string, options: XaiAuthPluginOptions = {}): Promise<TokenResponse> {
-  const response = await fetch(options.tokenUrl ?? TOKEN_URL, {
+  // 独立 serve 未安装全局包装，OAuth 也须显式走统一入口。
+  const response = await NetworkProxy.fetch(options.tokenUrl ?? TOKEN_URL, {
     method: "POST",
+    purpose: "plugin",
     headers: authHeaders(),
     body: new URLSearchParams({
       grant_type: "refresh_token",
@@ -106,8 +109,9 @@ interface DeviceTokenErrorBody {
 }
 
 export async function requestDeviceCode(options: XaiAuthPluginOptions = {}): Promise<DeviceCodeResponse> {
-  const response = await fetch(options.deviceAuthorizationUrl ?? DEVICE_AUTHORIZATION_URL, {
+  const response = await NetworkProxy.fetch(options.deviceAuthorizationUrl ?? DEVICE_AUTHORIZATION_URL, {
     method: "POST",
+    purpose: "plugin",
     headers: authHeaders(),
     body: new URLSearchParams({
       client_id: CLIENT_ID,
@@ -159,8 +163,9 @@ export async function pollDeviceCodeToken(
   )
 
   while (now() < deadline) {
-    const response = await fetch(options.tokenUrl ?? TOKEN_URL, {
+    const response = await NetworkProxy.fetch(options.tokenUrl ?? TOKEN_URL, {
       method: "POST",
+      purpose: "plugin",
       headers: authHeaders(),
       body: new URLSearchParams({
         grant_type: DEVICE_CODE_GRANT_TYPE,
@@ -227,7 +232,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
             // /connect with a pasted key). When that happens, pass the
             // request through untouched so the AI SDK's own apiKey-based
             // Authorization header reaches xAI unmodified.
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
+            if (currentAuth.type !== "oauth") return NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
 
             // Refresh either when the stored expires timestamp is within the
             // skew window, or — for JWT access tokens — when the JWT exp
@@ -290,7 +295,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
             headers.set("authorization", `Bearer ${currentAuth.access}`)
             headers.set("User-Agent", `opencode/${InstallationVersion}`)
 
-            return fetch(requestInput, { ...init, headers })
+            return NetworkProxy.fetch(requestInput, { ...init, headers, purpose: "provider" })
           },
         }
       },

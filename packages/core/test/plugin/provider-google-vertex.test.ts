@@ -1,5 +1,6 @@
 import { AISDK } from "@opencode-ai/core/aisdk"
-import { describe, expect, mock } from "bun:test"
+import { describe, expect, mock, spyOn } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Effect } from "effect"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -317,7 +318,8 @@ describe("GoogleVertexPlugin", () => {
   it.effect("keeps Google auth fetch for OpenAI-compatible Vertex endpoints", () =>
     Effect.gen(function* () {
       googleAuthOptions.length = 0
-      const fetchCalls: { input: Parameters<typeof fetch>[0]; init?: RequestInit }[] = []
+      const fetchCalls: { input: Parameters<typeof fetch>[0]; init?: Parameters<typeof NetworkProxy.fetch>[1] }[] = []
+      const signal = new AbortController().signal
       const plugin = yield* PluginV2.Service
       const aisdk = yield* AISDK.Service
       yield* addPlugin()
@@ -326,19 +328,16 @@ describe("GoogleVertexPlugin", () => {
           if (evt.model.providerID !== "google-vertex") return
           if (evt.package !== "@ai-sdk/openai-compatible") return
           expect(typeof evt.options.fetch).toBe("function")
-          await evt.options.fetch("https://vertex.example", {
+          await evt.options.fetch("http://127.0.0.1:9", {
             headers: { "x-test": "1" },
+            signal,
           })
         }),
       )
-      const originalFetch = fetch
-      ;(globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = (async (
-        input: Parameters<typeof fetch>[0],
-        init?: RequestInit,
-      ) => {
+      const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
         fetchCalls.push({ input, init })
         return new Response("ok")
-      }) as typeof fetch
+      })
       yield* Effect.acquireUseRelease(
         Effect.void,
         () =>
@@ -356,14 +355,16 @@ describe("GoogleVertexPlugin", () => {
           }),
         () =>
           Effect.sync(() => {
-            ;(globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = originalFetch
+            fetchSpy.mockRestore()
           }),
       )
       expect(fetchCalls).toHaveLength(1)
       expect(googleAuthOptions).toEqual([{ scopes: ["https://www.googleapis.com/auth/cloud-platform"] }])
-      expect(fetchCalls[0].input).toBe("https://vertex.example")
+      expect(fetchCalls[0].input).toBe("http://127.0.0.1:9")
       expect(new Headers(fetchCalls[0].init?.headers).get("authorization")).toBe("Bearer vertex-token")
       expect(new Headers(fetchCalls[0].init?.headers).get("x-test")).toBe("1")
+      expect(fetchCalls[0].init?.purpose).toBe("provider")
+      expect(fetchCalls[0].init?.signal).toBe(signal)
     }),
   )
 

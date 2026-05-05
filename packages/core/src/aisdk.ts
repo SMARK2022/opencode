@@ -5,6 +5,7 @@ import type { LanguageModelV3 } from "@ai-sdk/provider"
 import { Cause, Context, Effect, Layer, Schema, Scope } from "effect"
 import { ModelV2 } from "./model"
 import { ProviderV2 } from "./provider"
+import { NetworkProxy } from "./network-proxy"
 import { State } from "./state"
 
 type SDK = any
@@ -114,10 +115,10 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
       }
     }
 
-    const res = await (typeof customFetch === "function" ? customFetch : fetch)(input, {
-      ...opts,
-      timeout: false,
-    })
+    // 自定义适配器保留运输选项，默认 HTTP 出口显式走统一路由。
+    const res = await (typeof customFetch === "function"
+      ? customFetch(input, { ...opts, timeout: false })
+      : NetworkProxy.fetch(input, { ...opts, purpose: "provider" }))
     if (!chunkAbortCtl || typeof chunkTimeout !== "number") return res
     return wrapSSE(res, chunkTimeout, chunkAbortCtl)
   }

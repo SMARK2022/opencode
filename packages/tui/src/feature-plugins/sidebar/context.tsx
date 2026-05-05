@@ -135,12 +135,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
           const route = await NetworkProxy.resolveProxyRoute(url, "provider")
           if (!active) return
           setIsProxy(route.type === "proxy")
-          // 运输调用始终附回同一取消信号，避免代理重试移除调用方信号后留下在途请求。
-          const res = await NetworkProxy.fetchWithRoute(
-            (input, init?: RequestInit) => fetch(input, { ...init, signal }),
-            url,
-            { method: "HEAD", signal, purpose: "provider" },
-          )
+          // 普通 HTTP 探测调用统一路由入口，继续透传同一取消信号。
+          const res = await NetworkProxy.fetch(url, { method: "HEAD", signal, purpose: "provider" })
           if (!active) return
           // 认证拒绝仍证明网络可达；按源语义仅将三类网关故障记为离线。
           const down = res.status === 502 || res.status === 503 || res.status === 504

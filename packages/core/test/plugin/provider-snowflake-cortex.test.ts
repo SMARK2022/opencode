@@ -1,5 +1,6 @@
 import { AISDK } from "@opencode-ai/core/aisdk"
-import { describe, expect, it as bun_it } from "bun:test"
+import { describe, expect, it as bun_it, spyOn } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Effect } from "effect"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { PluginV2 } from "@opencode-ai/core/plugin"
@@ -175,17 +176,26 @@ type FetchLike = (url: string | URL | Request, init?: RequestInit) => Promise<Re
 describe("cortexFetch", () => {
   bun_it("rewrites max_tokens to max_completion_tokens", async () => {
     const captured: RequestInit[] = []
-    const upstream: FetchLike = async (_url, init) => {
+    const signal = new AbortController().signal
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_url, init) => {
       captured.push(init ?? {})
       return new Response("{}", { status: 200 })
-    }
-    await cortexFetch(upstream)("https://test", {
-      method: "POST",
-      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1024 }),
     })
-    const body = JSON.parse(captured[0].body as string)
-    expect(body.max_completion_tokens).toBe(1024)
-    expect(body.max_tokens).toBeUndefined()
+    try {
+      await cortexFetch()("http://127.0.0.1:9", {
+        method: "POST",
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1024 }),
+        signal,
+      })
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
+      const body = JSON.parse(captured[0].body as string)
+      expect(body.max_completion_tokens).toBe(1024)
+      expect(body.max_tokens).toBeUndefined()
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 
   bun_it("preserves body when max_tokens is absent", async () => {

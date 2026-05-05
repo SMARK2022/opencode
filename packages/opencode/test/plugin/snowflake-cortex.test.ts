@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { OAUTH_DUMMY_KEY } from "../../src/auth"
 import { oauthScope, SnowflakeCortexAuthPlugin } from "../../src/plugin/snowflake-cortex"
 
@@ -57,19 +58,18 @@ describe("plugin.snowflake-cortex", () => {
     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
     expect(options.apiKey).toBe(OAUTH_DUMMY_KEY)
 
-    const originalFetch = globalThis.fetch
     const captured: Headers[] = []
-    globalThis.fetch = (async (_request, init) => {
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_request, init) => {
       captured.push(new Headers(init?.headers))
       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
-    }) as typeof fetch
+    })
 
     try {
       await options.fetch("https://example.test/v1/chat", {
         headers: { Authorization: `Bearer ${OAUTH_DUMMY_KEY}`, "x-keep": "yes" },
       })
     } finally {
-      globalThis.fetch = originalFetch
+      fetchSpy.mockRestore()
     }
 
     expect(captured).toHaveLength(1)
@@ -83,9 +83,8 @@ describe("plugin.snowflake-cortex", () => {
     let refreshCalls = 0
     const apiAuthHeaders: string[] = []
 
-    // Must mock fetch before calling loader because startup refresh triggers for expires: 0
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = (async (request, init) => {
+    // loader 的预刷新也走统一入口，提前拦截以避免真实网络请求。
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (request, init) => {
       const url =
         typeof request === "string" ? request : request instanceof URL ? request.toString() : String(request.url)
 
@@ -101,7 +100,7 @@ describe("plugin.snowflake-cortex", () => {
 
       apiAuthHeaders.push(new Headers(init?.headers).get("authorization") || "")
       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
-    }) as typeof fetch
+    })
 
     try {
       const hooks = await SnowflakeCortexAuthPlugin(input)
@@ -121,8 +120,9 @@ describe("plugin.snowflake-cortex", () => {
         options.fetch("https://example.test/v1/chat", { headers: {} }),
         options.fetch("https://example.test/v1/chat", { headers: {} }),
       ])
+      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["plugin", "provider", "provider"])
     } finally {
-      globalThis.fetch = originalFetch
+      fetchSpy.mockRestore()
     }
 
     expect(refreshCalls).toBe(1)
@@ -153,8 +153,7 @@ describe("plugin.snowflake-cortex", () => {
 
     let apiCalls = 0
     const seenAuth: string[] = []
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = (async (request, init) => {
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (request, init) => {
       const url =
         typeof request === "string" ? request : request instanceof URL ? request.toString() : String(request.url)
 
@@ -165,14 +164,25 @@ describe("plugin.snowflake-cortex", () => {
       apiCalls += 1
       seenAuth.push(new Headers(init?.headers).get("authorization") || "")
       if (apiCalls === 1) return new Response("unauthorized", { status: 401 })
-      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
-    }) as typeof fetch
+      return new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
+        status: 200, headers: { "content-type": "text/event-stream" },
+      })
+    })
 
     try {
-      const response = await options.fetch("https://example.test/v1/chat", { headers: {} })
+      const signal = new AbortController().signal
+      const request = new Request("http://127.0.0.1:9/v1/chat", { headers: { "x-keep": "yes" } })
+      const response = await options.fetch(request, { signal })
       expect(response.status).toBe(200)
+      expect(await response.text()).toContain('"role":"assistant"')
+      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["provider", "plugin", "provider"])
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
+      expect(fetchSpy.mock.calls[2]?.[1]?.signal).toBe(signal)
+      expect(fetchSpy.mock.calls[0]?.[0]).toBe(request)
+      expect(fetchSpy.mock.calls[2]?.[0]).toBe(request)
+      expect(new Headers(fetchSpy.mock.calls[2]?.[1]?.headers).get("x-keep")).toBe("yes")
     } finally {
-      globalThis.fetch = originalFetch
+      fetchSpy.mockRestore()
     }
 
     expect(apiCalls).toBe(2)
@@ -192,11 +202,10 @@ describe("plugin.snowflake-cortex", () => {
     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
 
     let sentBody: string | undefined
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = (async (request, init) => {
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_request, init) => {
       sentBody = typeof init?.body === "string" ? init.body : undefined
       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
-    }) as typeof fetch
+    })
 
     try {
       await options.fetch("https://example.test/v1/chat", {
@@ -204,7 +213,7 @@ describe("plugin.snowflake-cortex", () => {
         body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 4096, messages: [] }),
       })
     } finally {
-      globalThis.fetch = originalFetch
+      fetchSpy.mockRestore()
     }
 
     expect(sentBody).toBeDefined()
@@ -219,13 +228,12 @@ describe("plugin.snowflake-cortex", () => {
     const hooks = await SnowflakeCortexAuthPlugin(input)
     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
 
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = (async () => {
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () => {
       return new Response(JSON.stringify({ message: "Conversation complete" }), {
         status: 400,
         headers: { "content-type": "application/json" },
       })
-    }) as unknown as typeof fetch
+    })
 
     try {
       const response = await options.fetch("https://example.test/v1/chat", {
@@ -236,7 +244,7 @@ describe("plugin.snowflake-cortex", () => {
       const body = await response.json()
       expect(body.choices[0].finish_reason).toBe("stop")
     } finally {
-      globalThis.fetch = originalFetch
+      fetchSpy.mockRestore()
     }
   })
 
@@ -245,9 +253,8 @@ describe("plugin.snowflake-cortex", () => {
     const hooks = await SnowflakeCortexAuthPlugin(input)
     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
 
-    const originalFetch = globalThis.fetch
     const sseChunk = `data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n`
-    globalThis.fetch = (async () => {
+    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () => {
       const stream = new ReadableStream({
         start(ctrl) {
           ctrl.enqueue(new TextEncoder().encode(sseChunk))
@@ -258,7 +265,7 @@ describe("plugin.snowflake-cortex", () => {
         status: 200,
         headers: { "content-type": "text/event-stream" },
       })
-    }) as unknown as typeof fetch
+    })
 
     try {
       const response = await options.fetch("https://example.test/v1/chat", {
@@ -272,7 +279,7 @@ describe("plugin.snowflake-cortex", () => {
       expect(text).not.toContain('"role":""')
       expect(text).toContain('"role":"assistant"')
     } finally {
-      globalThis.fetch = originalFetch
+      fetchSpy.mockRestore()
     }
   })
 })

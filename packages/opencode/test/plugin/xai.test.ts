@@ -1,6 +1,15 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test, type Mock } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { accessTokenIsExpiring, pollDeviceCodeToken, requestDeviceCode, XaiAuthPlugin } from "../../src/plugin/xai"
 import { OAUTH_DUMMY_KEY } from "../../src/auth"
+
+// 拦截统一入口，回环测试无需改动进程代理或全局 fetch。
+let fetchSpy: Mock<typeof NetworkProxy.fetch> | undefined
+
+afterEach(() => {
+  fetchSpy?.mockRestore()
+  fetchSpy = undefined
+})
 
 function makeJwt(payload: object): string {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url")
@@ -179,7 +188,7 @@ describe("plugin.xai", () => {
       expect(captured[0].get("x-extra")).toBe("yes")
     })
 
-    test("falls through to plain fetch when stored auth flips from oauth to api", async () => {
+    test("preserves API-key headers when stored auth flips from oauth to api", async () => {
       const { input } = makeInput()
       const captured: Headers[] = []
       using server = makeServer((request) => {
@@ -205,6 +214,7 @@ describe("plugin.xai", () => {
     })
 
     test("deduplicates concurrent refreshes within a loader instance", async () => {
+      fetchSpy = spyOn(NetworkProxy, "fetch")
       const { input, setCalls } = makeInput()
       let tokenRequests = 0
       const apiRequests: Headers[] = []
@@ -222,11 +232,18 @@ describe("plugin.xai", () => {
         await XaiAuthPlugin(input, serverOptions(server))
       ).auth!.loader!(async () => ({ type: "oauth" as const, access: "old", refresh: "rt-old", expires: 0 }), {} as any)
 
+      const signal = new AbortController().signal
       await Promise.all([
-        opts.fetch!(new URL("/chat/completions", server.url), { headers: {} }),
-        opts.fetch!(new URL("/chat/completions", server.url), { headers: {} }),
+        opts.fetch!(new URL("/chat/completions", server.url), { headers: {}, signal }),
+        opts.fetch!(new URL("/chat/completions", server.url), { headers: {}, signal }),
       ])
 
+      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["plugin", "provider", "provider"])
+      expect(fetchSpy.mock.calls.slice(1).every(([, init]) => init?.signal === signal)).toBe(true)
+      expect(fetchSpy.mock.calls.slice(1).map(([request]) => request.toString())).toEqual([
+        new URL("/chat/completions", server.url).toString(),
+        new URL("/chat/completions", server.url).toString(),
+      ])
       expect(tokenRequests).toBe(1)
       expect(apiRequests.map((headers) => headers.get("authorization"))).toEqual([
         "Bearer new-access",
@@ -374,6 +391,7 @@ describe("plugin.xai", () => {
 
   describe("device code flow", () => {
     test("authorize advertises verification URL + user code and returns success on callback", async () => {
+      fetchSpy = spyOn(NetworkProxy, "fetch")
       using server = makeServer((_, url) => {
         if (url.pathname === "/oauth2/device/code") {
           return Response.json({
@@ -401,6 +419,9 @@ describe("plugin.xai", () => {
       expect(result.instructions).toContain("https://x.ai/device")
       expect(result.instructions).toContain("ABCD-1234")
       expect(await (result as any).callback()).toMatchObject({ type: "success", refresh: "RT", access: "AT" })
+      expect(fetchSpy).toHaveBeenCalledTimes(2)
+      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["plugin", "plugin"])
+      expect(fetchSpy.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "POST"])
     })
 
     test("authorize falls back to verification_uri when verification_uri_complete is absent", async () => {

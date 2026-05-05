@@ -1,5 +1,6 @@
 import { AISDK } from "@opencode-ai/core/aisdk"
-import { describe, expect } from "bun:test"
+import { describe, expect, spyOn } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Effect } from "effect"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { PluginV2 } from "@opencode-ai/core/plugin"
@@ -67,21 +68,32 @@ describe("OpenAICompatiblePlugin", () => {
       const plugin = yield* PluginV2.Service
       const aisdk = yield* AISDK.Service
       const observed: string[] = []
+      const signal = new AbortController().signal
+      const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response("ok"))
+      yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
       yield* addPlugin()
       yield* aisdk.hook.sdk((event) =>
-        Effect.sync(() => {
+        Effect.promise(async () => {
           observed.push(event.sdk.languageModel("model").provider)
+          await event.options.fetch("http://127.0.0.1:9/v1/chat/completions", { signal })
         }),
       )
-      yield* aisdk.runSDK({
-        model: ModelV2.Info.make({
+      yield* aisdk.language(
+        ModelV2.Info.make({
           ...ModelV2.Info.empty(ProviderV2.ID.make("custom-provider"), ModelV2.ID.make("model")),
-          api: { id: ModelV2.ID.make("model"), type: "aisdk", package: "test-provider" },
+          api: {
+            id: ModelV2.ID.make("model"),
+            type: "aisdk",
+            package: "@ai-sdk/openai-compatible",
+            url: "http://127.0.0.1:9/v1",
+            settings: { timeout: false },
+          },
         }),
-        package: "@ai-sdk/openai-compatible",
-        options: { name: "custom-provider", baseURL: "https://example.com/v1" },
-      })
+      )
       expect(observed).toEqual(["custom-provider.chat"])
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
     }),
   )
 

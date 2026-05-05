@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { which } from "@opencode-ai/core/util/which"
 import type { Hooks } from "@opencode-ai/plugin"
@@ -19,7 +20,12 @@ type AzureCommand = (args: string[]) => Promise<unknown>
 
 export async function AzureAuthPlugin(): Promise<Hooks> {
   const available = Boolean(which("az"))
-  return createAzureAuthHooks(runAzure, fetch, available)
+  // 工厂注入真实代理出口，独立 serve 无需先包装全局 fetch。
+  return createAzureAuthHooks(
+    runAzure,
+    (input, init) => NetworkProxy.fetch(input, { ...init, purpose: "provider" }),
+    available,
+  )
 }
 
 export function createAzureAuthHooks(

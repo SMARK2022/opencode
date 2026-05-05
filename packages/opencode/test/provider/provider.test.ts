@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, expect, spyOn, test } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { mkdir, unlink } from "fs/promises"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -2190,6 +2191,51 @@ it.effect("opencode loader keeps paid models when config apiKey is present", () 
     expect(none).toBe(0)
     expect(keyedCount).toBeGreaterThan(0)
   }).pipe(provideMultiInstance),
+)
+
+it.instance(
+  "routes Snowflake PAT transformations through NetworkProxy",
+  () =>
+    Effect.gen(function* () {
+      const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () =>
+        new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+      )
+      yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
+      const providers = yield* list
+      const provider = providers[ProviderV2.ID.make("snowflake-cortex")]
+      expect(typeof provider.options.fetch).toBe("function")
+      const signal = new AbortController().signal
+      const response = yield* Effect.promise<Response>(() =>
+        provider.options.fetch("http://127.0.0.1:9/v1/chat/completions", {
+          method: "POST",
+          headers: { authorization: "Bearer test-pat", "x-keep": "yes" },
+          body: JSON.stringify({ model: "test-model", max_tokens: 1024 }),
+          signal,
+        }),
+      )
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
+      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer test-pat")
+      expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toEqual({
+        model: "test-model", max_completion_tokens: 1024,
+      })
+      expect(yield* Effect.promise(() => response.text())).toContain('"role":"assistant"')
+    }),
+  {
+    config: {
+      enabled_providers: ["snowflake-cortex"],
+      provider: {
+        "snowflake-cortex": {
+          npm: "@ai-sdk/openai-compatible",
+          models: { "test-model": { name: "Test" } },
+          options: { account: "test-account", token: "test-pat" },
+        },
+      },
+    },
+  },
 )
 
 it.effect("opencode loader keeps paid models when auth exists", () =>

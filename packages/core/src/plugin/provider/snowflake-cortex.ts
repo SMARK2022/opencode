@@ -1,11 +1,12 @@
 import { Effect } from "effect"
 import { define } from "../internal"
 import { ProviderV2 } from "../../provider"
+import { NetworkProxy } from "../../network-proxy"
 
 type FetchLike = (url: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 // Exported for testing: intercepts Cortex-specific request/response quirks.
-export function cortexFetch(upstream: FetchLike = fetch) {
+export function cortexFetch(upstream?: FetchLike) {
   return async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     if (init?.body && typeof init.body === "string") {
       try {
@@ -18,7 +19,9 @@ export function cortexFetch(upstream: FetchLike = fetch) {
       } catch {}
     }
 
-    const response = await upstream(url, init)
+    const response = await (upstream
+      ? upstream(url, init)
+      : NetworkProxy.fetch(url, { ...init, purpose: "provider" }))
 
     // Cortex returns 400 "conversation complete" as a normal stop condition
     if (!response.ok && response.status === 400) {

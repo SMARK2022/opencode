@@ -1,3 +1,4 @@
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import type { Model } from "@opencode-ai/sdk/v2"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -167,7 +168,8 @@ function waitForOAuthCallback(state: string): Promise<ImplicitTokenPayload> {
 async function listRouters(
   bearer: string,
 ): Promise<{ ok: true; routers: RouterEntry[] } | { ok: false; status: number }> {
-  const res = await fetch(`${DO_GENAI_API}/models/routers`, {
+  const res = await NetworkProxy.fetch(`${DO_GENAI_API}/models/routers`, {
+    purpose: "plugin",
     headers: {
       Authorization: `Bearer ${bearer}`,
       Accept: "application/json",

@@ -1,15 +1,18 @@
-import { afterEach, expect, mock, test } from "bun:test"
+import { afterEach, expect, spyOn, test } from "bun:test"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { CopilotModels } from "@/plugin/github-copilot/models"
 import { CopilotAuthPlugin } from "@/plugin/github-copilot/copilot"
 
-const originalFetch = globalThis.fetch
+// 模块加载绑定原生 fetch 后，测试须拦截统一入口以避免真实网络请求。
+let fetchSpy: ReturnType<typeof spyOn> | undefined
 
 afterEach(() => {
-  globalThis.fetch = originalFetch
+  fetchSpy?.mockRestore()
+  fetchSpy = undefined
 })
 
 test("preserves temperature support from existing provider models", async () => {
-  globalThis.fetch = mock(() =>
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -55,7 +58,7 @@ test("preserves temperature support from existing provider models", async () => 
         { status: 200 },
       ),
     ),
-  ) as unknown as typeof fetch
+  )
 
   const result = await CopilotModels.get(
     "https://api.githubcopilot.com",
@@ -119,7 +122,7 @@ test("preserves temperature support from existing provider models", async () => 
 })
 
 test("converts Copilot AIC token prices to USD per million tokens", async () => {
-  globalThis.fetch = mock(() =>
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -171,7 +174,7 @@ test("converts Copilot AIC token prices to USD per million tokens", async () => 
         { status: 200 },
       ),
     ),
-  ) as unknown as typeof fetch
+  )
 
   const models = (await CopilotModels.get("https://api.githubcopilot.com")).models
 
@@ -188,7 +191,7 @@ test("converts Copilot AIC token prices to USD per million tokens", async () => 
 })
 
 test("detects PDF input support when vision and media type are advertised", async () => {
-  globalThis.fetch = mock(() =>
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -246,7 +249,7 @@ test("detects PDF input support when vision and media type are advertised", asyn
         { status: 200 },
       ),
     ),
-  ) as unknown as typeof fetch
+  )
 
   const models = (await CopilotModels.get("https://api.githubcopilot.com")).models
   const model = models["pdf-model"]
@@ -256,7 +259,7 @@ test("detects PDF input support when vision and media type are advertised", asyn
 })
 
 test("uses zero cost when Copilot reports a zero billing batch size", async () => {
-  globalThis.fetch = mock(() =>
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -294,7 +297,7 @@ test("uses zero cost when Copilot reports a zero billing batch size", async () =
         { status: 200 },
       ),
     ),
-  ) as unknown as typeof fetch
+  )
 
   const model = (await CopilotModels.get("https://api.githubcopilot.com")).models["mercury-alpha"]
 
@@ -310,7 +313,7 @@ test("uses zero cost when Copilot reports a zero billing batch size", async () =
 })
 
 test("records Copilot advertised responses endpoint for non-GPT model IDs", async () => {
-  globalThis.fetch = mock(() =>
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -340,7 +343,7 @@ test("records Copilot advertised responses endpoint for non-GPT model IDs", asyn
         { status: 200 },
       ),
     ),
-  ) as unknown as typeof fetch
+  )
 
   const model = (await CopilotModels.get("https://api.githubcopilot.com")).models["mai-code-1-flash-picker"]
 
@@ -348,7 +351,7 @@ test("records Copilot advertised responses endpoint for non-GPT model IDs", asyn
 })
 
 test("clears existing variants so refreshed models calculate provider-specific variants", async () => {
-  globalThis.fetch = mock(() =>
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -378,7 +381,7 @@ test("clears existing variants so refreshed models calculate provider-specific v
         { status: 200 },
       ),
     ),
-  ) as unknown as typeof fetch
+  )
 
   const result = await CopilotModels.get(
     "https://api.githubcopilot.com",
@@ -447,7 +450,7 @@ test("clears existing variants so refreshed models calculate provider-specific v
 })
 
 test("remaps fallback oauth model urls to the enterprise host", async () => {
-  globalThis.fetch = mock(() => Promise.reject(new Error("timeout"))) as unknown as typeof fetch
+  fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(() => Promise.reject(new Error("timeout")))
 
   const hooks = await CopilotAuthPlugin({
     client: {} as never,
