@@ -13,9 +13,9 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
 /**
  * filePath 必填，主定位参数为完整规范化 cellId。
  * offset 默认 1，所选格默认从其全局起点读取；越界时警告并重置到格起点。
- * limit 默认 400，源码长行仍在 2000 字符处标为预览；未编号格头不占正文行预算。
- * 12 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
- * 返回 ran=false、实际 globalStart、returned、totalLines 与续读提示，不承诺未截短原文。
+ * limit 默认 400，源码长行完整保留；未编号格头不占正文行预算。
+ * 24 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
+ * 返回 ran=false、实际 globalStart、returned、totalLines 与续读提示；分页只省略未返回的完整行。
  */
 export async function notebookSource(input: Record<string, unknown>) {
   // source 复用身份解析接口并独占虚拟行分页，读取源码不能调用 run 模块。
@@ -62,7 +62,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   // 空文档仍使用一作为起点，零总行数不能使 clamp 生成负的续读位置。
   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
 
-  const maxBytes = 12 * 1024
+  const maxBytes = 24 * 1024
   let bytes = 0
   let rendered = 0
   let cut = false
@@ -106,12 +106,9 @@ export async function notebookSource(input: Record<string, unknown>) {
         cut = true
         break
       }
-      // 长行预览明确带截短标记，不能让调用方把 2000 字符当成完整源行。
+      // 精确编辑需要完整源行，分页仍沿既有行数与 UTF-8 字节预算。
       const sourceLine = cell.document.lineAt(i).text
-      const src = sourceLine.length > 2000
-        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
-        : sourceLine
-      const outLine = `${globalLineNum}: ${src}`
+      const outLine = `${globalLineNum}: ${sourceLine}`
       // UTF-8 预算包括真实行号前缀，多字节正文不能用字符数冒充输出字节。
       const outBytes = Buffer.byteLength(outLine, "utf8")
       // 首个正文行允许推进，未编号格头不能让空正文页永远重复同一 offset。
@@ -140,7 +137,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   output += outputCells.join("\n")
 
   if (cut) {
-    output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
   }

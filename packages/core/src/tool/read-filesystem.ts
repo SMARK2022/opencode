@@ -15,8 +15,6 @@ export const MAX_READ_LINES = 2_000
 // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
 export const MAX_READ_BYTES = 24 * 1024
 export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
-const MAX_LINE_LENGTH = 2_000
-const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 
 export class BinaryFileError extends Schema.TaggedErrorClass<BinaryFileError>()("ReadTool.BinaryFileError", {
   resource: Schema.String,
@@ -280,7 +278,6 @@ export const read = Effect.fn("ReadTool.read")(function* (
       const lines: string[] = []
       const decoder = new TextDecoder("utf-8", { fatal: true })
       let pending = ""
-      let discard = false
       let line = 1
       let bytes = 0
       let next: number | undefined
@@ -293,7 +290,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
           next = line
           return false
         }
-        const text = input.length > MAX_LINE_LENGTH ? input.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : input
+        const text = input
         const size = Buffer.byteLength(text, "utf-8") + (lines.length > 0 ? 1 : 0)
         if (bytes + size > MAX_READ_BYTES) {
           next = line
@@ -309,18 +306,12 @@ export const read = Effect.fn("ReadTool.read")(function* (
         while (true) {
           const index = text.indexOf("\n")
           if (index === -1) {
-            if (!discard) {
-              pending += text
-              if (pending.length > MAX_LINE_LENGTH) {
-                pending = pending.slice(0, MAX_LINE_LENGTH + 1)
-                discard = true
-              }
-            }
+            // 跨块保留完整行，由 append 的字节预算决定整行是否进入当前页。
+            pending += text
             break
           }
-          const current = pending + (discard ? "" : text.slice(0, index))
+          const current = pending + text.slice(0, index)
           pending = ""
-          discard = false
           text = text.slice(index + 1)
           if (!append(current.endsWith("\r") ? current.slice(0, -1) : current)) return false
         }
@@ -350,7 +341,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
       }
       if (!done) {
         const tail = yield* decodeUtf8(resource, decoder)
-        if (!discard) pending += tail
+        pending += tail
         if (pending) append(pending.endsWith("\r") ? pending.slice(0, -1) : pending)
       }
       if (lines.length === 0 && offset !== 1) return yield* Effect.fail(new OffsetOutOfRangeError({ offset }))

@@ -12,8 +12,6 @@ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 
 // 只降低缺省页大小，显式 limit 与既有安全、附件分支不随默认值收紧。
 const DEFAULT_READ_LIMIT = 400
-const MAX_LINE_LENGTH = 2000
-const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 // 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
 const MAX_BYTES = 24 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
@@ -262,7 +260,7 @@ export const ReadTool = Tool.define<
               return
             }
 
-            const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
+            const line = text // 保留完整行，由总字节预算决定当前页是否接纳。
             const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
             if (flags.bytes + size <= MAX_BYTES) {
               raw.push(line)
@@ -508,8 +506,6 @@ export const ReadTool = Tool.define<
       if (
         // 当前页读取与权限检查已完成；未截掉页内正文时分页仍可去重。
         !file.cut &&
-        // 行内截断丢失完整内容，相同前缀不能证明文件版本一致。
-        file.raw.every((line) => !line.endsWith(MAX_LINE_SUFFIX)) &&
         // 每次用本会话可见历史证明范围与版本，恢复会话无需预热或借用外会话缓存。
         findUnexpandedFileInContext(ctx, params, output)
       ) {
