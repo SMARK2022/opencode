@@ -6,6 +6,13 @@ src/**
 script/**
 .gitignore
 .yarnrc
+# 环境文件忽略：防止敏感信息泄露到 VSIX 包
+.env
+.env.*
+# 日志文件忽略：防止调试信息泄露
+*.log
+# VSIX 构建产物忽略：不在发布包中包含
+*.vsix
 bun.lock
 esbuild.js
 vsc-extension-quickstart.md
