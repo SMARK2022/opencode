@@ -47,7 +47,7 @@ import type {
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
 import { createThrottledSignal } from "../../util/signal"
-import { webSearchProviderLabel } from "../../util/tool-display"
+import { toolDisplayMetadata, webSearchProviderLabel } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
@@ -1701,10 +1701,11 @@ function ReasoningHeader(props: {
   encrypted?: boolean
 }) {
   const { theme } = useTheme()
+  // 沿源保留斜体强调色，展开透明度仍由现有思考状态决定。
   const fg = () =>
     props.open
-      ? RGBA.fromValues(theme.warning.r, theme.warning.g, theme.warning.b, theme.thinkingOpacity)
-      : theme.warning
+      ? RGBA.fromValues(theme.markdownEmph.r, theme.markdownEmph.g, theme.markdownEmph.b, theme.thinkingOpacity)
+      : theme.markdownEmph
   // 统计清理后全文，不受预览或摘要截断影响；加密块不传此值，标题不推测密文长度。
   const characters = () => (props.characters === undefined ? "" : `${props.characters.toLocaleString()} chars`)
   const completed = () => {
@@ -1716,14 +1717,15 @@ function ReasoningHeader(props: {
   return (
     <Switch>
       <Match when={!props.done}>
-        <box flexDirection="row">
-          <Spinner color={fg()}>
+        <box flexDirection="row" gap={1}>
+          <Spinner color={fg()} />
+          <text fg={fg()} attributes={TextAttributes.ITALIC}>
             {[props.title ? "Thinking: " + props.title : "Thinking", characters()].filter(Boolean).join(" · ")}
-          </Spinner>
+          </text>
         </box>
       </Match>
       <Match when={true}>
-        <text fg={fg()} wrapMode="none">
+        <text fg={fg()} attributes={TextAttributes.ITALIC} wrapMode="none">
           {completed()}
         </text>
       </Match>
@@ -1767,7 +1769,8 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   const toolprops = {
     get metadata() {
-      return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
+      // V2结果在structured，历史V1仍在metadata；共用展示入口而不改变持久化信封。
+      return props.part.state.status === "pending" ? {} : { ...props.part.state.metadata, ...toolDisplayMetadata(props.part.state) }
     },
     get input() {
       return props.part.state.input ?? {}
@@ -2193,6 +2196,8 @@ function Write(props: ToolProps) {
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
   const ctx = use()
+  // 两代输入采用不同字段名，展示使用实际调用路径，不改写模型输入。
+  const filepath = createMemo(() => stringValue(props.input.filePath) ?? stringValue(props.input.path))
   // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
   const [expanded, setExpanded] = createSignal(false)
   const code = createMemo(() => {
@@ -2206,12 +2211,71 @@ function Write(props: ToolProps) {
     if (expanded() || !collapsed().overflow) return code()
     return collapsed().output
   })
+  // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
+  const diff = createMemo(() => props.metadata.diff as string | undefined)
+  // 覆写判断：文件已存在且 diff 非空时显示 diff 视图
+  const isOverwrite = createMemo(() => (props.metadata.exists === true || props.metadata.existed === true) && !!diff())
+  // diff 样式：跟随用户配置的 diff_style，stacked 模式下使用 unified 视图
+  // diff 视图模式：stacked 模式强制 unified，auto 模式按终端宽度选择 split/unified
+  const diffView = createMemo(() => {
+    const diffStyle = ctx.tui.diff_style
+    if (diffStyle === "stacked") return "unified"
+    return ctx.width > 120 ? "split" : "unified"
+  })
+  // diff 统计：计算添加/删除行数，超过 20 行时显示展开/收缩
+  const diffStats = createMemo(() => {
+    const d = diff()
+    if (!d) return { added: 0, removed: 0, total: 0 }
+    // 0086 source 语义：+/- 计数用 startsWith（内容首字符为 +/- 的行也计入），
+    // total=diff 全部行数——大上下文覆写 diff 以 ctx 行为主，不得永久折叠
+    const lines = d.split("\n")
+    const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length
+    const removed = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length
+    return { added, removed, total: lines.length }
+  })
+  const diffOverflow = createMemo(() => diffStats().total > 20)
 
   return (
     <Switch>
-      <Match when={props.metadata.diagnostics !== undefined}>
+      <Match when={isOverwrite()}>
         <BlockTool
-          title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
+          title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
+          part={props.part}
+          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+        >
+          {/* diff 高度限制：折叠时最多显示 15 行，展开时显示全部 */}
+          <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+            <diff
+              diff={diff()!}
+              syncScroll={true}
+              view={diffView()}
+              filetype={filetype(filepath())}
+              syntaxStyle={syntax()}
+              showLineNumbers={true}
+              width="100%"
+              wrapMode={ctx.diffWrapMode()}
+              fg={theme.text}
+              addedBg={theme.diffAddedBg}
+              removedBg={theme.diffRemovedBg}
+              contextBg={theme.diffContextBg}
+              addedSignColor={theme.diffHighlightAdded}
+              removedSignColor={theme.diffHighlightRemoved}
+              lineNumberFg={theme.diffLineNumber}
+              lineNumberBg={theme.diffContextBg}
+              addedLineNumberBg={theme.diffAddedLineNumberBg}
+              removedLineNumberBg={theme.diffRemovedLineNumberBg}
+            />
+          </box>
+          <Show when={diffOverflow()}>
+            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+          </Show>
+          {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
+        </BlockTool>
+      </Match>
+      <Match when={props.metadata.diagnostics !== undefined || props.metadata.operation === "write"}>
+        <BlockTool
+          title={"# Wrote " + pathFormatter.format(filepath())}
           part={props.part}
           onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
         >
@@ -2219,7 +2283,7 @@ function Write(props: ToolProps) {
             <code
               conceal={false}
               fg={theme.text}
-              filetype={filetype(stringValue(props.input.filePath))}
+              filetype={filetype(filepath())}
               syntaxStyle={syntax()}
               content={limited()}
             />
@@ -2227,12 +2291,12 @@ function Write(props: ToolProps) {
           <Show when={collapsed().overflow}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing write…" complete={stringValue(props.input.filePath)} part={props.part}>
-          Write {pathFormatter.format(stringValue(props.input.filePath))}
+        <InlineTool icon="←" pending="Preparing write…" complete={filepath()} part={props.part}>
+          Write {pathFormatter.format(filepath())}
         </InlineTool>
       </Match>
     </Switch>
@@ -2533,6 +2597,8 @@ function Edit(props: ToolProps) {
           {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
           <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
             <diff
+              // 同步滚动：diff 视图与代码视图同步滚动，提升编辑体验
+              syncScroll={true}
               diff={diffContent()}
               view={view()}
               filetype={ft()}
@@ -2631,6 +2697,7 @@ function ApplyPatch(props: ToolProps) {
                 {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
                 <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
                   <diff
+                    syncScroll={true}
                     diff={file.patch || ""}
                     view={view()}
                     filetype={filetype(file.filePath)}

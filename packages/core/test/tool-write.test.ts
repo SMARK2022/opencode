@@ -2,7 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { FileMutation } from "@opencode-ai/core/file-mutation"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -143,6 +143,10 @@ describe("WriteTool", () => {
             Effect.gen(function* () {
               expect(settled.result).toEqual({ type: "text", value: "Wrote file successfully: existing.txt" })
               expect(settled.output?.structured).toMatchObject({ resource: "existing.txt", existed: true })
+              // 先按真实输出Schema读取，避免Bun的连续非对称匹配改写实际对象字段。
+              const output = Schema.decodeUnknownSync(WriteTool.Output)(settled.output?.structured)
+              expect(output.diff).toContain("-before\n")
+              expect(output.diff).toContain("+after\n")
               expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "existing.txt"), "utf8"))).toBe(
                 "after",
               )

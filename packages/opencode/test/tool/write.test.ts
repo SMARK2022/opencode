@@ -168,6 +168,9 @@ describe("tool.write", () => {
 
         expect(result.metadata).toHaveProperty("filepath", filepath)
         expect(result.metadata).toHaveProperty("exists", true)
+        // source86的展示数据必须实际返回，不能用exists断言冒充diff验证。
+        expect(result.metadata.diff).toContain("-old")
+        expect(result.metadata.diff).toContain("+new")
       }),
     )
   })

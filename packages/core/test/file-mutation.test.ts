@@ -241,16 +241,17 @@ describe("FileMutation", () => {
           const files = yield* FileMutation.Service
           const firstPlan = yield* mutation.resolve({ path: "shared.txt" })
           const secondPlan = yield* mutation.resolve({ path: "shared.txt" })
-          const first = yield* files.write({ target: firstPlan, content: "first" }).pipe(Effect.forkChild)
+          const first = yield* files.writeTextPreservingBom({ target: firstPlan, content: "first" }).pipe(Effect.forkChild)
           yield* Deferred.await(firstStarted)
-          const second = yield* files.write({ target: secondPlan, content: "second" }).pipe(Effect.forkChild)
+          const second = yield* files.writeTextPreservingBom({ target: secondPlan, content: "second" }).pipe(Effect.forkChild)
           yield* Effect.yieldNow
           expect(yield* Deferred.isDone(secondStarted)).toBe(false)
 
           yield* Deferred.succeed(releaseFirst, undefined)
           yield* Deferred.await(secondStarted)
-          yield* Fiber.join(first)
-          yield* Fiber.join(second)
+          // 每个diff必须对应自己持锁时的前像，第二次不能误用最初快照。
+          expect((yield* Fiber.join(first)).diff).toContain("-initial\n")
+          expect((yield* Fiber.join(second)).diff).toContain("-first\n")
           expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("second")
         }).pipe(provide(directory, filesystem))
       }),

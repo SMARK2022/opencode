@@ -58,6 +58,7 @@ function EditBody(props: { request: PermissionRequest }) {
           }}
         >
           <diff
+            syncScroll={true}
             diff={diff()}
             view={view()}
             filetype={ft()}
