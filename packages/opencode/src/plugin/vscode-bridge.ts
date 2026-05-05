@@ -49,7 +49,7 @@ const runArgs = {
   type: z
     .enum(["cell", "range"])
     .optional()
-    .describe("Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell."),
+    .describe("Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell."),
   cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx."),
   endCellId: z
     .string()

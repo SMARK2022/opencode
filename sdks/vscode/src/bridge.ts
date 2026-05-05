@@ -42,6 +42,22 @@ let lifetime: Promise<void> | undefined
 let closing = true
 // 屏障覆盖 listen 的启动期，取消意图与服务器引用都属于同一个 bridge owner。
 
+// 在既有 filePath 必填检查后加锁，同文档处理串行，失败也必须释放后继请求。
+const fileLocks = new Map<string, Promise<void>>()
+
+function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const next = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  fileLocks.set(key, next)
+  return prev.then(fn).finally(() => {
+    release()
+    if (fileLocks.get(key) === next) fileLocks.delete(key)
+  })
+}
+
 export async function closeBridge() {
 // bridge 模块持有唯一服务器句柄，外部只调用 closeBridge，不保存可独立关闭的副本。
   // 重复卸载共享同一个关闭屏障，不能在第一个 close 回调前清空 owner 并重新激活。
@@ -205,34 +221,36 @@ async function routeRequest(
   // 已鉴权路由共享必填路径检查，不能用类型断言把缺失路径送入新的严格接口。
   if (!filePath) throw new Error("filePath is required")
 
-  switch (pathname) {
-    case "/notebook/env":
-      return await notebookEnv(filePath)
+  return await withFileLock(filePath, async () => {
+    switch (pathname) {
+      case "/notebook/env":
+        return await notebookEnv(filePath)
 
-    case "/notebook/summary":
-      return await notebookSummary(filePath)
+      case "/notebook/summary":
+        return await notebookSummary(filePath)
 
-    case "/notebook/source":
-      return await notebookSource(body)
+      case "/notebook/source":
+        return await notebookSource(body)
 
-    case "/notebook/run":
-      return await runNotebook(body)
+      case "/notebook/run":
+        return await runNotebook(body)
 
-    case "/notebook/edit":
-      return await editNotebook(body)
+      case "/notebook/edit":
+        return await editNotebook(body)
 
-    case "/notebook/output":
-    case "/notebook/cell-output": {
-      // 输出别名复用前置鉴权路径，70 删除 LM 路由不改变其余 notebook 能力。
-      const cellId = typeof body.cellId === "string" ? body.cellId : undefined
-      // HTTP 输出契约只传 cellId；数字位置不能覆盖调用方选中的稳定格身份。
-      output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
-      return await readNotebookCellOutput(filePath, undefined, cellId)
+      case "/notebook/output":
+      case "/notebook/cell-output": {
+        // 输出别名复用前置鉴权路径，70 删除 LM 路由不改变其余 notebook 能力。
+        const cellId = typeof body.cellId === "string" ? body.cellId : undefined
+        // HTTP 输出契约只传 cellId；数字位置不能覆盖调用方选中的稳定格身份。
+        output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
+        return await readNotebookCellOutput(filePath, undefined, cellId)
+      }
+
     }
 
-  }
-
-  return undefined
+    return undefined
+  })
 }
 
 function authorized(request: http.IncomingMessage, url: URL, token: string) {
