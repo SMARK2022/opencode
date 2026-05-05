@@ -600,15 +600,17 @@ export const ShellTool = Tool.define(
       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
       // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
-      if (!file && (end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+      // CLIXML解码可能净增长；呈现变化仍须生成并广告未经改写的原文。
+      const transformed = compressed.text !== raw
+      if (!file && (transformed || end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
         file = yield* trunc.write(raw)
       }
 
       let output = end.text
       if (!output) output = "(no output)"
 
-      // 单独脱敏也广告原文路径；写盘输入仍是未改动的 raw。
-      if (file && (cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+      // 呈现变化与单独脱敏都广告原文路径，不能把收益布尔值当作恢复条件。
+      if (file && (transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
         output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
       }
 
@@ -624,7 +626,7 @@ export const ShellTool = Tool.define(
           output: last || preview(output),
           exit: code,
           truncated: cut,
-          ...((cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+          ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
           // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
           ...bashCompressionMetadata(compressed.stats),
           durationMs: Date.now() - started,
