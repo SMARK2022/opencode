@@ -23,7 +23,7 @@ import { resolveNotebook } from "./resolve"
 
 /**
  * Bridge endpoint handler: returns notebook source code with global line numbering.
- * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 12 KB.
+ * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
  */
 export async function notebookSource(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
@@ -66,7 +66,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
 
   // Render cells one by one, emitting headers + in-range source lines
-  const maxBytes = 12 * 1024
+  const maxBytes = 24 * 1024
   let bytes = 0
   let rendered = 0
   let cut = false
@@ -112,10 +112,7 @@ export async function notebookSource(input: Record<string, unknown>) {
         break
       }
       const sourceLine = cell.document.lineAt(i).text
-      const src = sourceLine.length > 2000
-        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
-        : sourceLine
-      const outLine = `${globalLineNum}: ${src}`
+      const outLine = `${globalLineNum}: ${sourceLine}`
       const outBytes = Buffer.byteLength(outLine, "utf8")
       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
         cut = true
@@ -141,7 +138,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   output += outputCells.join("\n")
 
   if (cut) {
-    output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
   }

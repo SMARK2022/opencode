@@ -14,8 +14,6 @@ import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWi
 import type { MessageV2 } from "../session/message-v2"
 
 const DEFAULT_READ_LIMIT = 400
-const MAX_LINE_LENGTH = 2000
-const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 24 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
@@ -543,7 +541,7 @@ async function lines(filepath: string, opts: { limit: number; offset: number }) 
         continue
       }
 
-      const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
+      const line = text
       const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
       if (bytes + size > MAX_BYTES) {
         cut = true
