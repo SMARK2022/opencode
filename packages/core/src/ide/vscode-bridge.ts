@@ -151,12 +151,8 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
 
 // 解析桥接：通过路径匹配选择最佳桥接，优先选择工作区路径最匹配的
 // CLI 桥接 API：resolveBridge — 发现/调用 VS Code notebook 能力
+// 发现仅走 registry/cache/健康探测：env 捷径已删除
 export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
-// 环境变量桥接：OPENCODE_IDE_BRIDGE 指定固定桥接，优先于发现流程
-  const env = envBridge()
-// 环境变量桥接：OPENCODE_IDE_BRIDGE 环境变量指定固定桥接，跳过发现流程
-  if (env && (await healthCheck(env, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return env
-
   const now = Date.now()
   if (
     cachedRegistryBridge &&
@@ -331,20 +327,6 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
     .some((active) => active !== undefined && samePath(active, target))
 }
 
-function envBridge(): BridgeRef | undefined {
-  const rawPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
-  const token = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
-  if (!rawPort || !token) return
-  const port = Number(rawPort)
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return
-  return {
-    id: "env",
-    host: process.env.OPENCODE_VSCODE_BRIDGE_HOST ?? "127.0.0.1",
-    port,
-    token,
-    source: "env",
-  }
-}
 
 // 读取注册条目：解析 JSON，验证 schema 版本和必需字段
 async function readEntry(filepath: string) {

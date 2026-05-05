@@ -8,15 +8,11 @@ import path from "path"
 import * as VscodeBridge from "../../src/ide/vscode-bridge"
 
 const originalRegistryDir = process.env.OPENCODE_IDE_REGISTRY_DIR
-const originalPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
-const originalToken = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
 const tempDirs: string[] = []
 
 // 清理责任：每个测试用例后删除临时目录和注册文件，防止测试间状态泄漏
 afterEach(async () => {
   restoreEnv("OPENCODE_IDE_REGISTRY_DIR", originalRegistryDir)
-  restoreEnv("OPENCODE_VSCODE_BRIDGE_PORT", originalPort)
-  restoreEnv("OPENCODE_VSCODE_BRIDGE_TOKEN", originalToken)
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })))
 })
 
@@ -27,18 +23,6 @@ describe("vscode bridge discovery", () => {
 // 边界条件：空目录时应返回空数组，不抛出异常
 // 测试意图：验证 stale 条目（超过 staleMs）被正确移除
 // 测试意图：验证 PID 失效的条目被移除，即使未超过 staleMs
-test("env bridge is preferred when healthy", async () => {
-    using server = await bridgeServer()
-    const dir = await tempRegistry()
-    await writeEntry(dir, "registry", server.port, "/tmp/project")
-    process.env.OPENCODE_VSCODE_BRIDGE_PORT = String(server.port)
-    process.env.OPENCODE_VSCODE_BRIDGE_TOKEN = "env-token"
-
-    const bridge = await VscodeBridge.resolveBridge({ cwd: "/tmp/project" })
-
-    expect(bridge.source).toBe("env")
-    expect(bridge.token).toBe("env-token")
-  })
 
 test("selects registry bridge matching the requested file path", async () => {
     using first = await bridgeServer()
@@ -83,8 +67,6 @@ async function tempRegistry() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-vscode-bridge-"))
   tempDirs.push(dir)
   process.env.OPENCODE_IDE_REGISTRY_DIR = dir
-  delete process.env.OPENCODE_VSCODE_BRIDGE_PORT
-  delete process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
   return dir
 }
 
