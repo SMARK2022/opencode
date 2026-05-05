@@ -537,7 +537,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             const headers = new Headers(init?.headers)
             headers.set("Authorization", `Bearer ${token.token}`)
 
-            return fetch(input, { ...init, headers })
+            return NetworkProxy.fetch(input, { ...init, headers, purpose: "provider" })
           },
         },
         async getModel(sdk: any, modelID: string) {
@@ -1565,7 +1565,6 @@ const layer: Layer.Layer<
         delete options["chunkTimeout"]
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-          const fetchFn = customFetch ?? fetch
           const opts = init ?? {}
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const signals: AbortSignal[] = []
@@ -1596,12 +1595,14 @@ const layer: Layer.Layer<
             }
           }
 
-          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
-            ...opts,
-            purpose: "provider",
-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-            timeout: false,
-          })
+          const res = customFetch
+            ? await NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
+            : await NetworkProxy.fetch(input, {
+                ...opts,
+                purpose: "provider",
+                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                timeout: false,
+              })
 
           if (!chunkAbortCtl) return res
           return wrapSSE(res, chunkTimeout, chunkAbortCtl)

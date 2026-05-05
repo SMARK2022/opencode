@@ -1,5 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import * as Log from "@opencode-ai/core/util/log"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Installation } from "../installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { OAUTH_DUMMY_KEY } from "../auth"
@@ -112,8 +113,9 @@ interface TokenResponse {
 }
 
 async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
-  const response = await fetch(`${ISSUER}/oauth/token`, {
+  const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
+    purpose: "plugin",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
@@ -130,8 +132,9 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  const response = await fetch(`${ISSUER}/oauth/token`, {
+  const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
+    purpose: "plugin",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "refresh_token",
@@ -415,7 +418,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             }
 
             const currentAuth = await getAuth()
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
+            if (currentAuth.type !== "oauth") return NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
 
             // Cast to include accountId field
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
@@ -473,8 +476,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                 ? new URL(CODEX_API_ENDPOINT)
                 : parsed
 
-            return fetch(url, {
+            return NetworkProxy.fetch(url, {
               ...init,
+              purpose: "provider",
               headers,
             })
           },
@@ -515,8 +519,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
           label: "ChatGPT Pro/Plus (headless)",
           type: "oauth",
           authorize: async () => {
-            const deviceResponse = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+            const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
               method: "POST",
+              purpose: "plugin",
               headers: {
                 "Content-Type": "application/json",
                 "User-Agent": `opencode/${InstallationVersion}`,
@@ -539,8 +544,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
               method: "auto" as const,
               async callback() {
                 while (true) {
-                  const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+                  const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
                     method: "POST",
+                    purpose: "plugin",
                     headers: {
                       "Content-Type": "application/json",
                       "User-Agent": `opencode/${InstallationVersion}`,
@@ -557,8 +563,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                       code_verifier: string
                     }
 
-                    const tokenResponse = await fetch(`${ISSUER}/oauth/token`, {
+                    const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
                       method: "POST",
+                      purpose: "plugin",
                       headers: { "Content-Type": "application/x-www-form-urlencoded" },
                       body: new URLSearchParams({
                         grant_type: "authorization_code",

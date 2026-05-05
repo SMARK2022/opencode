@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "crypto"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 // ============================================================================
 // 常量与基础配置
@@ -269,7 +270,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     // 只拦截向 /v1/messages 发送的请求
     if (!url.includes("/v1/messages")) {
-      return fetch(input, init)
+      return NetworkProxy.fetch(input, { ...init, purpose: "provider" })
     }
 
     const originalBody = init?.body
@@ -383,8 +384,9 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     }
 
     // 8. 透传所有 init 参数，只覆盖 body 和 headers，避免丢弃 signal / keepalive 等控制参数
-    return fetch(input, {
+    return NetworkProxy.fetch(input, {
       ...init,
+      purpose: "provider",
       headers: requestHeaders,
       body: finalBodyStr,
     })

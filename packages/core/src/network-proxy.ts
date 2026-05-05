@@ -4,12 +4,18 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
 
 export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 
+/** Proxy resolution TTL: re-check system proxy settings every 10s */
 const PROXY_TTL = 10_000
+/** Hostnames that should never be routed through a proxy */
 const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
 
 let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
 let globalFetchInstalled = false
-let savedOriginal: FetchFn | undefined
+/**
+ * Pre-bound native fetch reference.
+ * Captured once at module load before global fetch may be overridden by installGlobalFetch().
+ */
+const nativeFetch = globalThis.fetch.bind(globalThis) as FetchFn
 
 type SystemProxy = {
   http?: string
@@ -34,14 +40,29 @@ function isLocal(url: URL) {
   return LOCAL.has(normalizeHost(url.hostname))
 }
 
+/**
+ * Normalize a proxy string into a valid URL.
+ * Converts "localhost" hostnames to 127.0.0.1 for consistent resolution.
+ * Falls back to the raw value if URL parsing fails.
+ */
 function normalizeProxy(value: string | undefined) {
   if (!value) return
   const next = value.trim()
   if (!next) return
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(next)) return next
-  return `http://${next}`
+  const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(next) ? next : `http://${next}`
+  try {
+    const url = new URL(normalized)
+    if (normalizeHost(url.hostname) === "localhost") url.hostname = "127.0.0.1"
+    return url.toString()
+  } catch {
+    return normalized
+  }
 }
 
+/**
+ * Check whether the given hostname matches any entry in the bypass list.
+ * Supports exact match, wildcard prefix (*.example.com), and glob patterns.
+ */
 function bypass(url: URL, list: string[]) {
   const host = normalizeHost(url.hostname)
   for (const raw of list) {
@@ -58,6 +79,10 @@ function bypass(url: URL, list: string[]) {
   return false
 }
 
+/**
+ * Read proxy configuration from environment variables.
+ * Respects HTTPS_PROXY/HTTP_PROXY/ALL_PROXY and NO_PROXY bypass rules.
+ */
 function envProxy(url: URL): SystemProxy | undefined {
   const proxy =
     url.protocol === "https:"
@@ -69,6 +94,7 @@ function envProxy(url: URL): SystemProxy | undefined {
   return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
 }
 
+/** Execute a shell command and return its stdout text */
 async function execText(command: string, args: string[], timeout = 1500) {
   const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
   const timer = setTimeout(() => proc.kill(), timeout)
@@ -83,6 +109,10 @@ async function execText(command: string, args: string[], timeout = 1500) {
   }
 }
 
+/**
+ * Parse a Windows proxy server string which may use protocol=host;port format.
+ * Falls back to normalizing the raw value if no = delimiters are present.
+ */
 function parseWindowsProxyServer(value: string, protocol: string) {
   if (!value.includes("=")) return normalizeProxy(value)
   const entries = Object.fromEntries(
@@ -124,6 +154,7 @@ async function macProxy(): Promise<SystemProxy | undefined> {
   return { http, https, socks, bypass: [] }
 }
 
+/** Retrieve system proxy settings with caching (TTL = 10s) */
 async function currentSystemProxy(refresh = false) {
   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
   if (refresh) cache = undefined
@@ -136,6 +167,11 @@ async function currentSystemProxy(refresh = false) {
   return cache.value
 }
 
+/**
+ * Determine the effective proxy for a URL.
+ * On Windows/macOS reads system proxy settings; on Linux falls back to env vars.
+ * Respects the bypass/no-proxy list from the same source.
+ */
 async function configuredProxy(url: URL, refresh = false) {
   if (process.platform === "win32" || process.platform === "darwin") {
     const sys = await currentSystemProxy(refresh)
@@ -147,6 +183,11 @@ async function configuredProxy(url: URL, refresh = false) {
   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
 }
 
+/**
+ * Resolve the proxy route for a given URL.
+ * Returns either a `proxy` route (with the proxy URL) or a `direct` route.
+ * Local addresses and `local`-purpose calls always return `direct`.
+ */
 export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
   const url = input instanceof URL ? input : new URL(input)
   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
@@ -155,67 +196,88 @@ export async function resolveProxyRoute(input: string | URL, purpose: Purpose = 
   return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
 }
 
+/** Compatibility alias — delegates to the unified fetch() entry point */
 export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
-  return fetchWithRoute(fetch, input, init)
+  return fetch(input, init)
 }
 
-export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+/**
+ * Primary network fetch entry point.
+ *
+ * Resolves the proxy route for the given URL, then dispatches to either
+ * a direct connection or a proxy-backed connection via Bun's native `proxy:`.
+ * The explicit `proxy` parameter ensures Bun routes through the correct proxy
+ * regardless of cached environment variables at process startup.
+ */
+export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : input.toString())
-  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: string }
+  const {
+    purpose = "unknown",
+    signal,
+    proxy: _incomingProxy,
+    dispatcher: _incomingDispatcher,
+    timeout: _incomingTimeout,
+    ...rest
+  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
   const route = await resolveProxyRoute(url, purpose, false)
-  
-  // Bun caches proxy env at startup — explicit `proxy` param overrides it,
-  // but plain fetch still honours the cached env.  Setting NO_PROXY=* once
-  // disables that cached env so plain fetch goes direct.  The proxy() helper
-  // passes an explicit `proxy` param which Bun always respects regardless of
-  // NO_PROXY, so this is safe.
-  if (!process.env.__OPENCODE_NO_PROXY_SET) {
-    process.env.NO_PROXY = "*"
-    process.env.__OPENCODE_NO_PROXY_SET = "1"
-  }
-  
-  const fetchDirect = (overrideSignal?: AbortSignal) => 
-    fetchFn(input, { ...rest, signal: overrideSignal ?? signal })
-  
-  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
 
-  if (route.type === "direct") {
-    try {
-      return await fetchDirect()
-    } catch (error) {
-      if (signal?.aborted) throw error
-      const refreshed = await resolveProxyRoute(url, purpose, true)
-      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
-      throw error
-    }
-  }
+  if (route.type === "direct")
+    return directFetch(input, { ...rest, signal })
 
-  try {
-    return await proxy(route.proxy)
-  } catch (error) {
-    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
-    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
-      return proxy(refreshed.proxy).catch(() => { throw error })
-    }
-    if (signal?.aborted)
-      return fetchDirect(AbortSignal.timeout(10_000)).catch(() => { throw error })
-    return fetchDirect().catch(() => { throw error })
-  }
+  return proxyFetch(input, { ...rest, signal }, route.proxy)
 }
 
+/**
+ * Dispatch a custom fetch function (auth adapter / URL-rewriting wrapper).
+ *
+ * Provider SDKs may supply their own `fetch` implementation that injects
+ * auth headers, rewrites URLs, or transforms request bodies before the
+ * actual network request.  The custom fetcher is responsible for calling
+ * `NetworkProxy.fetch()` internally for the real outbound hop.
+ */
+export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+  const {
+    purpose = "unknown",
+    signal,
+    proxy: _incomingProxy,
+    dispatcher: _incomingDispatcher,
+    timeout: _incomingTimeout,
+    ...rest
+  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
+  return fetchFn(input, { ...rest, signal })
+}
+
+/**
+ * Send a fetch request through an explicit HTTP/SOCKS proxy.
+ * Uses Bun's built-in proxy support via the `proxy` option.
+ */
+async function proxyFetch(input: FetchInput, init: RequestInit, proxy: string) {
+  return nativeFetch(input, { ...init, proxy } as RequestInit & { proxy: string })
+}
+
+/**
+ * Direct network request without proxy interception.
+ * Uses the pre-bound native fetch to avoid recursion when global fetch is overridden.
+ */
+async function directFetch(input: FetchInput, init: RequestInit) {
+  return nativeFetch(input, init)
+}
+
+/**
+ * Install a routed fetch as the global `fetch` implementation.
+ * All subsequent `fetch()` calls in the process will be routed through
+ * proxy resolution automatically.
+ *
+ * Idempotent — subsequent calls are no-ops.
+ */
 export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
   if (globalFetchInstalled) return
-  const original = globalThis.fetch.bind(globalThis) as FetchFn
-  savedOriginal = original
   globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
-    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
+    fetch(input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof globalThis.fetch
   globalFetchInstalled = true
 }
 
-export function originalFetch() {
-  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
-}
-
+/** Return npm-compatible proxy options for the given registry URL */
 export async function npmProxyOptions(registry: string) {
   const route = await resolveProxyRoute(registry, "npm", true)
   if (route.type === "direct") return {}

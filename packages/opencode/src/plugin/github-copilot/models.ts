@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { Model } from "@opencode-ai/sdk/v2"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 export const schema = z.object({
   data: z.array(
@@ -158,7 +159,8 @@ export async function get(
   headers: HeadersInit = {},
   existing: Record<string, Model> = {},
 ): Promise<Record<string, Model>> {
-  const data = await fetch(`${baseURL}/models`, {
+  const data = await NetworkProxy.fetch(`${baseURL}/models`, {
+    purpose: "plugin",
     headers,
     signal: AbortSignal.timeout(5_000),
   }).then(async (res) => {
