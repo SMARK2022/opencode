@@ -20,7 +20,7 @@ const TERMINAL_NAME = "opencode"
 // ---------------------------------------------------------------------------
 
 export function deactivate() {
-  closeBridge()
+  return closeBridge()
 }
 
 export function activate(context: vscode.ExtensionContext) {

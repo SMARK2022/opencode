@@ -10,8 +10,8 @@
  *   GET  /health                – liveness check
  *   POST /notebook/summary      – notebook structure overview
  *   POST /notebook/source       – paginated virtual source text
- *   POST /notebook/run          – execute cells
- *   POST /notebook/edit         – insert/delete/replace cells
+ *   POST /notebook/run          – execute one cell or a cell-id range
+ *   POST /notebook/edit         – insert/edit/delete cells
  *   POST /notebook/output       – artifact-first output export
  *   POST /notebook/cell-output  – alias for /notebook/output
  *   POST /notebook/env          – kernel/environment snapshot
@@ -24,6 +24,7 @@ import { runNotebook } from "./notebook/run"
 import { editNotebook } from "./notebook/edit"
 import { readNotebookCellOutput } from "./notebook/output"
 import { notebookEnv } from "./notebook/env"
+import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
 
 const BRIDGE_HOST = "127.0.0.1"
 
@@ -31,8 +32,11 @@ export type BridgeInfo = { port: number; token: string }
 
 /** The active server instance — closed on extension deactivation. */
 let server: http.Server | undefined
+let registry: RegistryHandle | undefined
 
-export function closeBridge() {
+export async function closeBridge() {
+  await registry?.dispose()
+  registry = undefined
   server?.close()
   server = undefined
 }
@@ -47,6 +51,7 @@ export function closeBridge() {
  */
 export async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
   const { randomUUID } = await import("node:crypto")
+  const id = randomUUID()
   const token = randomUUID()
 
   const httpServer = http.createServer(async (request, response) => {
@@ -54,6 +59,10 @@ export async function startBridge(output: { appendLine(value: string): void }): 
     output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
 
     try {
+      if (!safeLocalRequest(request)) {
+        return writeJson(response, 403, { ok: false, error: "Forbidden" })
+      }
+
       // Health check — no auth required
       if (request.method === "GET" && url.pathname === "/health") {
         return writeJson(response, 200, { ok: true, service: "opencode-vscode-bridge" })
@@ -62,6 +71,10 @@ export async function startBridge(output: { appendLine(value: string): void }): 
       // All other endpoints require auth
       if (!authorized(request, url, token)) {
         return writeJson(response, 401, { ok: false, error: "Unauthorized" })
+      }
+
+      if (request.method === "GET" && url.pathname === "/manifest") {
+        return writeJson(response, 200, manifest({ id, port: addressPort(httpServer), token: "<redacted>" }))
       }
 
       // Route to notebook handlers
@@ -90,11 +103,17 @@ export async function startBridge(output: { appendLine(value: string): void }): 
 
       const base = `http://${BRIDGE_HOST}:${address.port}`
       output.appendLine(`[bridge] listening on ${base}`)
-      output.appendLine(`[bridge] token ${token}`)
+      output.appendLine("[bridge] token <redacted>")
       for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
-        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : `?token=${token}`}`)
+        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}`)
       }
-      resolve({ port: address.port, token })
+      registerBridge({ id, port: address.port, token })
+        .then((handle) => {
+          registry = handle
+          output.appendLine(`[bridge] registry ${handle.id}`)
+          resolve({ port: address.port, token })
+        })
+        .catch(reject)
     })
   })
 }
@@ -117,8 +136,11 @@ async function routeRequest(
   }
 
   switch (pathname) {
-    case "/notebook/summary":
-      return await notebookSummary(stringProp(body, "filePath"))
+    case "/notebook/summary": {
+      const filePath = stringProp(body, "filePath")
+      if (!filePath) throw new Error("filePath is required")
+      return await notebookSummary(filePath)
+    }
 
     case "/notebook/source":
       return await notebookSource(body)
@@ -131,14 +153,18 @@ async function routeRequest(
 
     case "/notebook/output":
     case "/notebook/cell-output": {
-      const filePath = typeof body.filePath === "string" ? body.filePath : undefined
+      const filePath = stringProp(body, "filePath")
+      if (!filePath) throw new Error("filePath is required")
       const cellId = typeof body.cellId === "string" ? body.cellId : undefined
-      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
+      output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
       return await readNotebookCellOutput(filePath, undefined, cellId)
     }
 
-    case "/notebook/env":
-      return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
+    case "/notebook/env": {
+      const filePath = stringProp(body, "filePath")
+      if (!filePath) throw new Error("filePath is required")
+      return await notebookEnv(filePath)
+    }
   }
 
   return undefined
@@ -149,7 +175,20 @@ async function routeRequest(
 // ---------------------------------------------------------------------------
 
 function authorized(request: http.IncomingMessage, url: URL, token: string) {
-  return request.headers.authorization === `Bearer ${token}` || url.searchParams.get("token") === token
+  void url
+  return request.headers.authorization === `Bearer ${token}`
+}
+
+function safeLocalRequest(request: http.IncomingMessage) {
+  if (request.headers.origin) return false
+  const host = request.headers.host
+  return !host || host.startsWith("127.0.0.1:") || host.startsWith("localhost:")
+}
+
+function addressPort(httpServer: http.Server) {
+  const address = httpServer.address()
+  if (!address || typeof address === "string") throw new Error("Bridge server port is not available")
+  return address.port
 }
 
 function writeJson(response: http.ServerResponse, status: number, value: unknown) {
