@@ -34,6 +34,22 @@ export type BridgeInfo = { port: number; token: string }
 let server: http.Server | undefined
 let registry: RegistryHandle | undefined
 
+/** Per-filePath mutex: serializes notebook requests that target the same document. */
+const fileLocks = new Map<string, Promise<void>>()
+
+function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const next = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  fileLocks.set(key, next)
+  return prev.then(fn).finally(() => {
+    release()
+    if (fileLocks.get(key) === next) fileLocks.delete(key)
+  })
+}
+
 export async function closeBridge() {
   await registry?.dispose()
   registry = undefined
@@ -77,10 +93,13 @@ export async function startBridge(output: { appendLine(value: string): void }): 
         return writeJson(response, 200, manifest({ id, port: addressPort(httpServer), token: "<redacted>" }))
       }
 
-      // Route to notebook handlers
-      const result = await routeRequest(request.method ?? "", url.pathname, request, output)
-      if (result !== undefined) {
-        return writeJson(response, 200, result)
+      // Route to notebook handlers — serialized per notebook filePath
+      if (request.method === "POST") {
+        const body = await readJson(request)
+        if (!body || !isRecord(body)) throw new Error("Expected JSON object body")
+        const filePath = stringProp(body, "filePath") ?? url.pathname
+        const result = await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
+        if (result !== undefined) return writeJson(response, 200, result)
       }
 
       writeJson(response, 404, { ok: false, error: "Not found" })
@@ -123,17 +142,10 @@ export async function startBridge(output: { appendLine(value: string): void }): 
 // ---------------------------------------------------------------------------
 
 async function routeRequest(
-  method: string,
   pathname: string,
-  request: http.IncomingMessage,
+  body: Record<string, unknown>,
   output: { appendLine(value: string): void },
 ) {
-  if (method !== "POST") return undefined
-
-  const body = await readJson(request)
-  if (!isRecord(body)) {
-    throw new Error("Expected JSON object body")
-  }
 
   switch (pathname) {
     case "/notebook/summary": {

@@ -4,8 +4,9 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { Global } from "@opencode-ai/core/global"
 
-const DEFAULT_HEALTH_TIMEOUT = 500
-const DEFAULT_STALE_MS = 15_000
+const DEFAULT_HEALTH_TIMEOUT = 2_000
+const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
+const DEFAULT_STALE_MS = 60_000
 const RESOLVE_CACHE_MS = 5_000
 
 export type BridgeEntry = {
@@ -64,6 +65,8 @@ let cachedRegistryBridge:
     }
   | undefined
 
+let bridgeRequestQueue = Promise.resolve()
+
 export function registryDir() {
   return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
 }
@@ -85,16 +88,20 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
         const filepath = path.join(dir, file)
         const entry = await readEntry(filepath)
         if (!entry) return
-        if (now - entry.updatedAt > staleMs) {
-          await removeStale(filepath)
-          return
-        }
         if (pidDead(entry.pid)) {
           await removeStale(filepath)
           return
         }
-        if (!(await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return
-        live.push(entry)
+        const age = now - entry.updatedAt
+        if (age <= DEFAULT_HEARTBEAT_TRUST_MS) {
+          live.push(entry)
+          return
+        }
+        if (await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT)) {
+          live.push(entry)
+          return
+        }
+        if (age > staleMs) await removeStale(filepath)
       }),
   )
   return live
@@ -152,6 +159,10 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
 }
 
 export async function callBridge(input: CallInput): Promise<unknown> {
+  return await enqueueBridgeRequest(() => callBridgeOnce(input))
+}
+
+async function callBridgeOnce(input: CallInput): Promise<unknown> {
   await assertExistingLocalFilePath(input.filePath)
   const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
   let response: Response
@@ -189,6 +200,20 @@ export async function callBridge(input: CallInput): Promise<unknown> {
   const error = errorFromResponse(value)
   if (error) throw new Error(error)
   return value
+}
+
+async function enqueueBridgeRequest<T>(operation: () => Promise<T>) {
+  const previous = bridgeRequestQueue
+  let release!: () => void
+  bridgeRequestQueue = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
 }
 
 export function summaryOnly(value: unknown) {

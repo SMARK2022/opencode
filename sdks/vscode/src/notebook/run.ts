@@ -37,6 +37,10 @@ export async function runNotebook(input: Record<string, unknown>) {
   if (type !== undefined && type !== "cell" && type !== "range") throw new Error("type must be one of: cell, range")
   const cellId = stringProp(input, "cellId")
   if (!cellId) throw new Error("cellId is required")
+  const endCellId = stringProp(input, "endCellId")
+  if (type === "cell" && endCellId && endCellId.replace(/^#/, "") !== cellId.replace(/^#/, "")) {
+    throw new Error("endCellId must not be set when type is cell unless it equals cellId")
+  }
 
   const notebook = await resolveNotebook(filePath)
   const commands = await vscode.commands.getCommands(true)
@@ -47,7 +51,7 @@ export async function runNotebook(input: Record<string, unknown>) {
   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
 
   // Resolve target cells via stable cell IDs. No cellIndex or "all" mode is accepted.
-  const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
+  const cells = resolveRunTarget(notebook, cellId, endCellId)
 
   // Open notebook and reveal first cell
   const editor = await vscode.window.showNotebookDocument(notebook, {
@@ -91,7 +95,7 @@ export async function runNotebook(input: Record<string, unknown>) {
       failedIndex = cell.index
     }
 
-    const result = await compactRunCell(notebook, cell)
+    const result = await compactRunCell(notebook, notebook.cellAt(cell.index))
     if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
     results.push(result)
   }
@@ -190,6 +194,7 @@ function runSummaryText(
  * VS Code/Copilot pattern so fast executions are not missed.
  */
 function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
+  const targetUri = cell.document.uri.toString()
   let subscription: vscode.Disposable | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
@@ -200,7 +205,7 @@ function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
     subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
       if (event.notebook.uri.toString() !== cell.notebook.uri.toString()) return
       for (const change of event.cellChanges) {
-        if (change.cell !== cell || typeof change.executionSummary?.success !== "boolean") continue
+        if (change.cell.document.uri.toString() !== targetUri || typeof change.executionSummary?.success !== "boolean") continue
         const summary = change.executionSummary
         clearTimeout(timer)
         subscription?.dispose()

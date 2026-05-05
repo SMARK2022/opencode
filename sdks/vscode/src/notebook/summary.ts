@@ -49,7 +49,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
   const status = failed.length
     ? `${failed.length} failed`
     : executed.length === code.length && code.length > 0
-      ? "All code cells have successful session execution state."
+      ? "All code cells report successful execution state (may be from a previous session)."
       : `${executed.length}/${code.length} code cells executed`
 
   return [
