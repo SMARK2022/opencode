@@ -759,10 +759,10 @@ const layer = Layer.effect(
                 if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id) return []
                 // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
                 const steps = message.parts.flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
-                  ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
+                  ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
                 if (steps.length > 0) return steps.toReversed()
                 if (!info.inputEstimate?.confirmed) return []
-                return [{ bodyChars: info.inputEstimate.bodyChars,
+                return [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown,
                   input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
               })
               // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。

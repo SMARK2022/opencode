@@ -14,17 +14,18 @@ const CHARS_PER_TOKEN = 4
 
 export const estimate = (input: string) => Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
 
-export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number }>) {
+export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>) {
   const sample = history.reduce((sum, item) => {
     // 调用方筛选同 API 的确认样本；分子分母同时截止，零确认和不足100字符的样本不校准。
     if (sum.bodyChars >= 100_000 || !Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return sum
-    return { bodyChars: sum.bodyChars + item.bodyChars, input: sum.input + item.input }
+    // 附件/base64 字符不参与文本密度，确认输入与缓存 token 仍保留原分母。
+    return { bodyChars: sum.bodyChars + Math.max(0, item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
   }, { bodyChars: 0, input: 0 })
   // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
   return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
 }
 
-export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number }>, sections?: ReadonlyArray<SystemSection>) {
+export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>, sections?: ReadonlyArray<SystemSection>) {
   const ratio = charsPerTokenFromHistory(history)
   const counts = {
     system: 0, instructions: 0, skills: 0, tools: 0,

@@ -771,10 +771,10 @@ describe("context usage", () => {
     expect(contextUsageFooter(data, 180)).toContain("Cost $0.0100")
   })
 
-  test("uses daemon inputBreakdown for every category and keeps confirmed usage separate", async () => {
+  test("uses daemon text breakdown and keeps confirmed usage separate", async () => {
     const inputBreakdown = {
       system: 8000, instructions: 1000, skills: 0, tools: 5000,
-      messages: { userText: 7800, assistantText: 8000, reasoning: 0, toolInput: 2000, toolOutput: 2000, attachments: 200, total: 20000 },
+      messages: { userText: 8000, assistantText: 8000, reasoning: 0, toolInput: 2000, toolOutput: 2000, attachments: 0, total: 20000 },
     }
     const finish: Part = {
       id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.001,
@@ -785,13 +785,13 @@ describe("context usage", () => {
       messages: [user("1"), assistant("2", "1")], parts: { "1": [text("1", "short")], "2": [finish] },
       providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
     }
-    // Source 的 ratio=2.0 保留输入/cache分母；attachments 必须实际进入生产分类。
+    // Source 的 ratio=2.0 保留输入/cache分母；此处只验证文本分类，附件另验视觉估算。
     const legacy = await computeContextData(input)
     expect(legacy.categories.find(item => item.name === "System prompt")?.tokens).toBe(4000)
     expect(legacy.categories.find(item => item.name === "Instructions")?.tokens).toBe(500)
     expect(legacy.categories.find(item => item.name === "Tool definitions")?.tokens).toBe(2500)
     expect(legacy.categories.find(item => item.name === "Skills")?.tokens).toBe(0)
-    expect(legacy.details.messages.attachments).toBe(100)
+    expect(legacy.details.messages.attachments).toBe(0)
     expect(legacy.details.messages.toolCalls).toBe(1000)
     expect(legacy.details.messages.toolResults).toBe(1000)
     // 确认输出600与费用来自 step-finish；细分的17000输入估算不能重写普通输入或抹掉缓存两栏。
@@ -869,6 +869,28 @@ describe("context usage", () => {
     expect(cleared.details.toolDefs).toEqual([{ name: "a", tokens: 0 }, { name: "b", tokens: 0 }])
     expect(cleared.totalTokens).toBe(0)
     expect(cleared.details.usage.total).toBe(0)
+  })
+
+  test("excludes attachment chars from calibration and uses image/PDF visual tokens", async () => {
+    const inputBreakdown = {
+      system: 0, instructions: 0, skills: 0, tools: 0,
+      messages: { userText: 4000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 6000, total: 10000 },
+    }
+    const finish: Part = { id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.001,
+      tokens: { input: 1600, output: 0, reasoning: 0, cache: { read: 200, write: 200 } }, inputChars: 10000, inputBreakdown }
+    const input: ComputeContextDataInput = { messages: [user("1"), assistant("2", "1")],
+      parts: { "1": [text("1", "short"),
+        { id: "image", sessionID: "s", messageID: "1", type: "file", mime: "image/png", url: `data:image/png;base64,${"x".repeat(1500)}` },
+        { id: "pdf", sessionID: "s", messageID: "1", type: "file", mime: "application/pdf", url: `data:application/pdf;base64,${"x".repeat(2200)}` },
+      ], "2": [finish] }, providers: [provider], paths: { cwd: process.cwd() },
+      instructionFiles: [], skills: [], toolDefinitions: [] }
+    const data = await computeContextData(input)
+    // 文本密度取 (10000-6000)/2000，附件取既有视觉估算，分类与明细必须同额。
+    expect(data.details.messages.userText).toBe(2000)
+    expect(data.details.messages.attachments).toBe(4)
+    expect(data.categories.find(item => item.name === "User Messages")?.tokens).toBe(2004)
+    expect(data.totalTokens).toBe(2004)
+    expect(data.details.usage).toMatchObject({ input: 1600, cacheRead: 200, cacheWrite: 200 })
   })
 
   test("ratio=2.5 tracks JSON-heavy input and ignores user or other-model calibration", async () => {
