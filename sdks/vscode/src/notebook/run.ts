@@ -16,7 +16,7 @@ import { captureNotebookCellOutput, serializeNotebookOutputItem } from "./output
 /**
  * 通过 notebook.cell.execute 串行执行保留格，文档 URI 和半开 ranges 明确传给原生命令。
  * filePath 与 cellId 必填；可选 endCellId 指定包含两端的范围，不接受 all 或数字索引。
- * 顶层 type 可省略或为 cell | range；endCellId 是范围信号，不依赖 type 决定范围。
+ * 顶层 type 可省略或为 cell | range；显式 cell 只接受解析为同一格的端点。
  * 每格观察超时默认为 300000 毫秒；超时停止后续格，但不取消正在运行的内核。
  * 首个原生失败停止后续执行，未执行格标为 skipped；历史输出标为 stale。
  * completed 表示等待边界，不补成 execution.status 的成功证据。
@@ -34,6 +34,8 @@ export async function runNotebook(input: Record<string, unknown>) {
   const notebook = await resolveNotebook(filePath)
   // UI 等待前按共享 resolver 固定格对象，不能在每次执行时按漂移索引重新选格。
   const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
+  // 使用解析后的身份允许同格别名，但不能把明确的单格请求扩成多格执行。
+  if (type === "cell" && cells.length > 1) throw new Error("endCellId must not be set when type is cell unless it equals cellId")
   const positions = cells.map((cell) => cell.index)
   // await 前保留目标格对象；其它格的源码或输出变化不应阻止本次执行。
   // showNotebookDocument 为官方 URI 解析提供已打开的编辑器，不把焦点当身份。

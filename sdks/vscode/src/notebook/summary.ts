@@ -43,7 +43,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
     ? `${failed.length} failed`
     // 没有代码格时保留零比零统计，不能用空数组 every 的真值宣称全部执行成功。
     : executed.length === code.length && code.length > 0
-      ? "All code cells have successful session execution state."
+      ? "All code cells report successful execution state (may be from a previous session)."
       : `${executed.length}/${code.length} code cells executed`
 
   return [

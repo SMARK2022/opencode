@@ -29,8 +29,8 @@ export const SourceInput = Schema.Struct({
 })
 export const RunInput = Schema.Struct({
   filePath,
-  // endCellId才决定范围，不能在CLI把可选type改成另一套目标选择逻辑。
-  type: Schema.Literals(["cell", "range"]).annotate({ description: "Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell." }).pipe(Schema.optional),
+  // 端点解析和同格别名校验仍归原生owner，CLI声明约束而不复制字符串守卫。
+  type: Schema.Literals(["cell", "range"]).annotate({ description: "Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell." }).pipe(Schema.optional),
   cellId: cellId.annotate({ description: "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx." }),
   endCellId: cellId.annotate({ description: "Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive." }).pipe(Schema.optional),
   timeoutMs: PositiveInt.check(Schema.isLessThanOrEqualTo(600_000)).annotate({ description: "Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000." }).pipe(Schema.optional),

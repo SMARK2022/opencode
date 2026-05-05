@@ -87,7 +87,7 @@ it.live("registers six Notebook tools through the real bridge and preserves nati
     // 必须实际注册六个名字，通用edit禁令还要过滤Notebook别名。
     const definitions = yield* toolDefinitions(registry)
     expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
-    expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("endCellId is the actual range signal")
+    expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
     expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")
     // 参数解码发生在RPC/审批之前，不用后端接收坏分页后再伪造错误。
     expect((yield* invoke("vscode_notebook_source", { filePath, limit: 1001 })).result.type).toBe("error")

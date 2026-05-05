@@ -19,7 +19,7 @@ export const VscodeNotebookDescriptions = {
   run: [
     "Execute notebook code cells in VS Code and return execution status plus artifact paths.",
     "Required fields: filePath and cellId. If endCellId is provided, the bridge runs from cellId through endCellId; otherwise it runs only cellId.",
-    "type is an optional hint only. endCellId is the actual range signal. cellId and endCellId are stable #VSC cell IDs from vscode_notebook_summary.",
+    "type is optional. Explicit cell requires endpoints resolving to the same cell; otherwise endCellId selects a range. Use stable #VSC cell IDs from vscode_notebook_summary.",
     "Range execution includes both endpoint cells and does not use numeric cell indexes.",
     "Execution uses VS Code's native notebook.cell.execute path for each code cell, so VS Code/Jupyter handles kernel selection on the real run path; the bridge awaits the cell execution summary or per-cell timeout.",
     "Range targets run code cells sequentially and stop on the first failed or timed-out code cell.",
