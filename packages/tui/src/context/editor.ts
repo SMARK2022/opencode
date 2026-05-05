@@ -1,4 +1,7 @@
 import { onCleanup, onMount } from "solid-js"
+import { readdirSync, readFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import { createStore } from "solid-js/store"
 import { Option, Schema, SchemaGetter } from "effect"
 import { isRecord } from "../util/record"
@@ -36,7 +39,8 @@ const EditorSelectionRangeSchema = Schema.Struct({
 
 const EditorSelectionRangesSchema = Schema.Struct({
   filePath: Schema.String,
-  source: Schema.optional(Schema.Literals(["websocket", "zed"])),
+  // selection.source 增加 bridge 枚举，与 registry 主路径对齐
+  source: Schema.optional(Schema.Literals(["websocket", "zed", "bridge"])),
   ranges: Schema.mutable(Schema.Array(EditorSelectionRangeSchema).check(Schema.isMinLength(1))),
 })
 
@@ -45,7 +49,7 @@ const EditorSelectionSchema = Schema.Union([
   Schema.Struct({
     text: Schema.String,
     filePath: Schema.String,
-    source: Schema.optional(Schema.Literals(["websocket", "zed"])),
+    source: Schema.optional(Schema.Literals(["websocket", "zed", "bridge"])),
     selection: Schema.Struct({
       start: PositionSchema,
       end: PositionSchema,
@@ -136,6 +140,8 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     let socket: WebSocket | undefined
     let closed = false
     let reconnect: ReturnType<typeof setTimeout> | undefined
+    // bridge registry 轮询句柄：5s 刷新 active file
+    let bridgePoll: ReturnType<typeof setTimeout> | undefined
     let attempt = 0
     let requestID = 0
     let zedSelection: Promise<void> | undefined
@@ -173,6 +179,23 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     const connect = () => {
       if (closed) return
 
+      // ① Primary: Bridge Registry（opencode VS Code 扩展）
+      // 优先 registry active 文件，不再依赖 OPENCODE_VSCODE_BRIDGE_* 环境变量
+      const bridge = resolveBridgeRegistryActiveFile(directory)
+      if (bridge) {
+        if (socket) {
+          socket.close()
+          socket = undefined
+        }
+        // source=bridge 标记 selection 来自扩展 registry
+        setSelection({ ...bridge, source: "bridge" })
+        setStore("status", "connected")
+        // 有 bridge selection 时 5s 轮询，捕获 active 切换
+        scheduleBridgePoll()
+        return
+      }
+
+      // ② Fallback: Claude Code lock / WebSocket
       const connection = resolveEditorConnection(directory, port, editor.connection)
       if (!connection) {
         if (!zedTerminal) {
@@ -281,6 +304,13 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       reconnect = setTimeout(connect, delay)
     }
 
+    const scheduleBridgePoll = () => {
+      if (closed) return
+      if (bridgePoll) clearTimeout(bridgePoll)
+      // 5s 轮询：registry active file 变化需及时反映到 TUI selection
+      bridgePoll = setTimeout(connect, 5000)
+    }
+
     const scheduleZedPoll = () => {
       if (closed) return
       if (reconnect) clearTimeout(reconnect)
@@ -298,6 +328,9 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       pending.clear()
       if (reconnect) clearTimeout(reconnect)
       reconnect = undefined
+      // 目录切换/卸载时清 bridge 轮询，避免跨目录串扰
+      if (bridgePoll) clearTimeout(bridgePoll)
+      bridgePoll = undefined
       if (socket) {
         const current = socket
         socket = undefined
@@ -314,13 +347,15 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       onCleanup(() => {
         closed = true
         if (reconnect) clearTimeout(reconnect)
+        if (bridgePoll) clearTimeout(bridgePoll)
         socket?.close()
       })
     })
 
     return {
+      // enabled 含 registry：无 websocket/zed 时仍可展示 bridge 绑定文件
       enabled() {
-        return Boolean(resolveEditorConnection(directory, port, editor.connection) || (zedTerminal && editor.selection))
+        return Boolean(resolveBridgeRegistryActiveFile(directory) || resolveEditorConnection(directory, port, editor.connection) || (zedTerminal && editor.selection))
       },
       connected() {
         return store.status === "connected"
@@ -385,6 +420,74 @@ export function editorSelectionKey(selection: EditorSelection | undefined) {
       range.text,
     ]),
   ].join("\0")
+}
+
+
+// 从 opencode IDE registry 读取最近 active notebook/text 文件（按 workspace 路径打分）
+// 读 ~/.local/state/opencode/ide 注册表 JSON，按 workspace 路径最长前缀打分
+function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
+  const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return
+  }
+
+  const now = Date.now()
+  const parsed = entries
+    .filter((f) => f.endsWith(".json"))
+    .flatMap((f) => {
+      try {
+        const data = JSON.parse(readFileSync(path.join(dir, f), "utf8")) as unknown
+        if (!isRecord(data) || data.schema !== 1) return []
+        return [data]
+      } catch {
+        return []
+      }
+    })
+    // 60s 心跳窗口：过期条目不参与 active 选择
+    .filter((e) => now - (e.updatedAt as number) < 60_000)
+
+  const scored = parsed
+    .map((entry) => ({ entry, score: bridgeRegistryWorkspaceScore(entry, activeDirectory) }))
+    // score=0 表示无 workspace 重叠，丢弃以免跨仓误选
+    .filter((e) => e.score > 0)
+    .sort((a, b) => b.score - a.score)
+  const best = scored[0]
+  if (!best) return
+
+  const active = best.entry.active as Record<string, string> | undefined
+  // notebook 优先于 textEditor：笔记本会话更依赖路径绑定
+  const filePath = active?.notebook || active?.textEditor
+  if (!filePath) return
+
+  return { filePath, source: "bridge", ranges: [] as EditorSelection["ranges"] }
+}
+
+// workspaceFolders 与 TUI cwd 的路径包含长度作为匹配分
+function bridgeRegistryWorkspaceScore(entry: Record<string, unknown>, activeDirectory: string) {
+  const folders = Array.isArray(entry.workspaceFolders)
+    ? (entry.workspaceFolders as Array<Record<string, unknown>>)
+    : []
+  return Math.max(
+    0,
+    ...folders.map((folder) => {
+      const fsPath = typeof folder.fsPath === "string" ? folder.fsPath : ""
+      const uri = typeof folder.uri === "string" ? folder.uri : ""
+      return Math.max(
+        fsPath ? pathContainsLength(fsPath, activeDirectory) : 0,
+        uri ? pathContainsLength(uri, activeDirectory) : 0,
+      )
+    }),
+  )
+}
+
+function pathContainsLength(parent: string, child: string) {
+  const resolvedParent = path.resolve(parent)
+  const resolvedChild = path.resolve(child)
+  const relative = path.relative(resolvedParent, resolvedChild)
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)) ? resolvedParent.length : 0
 }
 
 function openEditorSocket(connection: EditorConnection, WebSocketImpl: typeof WebSocket) {

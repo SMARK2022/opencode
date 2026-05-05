@@ -46,8 +46,8 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<BridgeInfo>) {
-  // 终端模块等待 BridgeInfo Promise 完成后才交接凭证，避免在未知桥接地址下开始工作或注入尚未分配的端口。
-  const bridgeInfo = await bridge
+  // 终端启动前仍等待桥接完成注册，端口和 token 改由 registry 发现。
+  await bridge
   const port = Math.floor(Math.random() * (65535 - 16384 + 1)) + 16384
   // CLI/TUI 自身仍保留源随机端口策略，不能与 bridge 的 listen(0) 端口合并为一个服务。
   // 凭证与终端共用同一环境快照，不能在请求时重读宿主环境而错配已启动 CLI 的认证配置。
@@ -55,8 +55,6 @@ async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<Br
     _EXTENSION_OPENCODE_PORT: port.toString(),
     OPENCODE_SERVER_USERNAME: process.env.OPENCODE_SERVER_USERNAME ?? "opencode",
     OPENCODE_SERVER_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD ?? "",
-    OPENCODE_VSCODE_BRIDGE_PORT: bridgeInfo.port.toString(),
-    OPENCODE_VSCODE_BRIDGE_TOKEN: bridgeInfo.token,
     OPENCODE_CALLER: "vscode",
   }
   const terminal = vscode.window.createTerminal({
