@@ -313,9 +313,9 @@ function latestInputEstimate(messages: WithParts[], raw: WithParts[], model: { p
     const info = message.info
     if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) return []
     const parts = message.parts.toReversed().flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
-      ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
+      ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
     return parts.length > 0 ? parts : info.inputEstimate?.confirmed
-      ? [{ bodyChars: info.inputEstimate.bodyChars, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
+      ? [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
   })
   for (const message of messages.toReversed()) {
     const info = message.info
@@ -1125,7 +1125,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
     lastUser?.role === "user" ? lastUser.system : undefined,
   ].filter(Boolean).join("\n")
-  // 五类与消息六子项只消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
+  // 文本分类消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
   const envTokens = bd ? Math.round(bd.system / ratio) : estimate(systemText, ratio)
   const instructionTokens = bd ? Math.round(bd.instructions / ratio) : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
@@ -1133,7 +1133,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const messageDetails = bd ? {
     userText: Math.round(bd.messages.userText / ratio), assistantText: Math.round(bd.messages.assistantText / ratio),
     reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
-    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: Math.round(bd.messages.attachments / ratio), compactionSummary: 0,
+    // 附件沿用视觉估算，不把 base64 字符除以文本密度。
+    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: msg.details.attachments, compactionSummary: 0,
   } : msg.details
   const userMessageTokens = messageDetails.userText + messageDetails.attachments
   const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary

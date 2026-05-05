@@ -17,6 +17,13 @@ test("calibrates input density with thresholds, cache-inclusive samples and a sh
   for (const input of [0, -1, Infinity, NaN]) expect(Token.charsPerTokenFromHistory([{ bodyChars: 1000, input }])).toBe(4)
   // 第三个样本故意极端偏斜，正确结果要求达到十万字符时分子、分母一起停止接纳旧样本。
   expect(Token.charsPerTokenFromHistory([{ bodyChars: 50000, input: 20000 }, { bodyChars: 50000, input: 20000 }, { bodyChars: 100000, input: 1 }])).toBe(2.5)
+  // 附件只从字符分子扣除；纯附件不足文本门槛时仍回到 /4。
+  const inputBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
+    messages: { userText: 1000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 99000, total: 100000 } }
+  const history = [{ bodyChars: 100000, input: 400, inputBreakdown }]
+  expect(Token.charsPerTokenFromHistory(history)).toBe(2.5)
+  expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(2.5)
+  expect(Token.charsPerTokenFromHistory([{ ...history[0], inputBreakdown: { ...inputBreakdown, messages: { ...inputBreakdown.messages, attachments: 100000 } } }])).toBe(4)
 })
 
 test("one serializer accounts for lowered messages, tools, source sections and JSON escapes", () => {

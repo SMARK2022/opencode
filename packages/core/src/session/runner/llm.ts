@@ -301,7 +301,7 @@ const layer = Layer.effect(
         // publisher 保存实际 provider/API model ID；边界只去除品牌，不换成 Session 的 catalog 别名。
         if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
           || !message.inputEstimate?.confirmed || !message.tokens) return []
-        return [{ bodyChars: message.inputEstimate.bodyChars,
+        return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
           input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
       })
       let inputEstimate: SessionMessage.InputEstimate | undefined
