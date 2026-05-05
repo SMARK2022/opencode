@@ -1133,6 +1133,7 @@ function detectHighEntropyType(line: string): string {
   if (/^data:image\/[^;]+;base64,/.test(line)) return 'data-uri'
   if (/^[{[].*[}\]]$/.test(line.trim()) && line.length > 1000) return 'minified-json'
   if (/^[0-9a-f]{64,}$/i.test(line.trim())) return 'hex-dump'
+  if (/^<Objs\b/.test(line.trim())) return 'powershell-clixml'
   return 'unknown'
 }
 
@@ -1347,18 +1348,55 @@ export function shouldCompressOutput(text: string) {
   if (!text) return false
   if (byteLen(text) < 200) return false
 
-  // 带回车的进度刷新输出高度可压缩，优先进入压缩流程。
   if (text.includes("\r")) return true
 
-  // 多行日志值得扫描重复行和重复块。
   let newlines = 0
   for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10) newlines++ // 10 是 \n
+    if (text.charCodeAt(i) === 10) newlines++
     if (newlines >= 5) return true
   }
 
-  // 长单行输出可能包含明显的行内重复模式，例如 abcabcabc...。
   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
+}
+
+/**
+ * Detects and decodes PowerShell CLIXML output back to plain text.
+ * CLIXML is PowerShell's XML-based error serialization format that wraps
+ * terminal-colored text into `<Objs><S S="...">_xHHHH_</S></Objs>`.
+ *
+ * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
+ * if the input is recognized CLIXML, or null otherwise.
+ */
+function transformPowerShellClixml(text: string): string | null {
+  const trimmed = text.trimStart()
+  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
+
+  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
+  const parts: string[] = []
+  let match: RegExpExecArray | null
+  while ((match = decoded.exec(text)) !== null) {
+    parts.push(clixmlDecodeHexEscapes(match[1]))
+  }
+  if (parts.length === 0) return null
+
+  let plain = parts.join("")
+  plain = plain.replace(ANSI_GLOBAL_RE, "")
+  // Collapse any \r\n → \n left over from the decode
+  plain = plain.replace(/\r\n/g, "\n")
+  plain = plain.trimEnd()
+
+  if (!plain) return null
+
+  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+}
+
+/** Decodes PowerShell _xHHHH_ hex escape sequences in CLIXML text nodes. */
+function clixmlDecodeHexEscapes(value: string): string {
+  return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => {
+    const num = parseInt(hex, 16)
+    // preserve printable ASCII range; pass non-printable control chars as-is (ANSI strip runs after)
+    return String.fromCharCode(num)
+  })
 }
 
 /**
@@ -1382,6 +1420,23 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     highEntropyLines: 0,
     secretsRedacted: 0,
     applied: false,
+  }
+
+  // 0a: PowerShell CLIXML — decode back to plain text before the main pipeline.
+  const clixml = transformPowerShellClixml(text)
+  if (clixml) {
+    const compressedBytes = byteLen(clixml)
+    return {
+      text: clixml,
+      stats: {
+        ...emptyStats,
+        compressedBytes,
+        savedBytes: originalBytes - compressedBytes,
+        savingRatio: originalBytes > 0 ? (originalBytes - compressedBytes) / originalBytes : 0,
+        highEntropyLines: 1,
+        applied: true,
+      },
+    }
   }
 
   // 禁用或不值得压缩时直接返回
