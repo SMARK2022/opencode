@@ -32,6 +32,8 @@ export const Output = Schema.Struct({
   target: Schema.String,
   resource: Schema.String,
   existed: Schema.Boolean,
+  // canonical编码保留覆写diff，供TUI消费；模型成功正文保持原契约。
+  diff: Schema.optionalKey(Schema.String),
 })
 export type Output = typeof Output.Type
 

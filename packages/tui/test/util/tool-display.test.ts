@@ -28,6 +28,9 @@ describe("toolDisplayMetadata", () => {
     expect(toolDisplayMetadata({ status: "running", structured })).toBe(structured)
     expect(toolDisplayMetadata({ status: "completed", structured })).toBe(structured)
     expect(toolDisplayMetadata({ status: "error", structured })).toBe(structured)
+    // V2覆写展示读取完整structured，不回退到空的旧metadata。
+    const write = { operation: "write", existed: true, diff: "@@ -1 +1 @@\n-before\n+after\n" }
+    expect(toolDisplayMetadata({ status: "completed", metadata: {}, structured: write })).toBe(write)
   })
 
   test("does not expose pending or malformed metadata", () => {

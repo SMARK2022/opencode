@@ -2,6 +2,7 @@ export * as FileMutation from "./file-mutation"
 
 import { makeLocationNode } from "./effect/app-node"
 import { Context, Effect, Layer, Schema } from "effect"
+import { createTwoFilesPatch } from "diff"
 import { dirname } from "path"
 import { KeyedMutex } from "./effect/keyed-mutex"
 import { FSUtil } from "./fs-util"
@@ -42,6 +43,8 @@ export interface WriteResult {
   readonly target: string
   readonly resource: string
   readonly existed: boolean
+  // 仅文本覆写生成展示patch，普通创建和二进制写入保持原结果。
+  readonly diff?: string
 }
 
 export interface RemoveResult {
@@ -116,7 +119,18 @@ const layer = Layer.effect(
             input.target.canonical,
             joinBom(next.text, Boolean(current && hasUtf8Bom(current)) || next.bom),
           )
-          return writeResult(input.target, current !== undefined)
+          if (current === undefined) return writeResult(input.target, false)
+          // 前像与最终回读位于同一目标锁，不能把后继写入混进本次覆写diff。
+          const final = yield* fs.readFileString(input.target.canonical)
+          return {
+            ...writeResult(input.target, true),
+            diff: createTwoFilesPatch(
+              input.target.resource,
+              input.target.resource,
+              splitBom(new TextDecoder().decode(current)).text,
+              splitBom(final).text,
+            ),
+          }
         }),
       ),
     )
