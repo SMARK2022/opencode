@@ -316,8 +316,8 @@ const layer = Layer.effectDiscard(
                 ? "[output capture truncated at the in-memory safety limit]"
                 : undefined
               return {
-                // 脱敏即使未压缩也要求原文；既有 capture 的 lazy flush 与失败传播不变。
-                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0,
+                // 呈现变化即使没有净压缩也要求原文；既有 capture 与失败传播不变。
+                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0,
                 value: {
                 ...outcome,
                 output: [output, notice, timeoutNotice].filter(Boolean).join("\n\n"),

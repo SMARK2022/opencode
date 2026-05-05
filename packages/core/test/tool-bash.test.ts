@@ -749,6 +749,27 @@ describe("BashTool", () => {
         const entropy = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(16)
         expect(compressVisibleOutput(entropy).text).toContain("high-entropy base64 omitted: 1024 bytes")
         expect(compressVisibleOutput(entropy).stats.highEntropyLines).toBe(1)
+        // CLIXML 解码仍走同一入口，覆盖脱敏、禁用、低收益与后续重复压缩。
+        const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">_x001B_[31merror: _x0073_k-abcdefghijklmnopqrstuvwxyz012345_x001B_[0m_x000D__x000A_</S><S S="Error">_x4E2D__x6587__x000D__x000A_</S></Objs>'
+        const decoded = compressVisibleOutput(clixml)
+        expect(decoded.text).toBe("<high-entropy powershell-clixml>error: <REDACTED_API-KEY>\n中文</high-entropy>")
+        expect(decoded.stats).toMatchObject({ applied: true, highEntropyLines: 1, secretsRedacted: 1, originalBytes: Buffer.byteLength(clixml), compressedBytes: Buffer.byteLength(decoded.text) })
+        expect(decoded.stats.savedBytes).toBe(Buffer.byteLength(clixml) - Buffer.byteLength(decoded.text))
+        expect(decoded.stats.savingRatio).toBe(decoded.stats.savedBytes / Buffer.byteLength(clixml))
+        expect(compressVisibleOutput(clixml, { enabled: false })).toMatchObject({ text: clixml, stats: { applied: false, highEntropyLines: 0, secretsRedacted: 0 } })
+        expect(compressVisibleOutput(clixml, { minSavedBytes: 100000 })).toEqual(decoded)
+        // 普通正文只省两个字节，解码不应受默认50%压缩收益门槛阻断。
+        const ordinary = Array.from({ length: 20 }, (_, i) => `ordinary output row ${i}: task completed successfully`).join("\n")
+        const ordinaryClixml = `<Objs Version="1.1.0.1"><S S="Output">${ordinary}</S></Objs>`
+        const ordinaryDecoded = compressVisibleOutput(ordinaryClixml)
+        expect(ordinaryDecoded.text).toBe(`<high-entropy powershell-clixml>${ordinary}</high-entropy>`)
+        expect(ordinaryDecoded.stats).toMatchObject({ applied: true, highEntropyLines: 1, secretsRedacted: 0 })
+        expect(ordinaryDecoded.stats.savedBytes).toBe(2)
+        expect(ordinaryDecoded.stats.savingRatio).toBe(2 / Buffer.byteLength(ordinaryClixml))
+        const clixmlRun = `<Objs><S S="Output">${"repeatable ordinary output_x000D__x000A_".repeat(20)}</S></Objs>`
+        const repeatedClixml = compressVisibleOutput(clixmlRun)
+        expect(repeatedClixml.stats).toMatchObject({ applied: true, highEntropyLines: 1, repeatedLineGroups: 1 })
+        expect(repeatedClixml.text).toContain("high-entropy powershell-clixml")
         const template = Array.from({ length: 20 }, (_, i) => `12:00:${String(i).padStart(2, "0")} worker completed a substantial ordinary task`).join("\n")
         expect(compressVisibleOutput(template).stats.templateGroups).toBe(1)
         expect(compressVisibleOutput(template, { templateNormalizationLevel: "off" }).stats.templateGroups).toBe(0)
@@ -805,9 +826,11 @@ describe("BashTool", () => {
           ["redaction-only", sensitive, "<REDACTED_API-KEY>"],
           ["terminal-redaction", decoratedSecret, "<REDACTED_API-KEY>"],
           ["crossline-redaction", crossline, "<REDACTED_CREDENTIAL>"],
+          ["clixml-low-savings", ordinaryClixml, ordinaryDecoded.text],
+          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "<high-entropy powershell-clixml>ordinary</high-entropy>"],
         ]) {
           // 禁用适配器或收益拒绝仍走同一入口，不用私有适配函数作为测试 oracle。
-          if (command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
+          if (!command.startsWith("clixml-") && command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
             expect(compressVisibleOutput(output, { enableCommandAdapters: false }, command).text).not.toContain(marker)
             expect(compressVisibleOutput(output, { minSavedBytes: 100000 }, command).text).toBe(output)
           }
@@ -823,6 +846,7 @@ describe("BashTool", () => {
             expect(runs[0]?.command).toBe(command)
             if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
             if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
+            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
             if (command === "docker build .") {
               // 不用adapter计算预期值，直接指定步骤摘要与失败详情的归属。
               expect(text).toContain("#2 compile: FAILED")
@@ -909,6 +933,23 @@ describe("BashTool", () => {
             }
           }), LayerNode.compile(AppProcess.node), undefined, mode === "config" ? false : undefined)
         }
+        // 两个真实进程流均进入共享解码器，不能只用AppProcess替身证明CLI链路。
+        reset()
+        const stdoutClixml = '<Objs><S S="Output">actual-stdout</S></Objs>'
+        const stderrClixml = '<Objs><S S="Error">actual-stderr</S></Objs>'
+        const clixmlCommand = `${executable} -e "process.stdout.write(String.fromCharCode(${Array.from(stdoutClixml, (char) => char.charCodeAt(0)).join(",")}));process.stderr.write(String.fromCharCode(${Array.from(stderrClixml, (char) => char.charCodeAt(0)).join(",")}))"`
+        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+          const settled = yield* settleTool(registry, call({ command: clixmlCommand }))
+          const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
+          expect(text).toContain("actual-stdout")
+          expect(text).toContain("actual-stderr")
+          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: 1 } })
+          const retained = settled.outputPaths?.[0]
+          if (!retained) throw new Error("expected retained dual-stream CLIXML")
+          const saved = yield* Effect.promise(() => fs.readFile(retained, "utf8"))
+          expect(saved).toContain(stdoutClixml)
+          expect(saved).toContain(stderrClixml)
+        }), LayerNode.compile(AppProcess.node))
         // 无 LF 的尾部超过 capture 上限，诊断仍看全流，磁盘原文不能只保存内存前缀。
         reset()
         const command = `${executable} -e "process.stdout.write('x'.repeat(${BashTool.MAX_CAPTURE_BYTES + 8192})+'RAW-END')"`

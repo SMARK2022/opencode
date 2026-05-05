@@ -1257,6 +1257,17 @@ describe("tool.shell truncation", () => {
         if (typeof rawPath !== "string") throw new Error("expected redacted raw output")
         expect(redacted.output).toContain(rawPath)
         expect(yield* fs.readFileString(rawPath)).toContain(secret)
+        // 短CLIXML净增长时不标记压缩，但实际V1调用仍须返回解码正文和可读raw。
+        const clixml = '<Objs><S S="Output">ordinary</S></Objs>'
+        const program = `process.stdout.write(String.fromCharCode(${Array.from(clixml, (char) => char.charCodeAt(0)).join(",")}))`
+        const command = `${bin} -e ${evalarg(program)}`
+        const decoded = yield* run({ command: PS.has(sh()) ? `& ${command}` : command })
+        expect(decoded.output).toContain("<high-entropy powershell-clixml>ordinary</high-entropy>")
+        expect(decoded.metadata).toMatchObject({ compressed: false, compressionOriginalBytes: 39, compressionCompressedBytes: 55 })
+        const clixmlPath = decoded.metadata.outputPath
+        if (typeof clixmlPath !== "string") throw new Error("expected decoded raw output")
+        expect(decoded.output).toContain(clixmlPath)
+        expect(yield* fs.readFileString(clixmlPath)).toBe(clixml)
       }),
     ),
   )

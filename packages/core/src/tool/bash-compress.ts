@@ -482,6 +482,7 @@ function compressHighEntropyLines(lines: string[], config: CompressionConfig) {
       : /^data:image\/[^;]+;base64,/.test(line) ? "data-uri"
       : /^[0-9a-f]{64,}$/i.test(line.trim()) ? "hex-dump"
       : /^[A-Za-z0-9+/]+=*$/.test(line.trim()) ? "base64"
+      : /^<Objs\b/.test(line.trim()) ? "powershell-clixml"
       : /^[{\[].*[}\]]$/.test(line.trim()) && line.length > 1000 ? "minified-json" : "unknown"
     // 首尾及哈希只读取已脱敏正文，不从 raw 重新截取样例。
     const replacement = `<high-entropy ${type} omitted: ${byteLen(line)} bytes, hash=${simpleHash(line)}, prefix=${JSON.stringify(line.slice(0, 20) + "...")}, suffix=${JSON.stringify("..." + line.slice(-20))}>`
@@ -962,6 +963,22 @@ export function shouldCompressOutput(text: string) {
   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
 }
 
+// 保留源 CLIXML 节点提取与转义规则，ANSI 清洗复用现有实现。
+function transformPowerShellClixml(text: string) {
+  const trimmed = text.trimStart()
+  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
+  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
+  const parts: string[] = []
+  let match: RegExpExecArray | null
+  while ((match = decoded.exec(text)) !== null) {
+    parts.push(match[1].replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))))
+  }
+  if (parts.length === 0) return null
+  const plain = stripAnsi(parts.join("")).replace(/\r\n/g, "\n").trimEnd()
+  if (!plain) return null
+  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+}
+
 /**
  * 主入口：压缩传入的可见文本，返回压缩后的文本以及详细的统计信息
  */
@@ -988,11 +1005,14 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
   // 源 opt-out 保持逐字原样；启用后脱敏不受长度预筛或压缩收益支配。
   if (!config.enabled) return { text, stats: emptyStats }
   // VT可能把ANSI分隔的片段重组成密钥；规范化完成后只执行一次canonical脱敏。
-  const cr = collapseCarriageReturns(text, config)
+  // CLIXML 解码属于呈现规范化，收益门槛只约束后续可选压缩。
+  const clixml = transformPowerShellClixml(text)
+  const cr = collapseCarriageReturns(clixml ?? text, config)
   const redaction = redactSecrets(cr.text)
   const redactedBytes = byteLen(redaction.text)
   // 短终态仍报告已提交的VT收益，独立脱敏不会被后续noapply回退撤销。
-  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, applied: cr.groups > 0 && redactedBytes < originalBytes,
+  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, highEntropyLines: clixml ? 1 : 0,
+    applied: (clixml !== null || cr.groups > 0) && redactedBytes < originalBytes,
     compressedBytes: redactedBytes, savedBytes: originalBytes - redactedBytes,
     savingRatio: originalBytes ? (originalBytes - redactedBytes) / originalBytes : 0, secretsRedacted: redaction.redacted }
   if (!shouldCompressOutput(redaction.text)) return { text: redaction.text, stats: redactedStats }
@@ -1035,11 +1055,11 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     repeatedLineGroups: same.groups,
     inlinePatternGroups: inline.groups,
     templateGroups: template.groups,
-    highEntropyLines: highEntropy.groups,
+    highEntropyLines: highEntropy.groups + (clixml ? 1 : 0),
     secretsRedacted: redaction.redacted,
     applied:
       compressedBytes < originalBytes &&
-      (cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0 || compressed !== lines.join("\n")),
+      (clixml !== null || cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0 || compressed !== lines.join("\n")),
   }
 
   return {
