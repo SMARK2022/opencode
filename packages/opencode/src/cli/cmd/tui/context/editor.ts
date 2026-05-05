@@ -40,13 +40,13 @@ const EditorSelectionSchema = z
   .union([
     z.object({
       filePath: z.string(),
-      source: z.enum(["websocket", "zed"]).optional(),
+      source: z.enum(["websocket", "zed", "bridge"]).optional(),
       ranges: z.array(EditorSelectionRangeSchema).min(1),
     }),
     z.object({
       text: z.string(),
       filePath: z.string(),
-      source: z.enum(["websocket", "zed"]).optional(),
+      source: z.enum(["websocket", "zed", "bridge"]).optional(),
       selection: z.object({
         start: PositionSchema,
         end: PositionSchema,
@@ -121,6 +121,7 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     let socket: WebSocket | undefined
     let closed = false
     let reconnect: ReturnType<typeof setTimeout> | undefined
+    let bridgePoll: ReturnType<typeof setTimeout> | undefined
     let attempt = 0
     let requestID = 0
     let zedSelection: Promise<void> | undefined
@@ -142,39 +143,22 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     const connect = () => {
       if (closed) return
 
-      const connection = resolveEditorConnection(directory)
-      if (!connection) {
-        const dbPath = resolveZedDbPath()
-        if (!dbPath) {
-          setStore("status", "disabled")
-          scheduleReconnect()
-          return
-        }
-        zedSelection ??= resolveZedSelection(dbPath, directory)
-          .then((result) => {
-            if (closed || socket) return
-            if (result.type === "unavailable") return
-            const selection = result.type === "selection" ? result.selection : undefined
-            const key = editorSelectionKey(selection)
-            if (key !== lastZedSelectionKey) {
-              lastZedSelectionKey = key
-              setStore("selection", selection)
-              setStore("status", selection ? "connected" : "disabled")
-            }
-          })
-          .catch(() => {
-            // Keep the last known Zed selection for transient polling failures.
-          })
-          .finally(() => {
-            zedSelection = undefined
-          })
-        scheduleZedPoll()
+      // ① Primary: Bridge Registry (opencode VS Code extension)
+      const bridge = resolveBridgeRegistryActiveFile(directory)
+      if (bridge) {
+        if (socket) { socket.close(); socket = undefined }
+        setStore("selection", { ...bridge, source: "bridge" })
+        setStore("status", "connected")
+        scheduleBridgePoll()
         return
       }
 
-      setStore("status", "connecting")
-      const current = openEditorSocket(connection, WebSocketImpl)
-      socket = current
+      // ② Fallback: Claude Code lock file / WebSocket
+      const connection = resolveEditorConnection(directory)
+      if (connection) {
+        setStore("status", "connecting")
+        const current = openEditorSocket(connection, WebSocketImpl)
+        socket = current
 
       current.addEventListener("open", () => {
         if (socket !== current) {
@@ -234,7 +218,34 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         setStore("status", "connecting")
         scheduleReconnect()
       })
+      return
     }
+
+    // ③ Fallback: Zed editor
+    const dbPath = resolveZedDbPath()
+    if (!dbPath) {
+      setStore("status", "disabled")
+      scheduleReconnect()
+      return
+    }
+    zedSelection ??= resolveZedSelection(dbPath, directory)
+      .then((result) => {
+        if (closed || socket) return
+        if (result.type === "unavailable") return
+        const selection = result.type === "selection" ? result.selection : undefined
+        const key = editorSelectionKey(selection)
+        if (key !== lastZedSelectionKey) {
+          lastZedSelectionKey = key
+          setStore("selection", selection)
+          setStore("status", selection ? "connected" : "disabled")
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        zedSelection = undefined
+      })
+    scheduleZedPoll()
+  }
 
     const scheduleReconnect = () => {
       if (closed) return
@@ -250,6 +261,12 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       reconnect = setTimeout(connect, 1000)
     }
 
+    const scheduleBridgePoll = () => {
+      if (closed) return
+      if (bridgePoll) clearTimeout(bridgePoll)
+      bridgePoll = setTimeout(connect, 5000)
+    }
+
     const reconnectWithDirectory = (nextDirectory?: string) => {
       const resolved = nextDirectory || process.cwd()
       if (directory === resolved) return
@@ -260,6 +277,8 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       lastZedSelectionKey = undefined
       if (reconnect) clearTimeout(reconnect)
       reconnect = undefined
+      if (bridgePoll) clearTimeout(bridgePoll)
+      bridgePoll = undefined
       if (socket) {
         const current = socket
         socket = undefined
@@ -277,13 +296,14 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       onCleanup(() => {
         closed = true
         if (reconnect) clearTimeout(reconnect)
+        if (bridgePoll) clearTimeout(bridgePoll)
         socket?.close()
       })
     })
 
     return {
       enabled() {
-        return Boolean(resolveEditorConnection(directory) || resolveZedDbPath())
+        return Boolean(resolveBridgeRegistryActiveFile(directory) || resolveEditorConnection(directory) || resolveZedDbPath())
       },
       connected() {
         return store.status === "connected"
@@ -401,6 +421,54 @@ function pathContainsLength(parent: string, child: string) {
   const resolved = path.resolve(parent)
   const relative = path.relative(resolved, path.resolve(child))
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)) ? resolved.length : 0
+}
+
+function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
+  const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
+  let entries: string[]
+  try { entries = readdirSync(dir) } catch { return }
+
+  const now = Date.now()
+  const parsed = entries
+    .filter((f) => f.endsWith(".json"))
+    .flatMap((f) => {
+      try {
+        const data = JSON.parse(readFileSync(path.join(dir, f), "utf8")) as unknown
+        if (!isRecord(data) || data.schema !== 1) return []
+        return [data]
+      } catch { return [] }
+    })
+    .filter((e) => now - (e.updatedAt as number) < 60_000)
+
+  const scored = parsed
+    .map((entry) => ({ entry, score: bridgeRegistryWorkspaceScore(entry, activeDirectory) }))
+    .filter((e) => e.score > 0)
+    .sort((a, b) => b.score - a.score)
+  const best = scored[0]
+  if (!best) return
+
+  const active = best.entry.active as Record<string, string> | undefined
+  const filePath = active?.notebook || active?.textEditor
+  if (!filePath) return
+
+  return { filePath, source: "bridge", ranges: [] }
+}
+
+function bridgeRegistryWorkspaceScore(entry: Record<string, unknown>, activeDirectory: string) {
+  const folders = Array.isArray(entry.workspaceFolders)
+    ? (entry.workspaceFolders as Array<Record<string, unknown>>)
+    : []
+  return Math.max(
+    0,
+    ...folders.map((folder) => {
+      const fsPath = typeof folder.fsPath === "string" ? folder.fsPath : ""
+      const uri = typeof folder.uri === "string" ? folder.uri : ""
+      return Math.max(
+        fsPath ? pathContainsLength(fsPath, activeDirectory) : 0,
+        uri ? pathContainsLength(uri, activeDirectory) : 0,
+      )
+    }),
+  )
 }
 
 function openEditorSocket(connection: EditorConnection, WebSocketImpl: typeof WebSocket) {

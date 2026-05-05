@@ -73,8 +73,6 @@ async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<Br
     location: { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
     env: {
       _EXTENSION_OPENCODE_PORT: port.toString(),
-      OPENCODE_VSCODE_BRIDGE_PORT: bridgeInfo.port.toString(),
-      OPENCODE_VSCODE_BRIDGE_TOKEN: bridgeInfo.token,
       OPENCODE_CALLER: "vscode",
     },
   })

@@ -108,9 +108,6 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
 }
 
 export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
-  const env = envBridge()
-  if (env && (await healthCheck(env, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return env
-
   const now = Date.now()
   if (
     cachedRegistryBridge &&
@@ -255,21 +252,6 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
   return [entry.active?.notebook, entry.active?.textEditor]
     .map(normalizeInputPath)
     .some((active) => active !== undefined && samePath(active, target))
-}
-
-function envBridge(): BridgeRef | undefined {
-  const rawPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
-  const token = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
-  if (!rawPort || !token) return
-  const port = Number(rawPort)
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return
-  return {
-    id: "env",
-    host: process.env.OPENCODE_VSCODE_BRIDGE_HOST ?? "127.0.0.1",
-    port,
-    token,
-    source: "env",
-  }
 }
 
 async function readEntry(filepath: string) {

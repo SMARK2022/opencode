@@ -6,31 +6,14 @@ import path from "path"
 import * as VscodeBridge from "../../src/ide/vscode-bridge"
 
 const originalRegistryDir = process.env.OPENCODE_IDE_REGISTRY_DIR
-const originalPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
-const originalToken = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
 const tempDirs: string[] = []
 
 afterEach(async () => {
   restoreEnv("OPENCODE_IDE_REGISTRY_DIR", originalRegistryDir)
-  restoreEnv("OPENCODE_VSCODE_BRIDGE_PORT", originalPort)
-  restoreEnv("OPENCODE_VSCODE_BRIDGE_TOKEN", originalToken)
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })))
 })
 
 describe("vscode bridge discovery", () => {
-  test("env bridge is preferred when healthy", async () => {
-    using server = await bridgeServer()
-    const dir = await tempRegistry()
-    await writeEntry(dir, "registry", server.port, "/tmp/project")
-    process.env.OPENCODE_VSCODE_BRIDGE_PORT = String(server.port)
-    process.env.OPENCODE_VSCODE_BRIDGE_TOKEN = "env-token"
-
-    const bridge = await VscodeBridge.resolveBridge({ cwd: "/tmp/project" })
-
-    expect(bridge.source).toBe("env")
-    expect(bridge.token).toBe("env-token")
-  })
-
   test("selects registry bridge matching the requested file path", async () => {
     using first = await bridgeServer()
     using second = await bridgeServer()
@@ -74,8 +57,6 @@ async function tempRegistry() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-vscode-bridge-"))
   tempDirs.push(dir)
   process.env.OPENCODE_IDE_REGISTRY_DIR = dir
-  delete process.env.OPENCODE_VSCODE_BRIDGE_PORT
-  delete process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
   return dir
 }
 
