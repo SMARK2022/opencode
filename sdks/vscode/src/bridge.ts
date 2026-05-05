@@ -1,9 +1,10 @@
 /**
  * HTTP 笔记本桥接监听 127.0.0.1:<OS-assigned port>；处理器不持有服务器或请求流。
  * 原生笔记本操作绕过 LM 工具代理，并将二进制输出保留为不可变的导出文件。
- * GET /health 仅提供无需认证的存活检查；笔记本 POST 请求要求本次实例的 Bearer 或查询参数 token。
+ * GET /health 无需认证；其余端点要求本次实例的 Bearer token，不接受 URL 凭证。
  * 端点列表：
  *   GET  /health               - 桥接存活状态，不代表内核就绪
+ *   GET  /manifest             - 认证后读取脱敏实例信息
  *   POST /notebook/summary     - 结构、规范化单元格 ID 与结构化执行状态
  *   POST /notebook/source      - 按 offset/limit 分页的全局虚拟源码
  *   POST /notebook/run         - 针对明确文档的原生执行与捕获结果
@@ -16,6 +17,8 @@
  */
 import http from "node:http"
 import { randomUUID } from "node:crypto"
+import vscode from "vscode"
+import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
 import { isRecord, stringProp } from "./util"
 import { notebookSummary } from "./notebook/summary"
 import { notebookSource } from "./notebook/source"
@@ -34,6 +37,7 @@ export type BridgeInfo = { port: number; token: string }
 // 导出的 BridgeInfo 必须同时携带端口与 token，终端模块不能把地址当成访问凭证。
 
 let server: http.Server | undefined
+let registry: RegistryHandle | undefined
 let lifetime: Promise<void> | undefined
 let closing = true
 // 屏障覆盖 listen 的启动期，取消意图与服务器引用都属于同一个 bridge owner。
@@ -49,6 +53,9 @@ export async function closeBridge() {
     await startup
     const current = server
     try {
+      // 等待同一次启动完成后注销心跳，再释放 HTTP 监听。
+      await registry?.dispose()
+      registry = undefined
       // Node 的关闭完成发生在回调；未监听的启动失败实例不需要调用 close 制造第二个错误。
       if (current?.listening) await new Promise<void>((resolve, reject) => current.close((error) => error ? reject(error) : resolve()))
     } finally {
@@ -75,6 +82,13 @@ export function activateBridge(output: { appendLine(value: string): void }) {
   return bridge
 }
 
+function safeLocalRequest(request: http.IncomingMessage) {
+  if (request.headers.origin) return false
+  const host = request.headers.host
+  // 原始桥接规则限制 Host 为回环地址，浏览器 Origin 请求在鉴权前拒绝。
+  return !host || host.startsWith("127.0.0.1:") || host.startsWith("localhost:")
+}
+
 async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
   // 工厂不复位关闭意图；关闭后的重启必须经过实际激活入口。
   if (closing) throw new Error("VS Code bridge startup cancelled")
@@ -83,6 +97,9 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
 
   const httpServer = http.createServer(async (request, response) => {
     try {
+      if (!safeLocalRequest(request)) {
+        return writeJson(response, 403, { ok: false, error: "Forbidden" })
+      }
       const url = new URL(request.url ?? "/", `http://${BRIDGE_HOST}`)
       // URL 解析也可能抛错，必须由同一个请求边界结束响应，不能留下未观察的拒绝。
       output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
@@ -95,6 +112,13 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
       if (!authorized(request, url, token)) {
         // 先鉴权再读取工具或 notebook 参数，未授权请求不能触发编辑器操作。
         return writeJson(response, 401, { ok: false, error: "Unauthorized" })
+      }
+
+      // manifest 复用注册身份，但不会向调用方回传访问 token。
+      if (request.method === "GET" && url.pathname === "/manifest") {
+        const address = httpServer.address()
+        const port = address && typeof address === "object" ? address.port : 0
+        return writeJson(response, 200, manifest({ id: vscode.env.sessionId || `vscode-${port}`, port, token: "<redacted>" }))
       }
 
       // 保留源未知路由的 404；即使 body 是 null、数组或坏 JSON，也不启动解析器。
@@ -138,11 +162,27 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
 
       const base = `http://${BRIDGE_HOST}:${address.port}`
       output.appendLine(`[bridge] listening on ${base}`)
-      output.appendLine(`[bridge] token ${token}`)
-      for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
-        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : `?token=${token}`}`)
-      }
-      resolve({ port: address.port, token })
+      output.appendLine("[bridge] token <redacted>")
+      // 写入本机 registry，供 CLI 发现此 VS Code 桥接实例
+      // 注册成功才 resolve；registry 失败则 startBridge reject
+      registerBridge({
+        // 用 sessionId 作 registry id，同窗多启可区分
+        id: vscode.env.sessionId || `vscode-${address.port}`,
+        port: address.port,
+        token,
+      })
+        .then((handle) => {
+          registry = handle
+          // 注册期间的卸载仍走原关闭屏障，不交付已经取消的凭证。
+          if (closing) return reject(new Error("VS Code bridge startup cancelled"))
+          output.appendLine(`[bridge] registry ${handle.id}`)
+          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "manifest"]) {
+            output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : ``}`)
+          }
+          resolve({ port: address.port, token })
+        })
+        // registry 写盘失败必须让 activate 失败，禁止半开桥
+        .catch(reject)
     })
   })
 }
@@ -196,8 +236,9 @@ async function routeRequest(
 }
 
 function authorized(request: http.IncomingMessage, url: URL, token: string) {
-  // 完整 Bearer 比较与源 query-token 契约共用实例凭证；回环监听不能替代认证。
-  return request.headers.authorization === `Bearer ${token}` || url.searchParams.get("token") === token
+  // 仅比较 Bearer 凭证，URL 查询参数不再传递访问权限。
+  void url
+  return request.headers.authorization === `Bearer ${token}`
 }
 
 function writeJson(response: http.ServerResponse, status: number, value: unknown) {
