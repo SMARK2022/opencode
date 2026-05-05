@@ -81,6 +81,27 @@ describe("ReadToolFileSystem", () => {
     }),
   )
 
+  it.live("keeps cross-chunk long lines whole within the byte budget", () =>
+    Effect.gen(function* () {
+      const fixtureData = yield* fixture
+      const file = path.join(fixtureData.directory, "long-lines.txt")
+      const long = "\u00e9".repeat(3000)
+      // 首行跳过，第二行在 64 KiB 读取块末尾留下 2048 字符，覆盖旧 pending 截短。
+      yield* fixtureData.files.writeFileString(
+        file,
+        `${"p".repeat(64 * 1024 - 4097)}\n${Array.from({ length: 5 }, () => long).join("\n")}`,
+      )
+      const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 2 })
+      expect(first.content).toBe(Array.from({ length: 4 }, () => long).join("\n"))
+      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 6 })
+      expect(Buffer.byteLength(first.content)).toBe(24_003)
+      const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 6 })
+      expect(last.content).toBe(long)
+      expect(last).toMatchObject({ type: "text-page", truncated: false })
+      expect("next" in last ? last.next : undefined).toBeUndefined()
+    }),
+  )
+
   it.effect("fails with a typed filesystem error when a resolved file disappears", () =>
     Effect.gen(function* () {
       const { fs, directory } = yield* fixture

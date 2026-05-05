@@ -387,8 +387,14 @@ describe("tool.read truncation", () => {
         ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
       })
       expect(denied.message).toBe("read denied")
-      // 相同截断前缀不是完整版本证明，长行必须继续返回实际可见内容。
+      // 完整长行可证明同版本，2000 字符之后的变化也必须返回新正文。
       yield* put(target, "x".repeat(3000))
+      const whole = yield* exec(dir, request)
+      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toBe(FILE_UNCHANGED_STUB)
+      yield* put(target, "x".repeat(3000) + "changed")
+      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain("changed")
+      // 字节预算省略的正文仍不构成完整版本证明。
+      yield* put(target, "x".repeat(24 * 1024 + 1))
       const partial = yield* exec(dir, request)
       expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
         .not.toBe(FILE_UNCHANGED_STUB)
@@ -403,7 +409,7 @@ describe("tool.read truncation", () => {
       const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
       yield* put(path.join(test.directory, "large.json"), content)
 
-      const result = yield* run({ filePath: path.join(test.directory, "large.json") })
+      const result = yield* run({ filePath: path.join(test.directory, "large.json"), limit: 2000 })
       expect(result.metadata.truncated).toBe(true)
       expect(result.output).toContain("Output capped at")
       expect(result.output).toContain("Use offset=")
@@ -553,14 +559,16 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  it.live("truncates long lines", () =>
+  it.live("keeps long lines whole within the byte budget", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
-      yield* put(path.join(dir, "long-line.txt"), "x".repeat(3000))
+      const long = "x".repeat(3000)
+      yield* put(path.join(dir, "long-line.txt"), long)
 
       const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
-      expect(result.output).toContain("(line truncated to 2000 chars)")
-      expect(result.output.length).toBeLessThan(3000)
+      expect(result.output).toContain(`1: ${long}`)
+      expect(result.output).not.toContain("line truncated to 2000")
+      expect(result.metadata.truncated).toBe(false)
     }),
   )
 
