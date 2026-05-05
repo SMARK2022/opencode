@@ -1548,7 +1548,8 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
           setExpanded((prev) => !prev)
         }}
       >
-        <text fg={theme.textMuted}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
+        {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
+        <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
         <code
           filetype="markdown"
           drawUnstyledText={false}
@@ -1972,6 +1973,7 @@ function Bash(props: ToolProps<typeof BashTool>) {
 }
 
 function Write(props: ToolProps<typeof WriteTool>) {
+  const ctx = use()
   const { theme, syntax } = useTheme()
   const [expanded, setExpanded] = createSignal(false)
   const code = createMemo(() => {
@@ -1979,20 +1981,78 @@ function Write(props: ToolProps<typeof WriteTool>) {
     return props.input.content
   })
 
+  const diff = createMemo(() => props.metadata.diff as string | undefined)
+  const isOverwrite = createMemo(() => props.metadata.exists === true && !!diff())
+  const view = createMemo(() => {
+    const diffStyle = ctx.tui.diff_style
+    if (diffStyle === "stacked") return "unified"
+    return ctx.width > 120 ? "split" : "unified"
+  })
+  const ft = createMemo(() => filetype(props.input.filePath))
+  const diffStats = createMemo(() => {
+    const d = diff()
+    if (!d) return { added: 0, removed: 0, total: 0 }
+    let added = 0, removed = 0
+    for (const line of d.split("\n")) {
+      if (line.startsWith("+") && !line.startsWith("+++")) added++
+      if (line.startsWith("-") && !line.startsWith("---")) removed++
+    }
+    return { added, removed, total: d.split("\n").length }
+  })
+  const diffOverflow = createMemo(() => diffStats().total > 20)
+
   const lines = createMemo(() => code().split("\n"))
-  const overflow = createMemo(() => lines().length > 20)
+  const codeOverflow = createMemo(() => lines().length > 20)
   const limitedCode = createMemo(() => {
-    if (expanded() || !overflow()) return code()
+    if (expanded() || !codeOverflow()) return code()
     return [...lines().slice(0, 10), "…"].join("\n")
   })
 
   return (
     <Switch>
+      {/* 覆写已有文件：以 git diff 形式展示变更，与 Edit/ApplyPatch 一致 */}
+      <Match when={isOverwrite()}>
+        <BlockTool 
+          title={"← Write " + normalizePath(props.input.filePath!) + (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")}
+          part={props.part}
+          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+        >
+          <box gap={1} flexDirection="column">
+            <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+              <diff
+                diff={diff()!}
+                view={view()}
+                syncScroll={true}
+                filetype={ft()}
+                syntaxStyle={syntax()}
+                showLineNumbers={true}
+                width="100%"
+                wrapMode={ctx.diffWrapMode()}
+                fg={theme.text}
+                addedBg={theme.diffAddedBg}
+                removedBg={theme.diffRemovedBg}
+                contextBg={theme.diffContextBg}
+                addedSignColor={theme.diffHighlightAdded}
+                removedSignColor={theme.diffHighlightRemoved}
+                lineNumberFg={theme.diffLineNumber}
+                lineNumberBg={theme.diffContextBg}
+                addedLineNumberBg={theme.diffAddedLineNumberBg}
+                removedLineNumberBg={theme.diffRemovedLineNumberBg}
+              />
+            </box>
+            <Show when={diffOverflow()}>
+              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+            </Show>
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+          </box>
+        </BlockTool>
+      </Match>
+      {/* 新建文件：保持原有代码块展示 */}
       <Match when={props.metadata.diagnostics !== undefined}>
         <BlockTool 
           title={"# Wrote " + normalizePath(props.input.filePath!)} 
           part={props.part}
-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+          onClick={codeOverflow() ? () => setExpanded((prev) => !prev) : undefined}
         >
           <box gap={1} flexDirection="column">
             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
@@ -2004,7 +2064,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
                 content={limitedCode()}
               />
             </line_number>
-            <Show when={overflow()}>
+            <Show when={codeOverflow()}>
               <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
             </Show>
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
@@ -2202,6 +2262,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
               <diff
                 diff={diffContent()}
                 view={view()}
+                syncScroll={true}
                 filetype={ft()}
                 syntaxStyle={syntax()}
                 showLineNumbers={true}
@@ -2297,6 +2358,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                       <diff
                         diff={file.patch || ""}
                         view={view()}
+                        syncScroll={true}
                         filetype={filetype(file.filePath)}
                         syntaxStyle={syntax()}
                         showLineNumbers={true}

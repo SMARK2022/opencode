@@ -65,6 +65,12 @@ export const WriteTool = Tool.define(
           if (yield* format.file(filepath)) {
             yield* Bom.syncFile(fs, filepath, desiredBom)
           }
+          // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
+          let metadataDiff: string | undefined
+          if (exists) {
+            const finalSource = yield* Bom.readFile(fs, filepath)
+            metadataDiff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, finalSource.text))
+          }
           yield* bus.publish(File.Event.Edited, { file: filepath })
           yield* bus.publish(FileWatcher.Event.Updated, {
             file: filepath,
@@ -94,7 +100,8 @@ export const WriteTool = Tool.define(
             metadata: {
               diagnostics,
               filepath,
-              exists: exists,
+              exists,
+              ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
             },
             output,
           }

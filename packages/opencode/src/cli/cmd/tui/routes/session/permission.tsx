@@ -82,6 +82,7 @@ function EditBody(props: { request: PermissionRequest }) {
           <diff
             diff={diff()}
             view={view()}
+            syncScroll={true}
             filetype={ft()}
             syntaxStyle={syntax()}
             showLineNumbers={true}
