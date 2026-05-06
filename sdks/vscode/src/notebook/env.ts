@@ -1,5 +1,5 @@
 /**
- * vscode_notebook_env 分别报告实际活动内核与保存的笔记本元数据。
+ * vscode_notebook_env 提供 info/configure/restart/save 环境操作。
  *
  * 运行时来源：Jupyter 稳定 API 的 api.kernels.getKernel(notebook.uri)，
  * Python 信息由该内核的 executeCode 探针取得。
@@ -11,7 +11,7 @@
  */
 import vscode from "vscode"
 import { TextDecoder } from "node:util"
-import { extensionState, extensionInfo } from "../util"
+import { extensionState, extensionInfo, stringProp } from "../util"
 import { resolveNotebook } from "./resolve"
 
 type KernelOutputItem = { mime: string; data: Uint8Array }
@@ -58,28 +58,54 @@ type SavedMetadata = {
   languageVersion: string | null
 }
 
-// 八秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
-const PROBE_TIMEOUT_MS = 8_000
+// 三十秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
+const PROBE_TIMEOUT_MS = 30_000
 const decoder = new TextDecoder("utf-8")
+const RESTART_CMD = "jupyter.restartkernel"
+const CONFIG_SECTION = "jupyter"
+const CONFIG_KEY = "askForKernelRestart"
+const SELECT_KERNEL_CMD = "notebook.selectKernel"
 
-export async function notebookEnv(filePath: string) {
+export async function notebookEnv(input: Record<string, unknown>) {
+  const filePath = stringProp(input, "filePath")
+  if (!filePath) throw new Error("filePath is required")
+  const operation = stringProp(input, "operation") ?? "info"
+  if (!["info", "configure", "restart", "save"].includes(operation)) throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save.`)
+  const reason = stringProp(input, "reason")
   const notebook = await resolveNotebook(filePath)
   // 路径无法打开时直接拒绝，不能把解析失败包装成 no-active-kernel 快照。
+  switch (operation) {
+    case "info":
+      return await infoNotebook(notebook, reason)
+    case "configure":
+      return await configureNotebook(notebook, reason)
+    case "restart":
+      return await restartNotebookKernel(notebook, reason)
+    case "save":
+      return await saveNotebook(notebook, reason)
+  }
+}
+
+async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) {
   const activeRuntime = await getActiveRuntime(notebook.uri)
   const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
 
   return {
     ran: false,
     summary: [
+      "Operation: info",
       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
         ? "运行时来源：通过 api.kernels.getKernel 与 executeCode 查询实际活动的 Jupyter 内核进程。"
         : "运行时来源：无；Jupyter 稳定 API 仅暴露与打开笔记本关联且已启动的内核。",
       activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
+      reason ? `Reason: ${reason}` : undefined,
     ].filter(Boolean).join("\n"),
     data: {
       path: notebook.uri.fsPath || notebook.uri.toString(),
+      operation: "info",
+      reason,
       runtime: activeRuntime,
       saved_metadata: savedMetadata,
       // active_notebook 只记录 UI 焦点；路径解析失败或焦点指向别的文档时，不能拿它补齐本次目标的 runtime。
@@ -92,6 +118,169 @@ export async function notebookEnv(filePath: string) {
     note:
       "运行时通过实际内核进程探测；保存的元数据单独报告，不作为运行时回退。",
   }
+}
+
+async function configureNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+  const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
+  if (!jupyter) {
+    return { ran: true, summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.", data: { path: primaryPath, operation: "configure", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
+  }
+  if (!jupyter.isActive) await jupyter.activate()
+  try {
+    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
+  } catch {
+    // 显示失败不阻止已打开文档按 URI 选核。
+  }
+  const allCommands = await vscode.commands.getCommands(true)
+  const hasSelect = allCommands.includes(SELECT_KERNEL_CMD)
+  if (hasSelect) {
+    await vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
+      notebookUri: notebook.uri,
+      skipIfAlreadySelected: true,
+    })
+  }
+  return {
+    ran: true,
+    summary: ["Operation: configure", hasSelect ? "Kernel selection triggered. The kernel will start on first cell execution." : "notebook.selectKernel not registered; select manually.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
+    data: { path: primaryPath, operation: "configure", reason, jupyterFound: true, jupyterActive: jupyter.isActive, selectKernelAvailable: hasSelect, dirty: notebook.isDirty, durationMs: Date.now() - startedAt },
+    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
+  }
+}
+
+async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+  const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
+  if (!jupyter) {
+    return { ran: true, summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.", data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
+  }
+  if (!jupyter.isActive) await jupyter.activate()
+  const allCommands = await vscode.commands.getCommands(true)
+  if (!allCommands.includes(RESTART_CMD)) {
+    return { ran: true, summary: "jupyter.restartkernel command is not registered.", data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
+  }
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+  const original = config.get<boolean>(CONFIG_KEY)
+  // 仅临时关闭已启用的确认，finally 恢复用户设置。
+  const needsRestore = original === true
+  if (needsRestore) await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
+  try {
+    // Jupyter 命令内部可能吞错，返回值只表示 requested。
+    await vscode.commands.executeCommand(RESTART_CMD, { notebookEditor: { notebookUri: notebook.uri } })
+    return {
+      ran: true,
+      summary: ["Operation: restart", "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
+      data: { path: primaryPath, operation: "restart", reason, requested: true, askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore, durationMs: Date.now() - startedAt },
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { ran: true, summary: `Kernel restart invocation failed: ${message}.`, data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt } }
+  } finally {
+    if (needsRestore) await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
+  }
+}
+
+async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+  if (notebook.isUntitled || notebook.uri.scheme === "untitled") {
+    return {
+      ran: true,
+      summary: [
+        "Operation: save",
+        "Untitled notebook cannot be saved without a target path.",
+        "Use a Save As / create-file workflow first, then save the named notebook.",
+        reason ? `Reason: ${reason}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      data: {
+        path: primaryPath,
+        operation: "save",
+        reason,
+        saved: false,
+        skipped: true,
+        beforeDirty: notebook.isDirty,
+        afterDirty: notebook.isDirty,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  }
+
+  const beforeDirty = notebook.isDirty
+  const beforeVersion = notebook.version
+  try {
+    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
+  } catch {
+    // save() works for open documents without being visible
+  }
+
+  let saveReturned = false
+  let saveError: string | undefined
+  try {
+    saveReturned = await notebook.save()
+  } catch (error) {
+    saveError = error instanceof Error ? error.message : String(error)
+  }
+
+  // 序列化器可能在 save() 返回后才清除 dirty。
+  await waitForDirtyStateToSettle(notebook, DIRTY_SETTLE_TIMEOUT_MS)
+  const afterDirty = notebook.isDirty
+  const afterVersion = notebook.version
+  // save() 的 false 也可能表示无需保存，以最终 dirty 状态确认。
+  const saved = !afterDirty
+
+  return {
+    ran: true,
+    summary: [
+      "Operation: save",
+      `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
+      `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
+      saveError ? `Save error: ${saveError}` : undefined,
+      saved
+        ? "Notebook persisted to disk."
+        : "Notebook may still have unsaved changes. Review the dirty state before git or disk operations.",
+      reason ? `Reason: ${reason}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    data: {
+      path: primaryPath,
+      operation: "save",
+      reason,
+      saved,
+      beforeDirty,
+      afterDirty,
+      beforeVersion,
+      afterVersion,
+      saveReturned,
+      saveError,
+      durationMs: Date.now() - startedAt,
+    },
+    note: "Save should only be called when the user explicitly requests it. Do not save ipynb files unprompted — prefer to leave dirty notebooks for user review.",
+  }
+}
+
+const DIRTY_SETTLE_TIMEOUT_MS = 10_000
+
+async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, timeoutMs: number) {
+  if (!notebook.isDirty) return
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      disposable.dispose()
+      resolve()
+    }, timeoutMs)
+    const disposable = vscode.workspace.onDidChangeNotebookDocument((event) => {
+      if (event.notebook.uri.toString() !== notebook.uri.toString()) return
+      if (!event.notebook.isDirty) {
+        clearTimeout(timer)
+        disposable.dispose()
+        resolve()
+      }
+    })
+  })
 }
 
 async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {

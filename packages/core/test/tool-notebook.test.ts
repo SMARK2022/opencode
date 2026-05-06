@@ -46,6 +46,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
   const release = Promise.withResolvers<void>()
   const queued = Promise.withResolvers<void>()
   // 原生响应保留nested数据，不能只断言被summaryOnly压平后的短文本。
+  const envResult = { ran: false, summary: "env", data: { operation: "info", runtime: { path: "fixture-python", version: "3" }, saved_metadata: { language_info: { name: "python" } } }, note: "saved metadata kept separate" }
   const responses: Record<string, typeof NotebookTools.Output.Type> = {
     "/notebook/summary": { ran: false, summary: "summary", data: { path: filePath, dirty: false, cells: [{ i: 1, id: "#VSC-a", kind: "code" }], runtime: null } },
     "/notebook/source": { ran: false, summary: "source", data: { path: filePath, target: "cell", cellId: "#VSC-a", globalStart: 3, limit: 20, returned: 2, totalLines: 12, truncated: false } },
@@ -53,8 +54,14 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     "/notebook/run": { ran: true, summary: "run", data: { completed: true, cells: [{ id: "#VSC-a", execution: { status: "succeeded", provenance: "current" }, artifacts: [{ mime: "image/png", bytes: 12, artifactURI: "vscode-remote://fixture/plot.png" }] }] } },
     "/notebook/output": { ran: false, summary: "output", data: { artifacts: [{ mime: "application/json", bytes: 7, text: '{"x":1}', artifactPath: path.join(tmp.path, "output.json") }] } },
     "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0 } },
-    "/notebook/env": { ran: false, summary: "env", data: { runtime: { path: "fixture-python", version: "3" }, saved_metadata: { language_info: { name: "python" } } }, note: "saved metadata kept separate" },
-    "/notebook/kernel": { ran: true, summary: "Kernel restart requested.", data: { path: filePath, requested: true, askForKernelRestartOriginal: true, askForKernelRestartSuppressed: true } },
+    "/notebook/env": envResult,
+  }
+  // 四操作响应各有原生状态与诊断，测试保真而不把ran当成功证明。
+  const environments: Record<string, typeof NotebookTools.Output.Type> = {
+    info: envResult,
+    configure: { ran: true, summary: "configure", data: { path: filePath, operation: "configure", jupyterFound: true, jupyterActive: true, selectKernelAvailable: true, dirty: true } },
+    restart: { ran: true, summary: "restart", data: { path: filePath, operation: "restart", requested: true, askForKernelRestartOriginal: true, askForKernelRestartSuppressed: true } },
+    save: { ran: true, summary: "save", data: { path: filePath, operation: "save", saved: true, beforeDirty: true, afterDirty: false, beforeVersion: 1, afterVersion: 2, saveReturned: true }, note: "Save only on user request" },
   }
   // 唯一监听只绑定回环随机端口；release也进入最终清理，失败断言不会留下等待请求。
   const server = yield* Effect.acquireRelease(
@@ -65,8 +72,10 @@ it.live("registers Notebook tools through the real bridge and preserves native r
         if (endpoint === "/health") return Response.json({ ok: true })
         if (!responses[endpoint]) return new Response("Not found", { status: 404 })
         // 保存真正收到的body/header，期望不从Schema或当前返回值反算。
-        received.push({ path: endpoint, method: request.method, auth: request.headers.get("authorization"), body: await request.json() })
+        const body: unknown = await request.json()
+        received.push({ path: endpoint, method: request.method, auth: request.headers.get("authorization"), body })
         if (endpoint === "/notebook/run") { started.resolve(); await release.promise }
+        if (endpoint === "/notebook/env" && body && typeof body === "object" && "operation" in body && typeof body.operation === "string") return Response.json(environments[body.operation])
         return Response.json(responses[endpoint])
       },
     })),
@@ -87,7 +96,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     })
     // 名字必须来自实际注册，通用edit禁令还要过滤Notebook别名。
     const definitions = yield* toolDefinitions(registry)
-    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_restart_kernel", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
+    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
     expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
     expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")
     // 参数解码发生在RPC/审批之前，不用后端接收坏分页后再伪造错误。
@@ -120,37 +129,49 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     expect(completed).toBe(true)
     expect(run.output?.structured).toEqual(responses["/notebook/run"])
     expect(run.output?.content).toEqual([{ type: "text", text: "run" }])
-    // 后续env与重启推进同一队列，迟到的取消编辑不能躲过完整RPC比较。
+    // 四操作推进同一队列，重启不再拥有第二个工具或HTTP入口。
     for (const [name, input, endpoint] of [
       ["vscode_notebook_output", { filePath, cellId: "#VSC-a" }, "/notebook/output"],
       ["vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, "/notebook/edit"],
-      ["vscode_notebook_env", { filePath }, "/notebook/env"],
-      ["vscode_notebook_restart_kernel", { filePath, reason: "fixture-restart" }, "/notebook/kernel"],
-      ["vscode_notebook_restart_kernel", { filePath }, "/notebook/kernel"],
+      ["vscode_notebook_env", { filePath, operation: "info" }, "/notebook/env"],
+      ["vscode_notebook_env", { filePath, operation: "configure", reason: "fixture-configure" }, "/notebook/env"],
+      ["vscode_notebook_env", { filePath, operation: "restart", reason: "fixture-restart" }, "/notebook/env"],
+      ["vscode_notebook_env", { filePath, operation: "save", reason: "fixture-save" }, "/notebook/env"],
     ] as const) {
       const result = yield* invoke(name, input)
+      const expected = "operation" in input ? environments[input.operation] : responses[endpoint]
       expect(result.result.type).toBe("text")
-      expect(result.output?.structured).toEqual(responses[endpoint])
-      expect(result.output?.content).toEqual([{ type: "text", text: responses[endpoint]?.summary }])
+      expect(result.output?.structured).toEqual(expected)
+      expect(result.output?.content).toEqual([{ type: "text", text: expected?.summary }])
     }
+    // 最大期限也经实际canonical执行和序列化验证，默认300000的原请求断言继续保留。
+    const maximum = yield* invoke("vscode_notebook_run", { filePath, cellId: "#VSC-a", timeoutMs: 3_000_000 })
+    expect(maximum.result.type).toBe("text")
+    expect(maximum.output?.structured).toEqual(responses["/notebook/run"])
+    expect(maximum.output?.content).toEqual([{ type: "text", text: "run" }])
     // 鉴权、方法和端点均检查实际请求，不能用mock客户端绕过发现与序列化。
     expect(received.map(item => ({ path: item.path, method: item.method, auth: item.auth }))).toEqual(
-      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env", "/notebook/kernel", "/notebook/kernel"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
+      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env", "/notebook/env", "/notebook/env", "/notebook/env", "/notebook/run"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
     )
     // 仅run补source规定的期限；未传oldCode/language等字段不能变为空值。
     expect(received.map(item => item.body)).toEqual([
       { filePath }, { filePath, cellId: "#VSC-a", offset: 3, limit: 20 }, { filePath, cellId: "#VSC-a", endCellId: "#VSC-b", timeoutMs: 300_000 },
-      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath }, { filePath, reason: "fixture-restart" }, { filePath },
+      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath, operation: "info" },
+      { filePath, operation: "configure", reason: "fixture-configure" }, { filePath, operation: "restart", reason: "fixture-restart" }, { filePath, operation: "save", reason: "fixture-save" },
+      { filePath, cellId: "#VSC-a", timeoutMs: 3_000_000 },
     ])
-    // 错误重启参数必须在canonical解码时拒绝，不发给原生宿主或补成空值。
-    expect((yield* invoke("vscode_notebook_restart_kernel", { reason: "missing path" })).result.type).toBe("error")
-    expect((yield* invoke("vscode_notebook_restart_kernel", { filePath, reason: 123 })).result.type).toBe("error")
-    expect(received).toHaveLength(8)
+    // 缺操作、非法操作/原因与超上限期限都在RPC和审批前拒绝。
+    expect((yield* invoke("vscode_notebook_env", { filePath })).result.type).toBe("error")
+    expect((yield* invoke("vscode_notebook_env", { filePath, operation: "unknown" })).result.type).toBe("error")
+    expect((yield* invoke("vscode_notebook_env", { filePath, operation: "info", reason: 123 })).result.type).toBe("error")
+    expect((yield* invoke("vscode_notebook_run", { filePath, cellId: "#VSC-a", timeoutMs: 3_000_001 })).result.type).toBe("error")
+    expect(received).toHaveLength(10)
     // 审批来自各自真实调用ID；被取消编辑不丢失已发生的审批事实。
     expect(permissions).toMatchObject([
       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-4" } },
       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
+      { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
     ])
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
