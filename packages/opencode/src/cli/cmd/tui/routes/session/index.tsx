@@ -1699,14 +1699,6 @@ function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
   const ctx = use()
   const output = createMemo(() => props.output?.trim() ?? "")
-  const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const maxLines = 3
-  const overflow = createMemo(() => lines().length > maxLines)
-  const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, maxLines), "…"].join("\n")
-  })
 
   return (
     <Show
@@ -1720,14 +1712,11 @@ function GenericTool(props: ToolProps<any>) {
       <BlockTool
         title={`# ${props.tool} ${input(props.input)}`}
         part={props.part}
-        onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+        maxLines={10}
+        threshold={20}
+        totalLines={output().split("\n").length}
       >
-        <box gap={1}>
-          <text fg={theme.text}>{limited()}</text>
-          <Show when={overflow()}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-        </box>
+        <text fg={theme.text}>{output()}</text>
       </BlockTool>
     </Show>
   )
@@ -1834,6 +1823,9 @@ function BlockTool(props: {
   spinner?: boolean
   contextView?: boolean
   contextLabel?: string
+  maxLines?: number
+  threshold?: number
+  totalLines?: number
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -1844,6 +1836,11 @@ function BlockTool(props: {
     if (hover()) return theme.backgroundMenu
     return theme.backgroundPanel
   })
+  const previewLines = props.maxLines ?? 10
+  const threshold = props.threshold ?? 20
+  const contentLines = props.totalLines ?? 0
+  const canCollapse = previewLines > 0 && contentLines > threshold
+  const [expanded, setExpanded] = createSignal(false)
   return (
     <box
       border={["left"]}
@@ -1855,7 +1852,7 @@ function BlockTool(props: {
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
-      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
+      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: TuiMouseEvent) => {
         if (renderer.getSelection()?.getSelectedText()) return
@@ -1866,6 +1863,7 @@ function BlockTool(props: {
           props.onRightClick()
           return
         }
+        if (canCollapse) setExpanded((prev) => !prev)
         props.onClick?.()
       }}
     >
@@ -1880,7 +1878,15 @@ function BlockTool(props: {
       >
         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
       </Show>
-      {props.children}
+      <box
+        maxHeight={canCollapse && !expanded() ? previewLines : undefined}
+        overflow={canCollapse && !expanded() ? "hidden" : undefined}
+      >
+        {props.children}
+      </box>
+      <Show when={canCollapse}>
+        <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+      </Show>
       <Show when={error()}>
         <text fg={theme.error}>{error()}</text>
       </Show>
@@ -1897,13 +1903,6 @@ function Bash(props: ToolProps<typeof BashTool>) {
   const output = createMemo(() => {
     const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
     return stripAnsi(text?.trim() ?? "")
-  })
-  const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const overflow = createMemo(() => lines().length > 10)
-  const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
   })
 
   const workdirDisplay = createMemo(() => {
@@ -1933,7 +1932,6 @@ function Bash(props: ToolProps<typeof BashTool>) {
 
   const toggleContextOutput = () => {
     if (!contextOutputAvailable()) return
-    setExpanded(true)
     setShowContextOutput((prev) => !prev)
   }
 
@@ -1944,7 +1942,9 @@ function Bash(props: ToolProps<typeof BashTool>) {
           title={title()}
           part={props.part}
           spinner={isRunning()}
-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+          maxLines={isRunning() || showContextOutput() ? 0 : 10}
+          threshold={20}
+          totalLines={1 + output().split("\n").length}
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
@@ -1955,10 +1955,7 @@ function Bash(props: ToolProps<typeof BashTool>) {
               <text fg={theme.info}>Model context output</text>
             </Show>
             <Show when={output()}>
-              <text fg={theme.text}>{limited()}</text>
-            </Show>
-            <Show when={overflow()}>
-              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+              <text fg={theme.text}>{output()}</text>
             </Show>
           </box>
         </BlockTool>
@@ -1975,7 +1972,6 @@ function Bash(props: ToolProps<typeof BashTool>) {
 function Write(props: ToolProps<typeof WriteTool>) {
   const ctx = use()
   const { theme, syntax } = useTheme()
-  const [expanded, setExpanded] = createSignal(false)
   const code = createMemo(() => {
     if (!props.input.content) return ""
     return props.input.content
@@ -1999,26 +1995,19 @@ function Write(props: ToolProps<typeof WriteTool>) {
     }
     return { added, removed, total: d.split("\n").length }
   })
-  const diffOverflow = createMemo(() => diffStats().total > 20)
-
-  const lines = createMemo(() => code().split("\n"))
-  const codeOverflow = createMemo(() => lines().length > 20)
-  const limitedCode = createMemo(() => {
-    if (expanded() || !codeOverflow()) return code()
-    return [...lines().slice(0, 10), "…"].join("\n")
-  })
 
   return (
     <Switch>
-      {/* 覆写已有文件：以 git diff 形式展示变更，与 Edit/ApplyPatch 一致 */}
       <Match when={isOverwrite()}>
         <BlockTool 
           title={"← Write " + normalizePath(props.input.filePath!) + (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")}
           part={props.part}
-          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+          maxLines={10}
+          threshold={20}
+          totalLines={diffStats().total}
         >
           <box gap={1} flexDirection="column">
-            <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+            <box paddingLeft={1}>
               <diff
                 diff={diff()!}
                 view={view()}
@@ -2040,19 +2029,17 @@ function Write(props: ToolProps<typeof WriteTool>) {
                 removedLineNumberBg={theme.diffRemovedLineNumberBg}
               />
             </box>
-            <Show when={diffOverflow()}>
-              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-            </Show>
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
           </box>
         </BlockTool>
       </Match>
-      {/* 新建文件：保持原有代码块展示 */}
       <Match when={props.metadata.diagnostics !== undefined}>
         <BlockTool 
           title={"# Wrote " + normalizePath(props.input.filePath!)} 
           part={props.part}
-          onClick={codeOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+          maxLines={10}
+          threshold={20}
+          totalLines={code().split("\n").length}
         >
           <box gap={1} flexDirection="column">
             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
@@ -2061,12 +2048,9 @@ function Write(props: ToolProps<typeof WriteTool>) {
                 fg={theme.text}
                 filetype={filetype(props.input.filePath!)}
                 syntaxStyle={syntax()}
-                content={limitedCode()}
+                content={code()}
               />
             </line_number>
-            <Show when={codeOverflow()}>
-              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-            </Show>
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
           </box>
         </BlockTool>
@@ -2226,7 +2210,6 @@ function Task(props: ToolProps<typeof TaskTool>) {
 function Edit(props: ToolProps<typeof EditTool>) {
   const ctx = use()
   const { theme, syntax } = useTheme()
-  const [expanded, setExpanded] = createSignal(false)
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2247,18 +2230,18 @@ function Edit(props: ToolProps<typeof EditTool>) {
     return { added, removed, total: lines.length }
   })
 
-  const overflow = createMemo(() => stats().total > 20)
-
   return (
     <Switch>
       <Match when={props.metadata.diff !== undefined}>
         <BlockTool 
           title={"← Edit " + normalizePath(props.input.filePath!) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+          maxLines={10}
+          threshold={20}
+          totalLines={stats().total}
         >
           <box gap={1} flexDirection="column">
-            <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+            <box paddingLeft={1}>
               <diff
                 diff={diffContent()}
                 view={view()}
@@ -2280,9 +2263,6 @@ function Edit(props: ToolProps<typeof EditTool>) {
                 removedLineNumberBg={theme.diffRemovedLineNumberBg}
               />
             </box>
-            <Show when={overflow()}>
-              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-            </Show>
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
           </box>
         </BlockTool>
@@ -2334,16 +2314,13 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
       <Match when={files().length > 0}>
         <For each={files()}>
           {(file) => {
-            const [expanded, setExpanded] = createSignal(false)
-
-            const patchLines = createMemo(() => (file.patch || "").split("\n"))
-            const overflow = createMemo(() => patchLines().length > 20)
-
             return (
               <BlockTool 
                 title={title(file)} 
                 part={props.part}
-                onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+                maxLines={10}
+                threshold={20}
+                totalLines={(file.patch ?? "").split("\n").length}
               >
                 <box gap={1} flexDirection="column">
                   <Show
@@ -2354,7 +2331,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                       </text>
                     }
                   >
-                    <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+                    <box paddingLeft={1}>
                       <diff
                         diff={file.patch || ""}
                         view={view()}
@@ -2376,9 +2353,6 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                         removedLineNumberBg={theme.diffRemovedLineNumberBg}
                       />
                     </box>
-                  </Show>
-                  <Show when={overflow() && file.type !== "delete"}>
-                    <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
                   </Show>
                   <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
                 </box>

@@ -68,8 +68,10 @@ export async function notebookSource(input: Record<string, unknown>) {
   // Render cells one by one, emitting headers + in-range source lines
   const maxBytes = 24 * 1024
   let bytes = 0
-  let rendered = 0
-  let cut = false
+  // `limit` applies to numbered virtual source lines only; headers are context and
+  // must not consume the same budget because they do not have real line numbers.
+  let renderedLines = 0
+  let bytesCut = false
   let lastRenderedLine = 0
   const outputCells: string[] = []
 
@@ -85,20 +87,16 @@ export async function notebookSource(input: Record<string, unknown>) {
       continue
     }
 
-    // Render header
-    if (rendered >= limit) {
-      cut = true
-      break
-    }
+    // Avoid emitting a dangling header once the source-line page is already full.
+    if (renderedLines >= limit) break
     const headerLine = buildHeader(cell, cellRange)
     const hdrBytes = Buffer.byteLength(headerLine, "utf8") + 4 // "--: "
     if (bytes + hdrBytes > maxBytes && outputCells.length > 0) {
-      cut = true
+      bytesCut = true
       break
     }
     outputCells.push(headerLine)
     bytes += hdrBytes
-    rendered++
 
     // Render source lines
     for (let i = 0; i < cell.document.lineCount; i++) {
@@ -107,27 +105,26 @@ export async function notebookSource(input: Record<string, unknown>) {
       if (globalLineNum > globalEnd) {
         break
       }
-      if (rendered >= limit) {
-        cut = true
-        break
-      }
+      if (renderedLines >= limit) break
       const sourceLine = cell.document.lineAt(i).text
       const outLine = `${globalLineNum}: ${sourceLine}`
       const outBytes = Buffer.byteLength(outLine, "utf8")
       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
-        cut = true
+        bytesCut = true
         break
       }
       outputCells.push(outLine)
       bytes += outBytes
-      rendered++
+      renderedLines++
       lastRenderedLine = globalLineNum
     }
 
-    if (cut) break
+    if (bytesCut || renderedLines >= limit) break
   }
 
-  if (!cut) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+  // Only fill to the requested end when the page still has source-line capacity;
+  // otherwise `more` below must report the next page instead of hiding it.
+  if (!bytesCut && renderedLines < limit) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
   const more = lastRenderedLine < globalEnd
 
   let output = warning ? `${warning}\n\n` : ""
@@ -137,7 +134,7 @@ export async function notebookSource(input: Record<string, unknown>) {
     ) + "\n"
   output += outputCells.join("\n")
 
-  if (cut) {
+  if (bytesCut) {
     output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
@@ -153,9 +150,9 @@ export async function notebookSource(input: Record<string, unknown>) {
       cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
       globalStart,
       limit,
-      returned: outputCells.length,
+      returned: renderedLines,
       totalLines,
-      truncated: cut || more,
+      truncated: bytesCut || more,
     },
   }
 }
