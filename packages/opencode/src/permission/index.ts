@@ -307,6 +307,21 @@ export function merge(...rulesets: Ruleset[]): Ruleset {
   return rulesets.flat()
 }
 
+export function compact(ruleset: Ruleset): Ruleset {
+  const seen = new Set<string>()
+  // Permission evaluation is last-match-wins. Keep that behavior while pruning
+  // older exact duplicates so repeated UI toggles do not grow session state.
+  return ruleset
+    .toReversed()
+    .filter((rule) => {
+      const key = `${rule.permission}\0${rule.pattern}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .toReversed()
+}
+
 const EDIT_TOOLS = ["edit", "write", "apply_patch"]
 
 export function disabled(tools: string[], ruleset: Ruleset): Set<string> {

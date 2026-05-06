@@ -21,8 +21,6 @@ import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { Git } from "@/git"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { MCP } from "@/mcp"
-import { ToolRegistry } from "@/tool"
 import { Shell } from "@/shell/shell"
 
 // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
@@ -49,6 +47,13 @@ export function provider(model: Provider.Model) {
 }
 
 export function toolUsageSection(registeredTools: string[]) {
+  if (registeredTools.length === 0) {
+    return [
+      "# WITHOUT any tools",
+      "NOTICE: Now, NO tools are currently available for this request. DO NOT claim to call ANY tools or perform tool-backed filesystem, shell, web, or notebook operations; IGNORE any generic tool instructions from other prompts.",
+    ].join("\n")
+  }
+
   const has = (name: string) => registeredTools.includes(name)
 
   const items: string[] = [
@@ -160,7 +165,7 @@ export function skillsSection(list: Skill.Info[]) {
 }
 
 export interface Interface {
-  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
+  readonly environment: (model: Provider.Model, registeredTools: string[]) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcpInstructions: () => Effect.Effect<string | undefined>
 }
@@ -172,7 +177,6 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const git = yield* Git.Service
-    const registry = yield* ToolRegistry.Service
 
     // 该缓存是会话级快照，按 cwd 作为键。
     // 为保持“快照语义”，会话内不主动失效。
@@ -283,13 +287,12 @@ export const layer = Layer.effect(
     })
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, registeredTools: string[]) {
         const ctx = yield* InstanceState.context
         const gitContext = yield* getGitContext(ctx)
         const { shellNotes, osVersion } = yield* getEnvExtras()
         const isWorktree = ctx.worktree !== ctx.directory
         const cutoff = getKnowledgeCutoff(model.api.id)
-        const toolIds = yield* registry.ids()
         const envLines: string[] = [
           `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
           `Here is some useful information about the environment you are running in:`,
@@ -310,7 +313,7 @@ export const layer = Layer.effect(
           `</env>`,
         ]
         return [
-          toolUsageSection(toolIds),
+          toolUsageSection(registeredTools),
           ...staticSections(),
           envLines.join("\n"),
         ]
@@ -333,8 +336,6 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(
   Layer.provide(Skill.defaultLayer),
   Layer.provide(Git.defaultLayer),
-  Layer.provide(MCP.defaultLayer),
-  Layer.provide(ToolRegistry.defaultLayer)
 )
 
 export * as SystemPrompt from "./system"

@@ -213,7 +213,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       if (ctx.payload.permission !== undefined) {
         yield* session.setPermission({
           sessionID: ctx.params.sessionID,
-          permission: Permission.merge(current.permission ?? [], ctx.payload.permission),
+          permission: Permission.compact(Permission.merge(current.permission ?? [], ctx.payload.permission)),
         })
       }
       if (ctx.payload.time?.archived !== undefined) {

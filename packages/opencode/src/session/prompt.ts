@@ -22,6 +22,7 @@ import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { ToolRegistry } from "@/tool/registry"
+import { ToolSelection } from "@/tool/selection"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -448,6 +449,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         providerID: input.model.providerID,
         agent: input.agent,
       })) {
+        if (!ToolSelection.enabled(item.id, input.session.permission)) continue
         const schema = ProviderTransform.schema(input.model, EffectZod.toJsonSchema(item.parameters))
         tools[item.id] = tool({
           description: item.description,
@@ -487,6 +489,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       for (const [key, item] of Object.entries(yield* mcp.tools())) {
+        if (!ToolSelection.enabled(key, input.session.permission)) continue
         const execute = item.execute
         if (!execute) continue
 
@@ -1527,9 +1530,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+            const registeredTools = Object.keys(tools).filter(ToolSelection.isUserConfigurable)
             const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
-              sys.environment(model),
+              sys.environment(model, registeredTools),
               instruction.system().pipe(Effect.orDie),
               sys.mcpInstructions(),
               MessageV2.toModelMessagesEffect(msgs, model),
@@ -1549,7 +1553,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const messagesText = JSON.stringify(messages)
             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
             const toolsText = Object.entries(tools)
-              .filter(([name]) => lastUser.tools?.[name] !== false && !disabledTools.has(name))
+              .filter(
+                ([name]) =>
+                  lastUser.tools?.[name] !== false &&
+                  !disabledTools.has(name) &&
+                  ToolSelection.enabled(name, session.permission),
+              )
               .map(([name, tool]) => {
                 const item = tool as { description?: string; inputSchema?: unknown }
                 return `Tool: ${name}\n${item.description ?? ""}\n${JSON.stringify(item.inputSchema)}`

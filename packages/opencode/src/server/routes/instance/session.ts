@@ -443,7 +443,7 @@ export const SessionRoutes = lazy(() =>
           if (updates.permission !== undefined) {
             yield* session.setPermission({
               sessionID,
-              permission: Permission.merge(current.permission ?? [], updates.permission),
+              permission: Permission.compact(Permission.merge(current.permission ?? [], updates.permission)),
             })
           }
           if (updates.time?.archived !== undefined) {

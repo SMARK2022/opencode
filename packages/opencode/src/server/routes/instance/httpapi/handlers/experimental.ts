@@ -83,7 +83,8 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     })
 
     const toolIDs = Effect.fn("ExperimentalHttpApi.toolIDs")(function* () {
-      return yield* registry.ids()
+      const [registryIDs, mcpTools] = yield* Effect.all([registry.ids(), mcp.tools()], { concurrency: "unbounded" })
+      return [...new Set([...registryIDs, ...Object.keys(mcpTools)])].toSorted()
     })
 
     const worktree = Effect.fn("ExperimentalHttpApi.worktree")(function* () {

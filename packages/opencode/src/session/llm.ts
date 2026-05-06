@@ -17,6 +17,7 @@ import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
 import { Bus } from "@/bus"
 import { Wildcard } from "@/util/wildcard"
+import { ToolSelection } from "@/tool/selection"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
 import { Installation } from "@/installation"
@@ -451,7 +452,10 @@ function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" 
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (_, k) => input.user.tools?.[k] !== false && !disabled.has(k) && ToolSelection.enabled(k, input.permission),
+  )
 }
 
 // Check if messages contain any tool-call content

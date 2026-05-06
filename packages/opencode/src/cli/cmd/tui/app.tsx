@@ -39,6 +39,7 @@ import { CommandProvider, useCommandDialog } from "@tui/component/dialog-command
 import { DialogAgent } from "@tui/component/dialog-agent"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
 import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
+import { DialogTool } from "@tui/component/dialog-tool"
 import { KeybindProvider, useKeybind } from "@tui/context/keybind"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
 import { Home } from "@tui/routes/home"
@@ -709,6 +710,20 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       onSelect: () => {
         dialog.replace(() => <DialogHelp />)
       },
+      category: "System",
+    },
+    {
+      title: "Manage tools",
+      value: "tools.manage",
+      slash: {
+        name: "tools",
+      },
+      onSelect: () => {
+        const current = route.data
+        if (current.type !== "session") return
+        dialog.replace(() => <DialogTool sessionID={current.sessionID} />)
+      },
+      enabled: route.data.type === "session",
       category: "System",
     },
     {
