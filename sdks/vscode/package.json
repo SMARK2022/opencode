@@ -1,9 +1,10 @@
 {
   "name": "opencode-ide-bridge",
-  "displayName": "OpenCode VS Code Bridge",
-  "description": "VS Code bridge for OpenCode IDE integration, notebook tools, and workspace context.",
+  "displayName": "OpenCode IDE Bridge",
+  "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
   "version": "1.14.31",
   "publisher": "SMARK2022",
+  "homepage": "https://github.com/anomalyco/opencode",
   "repository": {
     "type": "git",
     "url": "https://github.com/anomalyco/opencode"
@@ -24,6 +25,8 @@
     "opencode",
     "bridge",
     "notebook",
+    "jupyter",
+    "kernel",
     "ide"
   ],
   "activationEvents": [
@@ -34,7 +37,7 @@
     "commands": [
       {
         "command": "opencode.openTerminal",
-        "title": "Open OpenCode",
+        "title": "Open or Focus OpenCode Terminal",
         "icon": {
           "light": "images/button-dark.svg",
           "dark": "images/button-light.svg"
@@ -42,7 +45,7 @@
       },
       {
         "command": "opencode.openNewTerminal",
-        "title": "Open OpenCode in New Tab",
+        "title": "Open New OpenCode Terminal",
         "icon": {
           "light": "images/button-dark.svg",
           "dark": "images/button-light.svg"
@@ -50,7 +53,7 @@
       },
       {
         "command": "opencode.addFilepathToTerminal",
-        "title": "Add Filepath to Terminal"
+        "title": "Insert File Reference into OpenCode"
       },
       {
         "command": "opencode.showBridgeLog",
@@ -58,7 +61,7 @@
       },
       {
         "command": "opencode.notebookBridgeTools",
-        "title": "OpenCode Notebook Bridge Tools"
+        "title": "OpenCode: Test Notebook Bridge Tools"
       }
     ],
     "menus": {
@@ -72,7 +75,7 @@
     "keybindings": [
       {
         "command": "opencode.openTerminal",
-        "title": "Run OpenCode",
+        "title": "Open or Focus OpenCode Terminal",
         "key": "cmd+escape",
         "mac": "cmd+escape",
         "win": "ctrl+escape",
@@ -80,7 +83,7 @@
       },
       {
         "command": "opencode.openNewTerminal",
-        "title": "Run OpenCode",
+        "title": "Open New OpenCode Terminal",
         "key": "cmd+shift+escape",
         "mac": "cmd+shift+escape",
         "win": "ctrl+shift+escape",
@@ -88,7 +91,7 @@
       },
       {
         "command": "opencode.addFilepathToTerminal",
-        "title": "OpenCode: Insert At-Mentioned",
+        "title": "OpenCode: Insert File Reference",
         "key": "cmd+alt+k",
         "mac": "cmd+alt+k",
         "win": "ctrl+alt+K",
@@ -98,7 +101,7 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run package",
-    "vsix": "bun run package && npx @vscode/vsce package",
+    "vsix": "bun run package && npx @vscode/vsce package -o dist/SMARK2022.opencode-ide-bridge-1.14.31.vsix",
     "compile": "bun run check-types && bun run lint && node esbuild.js",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

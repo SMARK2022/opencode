@@ -1,9 +1,9 @@
 /**
- * opencode VS Code Extension — entry point.
+ * OpenCode VS Code Extension — entry point.
  *
  * Responsibilities:
- *   1. Start the HTTP bridge server for opencode CLI daemon integration.
- *   2. Register terminal management commands (open, focus, file-mention).
+ *   1. Start the HTTP bridge server for OpenCode CLI daemon integration.
+ *   2. Register terminal management commands (open, focus, insert file reference).
  *   3. Register the interactive notebook bridge testing command.
  *
  * All notebook tool logic lives under `./notebook/`, bridge HTTP handling

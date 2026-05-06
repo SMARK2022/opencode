@@ -1,20 +1,21 @@
 /**
- * HTTP bridge server for the opencode VS Code extension.
+ * HTTP bridge server for the OpenCode VS Code Extension.
  *
  * Exposes notebook tool endpoints on `127.0.0.1:<random port>` so that
- * the opencode CLI daemon can invoke notebook operations without going
- * through Copilot's LM tool proxy (which adds confirmation dialogs and
- * strips binary output).
+ * the OpenCode CLI daemon can invoke notebook operations without going
+ * through a remote LM tool proxy (which may add confirmation dialogs and
+ * strip binary output).
  *
  * Endpoints:
- *   GET  /health                – liveness check
+ *   GET  /health                – liveness check (no auth)
+ *   GET  /manifest              – bridge manifest (Bearer auth)
  *   POST /notebook/summary      – notebook structure overview
  *   POST /notebook/source       – paginated virtual source text
  *   POST /notebook/run          – execute one cell or a cell-id range
  *   POST /notebook/edit         – insert/edit/delete cells
  *   POST /notebook/output       – artifact-first output export
  *   POST /notebook/cell-output  – alias for /notebook/output
- *   POST /notebook/env           – notebook environment operations (info/configure/restart/save)
+ *   POST /notebook/env          – kernel/environment operations (info/configure/restart/save)
  */
 import * as http from "node:http"
 import { isRecord, stringProp } from "./util"
