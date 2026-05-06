@@ -115,6 +115,8 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
     MCP.Service,
     MCP.Service.of({
       status: () => Effect.succeed({}),
+      native: () => Effect.die("unexpected Native MCP connection in prompt-effect tests"),
+      snapshot: () => Effect.succeed({ tools: {}, clients: {}, instructions }),
       clients: () => Effect.succeed({}),
       instructions: () => Effect.succeed(instructions),
       tools: () => Effect.succeed({}),

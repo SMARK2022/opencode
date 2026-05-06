@@ -16,6 +16,8 @@ import { Location } from "./location"
 import { LocationMutation } from "./location-mutation"
 import { LocationServiceMap } from "./location-service-map"
 import { PermissionV2 } from "./permission"
+import { McpRuntime } from "./mcp"
+import { McpTools } from "./mcp/tools"
 import { PluginV2 } from "./plugin"
 import { PluginInternal } from "./plugin/internal"
 import { Policy } from "./policy"
@@ -68,6 +70,8 @@ export const locationServices = LayerNode.group([
   ToolOutputStore.node,
   ToolRegistry.node,
   ToolRegistry.toolsNode,
+  McpRuntime.node,
+  McpTools.node,
   Image.node,
   SkillGuidance.node,
   ReferenceGuidance.node,
@@ -84,7 +88,7 @@ export type LocationServices = LayerNode.Output<typeof locationServices>
 export type LocationError = LayerNode.Error<typeof locationServices>
 
 export function buildLocationServiceMap(
-  replacements: LayerNode.Replacements = [],
+  replacements: LayerNode.Replacements | ((ref: Location.Ref) => LayerNode.Replacements) = [],
 ): Layer.Layer<LocationServiceMap.Service> {
   return Layer.effect(
     LocationServiceMap.Service,
@@ -92,7 +96,8 @@ export function buildLocationServiceMap(
       const locations: LayerMap.LayerMap<Location.Ref, LocationServices, LocationError> = yield* LayerMap.make(
       (ref: Location.Ref) => {
         const defaults: LayerNode.Replacements = [[SessionExecution.node, SessionExecutionLocal.node]]
-        const allReplacements = defaults.concat(replacements, [[Location.node, Location.boundNode(ref)]])
+        // 放在hoist之前，替换owner的真实依赖才能参加原图分层。
+        const allReplacements = defaults.concat(typeof replacements === "function" ? replacements(ref) : replacements, [[Location.node, Location.boundNode(ref)]])
         // Apply replacements during hoist, not afterward: replacements can
         // introduce new tagged dependencies (Location.boundNode depends on
         // Project), and the hoist walk is the only pass that can still slice

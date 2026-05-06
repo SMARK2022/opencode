@@ -5,6 +5,7 @@ import { Effect, Layer, Schema } from "effect"
 import { FastCheck } from "effect/testing"
 import { Config } from "@opencode-ai/core/config"
 import { ConfigProvider } from "@opencode-ai/core/config/provider"
+import { ConfigMCP } from "@opencode-ai/core/config/mcp"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ConfigMigrateV1 } from "@opencode-ai/core/v1/config/migrate"
@@ -74,6 +75,89 @@ describe("Config", () => {
       expect(ConfigMigrateV1.isV1({ shell: "/bin/zsh", model: "anthropic/claude" })).toBe(false)
       expect(ConfigMigrateV1.isV1({ references: {} })).toBe(false)
     }),
+  )
+
+  it.live("loads MCP-only legacy files without changing native server timeouts", () =>
+    Effect.acquireRelease(Effect.promise(() => tmpdir()), tmp => Effect.promise(() => tmp[Symbol.asyncDispose]())).pipe(
+      Effect.flatMap(tmp => Effect.gen(function* () {
+        // 只读取配置，虚构命令和域名不会启动客户端或连接外部服务。
+        const legacy = {
+          mcp: {
+            local: { type: "local", command: ["fixture-mcp-no-exec"], enabled: false, timeout: 10000 },
+            remote: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false, timeout: 20000 },
+          },
+        } as const
+        const native = { mcp: { servers: { type: { type: "local", command: ["fixture-mcp-no-exec"], timeout: { startup: 11000, request: 22000 } } } } } as const
+        // 新式服务器也可能名为type，必须按条目形状而不是键名决定配置版本。
+        expect(ConfigMigrateV1.isV1(legacy)).toBe(true)
+        expect(ConfigMigrateV1.isV1(native)).toBe(false)
+        for (const [name, input, expected] of [
+          ["legacy", legacy, { servers: { local: { disabled: true, timeout: { startup: 10000, request: 10000 } }, remote: { oauth: false, timeout: { startup: 20000, request: 20000 } } } }],
+          ["native", native, native.mcp],
+        ] as const) {
+          const directory = path.join(tmp.path, name)
+          yield* Effect.promise(async () => { await fs.mkdir(directory); await fs.writeFile(path.join(directory, "opencode.json"), JSON.stringify(input)) })
+          // 真实文件加载器必须选中正确decoder，不能只测直接调用迁移函数。
+          const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(directory)))
+          const document = entries.find(entry => entry.type === "document")
+          expect(document).toBeDefined()
+          expect(document?.info.mcp).toMatchObject(expected)
+        }
+        for (const enabled of [false, true]) {
+          const directory = path.join(tmp.path, `toggle-${enabled}`)
+          const globalDirectory = path.join(directory, "global")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(globalDirectory, { recursive: true })
+            await fs.writeFile(path.join(globalDirectory, "opencode.json"), JSON.stringify({ mcp: { docs: { type: "local", command: ["fixture-mcp-no-exec"], enabled: !enabled, timeout: 15000 } } }))
+            await fs.writeFile(path.join(directory, "opencode.json"), JSON.stringify({ mcp: { docs: { enabled } } }))
+          })
+          // 使用真实全局/项目文件与同一运行时汇总器，双向启停不能丢失继承的command。
+          const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(directory, globalDirectory)))
+          const resolved = ConfigMCP.resolve(entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : []))
+          expect(resolved.servers?.docs).toMatchObject({ type: "local", command: ["fixture-mcp-no-exec"], disabled: !enabled, timeout: { startup: 15000, request: 15000 } })
+        }
+        expect(ConfigMigrateV1.isV1({ mcp: { docs: { enabled: false } } })).toBe(true)
+        const directory = path.join(tmp.path, "nested")
+        const globalDirectory = path.join(directory, "global")
+        yield* Effect.promise(async () => {
+          await fs.mkdir(globalDirectory, { recursive: true })
+          await fs.writeFile(path.join(globalDirectory, "opencode.json"), JSON.stringify({ mcp: {
+            docs: { type: "remote", url: "https://mcp.fixture.invalid", headers: { Authorization: "Bearer fixture", Common: "global" }, oauth: { clientId: "fixture-id", clientSecret: "fixture-secret" }, timeout: 17000 },
+            local: { type: "local", command: ["old-command"], cwd: "inherited-cwd", environment: { SHARED: "keep" } },
+          } }))
+          await fs.writeFile(path.join(directory, "opencode.json"), JSON.stringify({ mcp: {
+            docs: { type: "remote", url: "https://mcp.fixture.invalid", headers: { "X-Project": "project", Common: "project" }, oauth: { scope: "project-scope" } },
+            local: { type: "local", command: ["new-command"], environment: { PROJECT: "add" } },
+          } }))
+        })
+        // 走真实文档decoder后合并class字段，认证和环境未覆盖的键必须继续有效。
+        const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(directory, globalDirectory)))
+        const configs = entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : [])
+        const resolved = ConfigMCP.resolve(configs)
+        expect(resolved.servers?.docs).toMatchObject({ headers: { Authorization: "Bearer fixture", "X-Project": "project", Common: "project" }, oauth: { client_id: "fixture-id", client_secret: "fixture-secret", scope: "project-scope" }, timeout: { startup: 17000, request: 17000 } })
+        expect(resolved.servers?.local).toMatchObject({ command: ["new-command"], cwd: "inherited-cwd", environment: { SHARED: "keep", PROJECT: "add" } })
+        expect(ConfigMCP.resolve([...configs, ConfigMigrateV1.mcp({ mcp: { docs: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false } } }) ?? {}]).servers?.docs).toMatchObject({ oauth: false })
+        const variables = path.join(tmp.path, "variables")
+        const key = "OPENCODE_MCP_FIXTURE_CREDENTIAL"
+        const previous = process.env[key]
+        const fileSecret = 'fixture"secret\nsecond line'
+        yield* Effect.acquireUseRelease(Effect.sync(() => { process.env[key] = "fixture-env-value" }), () => Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(variables)
+            await fs.writeFile(path.join(variables, "credential.txt"), fileSecret + "\n")
+            await fs.writeFile(path.join(variables, "opencode.json"), "// {file:ignored-comment.txt}\n" + JSON.stringify({ mcp: {
+              docs: { type: "remote", url: "https://mcp.fixture.invalid", headers: { Authorization: `Bearer {env:${key}}` }, oauth: { clientId: `{env:${key}}`, clientSecret: "{file:credential.txt}" } },
+              local: { type: "local", command: ["fixture-mcp-no-exec"], environment: { CREDENTIAL: `{env:${key}}` } },
+            } }))
+          })
+          // 真实文件加载保留引用目录、JSON转义与注释跳过，不启动认证或本地MCP。
+          const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(variables)))
+          const resolved = ConfigMCP.resolve(entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : []))
+          expect(resolved.servers?.docs).toMatchObject({ headers: { Authorization: "Bearer fixture-env-value" }, oauth: { client_id: "fixture-env-value", client_secret: fileSecret } })
+          expect(resolved.servers?.local).toMatchObject({ environment: { CREDENTIAL: "fixture-env-value" } })
+        }), () => Effect.sync(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous }))
+      })),
+    ),
   )
 
   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>

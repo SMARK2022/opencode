@@ -42,6 +42,7 @@ import { PermissionProvider } from "./context/permission"
 import { DialogModel } from "./component/dialog-model"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
+import { DialogTool } from "./component/dialog-tool"
 import { DialogStatus } from "./component/dialog-status"
 import { DialogDebug } from "./component/dialog-debug"
 import { DialogThemeList } from "./component/dialog-theme-list"
@@ -853,6 +854,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         run: () => {
           dialog.replace(() => <DialogHelp />)
         },
+        category: "System",
+      },
+      {
+        name: "tools.manage",
+        title: "Manage tools",
+        slashName: "tools",
+        run: () => {
+          const current = route.data
+          if (current.type !== "session") return
+          dialog.replace(() => <DialogTool sessionID={current.sessionID} />)
+        },
+        enabled: () => route.data.type === "session",
         category: "System",
       },
       {

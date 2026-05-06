@@ -1242,6 +1242,30 @@ describe("SessionRunnerLLM", () => {
         expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
         expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
       }))
+      const db = (yield* Database.Service).db
+      // 在同一持久Session切换工具，核对真实请求与调用结果而不是只测selector。
+      for (const action of ["deny", "allow"] as const) {
+        yield* db.update(SessionTable).set({ permission: [{ permission: "echo", pattern: "*", action }] })
+          .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: `Set echo ${action}` }), resume: false })
+        requests.length = 0
+        executions.length = 0
+        responses = [[
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: `call-${action}`, name: "echo", input: { text: action } }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ], []]
+        yield* session.resume(sessionID)
+        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect"] : ["defect", "echo"])
+        expect(executions).toEqual(action === "deny" ? [] : ["allow"])
+        const parts = requests[0]?.system.map(part => part.text) ?? []
+        expect(parts.filter(part => part === "Initial context")).toHaveLength(1)
+        expect(parts[0]).toBe(expectedToolGuidance)
+        const messages = yield* session.context(sessionID)
+        const tools = messages.flatMap(message => message.type === "assistant" ? message.content.filter(part => part.type === "tool") : [])
+        expect(tools.find(tool => tool.id === `call-${action}`)?.state.status).toBe(action === "deny" ? "error" : "completed")
+      }
     }),
   )
 
@@ -3950,6 +3974,8 @@ describe("SessionRunnerLLM", () => {
       expect(requests[0]?.toolChoice).toBeUndefined()
       expect(requests[1]?.toolChoice).toMatchObject({ type: "none" })
       expect(requests[1]?.tools).toEqual([])
+      // 最后一步没有工具，即使静态族正文提到工具也必须明确覆盖。
+      expect(requests[1]?.system.map(part => part.text).join("\n")).toContain("NO tools are currently available")
       expect(requests[1]?.messages.at(-1)).toMatchObject({
         role: "assistant",
         content: [{ type: "text", text: expect.stringContaining("MAXIMUM STEPS REACHED") }],

@@ -201,6 +201,20 @@ export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] 
   return rulesets.flat()
 }
 
+export function compact(ruleset: PermissionV1.Ruleset): PermissionV1.Rule[] {
+  const seen = new Set<string>()
+  // 只删除同名同模式的旧规则，保留 last-match-wins 与交错规则的顺序。
+  return ruleset
+    .toReversed()
+    .filter((rule) => {
+      const key = `${rule.permission}\0${rule.pattern}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .toReversed()
+}
+
 export function disabled(tools: string[], ruleset: PermissionV1.Ruleset): Set<string> {
   const edits = ["edit", "write", "apply_patch"]
   const reads = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]

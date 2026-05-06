@@ -105,7 +105,9 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     })
 
     const toolIDs = Effect.fn("ExperimentalHttpApi.toolIDs")(function* () {
-      return yield* registry.ids()
+      // MCP 工具不在 registry.ids 中，管理列表需要合并两者。
+      const [registryIDs, mcpTools] = yield* Effect.all([registry.ids(), mcp.tools()], { concurrency: "unbounded" })
+      return [...new Set([...registryIDs, ...Object.keys(mcpTools)])].toSorted()
     })
 
     const worktree = Effect.fn("ExperimentalHttpApi.worktree")(function* () {
