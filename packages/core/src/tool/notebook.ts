@@ -33,7 +33,7 @@ export const RunInput = Schema.Struct({
   type: Schema.Literals(["cell", "range"]).annotate({ description: "Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell." }).pipe(Schema.optional),
   cellId: cellId.annotate({ description: "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx." }),
   endCellId: cellId.annotate({ description: "Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive." }).pipe(Schema.optional),
-  timeoutMs: PositiveInt.check(Schema.isLessThanOrEqualTo(600_000)).annotate({ description: "Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000." }).pipe(Schema.optional),
+  timeoutMs: PositiveInt.check(Schema.isLessThanOrEqualTo(3_000_000)).annotate({ description: "Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 3000000." }).pipe(Schema.optional),
 })
 export const OutputInput = Schema.Struct({ filePath, cellId: cellId.pipe(Schema.optional) })
 export const EditInput = Schema.Struct({
@@ -45,11 +45,11 @@ export const EditInput = Schema.Struct({
   newCode: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({ description: "New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content." }).pipe(Schema.optional),
   language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source." }).pipe(Schema.optional),
 })
-export const EnvInput = SummaryInput
-// 独立重启入口仅存在于本项中间态，原因只作原生日志，不作为执行参数。
-export const KernelInput = Schema.Struct({
+// 四操作与原生唯一env入口一致，不能在CLI缺省成info而丢弃模型的操作意图。
+export const EnvInput = Schema.Struct({
   filePath,
-  reason: Schema.String.annotate({ description: "Why the kernel is being restarted, for logging and user context." }).pipe(Schema.optional),
+  operation: Schema.Literals(["info", "configure", "restart", "save"]).annotate({ description: "Which notebook environment operation to perform." }),
+  reason: Schema.String.annotate({ description: "Brief description of why this operation is being performed, shown to the user." }).pipe(Schema.optional),
 })
 
 // 原生data中的格、运行时、MIME与artifact保留未知嵌套字段，不让较窄投影丢掉模型结果。
@@ -95,9 +95,7 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
     vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common, description: VscodeNotebookDescriptions.edit, input: EditInput,
       execute: (args, context) => ask("edit", args, context).pipe(Effect.andThen(call("/notebook/edit", args, context, 30_000))) }), "edit"),
     vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
-      execute: (args, context) => call("/notebook/env", args, context, 10_000) }),
-    vscode_notebook_restart_kernel: Tool.make({ ...common, description: VscodeNotebookDescriptions.kernel, input: KernelInput,
-      execute: (args, context) => call("/notebook/kernel", args, context, 30_000) }),
+      execute: (args, context) => call("/notebook/env", args, context, 120_000) }),
   }).pipe(Effect.orDie)
 }))
 
