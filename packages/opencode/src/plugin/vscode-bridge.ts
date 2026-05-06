@@ -181,6 +181,17 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
         metadata: { endpoint: "/notebook/env" },
       }),
     }),
+    vscode_notebook_restart_kernel: tool({
+      description: VscodeNotebookDescriptions.kernel,
+      args: {
+        ...requiredFilePath,
+        reason: z.string().optional().describe("Why the kernel is being restarted, for logging and user context."),
+      },
+      execute: async (args, context) => ({
+        output: await call("/notebook/kernel", args, context, 30_000),
+        metadata: { endpoint: "/notebook/kernel" },
+      }),
+    }),
   },
 }
 }

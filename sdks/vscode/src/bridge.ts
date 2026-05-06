@@ -12,6 +12,7 @@
  *   POST /notebook/output      - 将已有输出按原始字节导出为文件
  *   POST /notebook/cell-output - /notebook/output 的别名，使用相同认证
  *   POST /notebook/env         - 实际活动内核与保存的元数据分列报告
+ *   POST /notebook/kernel      - 请求重启指定笔记本的 Jupyter 内核
  * 所有 notebook 端点要求 filePath；路径或 URI 绑定目标文档，不由当前编辑器焦点决定。
  * 导出文件响应同时保留 artifactPath 与 artifactURI，包括远程 scheme 和 authority。
  */
@@ -26,12 +27,13 @@ import { runNotebook } from "./notebook/run"
 import { editNotebook } from "./notebook/edit"
 import { readNotebookCellOutput } from "./notebook/output"
 import { notebookEnv } from "./notebook/env"
+import { restartNotebookKernel } from "./notebook/kernel"
 
 const BRIDGE_HOST = "127.0.0.1"
 // 桥接服务仅绑定本机回环地址，杜绝网络暴露
 
 // 路由集合先决定是否读取请求体，未知路径不能因无关 JSON 内容从 404 变成 500。
-const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env"])
+const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env", "/notebook/kernel"])
 
 export type BridgeInfo = { port: number; token: string }
 // 导出的 BridgeInfo 必须同时携带端口与 token，终端模块不能把地址当成访问凭证。
@@ -192,7 +194,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
           // 注册期间的卸载仍走原关闭屏障，不交付已经取消的凭证。
           if (closing) return reject(new Error("VS Code bridge startup cancelled"))
           output.appendLine(`[bridge] registry ${handle.id}`)
-          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "manifest"]) {
+          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "notebook/kernel", "manifest"]) {
             output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : ``}`)
           }
           resolve({ port: address.port, token })
@@ -225,6 +227,9 @@ async function routeRequest(
     switch (pathname) {
       case "/notebook/env":
         return await notebookEnv(filePath)
+
+      case "/notebook/kernel":
+        return await restartNotebookKernel(body)
 
       case "/notebook/summary":
         return await notebookSummary(filePath)
