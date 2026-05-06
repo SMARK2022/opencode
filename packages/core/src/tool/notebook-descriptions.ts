@@ -45,9 +45,9 @@ export const VscodeNotebookDescriptions = {
     "Perform notebook environment operations selected via the `operation` field.",
     "filePath and operation are required. `reason` is an optional brief description shown to the user.",
     "Operations:",
-    "  info      — probe the active kernel/interpreter and report saved .ipynb metadata",
-    "  configure — open the notebook and trigger kernel selection (run before first execution)",
-    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward.",
+    "  info      — probe the active kernel (available after at least one cell has run) and report saved .ipynb metadata. Use to confirm runtime after first execution or to check the Python environment path and version.",
+    "  configure — select a kernel and verify readiness. Returns a status: configured (active kernel found), selected (accepted, kernel starts on first run — proceed directly to run), needs-selection (user cancelled picker), selection-requested (no explicit result), or failed (error). Use before the first run; no need to call info after selected.",
+    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward. Only restart when strictly necessary (e.g. stuck kernel, corrupted state); prefer re-running cells over restarting when possible.",
     "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
   ].join("\n"),
 }
