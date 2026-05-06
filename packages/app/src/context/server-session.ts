@@ -1029,6 +1029,13 @@ export function createServerSession(
       }
       case "message.updated": {
         const info = cleanMessage((event.properties as { info: Message }).info)
+        if ((info as unknown as { hidden?: unknown }).hidden) {
+          apply({
+            type: "message.removed",
+            properties: { sessionID: info.sessionID, messageID: info.id },
+          })
+          return
+        }
         indexLegacyMessage(info)
         const load = messageLoads.get(info.sessionID)
         load?.touchedMessages.add(info.id)
@@ -1093,6 +1100,13 @@ export function createServerSession(
       }
       case "message.part.updated": {
         const part = (event.properties as { part: Part }).part
+        if ((part as unknown as { hidden?: unknown }).hidden) {
+          apply({
+            type: "message.part.removed",
+            properties: { sessionID: part.sessionID, messageID: part.messageID, partID: part.id },
+          })
+          return
+        }
         if (SKIP_PARTS.has(part.type)) return
         const messages = data.message[part.sessionID]
         const load = messageLoads.get(part.sessionID)

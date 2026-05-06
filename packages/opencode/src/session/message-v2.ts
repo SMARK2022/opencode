@@ -27,6 +27,7 @@ import { eq } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
+import { sql } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
@@ -42,6 +43,7 @@ interface FetchDecompressionError extends Error {
   errno: number
   path: string
 }
+
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
@@ -439,16 +441,18 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
   limit: number
   before?: string
+  includeHidden?: boolean
 }) {
   const { db } = yield* Database.Service
   const before = input.before ? cursor.decode(input.before) : undefined
   const where = before
     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
     : eq(MessageTable.session_id, input.sessionID)
+  // #98：隐藏消息在 LIMIT 前过滤，保留可见页容量和游标。
   const rows = yield* db
     .select()
     .from(MessageTable)
-    .where(where)
+    .where(and(where, input.includeHidden ? undefined : sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`))
     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
     .limit(input.limit + 1)
     .all()
@@ -469,7 +473,10 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
-  const items = yield* hydrate(db, slice)
+  // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
+  const items = (yield* hydrate(db, slice)).map((item) =>
+    input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
+  )
   items.reverse()
   const tail = slice.at(-1)
   return {
@@ -479,13 +486,15 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   }
 })
 
-export function stream(sessionID: SessionID) {
+// #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
+export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
+  // includeHidden 默认 false：正常流不返回被撤销隐藏的消息和 part
   const size = 50
   return Effect.gen(function* () {
     const result = [] as WithParts[]
     let before: string | undefined
     while (true) {
-      const next = yield* page({ sessionID, limit: size, before }).pipe(
+      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden }).pipe(
         Effect.catchIf(NotFoundError.isInstance, () =>
           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
         ),
@@ -493,7 +502,8 @@ export function stream(sessionID: SessionID) {
       if (next.items.length === 0) break
       for (let i = next.items.length - 1; i >= 0; i--) {
         const item = next.items[i]
-        if (item) result.push(item)
+        if (!item) continue
+        result.push(item)
       }
       if (!next.more || !next.cursor) break
       before = next.cursor

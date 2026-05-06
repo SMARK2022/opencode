@@ -679,6 +679,66 @@ describe("server session", () => {
     expect(store.data.part[kept.id]).toBeUndefined()
   })
 
+  test("keeps soft-hidden content removed across hydration and history pages", async () => {
+    const hydration = Promise.withResolvers<SingleMessageResponse>()
+    const kept = userMessage("message-z")
+    const removed = assistantMessage("message-a", kept.id, { time: { created: 2, completed: 2 } })
+    const part = textPart(kept.id)
+    const removedPart = textPart(removed.id, { id: "removed-part" })
+    const stale = [
+      { info: kept, parts: [part] },
+      { info: removed, parts: [removedPart] },
+    ]
+    const client = rootMessageClient(
+      [response(stale, "older"), response([{ info: removed, parts: [removedPart] }], "older"), response(stale)],
+      [hydration.promise],
+    )
+    const store = createServerSession(client)
+    await store.sync("child")
+    store.optimistic.add({ sessionID: "child", message: kept, parts: [part] })
+    store.optimistic.add({ sessionID: "child", message: removed, parts: [removedPart] })
+    const refreshing = store.sync("child", { force: true })
+    await client.rootRequested(1)
+    store.remember({ ...session("child", "root"), revert: { messageID: kept.id, partID: part.id } })
+
+    for (const item of [part, removedPart]) {
+      const expected = item.text + " live"
+      store.apply({
+        type: "message.part.delta",
+        properties: { sessionID: "child", messageID: item.messageID, partID: item.id, field: "text", delta: " live" },
+      })
+      expect(store.data.part_text_accum_delta[item.id]).toBe(expected)
+    }
+    const hidden = { time: 3, reason: "undo" }
+    store.apply({ type: "message.updated", properties: { info: { ...removed, hidden } } })
+    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: { ...part, hidden } } })
+    store.apply({ type: "session.updated", properties: { info: session("child", "root") } })
+
+    expect(store.get("child")?.revert).toBeUndefined()
+    expect(store.data.message.child).toEqual([kept])
+    expect(store.data.session_message.child?.map((message) => message.id)).toEqual([kept.id])
+    expect(store.data.part[kept.id]).toBeUndefined()
+    expect(store.data.part[removed.id]).toBeUndefined()
+    expect(store.data.part_text_accum_delta[part.id]).toBeUndefined()
+    expect(store.data.part_text_accum_delta[removedPart.id]).toBeUndefined()
+
+    hydration.resolve(singleResponse(kept, [part]))
+    await refreshing
+
+    expect(store.data.message.child).toEqual([kept])
+    expect(store.data.part[kept.id]).toBeUndefined()
+    expect(store.data.part[removed.id]).toBeUndefined()
+
+    await store.history.loadMore("child")
+
+    expect(client.requests).toHaveLength(3)
+    expect(store.data.message.child).toEqual([kept])
+    expect(store.data.part[kept.id]).toBeUndefined()
+    expect(store.data.part[removed.id]).toBeUndefined()
+    expect(store.data.part_text_accum_delta[part.id]).toBeUndefined()
+    expect(store.data.part_text_accum_delta[removedPart.id]).toBeUndefined()
+  })
+
   test("keeps removal tracking isolated across load generations", async () => {
     const firstResponse = deferredResponse()
     const secondResponse = deferredResponse()
