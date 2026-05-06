@@ -107,7 +107,12 @@ const layer = Layer.effect(
       const target = index < 0 ? undefined : msgs[index]
       const remove = index < 0 ? [] : msgs.slice(index + (session.revert.partID ? 1 : 0))
       for (const msg of remove) {
-        yield* sessions.removeMessage({ sessionID, messageID: msg.info.id })
+        // #98：软隐藏而非物理删除，保留 DB 行
+        yield* sessions.updateMessage({
+          ...msg.info,
+          // #98：cleanup 写 hidden 而非 MessageRemoved
+          hidden: { time: Date.now(), reason: "undo" },
+        })
       }
       if (session.revert.partID && target) {
         const partID = session.revert.partID
@@ -116,7 +121,11 @@ const layer = Layer.effect(
           const removeParts = target.parts.slice(idx)
           target.parts = target.parts.slice(0, idx)
           for (const part of removeParts) {
-            yield* sessions.removePart({ sessionID, messageID: target.info.id, partID: part.id })
+            // #98：部件软隐藏保留工具输出。
+            yield* sessions.updatePart({
+              ...part,
+              hidden: { time: Date.now(), reason: "undo" },
+            })
           }
         }
       }

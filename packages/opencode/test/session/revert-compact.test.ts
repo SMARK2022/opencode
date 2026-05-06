@@ -19,7 +19,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(
   LayerNode.compile(
-    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node]),
+    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node, MessageV2.node]),
   ),
 )
 
@@ -374,7 +374,7 @@ describe("revert + compact workflow", () => {
           const u1 = yield* user(sid)
           const p1 = yield* text(sid, u1.id, "first part")
           const p2 = yield* tool(sid, u1.id)
-          yield* text(sid, u1.id, "third part")
+          const p3 = yield* text(sid, u1.id, "third part")
 
           yield* session.setRevert({
             sessionID: sid,
@@ -389,6 +389,24 @@ describe("revert + compact workflow", () => {
           expect(msgs.length).toBe(1)
           expect(msgs[0].parts.length).toBe(1)
           expect(msgs[0].parts[0].id).toBe(p1.id)
+
+          // #98：原始读取保留隐藏部件及完整工具输出。
+          const raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
+          expect(raw.info.hidden).toBeUndefined()
+          expect(raw.parts).toEqual([
+            p1,
+            { ...p2, hidden: { time: expect.any(Number), reason: "undo" } },
+            { ...p3, hidden: { time: expect.any(Number), reason: "undo" } },
+          ])
+
+          const page = yield* MessageV2.page({ sessionID: sid, limit: 1 })
+          expect(page.items).toEqual(msgs)
+          expect(page.more).toBe(false)
+          expect(page.cursor).toBeUndefined()
+          expect(yield* session.messages({ sessionID: sid, limit: 1 })).toEqual(msgs)
+          expect(yield* MessageV2.stream(sid, { includeHidden: true })).toEqual([raw])
+          const audit = yield* MessageV2.page({ sessionID: sid, limit: 1, includeHidden: true })
+          expect(audit.items).toEqual([raw])
 
           const cleared = yield* session.get(sid)
           expect(cleared.revert).toBeUndefined()
@@ -433,6 +451,25 @@ describe("revert + compact workflow", () => {
           expect(ids).toContain(a1.id)
           expect(ids).not.toContain(u2.id)
           expect(ids).not.toContain(a2.id)
+
+          // #98：隐藏后缀不占页容量，游标指向最旧可见项。
+          const page = yield* MessageV2.page({ sessionID: sid, limit: 1 })
+          expect(page.items.map((msg) => msg.info.id)).toEqual([a1.id])
+          expect(page.more).toBe(true)
+          expect(page.cursor).toBe(MessageV2.cursor.encode({ id: a1.id, time: a1.time.created }))
+
+          const older = yield* MessageV2.page({ sessionID: sid, limit: 1, before: page.cursor })
+          expect(older.items.map((msg) => msg.info.id)).toEqual([u1.id])
+          expect(older.more).toBe(false)
+          expect(older.cursor).toBeUndefined()
+          expect(yield* session.messages({ sessionID: sid, limit: 1 })).toEqual(page.items)
+          expect(yield* session.messages({ sessionID: sid, limit: 2 })).toEqual(msgs)
+
+          const audit = yield* MessageV2.stream(sid, { includeHidden: true })
+          expect(audit.map((msg) => msg.info.id)).toEqual([a2.id, u2.id, a1.id, u1.id])
+          const raw = yield* MessageV2.page({ sessionID: sid, limit: 2, includeHidden: true })
+          expect(raw.items.map((msg) => msg.info.id)).toEqual([u2.id, a2.id])
+          expect(raw.items.every((msg) => msg.info.hidden?.reason === "undo")).toBe(true)
         }),
       { git: true },
     ),
@@ -466,6 +503,44 @@ describe("revert + compact workflow", () => {
 
           expect(yield* run(1)).toEqual([1])
           expect(yield* run(2)).toEqual([1, 2])
+        }),
+      { git: true },
+    ),
+  )
+
+
+  it.live(
+    "cleanup preserves hidden messages in database",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          // #98：软隐藏必须 DB 留存；visible 为空且 get 得 hidden.reason=undo
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "hello")
+          const a1 = yield* assistant(sid, u1.id, dir)
+          yield* text(sid, a1.id, "hi back")
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u1.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+
+          const state = yield* session.get(sid)
+          yield* revert.cleanup(state)
+
+          const visible = yield* session.messages({ sessionID: sid })
+          expect(visible.length).toBe(0)
+
+          const hidden = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
+          expect(hidden.info.hidden).toBeDefined()
+          expect(hidden.info.hidden!.reason).toBe("undo")
         }),
       { git: true },
     ),

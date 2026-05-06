@@ -779,25 +779,19 @@ const layer: Layer.Layer<
       if (input.limit) {
         return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
           Effect.provideService(Database.Service, database),
-        )).items
+        )).items.filter(
+          // 隐藏消息不返回给调用方，但仍在数据库中保留
+          (m) => !m.info.hidden,
+        )
       }
 
-      const size = 50
-      const result = [] as SessionV1.WithParts[]
-      let before: string | undefined
-      while (true) {
-        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before }).pipe(
-          Effect.provideService(Database.Service, database),
-        )
-        if (page.items.length === 0) break
-        for (let i = page.items.length - 1; i >= 0; i--) {
-          const item = page.items[i]
-          if (item) result.push(item)
-        }
-        if (!page.more || !page.cursor) break
-        before = page.cursor
-      }
-      return result.reverse()
+      // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
+      yield* get(input.sessionID)
+      const newestFirst = yield* MessageV2.stream(input.sessionID).pipe(
+        Effect.provideService(Database.Service, database),
+      )
+      // stream 为 newest-first；Session.messages 契约为 chronological oldest-first
+      return newestFirst.slice().reverse()
     })
 
     const removeMessage = Effect.fn("Session.removeMessage")(function* (input: {

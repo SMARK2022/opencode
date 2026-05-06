@@ -1,6 +1,7 @@
 export * as SessionV1 from "./session"
 
 import { Effect, Schema, Types } from "effect"
+
 import { define, inventory } from "../event"
 import { FileDiff } from "../file-diff"
 import { Project } from "../project"
@@ -80,10 +81,19 @@ export const Format = Schema.Union([OutputFormatText, OutputFormatJsonSchema]).a
 })
 export type OutputFormat = Schema.Schema.Type<typeof Format>
 
+// #98：撤销软隐藏元数据
+export const Hidden = Schema.Struct({
+  time: NonNegativeInt,
+  reason: Schema.Literal("undo"),
+})
+export type Hidden = Schema.Schema.Type<typeof Hidden>
+
 const partBase = {
   id: PartID,
   sessionID: SessionID,
   messageID: MessageID,
+  // #98：part 可选 soft-hide
+  hidden: Schema.optional(Hidden),
 }
 
 export const SnapshotPart = Schema.Struct({
@@ -332,6 +342,8 @@ export type ToolPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof ToolPart
 const messageBase = {
   id: MessageID,
   sessionID: partBase.sessionID,
+  // #98：message 可选 soft-hide
+  hidden: Schema.optional(Hidden),
 }
 
 export const User = Schema.Struct({

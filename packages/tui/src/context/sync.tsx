@@ -389,6 +389,25 @@ export const {
         }
 
         case "message.updated": {
+          // #98：隐藏消息按 ID 移除，旧快照不能复活。
+          const info = event.properties.info
+          if ((info as Record<string, unknown>).hidden) {
+            touchMessage(info.sessionID, info.id)
+            const messages = store.message[info.sessionID]
+            if (messages) {
+              const index = messages.findIndex((message) => message.id === info.id)
+              if (index !== -1) {
+                setStore(
+                  "message",
+                  info.sessionID,
+                  produce((draft) => {
+                    draft.splice(index, 1)
+                  }),
+                )
+              }
+            }
+            break
+          }
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
@@ -444,6 +463,23 @@ export const {
           break
         }
         case "message.part.updated": {
+          // #98：隐藏部件先记入 hydration，再从 store 移除。
+          const part = event.properties.part
+          if ((part as Record<string, unknown>).hidden) {
+            touchPart(part.sessionID, part.id)
+            const parts = store.part[part.messageID]
+            if (!parts) break
+            const foundAt = search(parts, part.id, (p) => p.id)
+            if (!foundAt.found) break
+            setStore(
+              "part",
+              part.messageID,
+              produce((draft) => {
+                draft.splice(foundAt.index, 1)
+              }),
+            )
+            break
+          }
           touchPart(event.properties.part.sessionID, event.properties.part.id)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {

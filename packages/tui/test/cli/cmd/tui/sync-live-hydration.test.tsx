@@ -542,3 +542,82 @@ test("a message removed during hydration does not regain stale parts", async () 
     app.renderer.destroy()
   }
 })
+
+test("hidden messages and parts survive stale session hydration", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const removed = { ...assistant, id: "msg_a", time: { created: 3, completed: 4 } }
+  const absent = { ...assistant, id: "msg_absent", time: { created: 5, completed: 6 } }
+  const unloaded = { ...assistant, id: "msg_unloaded", time: { created: 7, completed: 8 } }
+  const live = { id: partID, sessionID, messageID, type: "text" as const, text: "visible live content" }
+  const removedPart = { ...live, id: "prt_removed", text: "hidden part" }
+  const absentPart = { ...live, id: "prt_absent", text: "absent part" }
+  const unloadedPart = { ...live, id: "prt_unloaded", messageID: unloaded.id, text: "unloaded part" }
+  const messagePart = { ...live, id: "prt_hidden_message", messageID: removed.id, text: "hidden message part" }
+
+  let resolveMessages!: (response: Response) => void
+  const messages = new Promise<Response>((resolve) => {
+    resolveMessages = resolve
+  })
+  let requested = false
+  const { app, emit, sync } = await mount((url) => {
+    if (url.pathname === `/session/${sessionID}`) return json(session)
+    if (url.pathname === `/session/${sessionID}/message`) {
+      requested = true
+      return messages
+    }
+    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) return json([])
+    return undefined
+  }, tmp.path)
+
+  try {
+    // 先填 store 再发请求；时间与 ID 反序，trace 只能由隐藏事件建立。
+    for (const info of [assistant, removed]) {
+      emit(global({ id: `evt_live_${info.id}`, type: "message.updated", properties: { sessionID, info } }))
+    }
+    for (const part of [live, removedPart, messagePart]) {
+      emit(global({ id: `evt_live_${part.id}`, type: "message.part.updated", properties: {
+        sessionID, time: 2, part,
+      } }))
+    }
+    await wait(() => sync.data.part[removed.id]?.length === 1)
+    expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID, removed.id])
+
+    const hydrate = sync.session.sync(sessionID)
+    await wait(() => requested)
+    const hidden = { time: 9, reason: "undo" as const }
+    for (const info of [{ ...removed, hidden }, { ...absent, hidden }]) {
+      emit(global({ id: `evt_hide_${info.id}`, type: "message.updated", properties: { sessionID, info } }))
+    }
+    for (const part of [{ ...removedPart, hidden }, { ...absentPart, hidden }, { ...unloadedPart, hidden }]) {
+      emit(global({ id: `evt_hide_${part.id}`, type: "message.part.updated", properties: {
+        sessionID, time: 9, part,
+      } }))
+    }
+    // FIFO 标记证明隐藏事件已处理，再放行旧快照。
+    emit(global({ id: "evt_hidden_ready", type: "todo.updated", properties: { sessionID, todos: [] } }))
+    await wait(() => sync.data.todo[sessionID] !== undefined)
+    expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID])
+    expect(sync.data.part[messageID]).toEqual([live])
+
+    resolveMessages(
+      json([
+        { info: assistant, parts: [absentPart, { ...live, text: "" }, removedPart] },
+        { info: removed, parts: [messagePart] },
+        { info: absent, parts: [] },
+        { info: unloaded, parts: [unloadedPart] },
+      ]),
+    )
+    await hydrate
+
+    // 未触碰消息正常接收，已有正文保留；隐藏项和旧部件不得回填。
+    expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID, unloaded.id])
+    expect(sync.data.part[messageID]).toEqual([live])
+    expect(sync.data.part[removed.id]).toBeUndefined()
+    expect(sync.data.part[absent.id]).toBeUndefined()
+    expect(sync.data.part[unloaded.id]).toEqual([])
+  } finally {
+    resolveMessages(json([]))
+    app.renderer.destroy()
+  }
+})

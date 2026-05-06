@@ -271,6 +271,13 @@ export function applyDirectoryEvent(input: {
     }
     case "message.updated": {
       const info = clean((event.properties as { info: Message }).info)
+      if ((info as unknown as { hidden?: unknown }).hidden) {
+        applyDirectoryEvent({
+          ...input,
+          event: { type: "message.removed", properties: { sessionID: info.sessionID, messageID: info.id } },
+        })
+        break
+      }
       const messages = input.store.message[info.sessionID]
       if (!messages) {
         input.setStore("message", info.sessionID, [info])
@@ -312,6 +319,13 @@ export function applyDirectoryEvent(input: {
     }
     case "message.part.updated": {
       const part = (event.properties as { part: Part }).part
+      if ((part as unknown as { hidden?: unknown }).hidden) {
+        applyDirectoryEvent({
+          ...input,
+          event: { type: "message.part.removed", properties: { messageID: part.messageID, partID: part.id } },
+        })
+        break
+      }
       if (SKIP_PARTS.has(part.type)) break
       input.setStore(
         produce((draft) => {
