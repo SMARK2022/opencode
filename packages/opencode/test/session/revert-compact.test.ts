@@ -636,4 +636,45 @@ describe("revert + compact workflow", () => {
       { git: true },
     ),
   )
+
+  it.live(
+    "cleanup preserves hidden messages in database",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "hello")
+          const a1 = yield* assistant(sid, u1.id, info.directory)
+          yield* text(sid, a1.id, "hi")
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u1.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+
+          yield* revert.cleanup(yield* session.get(sid))
+
+          const visible = yield* session.messages({ sessionID: sid })
+          expect(visible.length).toBe(0)
+
+          const hidden = MessageV2.get({ sessionID: sid, messageID: u1.id })
+          expect(hidden.info.hidden).toBeDefined()
+          expect(hidden.info.hidden!.reason).toBe("undo")
+
+          const u1raw = MessageV2.get({ sessionID: sid, messageID: u1.id })
+          expect(u1raw.info.id).toBe(u1.id)
+          expect(u1raw.info.hidden?.reason).toBe("undo")
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
 })

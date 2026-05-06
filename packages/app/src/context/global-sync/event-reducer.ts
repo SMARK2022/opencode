@@ -183,6 +183,19 @@ export function applyDirectoryEvent(input: {
     }
     case "message.updated": {
       const info = clean((event.properties as { info: Message }).info)
+      if ((info as unknown as { hidden?: unknown }).hidden) {
+        input.setStore(
+          produce((draft) => {
+            const messages = draft.message[info.sessionID]
+            if (messages) {
+              const result = Binary.search(messages, info.id, (m) => m.id)
+              if (result.found) messages.splice(result.index, 1)
+            }
+            delete draft.part[info.id]
+          }),
+        )
+        break
+      }
       const messages = input.store.message[info.sessionID]
       if (!messages) {
         input.setStore("message", info.sessionID, [info])
@@ -218,6 +231,23 @@ export function applyDirectoryEvent(input: {
     }
     case "message.part.updated": {
       const part = (event.properties as { part: Part }).part
+      if ((part as unknown as { hidden?: unknown }).hidden) {
+        const parts = input.store.part[part.messageID]
+        if (!parts) break
+        const foundAt = Binary.search(parts, part.id, (p) => p.id)
+        if (!foundAt.found) break
+        input.setStore(
+          produce((draft) => {
+            const list = draft.part[part.messageID]
+            if (!list) return
+            const next = Binary.search(list, part.id, (p) => p.id)
+            if (!next.found) return
+            list.splice(next.index, 1)
+            if (list.length === 0) delete draft.part[part.messageID]
+          }),
+        )
+        break
+      }
       if (SKIP_PARTS.has(part.type)) break
       const parts = input.store.part[part.messageID]
       if (!parts) {

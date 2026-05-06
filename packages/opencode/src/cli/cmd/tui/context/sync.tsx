@@ -251,30 +251,45 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.updated": {
-          const messages = store.message[event.properties.info.sessionID]
-          if (!messages) {
-            setStore("message", event.properties.info.sessionID, [event.properties.info])
+          const info = event.properties.info
+          if ((info as Record<string, unknown>).hidden) {
+            const messages = store.message[info.sessionID]
+            const result = Binary.search(messages, info.id, (m) => m.id)
+            if (result.found) {
+              setStore(
+                "message",
+                info.sessionID,
+                produce((draft) => {
+                  draft.splice(result.index, 1)
+                }),
+              )
+            }
             break
           }
-          const result = Binary.search(messages, event.properties.info.id, (m) => m.id)
+          const messages = store.message[info.sessionID]
+          if (!messages) {
+            setStore("message", info.sessionID, [info])
+            break
+          }
+          const result = Binary.search(messages, info.id, (m) => m.id)
           if (result.found) {
-            setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
+            setStore("message", info.sessionID, result.index, reconcile(info))
             break
           }
           setStore(
             "message",
-            event.properties.info.sessionID,
+            info.sessionID,
             produce((draft) => {
-              draft.splice(result.index, 0, event.properties.info)
+              draft.splice(result.index, 0, info)
             }),
           )
-          const updated = store.message[event.properties.info.sessionID]
+          const updated = store.message[info.sessionID]
           if (updated.length > 100) {
             const oldest = updated[0]
             batch(() => {
               setStore(
                 "message",
-                event.properties.info.sessionID,
+                info.sessionID,
                 produce((draft) => {
                   draft.shift()
                 }),
@@ -304,21 +319,36 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.part.updated": {
-          const parts = store.part[event.properties.part.messageID]
-          if (!parts) {
-            setStore("part", event.properties.part.messageID, [event.properties.part])
+          const part = event.properties.part
+          if ((part as Record<string, unknown>).hidden) {
+            const parts = store.part[part.messageID]
+            if (!parts) break
+            const foundAt = Binary.search(parts, part.id, (p) => p.id)
+            if (!foundAt.found) break
+            setStore(
+              "part",
+              part.messageID,
+              produce((draft) => {
+                draft.splice(foundAt.index, 1)
+              }),
+            )
             break
           }
-          const result = Binary.search(parts, event.properties.part.id, (p) => p.id)
+          const parts = store.part[part.messageID]
+          if (!parts) {
+            setStore("part", part.messageID, [part])
+            break
+          }
+          const result = Binary.search(parts, part.id, (p) => p.id)
           if (result.found) {
-            setStore("part", event.properties.part.messageID, result.index, reconcile(event.properties.part))
+            setStore("part", part.messageID, result.index, reconcile(part))
             break
           }
           setStore(
             "part",
-            event.properties.part.messageID,
+            part.messageID,
             produce((draft) => {
-              draft.splice(result.index, 0, event.properties.part)
+              draft.splice(result.index, 0, part)
             }),
           )
           break

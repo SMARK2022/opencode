@@ -38,6 +38,11 @@ interface FetchDecompressionError extends Error {
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:"
 export { isMedia }
 
+const Hidden = Schema.Struct({
+  time: NonNegativeInt,
+  reason: Schema.Literal("undo"),
+})
+
 export const OutputLengthError = namedSchemaError("MessageOutputLengthError", {})
 export const AbortedError = namedSchemaError("MessageAbortedError", { message: Schema.String })
 export const StructuredOutputError = namedSchemaError("StructuredOutputError", {
@@ -87,6 +92,7 @@ const partBase = {
   id: PartID,
   sessionID: SessionID,
   messageID: MessageID,
+  hidden: Schema.optional(Hidden),
 }
 
 export const SnapshotPart = Schema.Struct({
@@ -401,6 +407,7 @@ export type ToolPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof ToolPart
 const messageBase = {
   id: MessageID,
   sessionID: SessionID,
+  hidden: Schema.optional(Hidden),
 }
 
 export const User = Schema.Struct({
@@ -1056,14 +1063,17 @@ export function page(input: { sessionID: SessionID; limit: number; before?: stri
   }
 }
 
-export function* stream(sessionID: SessionID) {
+export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
   const size = 50
   let before: string | undefined
   while (true) {
     const next = page({ sessionID, limit: size, before })
     if (next.items.length === 0) break
     for (let i = next.items.length - 1; i >= 0; i--) {
-      yield next.items[i]
+      const msg = next.items[i]
+      if (!opts?.includeHidden && msg.info.hidden) continue
+      if (!opts?.includeHidden) msg.parts = msg.parts.filter((p) => !p.hidden)
+      yield msg
     }
     if (!next.more || !next.cursor) break
     before = next.cursor
