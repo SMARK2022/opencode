@@ -313,8 +313,10 @@ describe("SystemContextBuiltIns", () => {
 })
 
 test("uses actual tool names and preserves parallel write boundaries", () => {
-  // 空能力来自最后一步请求，不能输出工具可用性声明。
-  expect(SystemContextBuiltIns.toolUsage([])).toBeUndefined()
+  // 最后一步等空能力请求明确声明无工具，避免静态模板仍暗示可调用。
+  expect(SystemContextBuiltIns.toolUsage([])).toContain("# WITHOUT any tools")
+  expect(SystemContextBuiltIns.toolUsage([])).toContain("NO tools are currently available")
+  expect(SystemContextBuiltIns.toolUsage([])).not.toContain("# Using your tools")
   const guidance = SystemContextBuiltIns.toolUsage(["read", "apply_patch", "todowrite"])
   // patch-only 模式应广告 patch，而不是隐式补回已过滤的 edit/write。
   expect(guidance).toContain("use the apply_patch tool")

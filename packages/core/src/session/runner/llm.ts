@@ -28,6 +28,8 @@ import { SessionReminders } from "../reminders"
 import { SkillGuidance } from "../../skill/guidance"
 import { ReferenceGuidance } from "../../reference/guidance"
 import { ToolRegistry } from "../../tool/registry"
+import { ToolSelection } from "../../tool/selection"
+import { McpTools } from "../../mcp/tools"
 import { ToolOutputStore } from "../../tool-output-store"
 import { SessionContextEpoch } from "../context-epoch"
 import { SessionCompaction } from "../compaction"
@@ -110,6 +112,7 @@ const layer = Layer.effect(
     const agents = yield* AgentV2.Service
     const tools = yield* ToolRegistry.Service
     const models = yield* SessionRunnerModel.Service
+    const mcpTools = yield* McpTools.Service
     const store = yield* SessionStore.Service
     const location = yield* Location.Service
     const systemContext = yield* SystemContextRegistry.Service
@@ -178,10 +181,19 @@ const layer = Layer.effect(
     const continueAfterOverflowCompaction = (step: number) =>
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
 
-    const loadSystemContext = (agent: AgentV2.Selection) =>
-      Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
-        concurrency: "unbounded",
-      }).pipe(Effect.map(SystemContext.combine))
+    const prepareTurn = Effect.fn("SessionRunner.prepareTurn")(function* (sessionID: SessionSchema.ID, agent: AgentV2.Selection) {
+      const mcpContextFor = yield* mcpTools.prepare()
+      // 工具与说明使用同一轮权限/选择快照，不能共享另一Session的可见工具列表。
+      const sessionPermissions = yield* store.permissions(sessionID)
+      const materialization = yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions], sessionPermissions)
+      return {
+        materialization,
+        context: Effect.all([
+          systemContext.load(), skillGuidance.load(agent), referenceGuidance.load(),
+          Effect.succeed(mcpContextFor(materialization.definitions.map(tool => tool.name))),
+        ], { concurrency: "unbounded" }).pipe(Effect.map(SystemContext.combine)),
+      }
+    })
 
     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
       sessionID: SessionSchema.ID,
@@ -193,7 +205,9 @@ const layer = Layer.effect(
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
         return yield* Effect.interrupt
       const agent = yield* agents.select(session.agent)
-      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent), session.id)
+      const prepared = yield* prepareTurn(session.id, agent)
+      // initialize仍在durable promotion之前，既有epoch基线与用户admission边界不移动。
+      const initialized = yield* SessionContextEpoch.initialize(db, prepared.context, session.id)
       const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
@@ -251,17 +265,15 @@ const layer = Layer.effect(
         })))
       }))
       const system =
-        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
+        initialized ?? (yield* SessionContextEpoch.prepare(db, events, prepared.context, session.id))
       const selection = yield* models.resolve(session)
       const model = selection.model
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
-      // 委派Session的持久范围也决定本轮广告，防止正文可见工具与实际权限分裂。
-      const sessionPermissions = yield* store.permissions(session.id)
-      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions])
-      // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
-      const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
+      const toolMaterialization = isLastStep ? undefined : prepared.materialization
+      // 指引只引用本轮真实可见工具；内部修复定义不算用户能力，空列表明确提示无工具。
+      const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name).filter(ToolSelection.isUserConfigurable) ?? [])
       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
       // 普通提醒逐轮生成，实验计划沿既有synthetic持久化；两者都不新增用户admission或放宽权限。
@@ -564,6 +576,7 @@ export const node = makeLocationNode({
     AgentV2.node,
     ToolRegistry.node,
     SessionRunnerModel.node,
+    McpTools.node,
     SessionStore.node,
     Location.node,
     SystemContextRegistry.node,

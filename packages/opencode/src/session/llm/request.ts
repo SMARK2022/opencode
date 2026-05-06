@@ -4,6 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
+import { ToolSelection } from "@/tool/selection"
 import type { Agent } from "@/agent/agent"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -58,7 +59,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // 复用最终权限/user.tools 过滤；同一工具对象随后用于 SDK/native 请求，不读取 registry 全集。
   const tools = resolveTools(input)
   // 指引在 prompt transform 和 OAuth instructions 构造之前进入 system，避免漏掉其中一种运行时。
-  const toolGuidance = SystemContextBuiltIns.toolUsage(Object.keys(tools))
+  const toolGuidance = SystemContextBuiltIns.toolUsage(Object.keys(tools).filter(ToolSelection.isUserConfigurable))
   const system = [
     [
       // 当前权限过滤后的工具指引先于静态提示和环境，两个运行时共用此 producer。
@@ -217,7 +218,10 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (_, k) => input.user.tools?.[k] !== false && !disabled.has(k) && ToolSelection.enabled(k, input.permission),
+  )
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {

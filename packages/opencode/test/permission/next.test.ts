@@ -258,6 +258,23 @@ test("merge - preserves rule order", () => {
   ])
 })
 
+test("compact - preserves last-match-wins across repeated tool toggles", () => {
+  const rules: PermissionV1.Ruleset = [
+    { permission: "write", pattern: "*", action: "allow" },
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "write", pattern: "*", action: "deny" },
+    { permission: "edit", pattern: "src/*", action: "ask" },
+    { permission: "write", pattern: "*", action: "allow" },
+    { permission: "write", pattern: "*", action: "deny" },
+  ]
+  const compacted = Permission.compact(rules)
+  expect(compacted).toEqual([rules[1], rules[3], rules[5]])
+  expect(Permission.compact(compacted)).toEqual(compacted)
+  expect(Permission.evaluate("write", "file.ts", compacted)).toEqual(Permission.evaluate("write", "file.ts", rules))
+  expect(Permission.evaluate("edit", "src/file.ts", compacted)).toEqual(Permission.evaluate("edit", "src/file.ts", rules))
+  expect(Permission.evaluate("bash", "ls", compacted)).toEqual(Permission.evaluate("bash", "ls", rules))
+})
+
 test("merge - config permission overrides default ask", () => {
   const defaults: PermissionV1.Ruleset = [{ permission: "*", pattern: "*", action: "ask" }]
   const config: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]

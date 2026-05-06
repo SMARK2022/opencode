@@ -44,6 +44,8 @@ type Config<
 > = {
   readonly description: string
   readonly input: Input
+  // 外部MCP保留原始schema广告；普通工具仍由自身codec生成定义和校验输入。
+  readonly inputSchema?: ToolDefinition["inputSchema"]
   readonly output: Output
   readonly structured?: Structured
   readonly toStructuredOutput?: (input: {
@@ -82,7 +84,7 @@ export function make<
       const definition = new ToolDefinition({
         name,
         description: config.description,
-        inputSchema: toJsonSchema(config.input),
+        inputSchema: config.inputSchema ?? toJsonSchema(config.input),
         outputSchema: toJsonSchema(config.structured ?? config.output),
       })
       definitions.set(name, definition)
@@ -132,7 +134,8 @@ export function make<
 }
 
 export const validateName = (name: string) =>
-  /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
+  // canonical保存MCP原规范化ID，provider的名称长度约束不能阻止会话先关闭该工具。
+  /^[A-Za-z0-9_-]+$/.test(name)
     ? Effect.void
     : Effect.fail(new RegistrationError({ name, message: `Invalid tool name: ${name}` }))
 

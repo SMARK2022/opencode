@@ -36,6 +36,8 @@ const mcp = Layer.succeed(
   MCP.Service,
   MCP.Service.of({
     status: () => Effect.succeed({}),
+    native: () => Effect.die("unexpected Native MCP connection in snapshot-effect tests"),
+    snapshot: () => Effect.succeed({ tools: {}, clients: {}, instructions: [] }),
     clients: () => Effect.succeed({}),
     instructions: () => Effect.succeed([]),
     tools: () => Effect.succeed({}),

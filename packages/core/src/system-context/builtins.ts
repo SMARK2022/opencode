@@ -24,7 +24,13 @@ export const knowledgeCutoff = (id: string) => {
 
 // 输入必须是当前 turn 真正广告的工具名；不能读取 registry.ids 或固定默认 agent。
 export const toolUsage = (ids: readonly string[]) => {
-  if (ids.length === 0) return undefined
+  // 空列表显式覆盖静态模板中的通用工具指令。
+  if (ids.length === 0) {
+    return [
+      "# WITHOUT any tools",
+      "NOTICE: Now, NO tools are currently available for this request. DO NOT claim to call ANY tools or perform tool-backed filesystem, shell, web, or notebook operations; IGNORE any generic tool instructions from other prompts.",
+    ].join("\n")
+  }
   return [
     "# Using your tools",
     "Do NOT use the bash tool when a dedicated tool is available.",

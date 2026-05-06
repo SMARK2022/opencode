@@ -3,6 +3,7 @@ export * as ConfigMigrateV1 from "./migrate"
 import { ConfigV1 } from "./config"
 import { ConfigAgentV1 } from "./agent"
 import { ConfigMCPV1 } from "./mcp"
+import { ConfigMCP } from "../../config/mcp"
 import { ConfigPermissionV1 } from "./permission"
 import { ConfigProviderV1 } from "./provider"
 import { ConfigProviderOptionsV1 } from "./provider-options"
@@ -29,7 +30,12 @@ const keys = new Set([
 
 export function isV1(input: unknown) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return false
-  return Object.keys(input).some((key) => keys.has(key))
+  if (Object.keys(input).some((key) => keys.has(key))) return true
+  const mcp = "mcp" in input ? input.mcp : undefined
+  // 旧MCP可单独配置，不能因缺少其他旧键而被新schema当成空服务器集。
+  return typeof mcp === "object" && mcp !== null && !Array.isArray(mcp) &&
+    Object.values(mcp).some(server => typeof server === "object" && server !== null && (
+      ("type" in server && (server.type === "local" || server.type === "remote")) || ("enabled" in server && typeof server.enabled === "boolean")))
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {
@@ -125,10 +131,11 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
   }
 }
 
-function mcp(info: typeof ConfigV1.Info.Type) {
+export function mcp(info: Pick<typeof ConfigV1.Info.Type, "mcp" | "experimental">): ConfigMCP.Info | undefined {
   const servers = Object.fromEntries(
-    Object.entries(info.mcp ?? {}).flatMap(([name, server]) =>
-      "type" in server ? [[name, migrateMcp(server)] as const] : [],
+    // enabled-only是公开的继承覆盖，不能在全局与项目配置合并前丢弃。
+    Object.entries(info.mcp ?? {}).map(([name, server]) =>
+      [name, "type" in server ? migrateMcp(server) : { disabled: !server.enabled }],
     ),
   )
   const timeout = info.experimental?.mcp_timeout
@@ -136,7 +143,7 @@ function mcp(info: typeof ConfigV1.Info.Type) {
   return { timeout: timeout === undefined ? undefined : { request: timeout }, servers }
 }
 
-function migrateMcp(info: ConfigMCPV1.Info) {
+export function migrateMcp(info: ConfigMCPV1.Info): typeof ConfigMCP.Server.Type {
   const disabled = info.enabled === undefined ? undefined : !info.enabled
   if (info.type === "local")
     return {
@@ -145,7 +152,8 @@ function migrateMcp(info: ConfigMCPV1.Info) {
       cwd: info.cwd,
       environment: info.environment,
       disabled,
-      timeout: info.timeout === undefined ? undefined : { request: info.timeout },
+      // V1同一期限控制连接和调用，不能迁移后把长连接等待缩回默认值。
+      timeout: info.timeout === undefined ? undefined : { startup: info.timeout, request: info.timeout },
     }
   return {
     type: info.type,
@@ -159,7 +167,7 @@ function migrateMcp(info: ConfigMCPV1.Info) {
       redirect_uri: info.oauth.redirectUri,
     },
     disabled,
-    timeout: info.timeout === undefined ? undefined : { request: info.timeout },
+    timeout: info.timeout === undefined ? undefined : { startup: info.timeout, request: info.timeout },
   }
 }
 

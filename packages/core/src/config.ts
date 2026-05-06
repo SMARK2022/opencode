@@ -23,6 +23,7 @@ import { ConfigProvider } from "./config/provider"
 import { ConfigReference } from "./config/reference"
 import { ConfigToolOutput } from "./config/tool-output"
 import { ConfigWatcher } from "./config/watcher"
+import { ConfigVariable } from "./config/variable"
 import { ConfigV1 } from "./v1/config/config"
 import { ConfigMigrateV1 } from "./v1/config/migrate"
 
@@ -153,7 +154,9 @@ const layer = Layer.effect(
       if (!text) return
 
       const errors: ParseError[] = []
-      const input: unknown = parse(text, errors, { allowTrailingComma: true })
+      // 与V1在同一解析前展开凭证；file引用相对于各自配置文件，而不是Location目录。
+      const expanded = yield* Effect.promise(() => ConfigVariable.substitute({ text, type: "path", path: filepath }))
+      const input: unknown = parse(expanded, errors, { allowTrailingComma: true })
       if (errors.length) return
 
       const info = Option.getOrUndefined(

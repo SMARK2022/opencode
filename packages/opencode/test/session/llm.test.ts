@@ -1271,12 +1271,25 @@ describe("session.llm.stream", () => {
           sessionID,
           model: resolved,
           agent,
-          permission: [{ permission: "question", pattern: "*", action: "allow" }],
+          permission: [
+            { permission: "question", pattern: "*", action: "allow" },
+            { permission: "write", pattern: "*", action: "deny" },
+          ],
           system: ["You are a helpful assistant.", "<env>request environment</env>"],
           messages: [{ role: "user", content: "Hello" }],
           tools: {
             question: tool({
               description: "Ask a question",
+              inputSchema: z.object({}),
+              execute: async () => ({ output: "" }),
+            }),
+            edit: tool({
+              description: "Edit a file",
+              inputSchema: z.object({}),
+              execute: async () => ({ output: "" }),
+            }),
+            write: tool({
+              description: "Write a file",
               inputSchema: z.object({}),
               execute: async () => ({ output: "" }),
             }),
@@ -1286,6 +1299,8 @@ describe("session.llm.stream", () => {
         const capture = yield* Effect.promise(() => request)
         const tools = capture.body.tools as Array<{ function?: { name?: string } }> | undefined
         expect(tools?.some((item) => item.function?.name === "question")).toBe(true)
+        expect(tools?.some((item) => item.function?.name === "edit")).toBe(true)
+        expect(tools?.some((item) => item.function?.name === "write")).toBe(false)
         // 真实 HTTP 捕获验证最终 system，而非单独调用 toolUsage 复制生产逻辑。
         const messages = capture.body.messages as Array<{ role: string; content: string }>
         const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n")
@@ -1293,6 +1308,8 @@ describe("session.llm.stream", () => {
         expect(system.indexOf("You are a helpful assistant.")).toBeGreaterThan(system.indexOf("# Using your tools"))
         expect(system.indexOf("<env>")).toBeGreaterThan(system.indexOf("You are a helpful assistant."))
         expect(system).not.toContain("To read files use the read tool")
+        expect(system).toContain("To edit files use the edit tool")
+        expect(system).not.toContain("To create files use the write tool")
       }),
     {
       config: () => ({

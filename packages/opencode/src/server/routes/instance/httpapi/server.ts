@@ -18,6 +18,7 @@ import { Git } from "@/git"
 import { Installation } from "@/installation"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "@/mcp"
+import { McpRuntime } from "@opencode-ai/core/mcp"
 import { McpAuth } from "@/mcp/auth"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
@@ -272,18 +273,30 @@ const app = LayerNode.group([
 ])
 
 export function createSharedServices() {
-  const locationServiceMapV2 = buildLocationServiceMap()
-  return {
-    layer: Layer.mergeAll(
-      AppNodeBuilderV1.build(app),
-      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), [
-        [LocationServiceMap.node, locationServiceMapV2],
-        [SessionExecution.node, SessionExecutionLocal.node],
-      ]),
-      AppNodeBuilderV1.build(MoveSession.node, [[LocationServiceMap.node, locationServiceMapV2]]),
-    ).pipe(Layer.provideMerge(locationServiceMapV2)),
-    memoMap,
-  }
+  const legacyOwners = AppNodeBuilderV1.build(LayerNode.group([MCP.node, InstanceStore.node]))
+  const layer = Layer.unwrap(Effect.gen(function* () {
+    const mcp = yield* MCP.Service
+    const instances = yield* InstanceStore.Service
+    const locationServiceMapV2 = buildLocationServiceMap(ref => {
+      // 显式workspace有自己的Native owner；隐式本地位置取旧实例内的同一连接对象。
+      if (ref.workspaceID !== undefined) return []
+      return [[McpRuntime.node, Layer.effect(McpRuntime.Service,
+        instances.provide({ directory: ref.directory }, mcp.native()),
+      )]]
+    })
+    const replacements: LayerNode.Replacements = [
+      [LocationServiceMap.node, locationServiceMapV2],
+      [SessionExecution.node, SessionExecutionLocal.node],
+      [MCP.node, Layer.succeed(MCP.Service, mcp)],
+      [InstanceStore.node, Layer.succeed(InstanceStore.Service, instances)],
+    ]
+    return Layer.mergeAll(
+      AppNodeBuilderV1.build(app, replacements),
+      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), replacements),
+      AppNodeBuilderV1.build(MoveSession.node, replacements),
+    ).pipe(Layer.provideMerge(locationServiceMapV2))
+  })).pipe(Layer.provideMerge(legacyOwners))
+  return { layer, memoMap }
 }
 
 export function createRoutes(
