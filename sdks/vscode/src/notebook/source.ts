@@ -64,8 +64,9 @@ export async function notebookSource(input: Record<string, unknown>) {
 
   const maxBytes = 24 * 1024
   let bytes = 0
-  let rendered = 0
-  let cut = false
+  // 正文行数与字节截断分开记录，格头只计入字节预算。
+  let renderedLines = 0
+  let bytesCut = false
   let lastRenderedLine = 0
   const outputCells: string[] = []
 
@@ -81,14 +82,11 @@ export async function notebookSource(input: Record<string, unknown>) {
       continue
     }
 
-    if (rendered >= limit) {
-      cut = true
-      break
-    }
+    if (renderedLines >= limit) break
     const headerLine = buildHeader(cell, cellRange)
     const hdrBytes = Buffer.byteLength(headerLine, "utf8") + 4 // "--: "
     if (bytes + hdrBytes > maxBytes && outputCells.length > 0) {
-      cut = true
+      bytesCut = true
       break
     }
     outputCells.push(headerLine)
@@ -102,31 +100,28 @@ export async function notebookSource(input: Record<string, unknown>) {
       if (globalLineNum > globalEnd) {
         break
       }
-      if (rendered >= limit) {
-        cut = true
-        break
-      }
+      if (renderedLines >= limit) break
       // 精确编辑需要完整源行，分页仍沿既有行数与 UTF-8 字节预算。
       const sourceLine = cell.document.lineAt(i).text
       const outLine = `${globalLineNum}: ${sourceLine}`
       // UTF-8 预算包括真实行号前缀，多字节正文不能用字符数冒充输出字节。
       const outBytes = Buffer.byteLength(outLine, "utf8")
       // 首个正文行允许推进，未编号格头不能让空正文页永远重复同一 offset。
-      if (bytes + outBytes > maxBytes && rendered > 0) {
-        cut = true
+      if (bytes + outBytes > maxBytes && renderedLines > 0) {
+        bytesCut = true
         break
       }
       outputCells.push(outLine)
       bytes += outBytes
-      rendered++
+      renderedLines++
       lastRenderedLine = globalLineNum
     }
 
-    if (cut) break
+    if (bytesCut || renderedLines >= limit) break
   }
 
-  // 字节或行数截断时只从最后实际输出的正文编号续读，不能跳过尚未返回的源码。
-  if (!cut) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+  // 仅有剩余正文容量时补齐窗口终点，满额页按实际返回编号判断是否仍需续读。
+  if (!bytesCut && renderedLines < limit) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
   const more = lastRenderedLine < globalEnd
 
   let output = warning ? `${warning}\n\n` : ""
@@ -136,7 +131,7 @@ export async function notebookSource(input: Record<string, unknown>) {
     ) + "\n"
   output += outputCells.join("\n")
 
-  if (cut) {
+  if (bytesCut) {
     output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
@@ -152,9 +147,9 @@ export async function notebookSource(input: Record<string, unknown>) {
       cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
       globalStart,
       limit,
-      returned: outputCells.length,
+      returned: renderedLines,
       totalLines,
-      truncated: cut || more,
+      truncated: bytesCut || more,
     },
   }
 }

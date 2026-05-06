@@ -1851,12 +1851,13 @@ function GenericTool(props: ToolProps) {
   const ctx = use()
   const output = createMemo(() => props.output?.trim() ?? "")
   const [expanded, setExpanded] = createSignal(false)
-  const maxLines = 3
+  // 20 行判断是否折叠，预览保留 10 行；字符预算继续随终端宽度变化。
+  const maxLines = 10
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars()))
+  const collapsed = createMemo(() => collapseToolOutput(output(), 20, maxChars() * 2))
   const limited = createMemo(() => {
     if (expanded() || !collapsed().overflow) return output()
-    return collapsed().output
+    return collapseToolOutput(output(), maxLines, maxChars()).output
   })
 
   return (
@@ -2126,12 +2127,16 @@ function Shell(props: ToolProps) {
     return stripAnsi(text?.trim() ?? "")
   })
   const [expanded, setExpanded] = createSignal(false)
+  // 命令占一行，空闲预览按总行数 10/20 与字符预算判断；运行及模型上下文视图保持完整。
   const maxLines = 10
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars()))
+  const collapsed = createMemo(() => {
+    if (isRunning() || showContextOutput()) return { output: output(), overflow: false }
+    return collapseToolOutput(output(), 19, maxChars() * 2)
+  })
   const limited = createMemo(() => {
     if (expanded() || !collapsed().overflow) return output()
-    return collapsed().output
+    return collapseToolOutput(output(), maxLines - 1, (maxLines - 1) * Math.max(20, ctx.width - 6)).output
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2148,10 +2153,9 @@ function Shell(props: ToolProps) {
     return `# Running in ${wd}`
   })
 
-  // 切换时展开完整窗口，避免压缩前后行数变化被旧的折叠状态隐藏。
+  // 上下文视图完整展示，右键切换不改变普通输出的展开状态。
   const toggleContextOutput = () => {
     if (!contextOutputAvailable()) return
-    setExpanded(true)
     setShowContextOutput((prev) => !prev)
   }
 
@@ -2203,13 +2207,13 @@ function Write(props: ToolProps) {
   const code = createMemo(() => {
     return stringValue(props.input.content) ?? ""
   })
-  const maxLines = 20
-  // 同时限制字符预算，单行长内容也不能挤满窄终端。
+  const maxLines = 10
+  // 完整展示阈值为 20 行，折叠预览为 10 行；两者都保留字符预算。
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars()))
+  const collapsed = createMemo(() => collapseToolOutput(code(), 20, maxChars() * 2))
   const limited = createMemo(() => {
     if (expanded() || !collapsed().overflow) return code()
-    return collapsed().output
+    return collapseToolOutput(code(), maxLines, maxChars()).output
   })
   // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
   const diff = createMemo(() => props.metadata.diff as string | undefined)
@@ -2243,8 +2247,8 @@ function Write(props: ToolProps) {
           part={props.part}
           onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
         >
-          {/* diff 高度限制：折叠时最多显示 15 行，展开时显示全部 */}
-          <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+          {/* 超过 20 行才限高为 10 行，短 diff 与展开态保留完整内容。 */}
+          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 10 : undefined}>
             <diff
               diff={diff()!}
               syncScroll={true}
@@ -2582,7 +2586,7 @@ function Edit(props: ToolProps) {
     // 收缩阈值仍按完整展示行数判断，不能用变更行数忽略上下文和文件头。
     return { ...changes, total: diffContent().split("\n").length }
   })
-  // 20 行是展开阈值，15 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
+  // 20 行是展开阈值，10 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
   const overflow = createMemo(() => stats().total > 20)
 
   return (
@@ -2595,7 +2599,7 @@ function Edit(props: ToolProps) {
           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
         >
           {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
-          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
+          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 10 : undefined}>
             <diff
               // 同步滚动：diff 视图与代码视图同步滚动，提升编辑体验
               syncScroll={true}
@@ -2694,8 +2698,8 @@ function ApplyPatch(props: ToolProps) {
                   </text>
                 }
               >
-                {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
-                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
+                {/* 完整 patch 仍供解析，仅超过 20 行的未展开预览限高为 10 行。 */}
+                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 10 : undefined}>
                   <diff
                     syncScroll={true}
                     diff={file.patch || ""}
