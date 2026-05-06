@@ -44,4 +44,10 @@ export const VscodeNotebookDescriptions = {
     "filePath is required. Use this when debugging kernel, interpreter, package, working-directory, or environment issues.",
     "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
   ].join("\n"),
+
+  kernel: [
+    "Restart the Jupyter kernel for a VS Code notebook.",
+    "filePath is required. Use this when the kernel is unresponsive, packages have been installed, or a clean runtime state is needed.",
+    "Clears all variables and execution state from previous cell runs. Rerun setup or import cells before running dependent cells.",
+  ].join("\n"),
 }

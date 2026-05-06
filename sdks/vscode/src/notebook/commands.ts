@@ -14,6 +14,7 @@ import { runNotebook } from "./run"
 import { editNotebook } from "./edit"
 import { readNotebookCellOutput } from "./output"
 import { notebookEnv } from "./env"
+import { restartNotebookKernel } from "./kernel"
 
 // ---------------------------------------------------------------------------
 // Main command
@@ -66,6 +67,19 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
         run: async () => {
           const notebook = await selectNotebook()
           return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
+        },
+      },
+      {
+        label: "vscode_notebook_restart_kernel",
+        description: "restart Jupyter kernel, clear all runtime state",
+        run: async () => {
+          const notebook = await selectNotebook()
+          if (!notebook) return undefined
+          const reason = await vscode.window.showInputBox({
+            prompt: "Restart reason (optional)",
+            ignoreFocusOut: true,
+          })
+          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason ?? undefined })
         },
       },
     ],

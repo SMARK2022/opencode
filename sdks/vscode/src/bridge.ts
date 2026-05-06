@@ -14,7 +14,8 @@
  *   POST /notebook/edit         – insert/edit/delete cells
  *   POST /notebook/output       – artifact-first output export
  *   POST /notebook/cell-output  – alias for /notebook/output
- *   POST /notebook/env          – kernel/environment snapshot
+ *   POST /notebook/env           – kernel/environment snapshot
+ *   POST /notebook/kernel        – restart Jupyter kernel
  */
 import * as http from "node:http"
 import { isRecord, stringProp } from "./util"
@@ -24,6 +25,7 @@ import { runNotebook } from "./notebook/run"
 import { editNotebook } from "./notebook/edit"
 import { readNotebookCellOutput } from "./notebook/output"
 import { notebookEnv } from "./notebook/env"
+import { restartNotebookKernel } from "./notebook/kernel"
 import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
 
 const BRIDGE_HOST = "127.0.0.1"
@@ -123,7 +125,7 @@ export async function startBridge(output: { appendLine(value: string): void }): 
       const base = `http://${BRIDGE_HOST}:${address.port}`
       output.appendLine(`[bridge] listening on ${base}`)
       output.appendLine("[bridge] token <redacted>")
-      for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
+      for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "notebook/kernel"]) {
         output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}`)
       }
       registerBridge({ id, port: address.port, token })
@@ -177,6 +179,9 @@ async function routeRequest(
       if (!filePath) throw new Error("filePath is required")
       return await notebookEnv(filePath)
     }
+
+    case "/notebook/kernel":
+      return await restartNotebookKernel(body)
   }
 
   return undefined
