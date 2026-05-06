@@ -21,7 +21,7 @@ export const VscodeNotebookDescriptions = {
     "Range execution includes both endpoint cells and does not use numeric cell indexes.",
     "Execution uses VS Code's native notebook.cell.execute path for each code cell, so VS Code/Jupyter handles kernel selection on the real run path; the bridge awaits the cell execution summary or per-cell timeout.",
     "Range targets run code cells sequentially and stop on the first failed or timed-out code cell.",
-    "Use this after editing code cells when execution validation matters. Default timeout is 300000 ms per cell; maximum is 600000 ms.",
+    "Use this after editing code cells when execution validation matters. Default timeout is 300000 ms per cell; maximum is 3000000 ms.",
   ].join("\n"),
 
   output: [
@@ -44,9 +44,9 @@ export const VscodeNotebookDescriptions = {
     "filePath and operation are required. `reason` is an optional brief description shown to the user.",
     "",
     "Operations:",
-    "  info      — probe the active kernel/interpreter and report saved .ipynb metadata",
-    "  configure — open the notebook and trigger kernel selection (run before first execution)",
-    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward.",
+    "  info      — probe the active kernel (available after at least one cell has run) and report saved .ipynb metadata. Use to confirm runtime after first execution or to check the Python environment path and version.",
+    "  configure — select a kernel and verify readiness. Returns a status: configured (active kernel found), selected (accepted, kernel starts on first run — proceed directly to run), needs-selection (user cancelled picker), selection-requested (no explicit result), or failed (error). Use before the first run; no need to call info after selected.",
+    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward. Only restart when strictly necessary (e.g. stuck kernel, corrupted state); prefer re-running cells over restarting when possible.",
     "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
   ].join("\n"),
 }

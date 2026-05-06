@@ -13,10 +13,22 @@
  * (api.kernels.getKernel + executeCode). Saved .ipynb metadata is reported
  * separately and is not treated as the active runtime.
  *
- * Configure is light-weight: it ensures Jupyter is active, makes the notebook
- * visible, and triggers kernel selection. It cannot read Jupyter's internal
- * controller registration — configure is best-effort, not a replacement for
- * Jupyter's built-in configure_notebook.
+ * Configure probes the Jupyter public API (api.kernels.getKernel + executeCode)
+ * before and after kernel selection to confirm readiness. A single probe after
+ * notebook.selectKernel is sufficient — polling cannot detect a kernel that
+ * only starts on first code-cell execution.
+ *
+ * Statuses:
+ *   configured          — active kernel confirmed via executeCode probe
+ *   selected            — selectKernel returned true, kernel not yet active
+ *                          (expected before first code-cell execution)
+ *   needs-selection     — selectKernel returned false or did not run;
+ *                          user likely cancelled or no kernel accepted
+ *   selection-requested — command ran but returned no clear boolean result
+ *   failed              — extension missing or command threw an error
+ *
+ * Returns diagnostic data for each flow node: notebook metadata, extension
+ * state, visibility, pre-/post-selection kernel probes, and poll results.
  *
  * Restart temporarily disables jupyter.askForKernelRestart to suppress the
  * Jupyter confirmation modal, calls the public jupyter.restartkernel command,
@@ -74,11 +86,25 @@ type SavedMetadata = {
 
 type Operation = "info" | "configure" | "restart" | "save"
 
+type ConfigureStatus = "configured" | "selected" | "needs-selection" | "selection-requested" | "failed"
+
+type ConfigureProbe = {
+  hasKernel: boolean
+  configured: boolean
+  kernelLanguage?: string
+  kernelStatus?: string
+  probeSucceeded?: boolean
+  probeError?: string
+  probeDurationMs?: number
+  elapsedMs: number
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const JUPYTER_ID = "ms-toolsai.jupyter"
+const PYTHON_ID = "ms-python.python"
 const RESTART_CMD = "jupyter.restartkernel"
 const CONFIG_SECTION = "jupyter"
 const CONFIG_KEY = "askForKernelRestart"
@@ -130,11 +156,11 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
     summary: [
       `Operation: info`,
       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}`,
-      `Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState(JUPYTER_ID)}.`,
+      `Python/Jupyter extensions: ${extensionState(PYTHON_ID)}/${extensionState(JUPYTER_ID)}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
         ? "Runtime source: active kernel (api.kernels.getKernel + executeCode probe)."
-        : "Runtime source: none. Jupyter public API exposes only started kernels for open notebooks.",
+        : "Runtime source: none. Jupyter public API only exposes kernels that have been started by executing at least one code cell.",
       activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
       reason ? `Reason: ${reason}` : undefined,
     ].filter(Boolean).join("\n"),
@@ -146,7 +172,7 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
       saved_metadata: savedMetadata,
       active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
       extensions: {
-        python: extensionInfo("ms-python.python"),
+        python: extensionInfo(PYTHON_ID),
         jupyter: extensionInfo(JUPYTER_ID),
       },
     },
@@ -156,62 +182,378 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
 }
 
 // ===========================================================================
-// configure — open notebook + trigger kernel selection
+// configure — verify / select / start kernel with full diagnostic output
 // ===========================================================================
 
 async function configureNotebook(notebook: vscode.NotebookDocument, reason?: string) {
   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
   const startedAt = Date.now()
 
-  // Ensure Jupyter extension is available
+  // ---- node 1: notebook metadata ----
+  const notebookMeta = {
+    uri: notebook.uri.toString(),
+    cellCount: notebook.cellCount,
+    notebookType: notebook.notebookType,
+    isUntitled: notebook.isUntitled,
+    isClosed: notebook.isClosed,
+    metadataKernelSpec: (notebook.metadata as { kernelspec?: unknown })?.kernelspec ?? null,
+  }
+
+  // ---- node 2: Jupyter extension ----
   const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
   if (!jupyter) {
-    return {
-      ran: true,
-      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
-      data: { path: primaryPath, operation: "configure", reason, jupyterFound: false, durationMs: Date.now() - startedAt },
+    return configureResult({
+      path: primaryPath,
+      reason,
+      status: "failed",
+      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter first.",
+      data: {
+        notebook: notebookMeta,
+        jupyter: { found: false, active: false },
+        durationMs: Date.now() - startedAt,
+      },
+    })
+  }
+
+  const jupActivateStart = Date.now()
+  if (!jupyter.isActive) await jupyter.activate()
+  const jupyterInfo = {
+    found: true,
+    active: jupyter.isActive,
+    version: (jupyter.packageJSON as { version?: string })?.version,
+    activationDurationMs: Date.now() - jupActivateStart,
+  }
+
+  // ---- node 3: Python extension (best-effort, non-fatal) ----
+  const pythonHeuristic = isPythonNotebookLike(notebook)
+  const python = vscode.extensions.getExtension(PYTHON_ID)
+  let pythonInfo: Record<string, unknown> = { isPythonLike: pythonHeuristic.result, heuristic: pythonHeuristic.heuristic, found: false, active: false }
+
+  if (pythonHeuristic.result && python) {
+    const pyActivateStart = Date.now()
+    try {
+      if (!python.isActive) await python.activate()
+      pythonInfo = {
+        isPythonLike: pythonHeuristic.result,
+        heuristic: pythonHeuristic.heuristic,
+        found: true,
+        active: python.isActive,
+        version: (python.packageJSON as { version?: string })?.version,
+        activationDurationMs: Date.now() - pyActivateStart,
+      }
+    } catch (error) {
+      pythonInfo = {
+        ...pythonInfo,
+        found: true,
+        activationError: error instanceof Error ? error.message : String(error),
+        activationDurationMs: Date.now() - pyActivateStart,
+      }
     }
   }
-  if (!jupyter.isActive) await jupyter.activate()
 
-  // Make the notebook visible so the kernel picker can render
+  // ---- node 4: show notebook ----
+  const visStart = Date.now()
+  let showNotebookSucceeded = false
   try {
-    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
+    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: false })
+    showNotebookSucceeded = true
   } catch {
-    // Non-fatal: selectKernel can still work for open notebooks
+    // non-fatal
+  }
+  const visibility = {
+    showNotebookSucceeded,
+    showNotebookDurationMs: Date.now() - visStart,
+    visibleEditorCount: vscode.window.visibleNotebookEditors.length,
+    activeNotebookUri: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
+    targetNotebookActive: vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString(),
   }
 
-  // Trigger kernel selection without prompting if a kernel is already attached
-  const selectKernelAvailable = (await vscode.commands.getCommands(true)).includes("notebook.selectKernel")
-  if (selectKernelAvailable) {
-    await vscode.commands.executeCommand("notebook.selectKernel", {
+  // ---- node 5: pre-check — probe kernel readiness ----
+  const preCheck = await probeConfigureRuntime(notebook.uri, "preCheck")
+
+  if (preCheck.configured) {
+    return configureResult({
+      path: primaryPath,
+      reason,
+      status: "configured",
+      summary: "Notebook already has an active kernel — runtime probe via executeCode succeeded.",
+      data: {
+        notebook: notebookMeta,
+        jupyter: jupyterInfo,
+        python: pythonInfo,
+        visibility,
+        preCheck,
+        commands: null as unknown,
+        selectKernel: null as unknown,
+        poll: null as unknown,
+        durationMs: Date.now() - startedAt,
+      },
+    })
+  }
+
+  // ---- node 6: command discovery (diagnostic, not gating) ----
+  const cmdStart = Date.now()
+  const commandsPublic = await vscode.commands.getCommands(true)
+  const commandsAll = await vscode.commands.getCommands(false)
+  const commandInfo = {
+    selectKernelListedPublic: commandsPublic.includes("notebook.selectKernel"),
+    selectKernelListedAll: commandsAll.includes("notebook.selectKernel"),
+    selectKernelExecuteSucceeded: false as boolean,
+    restartKernelListed: commandsAll.includes(RESTART_CMD),
+    notebookCellExecuteListed: commandsAll.includes("notebook.cell.execute"),
+    discoveryDurationMs: Date.now() - cmdStart,
+  }
+
+  // ---- node 7: try notebook.selectKernel directly ----
+  const selStart = Date.now()
+  let selectKernelInvoked = false
+  let selectKernelResult: unknown = undefined
+  let selectKernelError: string | undefined
+
+  try {
+    selectKernelResult = await vscode.commands.executeCommand("notebook.selectKernel", {
       notebookUri: notebook.uri,
       skipIfAlreadySelected: true,
     })
+    selectKernelInvoked = true
+  } catch (error) {
+    selectKernelError = error instanceof Error ? error.message : String(error)
   }
+
+  const selectKernelAccepted = selectKernelResult === true
+  const selectKernelRejected = selectKernelResult === false
+
+  const selectKernelInfo = {
+    invoked: selectKernelInvoked,
+    result: selectKernelResult,
+    accepted: selectKernelAccepted,
+    rejectedOrCancelled: selectKernelRejected,
+    resultKind: selectKernelAccepted
+      ? "accepted"
+      : selectKernelRejected
+        ? "cancelled-or-not-selected"
+        : selectKernelError
+          ? "error"
+          : selectKernelInvoked
+            ? "unknown"
+            : "not-invoked",
+    error: selectKernelError,
+    durationMs: Date.now() - selStart,
+  }
+
+  // ---- node 8: single post-selection probe (not a poll — kernel appears
+  //      only on first cell execution, not after select alone) ----
+  const postProbe = await probeConfigureRuntime(notebook.uri, "post-select")
+
+  // Pair pre/post probes for diagnostic comparison
+  const pairedProbe = {
+    preCheck: {
+      hasKernel: preCheck.hasKernel,
+      configured: preCheck.configured,
+      kernelLanguage: preCheck.kernelLanguage,
+      kernelStatus: preCheck.kernelStatus,
+      probeDurationMs: preCheck.probeDurationMs,
+    },
+    postSelect: {
+      hasKernel: postProbe.hasKernel,
+      configured: postProbe.configured,
+      kernelLanguage: postProbe.kernelLanguage,
+      kernelStatus: postProbe.kernelStatus,
+      probeSucceeded: postProbe.probeSucceeded,
+      probeError: postProbe.probeError,
+      probeDurationMs: postProbe.probeDurationMs,
+    },
+  }
+
+  // Backfill execute success into commandInfo
+  commandInfo.selectKernelExecuteSucceeded = selectKernelAccepted
+
+  // ---- node 9: status determination ----
+  const { status, statusSummary } = resolveConfigureStatus(
+    postProbe.configured,
+    selectKernelInvoked,
+    selectKernelAccepted,
+    selectKernelRejected,
+    selectKernelError,
+  )
+
+  // ---- node 10: construct response ----
+  return configureResult({
+    path: primaryPath,
+    reason,
+    status,
+    summary: statusSummary,
+    data: {
+      notebook: notebookMeta,
+      jupyter: jupyterInfo,
+      python: pythonInfo,
+      visibility,
+      probe: pairedProbe,
+      commands: commandInfo,
+      selectKernel: selectKernelInfo,
+      durationMs: Date.now() - startedAt,
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// configure helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Determines configure status from selectKernel outcome + post-selection probe.
+ * The boolean value of selectKernelResult is the key discriminator:
+ *   result=true  → selection was accepted (but kernel may not be active yet)
+ *   result=false → selection was rejected, likely user cancellation
+ */
+function resolveConfigureStatus(
+  postProbeConfigured: boolean,
+  selectKernelInvoked: boolean,
+  selectKernelAccepted: boolean,
+  selectKernelRejected: boolean,
+  selectKernelError?: string,
+): { status: ConfigureStatus; statusSummary: string } {
+  if (postProbeConfigured) {
+    return {
+      status: "configured",
+      statusSummary: "Kernel is active — runtime probe via executeCode succeeded after selection.",
+    }
+  }
+
+  if (selectKernelAccepted) {
+    return {
+      status: "selected",
+      statusSummary: [
+        "Kernel selection was accepted.",
+        "The kernel will start on the first code-cell execution — no active kernel is visible through the public Jupyter API yet, which is expected.",
+      ].join(" "),
+    }
+  }
+
+  if (selectKernelRejected) {
+    return {
+      status: "needs-selection",
+      statusSummary: [
+        "Kernel selection was invoked, but no kernel was selected or accepted.",
+        "The user may have cancelled the kernel picker or not chosen an environment.",
+      ].join(" "),
+    }
+  }
+
+  if (selectKernelError) {
+    return {
+      status: "failed",
+      statusSummary: `Kernel selection command failed: ${selectKernelError}.`,
+    }
+  }
+
+  if (selectKernelInvoked) {
+    return {
+      status: "selection-requested",
+      statusSummary: [
+        "Kernel selection command completed without an explicit boolean result.",
+        "No active kernel was confirmed. Retry configure or select a kernel manually.",
+      ].join(" "),
+    }
+  }
+
+  return {
+    status: "needs-selection",
+    statusSummary: "Kernel selection could not be invoked automatically. Select a kernel manually from the notebook toolbar.",
+  }
+}
+
+function configureResult(input: {
+  path: string
+  reason?: string
+  status: ConfigureStatus
+  summary: string
+  data: Record<string, unknown>
+}) {
+  const guidance = input.status === "configured"
+    ? "Notebook is ready for cell execution."
+    : input.status === "selected"
+      ? "Proceed to run cells — the kernel will start on first execution."
+      : input.status === "needs-selection"
+        ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
+        : input.status === "selection-requested"
+          ? "Retry configure or select a kernel manually."
+          : "Check Jupyter/Python extensions and workspace trust."
 
   return {
     ran: true,
     summary: [
       "Operation: configure",
-      selectKernelAvailable
-        ? "Kernel selection triggered. Choose a kernel if prompted; if a kernel was already selected, this is a no-op."
-        : "notebook.selectKernel command is not registered. Select a kernel manually via the notebook toolbar.",
-      "After kernel selection, kernel will start on first cell execution.",
-      reason ? `Reason: ${reason}` : "",
+      `Status: ${input.status}`,
+      input.summary,
+      guidance,
+      input.reason ? `Reason: ${input.reason}` : "",
     ].filter(Boolean).join("\n"),
     data: {
-      path: primaryPath,
+      path: input.path,
       operation: "configure",
-      reason,
-      jupyterFound: true,
-      jupyterActive: jupyter.isActive,
-      selectKernelAvailable,
-      dirty: notebook.isDirty,
-      durationMs: Date.now() - startedAt,
+      reason: input.reason,
+      status: input.status,
+      ...input.data,
     },
-    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
+    note:
+      "Public-API configure. Uses api.kernels.getKernel + executeCode to confirm kernel readiness. Cannot access Jupyter internal controllerRegistration/kernelProvider.",
   }
+}
+
+/**
+ * Probes kernel readiness through the Jupyter public API.
+ * Uses getActiveRuntime which calls api.kernels.getKernel + optional executeCode.
+ */
+async function probeConfigureRuntime(uri: vscode.Uri, label?: string): Promise<ConfigureProbe> {
+  const startedAt = Date.now()
+  const result: ConfigureProbe = { hasKernel: false, configured: false, elapsedMs: 0 }
+
+  try {
+    const runtime = await getActiveRuntime(uri)
+    result.elapsedMs = Date.now() - startedAt
+    result.probeDurationMs = result.elapsedMs
+
+    if (!runtime) {
+      result.hasKernel = false
+      return result
+    }
+
+    result.hasKernel = true
+    result.kernelLanguage = runtime.language
+    result.kernelStatus = runtime.kernelStatus
+    result.probeSucceeded = true
+    result.configured = true
+  } catch (error) {
+    result.elapsedMs = Date.now() - startedAt
+    result.probeDurationMs = result.elapsedMs
+    result.probeError = error instanceof Error ? error.message : String(error)
+  }
+
+  void label // caller may inject a label for diagnostic tracing
+  return result
+}
+
+/** Detects whether a notebook is Python-like from cell language and metadata. */
+function isPythonNotebookLike(notebook: vscode.NotebookDocument) {
+  // Heuristic 1: any code cell with languageId "python"
+  if (notebook.getCells().some(
+    (c) => c.kind === vscode.NotebookCellKind.Code && c.document.languageId === "python",
+  )) {
+    return { result: true, heuristic: "cells" } as const
+  }
+
+  // Heuristic 2: metadata.kernelspec / language_info mentions "python"
+  const meta = notebook.metadata as Record<string, unknown>
+  const kernelspec = (meta as Record<string, unknown>)?.kernelspec as { language?: string; name?: string } | undefined
+  const langInfo = (meta as Record<string, unknown>)?.language_info as { name?: string } | undefined
+  const lang = langInfo?.name ?? kernelspec?.language ?? kernelspec?.name
+
+  if (typeof lang === "string" && lang.toLowerCase().includes("python")) {
+    return { result: true, heuristic: "metadata" } as const
+  }
+
+  return { result: false, heuristic: "none" } as const
 }
 
 // ===========================================================================
