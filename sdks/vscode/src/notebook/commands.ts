@@ -14,7 +14,6 @@ import { runNotebook } from "./run"
 import { editNotebook } from "./edit"
 import { readNotebookCellOutput } from "./output"
 import { notebookEnv } from "./env"
-import { restartNotebookKernel } from "./kernel"
 
 // ---------------------------------------------------------------------------
 // Main command
@@ -63,24 +62,8 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
       },
       {
         label: "vscode_notebook_env",
-        description: "kernel/environment capability snapshot",
-        run: async () => {
-          const notebook = await selectNotebook()
-          return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
-        },
-      },
-      {
-        label: "vscode_notebook_restart_kernel",
-        description: "restart Jupyter kernel, clear all runtime state",
-        run: async () => {
-          const notebook = await selectNotebook()
-          if (!notebook) return undefined
-          const reason = await vscode.window.showInputBox({
-            prompt: "Restart reason (optional)",
-            ignoreFocusOut: true,
-          })
-          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason ?? undefined })
-        },
+        description: "info / configure / restart / save operations",
+        run: async () => await notebookEnvCommand(),
       },
     ],
     {
@@ -258,5 +241,32 @@ async function editNotebookCommand() {
     editType,
     cellId,
     newCode: newCode?.replace(/\\n/g, "\n"),
+  })
+}
+
+async function notebookEnvCommand() {
+  const operation = await vscode.window.showQuickPick(
+    [
+      { label: "info", description: "kernel / interpreter / saved metadata snapshot" },
+      { label: "configure", description: "open notebook + trigger kernel selection" },
+      { label: "restart", description: "restart Jupyter kernel, clear all runtime state" },
+      { label: "save", description: "persist notebook document to disk" },
+    ],
+    { title: "vscode_notebook_env", placeHolder: "Select operation" },
+  )
+  if (!operation) return undefined
+
+  const notebook = await selectNotebook()
+  if (!notebook) return undefined
+
+  const reason = await vscode.window.showInputBox({
+    prompt: "Brief reason for this operation (optional)",
+    ignoreFocusOut: true,
+  })
+
+  return notebookEnv({
+    filePath: notebook.uri.toString(),
+    operation: operation.label,
+    reason: reason || undefined,
   })
 }

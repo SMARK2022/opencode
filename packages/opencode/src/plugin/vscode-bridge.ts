@@ -58,9 +58,9 @@ const runArgs = {
     .number()
     .int()
     .positive()
-    .max(600_000)
+    .max(3_000_000)
     .optional()
-    .describe("Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000."),
+    .describe("Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 3000000."),
 }
 
 const outputArgs = {
@@ -86,6 +86,17 @@ const editArgs = {
     .string()
     .optional()
     .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
+}
+
+const envArgs = {
+  ...requiredFilePath,
+  operation: z
+    .enum(["info", "configure", "restart", "save"])
+    .describe("Which notebook environment operation to perform."),
+  reason: z
+    .string()
+    .optional()
+    .describe("Brief description of why this operation is being performed, shown to the user."),
 }
 
 async function call(
@@ -168,21 +179,10 @@ export const VscodeBridgePlugin = async () => ({
     }),
     vscode_notebook_env: tool({
       description: VscodeNotebookDescriptions.env,
-      args: requiredFilePath,
+      args: envArgs,
       execute: async (args, context) => ({
-        output: await call("/notebook/env", args, context, 10_000),
+        output: await call("/notebook/env", args, context, 120_000),
         metadata: { endpoint: "/notebook/env" },
-      }),
-    }),
-    vscode_notebook_restart_kernel: tool({
-      description: VscodeNotebookDescriptions.kernel,
-      args: {
-        ...requiredFilePath,
-        reason: z.string().optional().describe("Why the kernel is being restarted, for logging and user context."),
-      },
-      execute: async (args, context) => ({
-        output: await call("/notebook/kernel", args, context, 30_000),
-        metadata: { endpoint: "/notebook/kernel" },
       }),
     }),
   },

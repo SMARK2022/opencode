@@ -1,21 +1,39 @@
 /**
- * `vscode_notebook_env` — reports notebook runtime and saved metadata.
+ * `vscode_notebook_env` — notebook environment operations.
  *
- * Runtime source:
- *   active Jupyter kernel process via Jupyter stable API:
- *   api.kernels.getKernel(notebook.uri) + kernel.executeCode(probe).
+ * Single tool with four operations selected via the `operation` field:
+ *   "info"        — kernel / interpreter / saved metadata snapshot
+ *   "configure"   — open notebook + trigger kernel selection
+ *   "restart"     — restart Jupyter kernel, clear all runtime state
+ *   "save"        — persist notebook document to disk
  *
- * Metadata source:
- *   saved .ipynb file metadata.kernelspec / metadata.language_info.
+ * All operations accept an optional `reason` string briefly shown to the user.
  *
- * Important:
- *   saved metadata is NOT treated as active runtime. If no started kernel exists,
- *   runtime is reported as no-active-kernel even if metadata says "ML".
+ * Info probes the active Jupyter kernel via the stable public API
+ * (api.kernels.getKernel + executeCode). Saved .ipynb metadata is reported
+ * separately and is not treated as the active runtime.
+ *
+ * Configure is light-weight: it ensures Jupyter is active, makes the notebook
+ * visible, and triggers kernel selection. It cannot read Jupyter's internal
+ * controller registration — configure is best-effort, not a replacement for
+ * Jupyter's built-in configure_notebook.
+ *
+ * Restart temporarily disables jupyter.askForKernelRestart to suppress the
+ * Jupyter confirmation modal, calls the public jupyter.restartkernel command,
+ * then restores the original setting.
+ *
+ * Save persists the notebook via NotebookDocument.save(). Since save() returns
+ * false for both "not dirty" and "genuine failure", success is determined by
+ * comparing before/after dirty state. Untitled notebooks are skipped.
  */
 import * as vscode from "vscode"
 import { TextDecoder } from "node:util"
-import { extensionState, extensionInfo } from "../util"
+import { extensionState, extensionInfo, stringProp } from "../util"
 import { resolveNotebook } from "./resolve"
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 type KernelOutputItem = { mime: string; data: Uint8Array }
 type KernelOutput = { items: KernelOutputItem[] }
@@ -54,42 +72,358 @@ type SavedMetadata = {
   languageVersion: string | null
 }
 
-const PROBE_TIMEOUT_MS = 8_000
+type Operation = "info" | "configure" | "restart" | "save"
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const JUPYTER_ID = "ms-toolsai.jupyter"
+const RESTART_CMD = "jupyter.restartkernel"
+const CONFIG_SECTION = "jupyter"
+const CONFIG_KEY = "askForKernelRestart"
+const PROBE_TIMEOUT_MS = 30_000
+const DIRTY_SETTLE_TIMEOUT_MS = 10_000
 const decoder = new TextDecoder("utf-8")
 
-export async function notebookEnv(filePath: string) {
+// ---------------------------------------------------------------------------
+// Main entry — dispatched by operation
+// ---------------------------------------------------------------------------
+
+export async function notebookEnv(input: Record<string, unknown>) {
+  const filePath = stringProp(input, "filePath")
+  if (!filePath) throw new Error("filePath is required")
+
+  const operation = stringProp(input, "operation") ?? "info"
+  if (!["info", "configure", "restart", "save"].includes(operation)) {
+    throw new Error(
+      `Invalid operation "${operation}". Must be one of: info, configure, restart, save.`,
+    )
+  }
+
   const notebook = await resolveNotebook(filePath)
+  const reason = stringProp(input, "reason")
+
+  switch (operation as Operation) {
+    case "info":
+      return await probeNotebookEnv(notebook, reason)
+    case "configure":
+      return await configureNotebook(notebook, reason)
+    case "restart":
+      return await restartNotebookKernel(notebook, reason)
+    case "save":
+      return await saveNotebook(notebook, reason)
+  }
+}
+
+// ===========================================================================
+// info — kernel / interpreter / metadata snapshot
+// ===========================================================================
+
+async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: string) {
   const activeRuntime = await getActiveRuntime(notebook.uri)
   const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 
   return {
     ran: false,
     summary: [
-      `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
+      `Operation: info`,
+      `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}`,
+      `Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState(JUPYTER_ID)}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
-        ? "Runtime source: actual active Jupyter kernel process via api.kernels.getKernel + executeCode."
-        : "Runtime source: none; Jupyter stable API exposes only started kernels associated with the open notebook.",
+        ? "Runtime source: active kernel (api.kernels.getKernel + executeCode probe)."
+        : "Runtime source: none. Jupyter public API exposes only started kernels for open notebooks.",
       activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
+      reason ? `Reason: ${reason}` : undefined,
     ].filter(Boolean).join("\n"),
     data: {
-      path: notebook.uri.fsPath || notebook.uri.toString(),
+      path: primaryPath,
+      operation: "info",
+      reason,
       runtime: activeRuntime,
       saved_metadata: savedMetadata,
       active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
       extensions: {
         python: extensionInfo("ms-python.python"),
-        jupyter: extensionInfo("ms-toolsai.jupyter"),
+        jupyter: extensionInfo(JUPYTER_ID),
       },
     },
     note:
-      "Runtime is probed from the active kernel process; saved metadata is reported separately and is not used as runtime fallback.",
+      "Runtime is probed from the active kernel process; saved metadata is reported separately and is not treated as runtime fallback.",
   }
 }
 
+// ===========================================================================
+// configure — open notebook + trigger kernel selection
+// ===========================================================================
+
+async function configureNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+
+  // Ensure Jupyter extension is available
+  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
+  if (!jupyter) {
+    return {
+      ran: true,
+      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
+      data: { path: primaryPath, operation: "configure", reason, jupyterFound: false, durationMs: Date.now() - startedAt },
+    }
+  }
+  if (!jupyter.isActive) await jupyter.activate()
+
+  // Make the notebook visible so the kernel picker can render
+  try {
+    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
+  } catch {
+    // Non-fatal: selectKernel can still work for open notebooks
+  }
+
+  // Trigger kernel selection without prompting if a kernel is already attached
+  const selectKernelAvailable = (await vscode.commands.getCommands(true)).includes("notebook.selectKernel")
+  if (selectKernelAvailable) {
+    await vscode.commands.executeCommand("notebook.selectKernel", {
+      notebookUri: notebook.uri,
+      skipIfAlreadySelected: true,
+    })
+  }
+
+  return {
+    ran: true,
+    summary: [
+      "Operation: configure",
+      selectKernelAvailable
+        ? "Kernel selection triggered. Choose a kernel if prompted; if a kernel was already selected, this is a no-op."
+        : "notebook.selectKernel command is not registered. Select a kernel manually via the notebook toolbar.",
+      "After kernel selection, kernel will start on first cell execution.",
+      reason ? `Reason: ${reason}` : "",
+    ].filter(Boolean).join("\n"),
+    data: {
+      path: primaryPath,
+      operation: "configure",
+      reason,
+      jupyterFound: true,
+      jupyterActive: jupyter.isActive,
+      selectKernelAvailable,
+      dirty: notebook.isDirty,
+      durationMs: Date.now() - startedAt,
+    },
+    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
+  }
+}
+
+// ===========================================================================
+// restart — restart Jupyter kernel, clear all runtime state
+// ===========================================================================
+
+async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+
+  // Ensure Jupyter extension is active
+  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
+  if (!jupyter) {
+    return {
+      ran: true,
+      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
+      data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt },
+    }
+  }
+  if (!jupyter.isActive) await jupyter.activate()
+
+  // Ensure the public restart command is registered
+  const allCommands = await vscode.commands.getCommands(true)
+  if (!allCommands.includes(RESTART_CMD)) {
+    return {
+      ran: true,
+      summary: "jupyter.restartkernel command is not registered. Check that the Jupyter extension is correctly installed.",
+      data: {
+        path: primaryPath,
+        operation: "restart",
+        reason,
+        jupyterFound: true,
+        jupyterActive: jupyter.isActive,
+        restartCommandFound: false,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  }
+
+  // Temporarily suppress Jupyter's built-in restart confirmation modal.
+  // The public command internally reads jupyter.askForKernelRestart via
+  // shouldAskForRestart(); setting it to false skips the modal.
+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
+  const original = config.get<boolean>(CONFIG_KEY)
+  const needsRestore = original === true
+
+  if (needsRestore) {
+    await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
+  }
+
+  try {
+    // The public command swallows errors internally (`.catch(noop)`), so
+    // this invocation will not reject on kernel-level failures.
+    await vscode.commands.executeCommand(RESTART_CMD, {
+      notebookEditor: { notebookUri: notebook.uri },
+    })
+
+    return {
+      ran: true,
+      summary: [
+        "Operation: restart",
+        "Kernel restart requested. All runtime state from previous cell executions should be cleared.",
+        "Rerun setup or import cells before running dependent cells.",
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: {
+        path: primaryPath,
+        operation: "restart",
+        reason,
+        requested: true,
+        askForKernelRestartOriginal: original,
+        askForKernelRestartSuppressed: needsRestore,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      ran: true,
+      summary: `Kernel restart invocation failed: ${message}.`,
+      data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt },
+    }
+  } finally {
+    // Restore the user's original setting so no permanent change is left behind
+    if (needsRestore) {
+      await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
+    }
+  }
+}
+
+// ===========================================================================
+// save — persist notebook document to disk
+// ===========================================================================
+
+async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+
+  // Untitled notebooks have no stable file path — skip without attempting save
+  if (notebook.isUntitled || notebook.uri.scheme === "untitled") {
+    return {
+      ran: true,
+      summary: [
+        "Operation: save",
+        "Saved: skipped — notebook is untitled and has no stable file path.",
+        "Use a Save As / create-file workflow first, then save the named notebook.",
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: {
+        path: primaryPath,
+        operation: "save",
+        reason,
+        saved: false,
+        skipped: true,
+        beforeDirty: notebook.isDirty,
+        afterDirty: notebook.isDirty,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  }
+
+  const beforeDirty = notebook.isDirty
+  const beforeVersion = notebook.version
+
+  // Make the target notebook visible (non-fatal)
+  try {
+    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
+  } catch {
+    // save() works for open documents without being visible
+  }
+
+  let saveReturned = false
+  let saveError: string | undefined
+
+  try {
+    saveReturned = await notebook.save()
+  } catch (error) {
+    saveError = error instanceof Error ? error.message : String(error)
+  }
+
+  // Allow the dirty flag to settle — remote/large notebook serializers
+  // may update the dirty state asynchronously after save() resolves
+  await waitForDirtyStateToSettle(notebook, DIRTY_SETTLE_TIMEOUT_MS)
+
+  const afterDirty = notebook.isDirty
+  const afterVersion = notebook.version
+
+  // save() returns false for both "not dirty" and "genuine failure", so
+  // confirm success by checking that afterDirty is false
+  const saved = !afterDirty
+
+  return {
+    ran: true,
+    summary: [
+      `Operation: save`,
+      `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
+      `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
+      saveError ? `Save error: ${saveError}` : undefined,
+      saved
+        ? "Notebook persisted to disk. Git and disk operations will see the latest content."
+        : "Notebook may still have unsaved changes. Review the dirty state before git or disk operations.",
+      reason ? `Reason: ${reason}` : "",
+    ].filter(Boolean).join("\n"),
+    data: {
+      path: primaryPath,
+      operation: "save",
+      reason,
+      saved,
+      beforeDirty,
+      afterDirty,
+      beforeVersion,
+      afterVersion,
+      saveReturned,
+      saveError,
+      durationMs: Date.now() - startedAt,
+    },
+    note:
+      "Save should only be called when the user explicitly requests it. Do not save ipynb files unprompted — prefer to let the user review changes and save manually.",
+  }
+}
+
+/**
+ * Waits for the notebook's dirty bit to clear (up to timeoutMs).
+ * Some notebook serializers update dirty state asynchronously after save().
+ */
+async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, timeoutMs: number) {
+  if (!notebook.isDirty) return
+
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      sub.dispose()
+      resolve()
+    }, timeoutMs)
+
+    const sub = vscode.workspace.onDidChangeNotebookDocument((event) => {
+      if (event.notebook.uri.toString() !== notebook.uri.toString()) return
+      if (!event.notebook.isDirty) {
+        clearTimeout(timer)
+        sub.dispose()
+        resolve()
+      }
+    })
+  })
+}
+
+// ===========================================================================
+// info helpers — active runtime probe + metadata readers
+// ===========================================================================
+
 async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {
   try {
-    const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
+    const ext = vscode.extensions.getExtension(JUPYTER_ID)
     if (!ext) return null
 
     const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
@@ -180,6 +514,10 @@ async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata
     return null
   }
 }
+
+// ===========================================================================
+// Format helpers
+// ===========================================================================
 
 function formatActiveRuntime(runtime: ActiveRuntime) {
   const p = runtime.python
