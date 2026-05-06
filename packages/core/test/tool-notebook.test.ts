@@ -173,6 +173,24 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
     ])
+    // 只验证原生五态响应穿过真实CLI，不在fixture重演或伪造内核判态算法。
+    for (const [status, data] of [
+      ["configured", { preCheck: { hasKernel: true, configured: true, probeSucceeded: true } }],
+      ["selected", { selectKernel: { invoked: true, result: true, accepted: true }, probe: { postSelect: { hasKernel: false, configured: false } } }],
+      ["needs-selection", { selectKernel: { invoked: true, result: false, rejectedOrCancelled: true } }],
+      ["selection-requested", { selectKernel: { invoked: true } }],
+      ["failed", { selectKernel: { invoked: false, error: "fixture selection failure" } }],
+    ] as const) {
+      const response = { ran: true, summary: `Operation: configure\nStatus: ${status}`, data: { path: filePath, operation: "configure", status, ...data }, note: "Public-API configure." }
+      environments.configure = response
+      const result = yield* invoke("vscode_notebook_env", { filePath, operation: "configure", reason: status })
+      expect(result.result.type).toBe("text")
+      expect(result.output?.structured).toEqual(response)
+      expect(result.output?.content).toEqual([{ type: "text", text: response.summary }])
+    }
+    expect(received).toHaveLength(15)
+    expect(received.slice(-5).map(item => item.body)).toEqual(["configured", "selected", "needs-selection", "selection-requested", "failed"].map(reason => ({ filePath, operation: "configure", reason })))
+    expect(permissions).toHaveLength(4)
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
     [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }) })],
