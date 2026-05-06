@@ -19,7 +19,7 @@ import { settleTool, toolDefinitions, toolIdentity } from "./lib/tool"
 
 const it = testEffect(Layer.empty)
 
-it.live("registers six Notebook tools through the real bridge and preserves native results", () => Effect.gen(function* () {
+it.live("registers Notebook tools through the real bridge and preserves native results", () => Effect.gen(function* () {
   const tmp = yield* Effect.acquireRelease(
     Effect.promise(() => tmpdir()),
     tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
@@ -54,6 +54,7 @@ it.live("registers six Notebook tools through the real bridge and preserves nati
     "/notebook/output": { ran: false, summary: "output", data: { artifacts: [{ mime: "application/json", bytes: 7, text: '{"x":1}', artifactPath: path.join(tmp.path, "output.json") }] } },
     "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0 } },
     "/notebook/env": { ran: false, summary: "env", data: { runtime: { path: "fixture-python", version: "3" }, saved_metadata: { language_info: { name: "python" } } }, note: "saved metadata kept separate" },
+    "/notebook/kernel": { ran: true, summary: "Kernel restart requested.", data: { path: filePath, requested: true, askForKernelRestartOriginal: true, askForKernelRestartSuppressed: true } },
   }
   // 唯一监听只绑定回环随机端口；release也进入最终清理，失败断言不会留下等待请求。
   const server = yield* Effect.acquireRelease(
@@ -84,9 +85,9 @@ it.live("registers six Notebook tools through the real bridge and preserves nati
       sessionID: SessionV2.ID.make("ses_notebook_fixture"), ...toolIdentity,
       call: { type: "tool-call", id: `call-${++calls}`, name, input },
     })
-    // 必须实际注册六个名字，通用edit禁令还要过滤Notebook别名。
+    // 名字必须来自实际注册，通用edit禁令还要过滤Notebook别名。
     const definitions = yield* toolDefinitions(registry)
-    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
+    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_restart_kernel", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
     expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
     expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")
     // 参数解码发生在RPC/审批之前，不用后端接收坏分页后再伪造错误。
@@ -119,11 +120,13 @@ it.live("registers six Notebook tools through the real bridge and preserves nati
     expect(completed).toBe(true)
     expect(run.output?.structured).toEqual(responses["/notebook/run"])
     expect(run.output?.content).toEqual([{ type: "text", text: "run" }])
-    // 后续env推进同一队列，迟到的取消编辑不能躲过最终六次RPC的完整比较。
+    // 后续env与重启推进同一队列，迟到的取消编辑不能躲过完整RPC比较。
     for (const [name, input, endpoint] of [
       ["vscode_notebook_output", { filePath, cellId: "#VSC-a" }, "/notebook/output"],
       ["vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, "/notebook/edit"],
       ["vscode_notebook_env", { filePath }, "/notebook/env"],
+      ["vscode_notebook_restart_kernel", { filePath, reason: "fixture-restart" }, "/notebook/kernel"],
+      ["vscode_notebook_restart_kernel", { filePath }, "/notebook/kernel"],
     ] as const) {
       const result = yield* invoke(name, input)
       expect(result.result.type).toBe("text")
@@ -132,13 +135,17 @@ it.live("registers six Notebook tools through the real bridge and preserves nati
     }
     // 鉴权、方法和端点均检查实际请求，不能用mock客户端绕过发现与序列化。
     expect(received.map(item => ({ path: item.path, method: item.method, auth: item.auth }))).toEqual(
-      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
+      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env", "/notebook/kernel", "/notebook/kernel"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
     )
     // 仅run补source规定的期限；未传oldCode/language等字段不能变为空值。
     expect(received.map(item => item.body)).toEqual([
       { filePath }, { filePath, cellId: "#VSC-a", offset: 3, limit: 20 }, { filePath, cellId: "#VSC-a", endCellId: "#VSC-b", timeoutMs: 300_000 },
-      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath },
+      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath }, { filePath, reason: "fixture-restart" }, { filePath },
     ])
+    // 错误重启参数必须在canonical解码时拒绝，不发给原生宿主或补成空值。
+    expect((yield* invoke("vscode_notebook_restart_kernel", { reason: "missing path" })).result.type).toBe("error")
+    expect((yield* invoke("vscode_notebook_restart_kernel", { filePath, reason: 123 })).result.type).toBe("error")
+    expect(received).toHaveLength(8)
     // 审批来自各自真实调用ID；被取消编辑不丢失已发生的审批事实。
     expect(permissions).toMatchObject([
       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-4" } },

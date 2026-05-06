@@ -8,6 +8,7 @@ import { runNotebook } from "./run"
 import { editNotebook } from "./edit"
 import { readNotebookCellOutput } from "./output"
 import { notebookEnv } from "./env"
+import { restartNotebookKernel } from "./kernel"
 
 export async function notebookBridgeTools(output: vscode.OutputChannel) {
   // palette 与 HTTP 路由导入同一组处理器，交互调试不能再维护一套执行实现。
@@ -53,6 +54,20 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
           // 环境探测也绑定已选文档，取消选择不能发布一个无目标快照。
           const notebook = await selectNotebook()
           return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
+        },
+      },
+      {
+        label: "vscode_notebook_restart_kernel",
+        description: "restart Jupyter kernel, clear all runtime state",
+        run: async () => {
+          const notebook = await selectNotebook()
+          if (!notebook) return undefined
+          const reason = await vscode.window.showInputBox({
+            prompt: "Restart reason (optional)",
+            ignoreFocusOut: true,
+          })
+          if (reason === undefined) return undefined
+          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason || undefined })
         },
       },
     ],

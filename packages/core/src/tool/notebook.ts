@@ -46,6 +46,11 @@ export const EditInput = Schema.Struct({
   language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source." }).pipe(Schema.optional),
 })
 export const EnvInput = SummaryInput
+// 独立重启入口仅存在于本项中间态，原因只作原生日志，不作为执行参数。
+export const KernelInput = Schema.Struct({
+  filePath,
+  reason: Schema.String.annotate({ description: "Why the kernel is being restarted, for logging and user context." }).pipe(Schema.optional),
+})
 
 // 原生data中的格、运行时、MIME与artifact保留未知嵌套字段，不让较窄投影丢掉模型结果。
 export const Output = Schema.Struct({
@@ -91,6 +96,8 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
       execute: (args, context) => ask("edit", args, context).pipe(Effect.andThen(call("/notebook/edit", args, context, 30_000))) }), "edit"),
     vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
       execute: (args, context) => call("/notebook/env", args, context, 10_000) }),
+    vscode_notebook_restart_kernel: Tool.make({ ...common, description: VscodeNotebookDescriptions.kernel, input: KernelInput,
+      execute: (args, context) => call("/notebook/kernel", args, context, 30_000) }),
   }).pipe(Effect.orDie)
 }))
 
