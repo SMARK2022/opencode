@@ -1,5 +1,5 @@
 /**
- * HTTP 笔记本桥接监听 127.0.0.1:<OS-assigned port>；处理器不持有服务器或请求流。
+ * OpenCode VS Code 扩展的 HTTP 笔记本桥接监听 127.0.0.1:<OS-assigned port>；处理器不持有服务器或请求流。
  * 原生笔记本操作绕过 LM 工具代理，并将二进制输出保留为不可变的导出文件。
  * GET /health 无需认证；其余端点要求本次实例的 Bearer token，不接受 URL 凭证。
  * 端点列表：

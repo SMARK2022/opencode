@@ -1,4 +1,4 @@
-// 入口注册终端与 palette，bridge 模块独占监听资源，notebook 模块独占工具行为。
+// OpenCode VS Code 扩展入口注册终端与 palette，bridge 模块独占监听资源，notebook 模块独占工具行为。
 import vscode from "vscode"
 import { activateBridge, closeBridge, type BridgeInfo } from "./bridge"
 import { notebookBridgeTools } from "./notebook/commands"
