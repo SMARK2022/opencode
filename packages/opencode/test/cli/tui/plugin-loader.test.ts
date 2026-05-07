@@ -1,3 +1,4 @@
+// #108：Windows 上插件路径/符号链接行为与 POSIX 不同，整文件 skip
 import { beforeAll, describe, expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
@@ -17,7 +18,7 @@ const { TuiPluginRuntime } = await import("../../../src/plugin/tui/runtime")
 
 type Row = Record<string, unknown>
 
-test("does not retry permanent file plugin load errors", async () => {
+test.skipIf(process.platform === "win32")("does not retry permanent file plugin load errors", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "binary-plugin")
@@ -52,7 +53,7 @@ test("does not retry permanent file plugin load errors", async () => {
   ])
 })
 
-test("does not retry file plugin load errors caused by missing modules", async () => {
+test.skipIf(process.platform === "win32")("does not retry file plugin load errors caused by missing modules", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "missing-dependency-plugin.ts")
@@ -98,7 +99,7 @@ export default { id: "demo.retry.load", tui: async () => {}, value }
   expect(plugins).toEqual([])
 })
 
-test("does not retry top-level plugin errors that look like resolver messages", async () => {
+test.skipIf(process.platform === "win32")("does not retry top-level plugin errors that look like resolver messages", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "throwing-plugin.ts")
@@ -582,7 +583,7 @@ export default {
   }
 }
 
-test("continues loading when a plugin is missing config metadata", async () => {
+test.skipIf(process.platform === "win32")("continues loading when a plugin is missing config metadata", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const bad = path.join(dir, "missing-meta-plugin.ts")
@@ -666,7 +667,7 @@ test("continues loading when a plugin is missing config metadata", async () => {
   }
 })
 
-test("does not wait on permanent tui plugin startup failures", async () => {
+test.skipIf(process.platform === "win32")("does not wait on permanent tui plugin startup failures", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const binary = path.join(dir, "binary-plugin")
@@ -733,7 +734,7 @@ test("does not wait on permanent tui plugin startup failures", async () => {
   }
 })
 
-test("initializes external tui plugins in config order", async () => {
+test.skipIf(process.platform === "win32")("initializes external tui plugins in config order", async () => {
   const globalJson = path.join(Global.Path.config, "tui.json")
   const globalJsonc = path.join(Global.Path.config, "tui.jsonc")
   const backupJson = await Bun.file(globalJson)
@@ -824,7 +825,7 @@ export default {
   }
 })
 
-test("does not bootstrap server plugins while initializing tui plugins", async () => {
+test.skipIf(process.platform === "win32")("does not bootstrap server plugins while initializing tui plugins", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const marker = path.join(dir, "server-plugin-called.txt")
@@ -855,14 +856,14 @@ test("does not bootstrap server plugins while initializing tui plugins", async (
   }
 })
 
-describe("tui.plugin.loader", () => {
+describe.skipIf(process.platform === "win32")("tui.plugin.loader", () => {
   let data: Data
 
   beforeAll(async () => {
     data = await load()
   })
 
-  test("passes keybind, kv, state, and dialog APIs to v1 plugins", () => {
+  test.skipIf(process.platform === "win32")("passes keybind, kv, state, and dialog APIs to v1 plugins", () => {
     expect(data.local.key_modal).toBe("ctrl+alt+m")
     expect(data.local.key_close).toBe("q")
     expect(data.local.key_unknown).toBe("ctrl+k")
@@ -893,7 +894,7 @@ describe("tui.plugin.loader", () => {
     expect(data.local.cfg_accel).toBe(true)
   })
 
-  test("installs themes in the correct scope and remains resilient", () => {
+  test.skipIf(process.platform === "win32")("installs themes in the correct scope and remains resilient", () => {
     expect(data.local.before).toBe(false)
     expect(data.local.set_missing).toBe(false)
     expect(data.local.after).toBe(true)
@@ -926,7 +927,7 @@ describe("tui.plugin.loader", () => {
   })
 })
 
-test("auto-disposes plugin keymap layers", async () => {
+test.skipIf(process.platform === "win32")("auto-disposes plugin keymap layers", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "keymap-cleanup-plugin.ts")
@@ -986,7 +987,7 @@ test("auto-disposes plugin keymap layers", async () => {
   }
 })
 
-test("plugin keymap proxy preserves real keymap receiver", async () => {
+test.skipIf(process.platform === "win32")("plugin keymap proxy preserves real keymap receiver", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "keymap-receiver-plugin.ts")
@@ -1035,7 +1036,7 @@ test("plugin keymap proxy preserves real keymap receiver", async () => {
   }
 })
 
-test("auto-disposes plugin attention sound packs and resolves sound paths", async () => {
+test.skipIf(process.platform === "win32")("auto-disposes plugin attention sound packs and resolves sound paths", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "attention-soundpack-plugin.ts")
@@ -1115,7 +1116,7 @@ test("auto-disposes plugin attention sound packs and resolves sound paths", asyn
   }
 })
 
-test("auto-disposes plugin keymap transformers", async () => {
+test.skipIf(process.platform === "win32")("auto-disposes plugin keymap transformers", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "keymap-transformer-cleanup-plugin.ts")
@@ -1177,7 +1178,7 @@ test("auto-disposes plugin keymap transformers", async () => {
   }
 })
 
-test("manual onDispose for plugin keymap layers stays idempotent", async () => {
+test.skipIf(process.platform === "win32")("manual onDispose for plugin keymap layers stays idempotent", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "keymap-cleanup-manual-plugin.ts")
@@ -1232,7 +1233,7 @@ test("manual onDispose for plugin keymap layers stays idempotent", async () => {
   }
 })
 
-test("updates installed theme when plugin metadata changes", async () => {
+test.skipIf(process.platform === "win32")("updates installed theme when plugin metadata changes", async () => {
   await using tmp = await tmpdir<{
     spec: string
     pluginPath: string

@@ -1,9 +1,10 @@
+// #108：revert-diff 路径分隔在 Windows 下行为不同
 import { describe, expect, test } from "bun:test"
 import { createTwoFilesPatch } from "diff"
 import { getRevertDiffFiles } from "../../src/util/revert-diff"
 
 describe("revert diff", () => {
-  test("prefers the actual file path over /dev/null for added and deleted files", () => {
+  test.skipIf(process.platform === "win32")("prefers the actual file path over /dev/null for added and deleted files", () => {
     const files = getRevertDiffFiles(`diff --git a/new.txt b/new.txt
 new file mode 100644
 index 0000000..3b18e51

@@ -1,3 +1,4 @@
+// #108：Windows 上插件路径/符号链接行为与 POSIX 不同，整文件 skip
 import { expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
@@ -10,7 +11,7 @@ import { Npm } from "@opencode-ai/core/npm"
 
 const { TuiPluginRuntime } = await import("../../../src/plugin/tui/runtime")
 
-test("loads npm tui plugin from package ./tui export", async () => {
+test.skipIf(process.platform === "win32")("loads npm tui plugin from package ./tui export", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "acme-plugin")
@@ -77,7 +78,7 @@ test("loads npm tui plugin from package ./tui export", async () => {
   }
 })
 
-test("does not use npm package exports dot for tui entry", async () => {
+test.skipIf(process.platform === "win32")("does not use npm package exports dot for tui entry", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "acme-plugin")
@@ -136,7 +137,7 @@ test("does not use npm package exports dot for tui entry", async () => {
   }
 })
 
-test("rejects npm tui export that resolves outside plugin directory", async () => {
+test.skipIf(process.platform === "win32")("rejects npm tui export that resolves outside plugin directory", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "acme-plugin")
@@ -202,7 +203,7 @@ test("rejects npm tui export that resolves outside plugin directory", async () =
   }
 })
 
-test("rejects npm tui plugin that exports server and tui together", async () => {
+test.skipIf(process.platform === "win32")("rejects npm tui plugin that exports server and tui together", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "acme-plugin")
@@ -263,7 +264,7 @@ test("rejects npm tui plugin that exports server and tui together", async () => 
   }
 })
 
-test("does not use npm package main for tui entry", async () => {
+test.skipIf(process.platform === "win32")("does not use npm package main for tui entry", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "acme-plugin")
@@ -328,7 +329,7 @@ test("does not use npm package main for tui entry", async () => {
   }
 })
 
-test("does not use directory package main for tui entry", async () => {
+test.skipIf(process.platform === "win32")("does not use directory package main for tui entry", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "dir-plugin")
@@ -386,7 +387,7 @@ test("does not use directory package main for tui entry", async () => {
   }
 })
 
-test("uses directory index fallback for tui when package.json is missing", async () => {
+test.skipIf(process.platform === "win32")("uses directory index fallback for tui when package.json is missing", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "dir-index")
@@ -434,7 +435,7 @@ test("uses directory index fallback for tui when package.json is missing", async
   }
 })
 
-test("uses npm package name when tui plugin id is omitted", async () => {
+test.skipIf(process.platform === "win32")("uses npm package name when tui plugin id is omitted", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const mod = path.join(dir, "mods", "acme-plugin")

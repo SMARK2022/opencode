@@ -97,6 +97,8 @@ describe("shell", () => {
       const shell = file.replace(/^([A-Za-z]):/, (_, drive) => `/cygdrive/${drive.toLowerCase()}`).replaceAll("\\", "/")
       await withShell(shell, async () => {
         expect(Shell.preferred()).toBe(FSUtil.windowsPath(shell))
+        // 保留临时夹具的真实解析，同时独立核对source固定路径，不依赖主机Git安装。
+        expect(FSUtil.windowsPath("/cygdrive/c/Program Files/Git/bin/bash.exe")).toBe("C:/Program Files/Git/bin/bash.exe")
       })
     })
 

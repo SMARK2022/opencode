@@ -14,7 +14,9 @@ afterAll(async () => {
   await AppRuntime.dispose()
 
   const busy = (error: unknown) =>
-    typeof error === "object" && error !== null && "code" in error && error.code === "EBUSY"
+    typeof error === "object" && error !== null && "code" in error &&
+    // #108：Windows 清理可能 EACCES，与 EBUSY 同属可重试
+    (error.code === "EBUSY" || error.code === "EACCES")
   const rm = async (left: number): Promise<void> => {
     Bun.gc(true)
     await sleep(100)

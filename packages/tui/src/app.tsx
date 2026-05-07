@@ -175,10 +175,16 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       const renderer = yield* Effect.acquireRelease(
         Effect.tryPromise({
           try: async () => {
-            // macOS 编译 Bun 的 native locale 可能让系统 wcwidth 对 CJK 返回 -1，改用内置宽度表。
-            if (process.platform === "darwin") {
+            // #108：macOS/Windows 默认强制 Unicode 宽度表；尊重用户 OPENTUI_FORCE_* 覆盖
+            const shouldForceUnicodeWidth =
+              (process.platform === "darwin" || process.platform === "win32") &&
+              process.env.OPENTUI_FORCE_UNICODE === undefined &&
+              process.env.OPENTUI_FORCE_WCWIDTH === undefined
+            if (shouldForceUnicodeWidth) {
               process.env.OPENTUI_FORCE_UNICODE = "1"
-              // PTY 尚未报告列数时最多等 100ms，避免初帧过早采用 80x24 回退尺寸。
+            }
+            // PTY 初始化竞争：仅 macOS 等待 columns
+            if (process.platform === "darwin") {
               for (let i = 0; i < 10 && !process.stdout.columns; i++) {
                 await new Promise<void>((r) => setTimeout(r, 10))
               }

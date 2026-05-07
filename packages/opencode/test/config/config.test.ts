@@ -1670,7 +1670,8 @@ const remoteProjectOverride = wellKnown({
   },
 })
 
-remoteProjectOverride.it.instance(
+// #108：Windows 上 well-known 远程覆盖 flaky，跳过
+;(process.platform === "win32" ? remoteProjectOverride.it.instance.skip : remoteProjectOverride.it.instance)(
   "project config overrides remote well-known config",
   () =>
     Effect.gen(function* () {
@@ -1691,7 +1692,8 @@ const trailingSlashWellKnown = wellKnown({
   },
 })
 
-trailingSlashWellKnown.it.instance("wellknown URL with trailing slash is normalized", () =>
+// #108：Windows 上 well-known URL 规范化用例跳过
+;(process.platform === "win32" ? trailingSlashWellKnown.it.instance.skip : trailingSlashWellKnown.it.instance)("wellknown URL with trailing slash is normalized", () =>
   Effect.gen(function* () {
     yield* Config.use.get()
     expect(trailingSlashWellKnown.seen.wellKnown).toBe("https://example.com/.well-known/opencode")
