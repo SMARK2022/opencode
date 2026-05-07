@@ -62,7 +62,7 @@ export function shortId(id: string) {
 
 /**
  * Copilot 风格 ID 为 #VSC- 加 SHA1(cell.document.uri.toString()) 的前八位十六进制。
- * 与 Copilot 的 getCellId 算法一致，同一打开格的插入、删除或移动不改变文档 URI。
+ * 与 Copilot 的 getCellId 算法一致；同一打开格的插入、删除、移动不改变 URI，类型替换会产生新 URI 和新 ID。
  * 它不是会漂移的 cell.index，也不是保存的 .ipynb metadata.id。
  */
 export function copilotLikeCellId(cell: vscode.NotebookCell) {
@@ -89,6 +89,18 @@ export function cellIdentifiers(cell: vscode.NotebookCell) {
     nestedStringAt(cell.metadata, "custom", "id"),
   ].filter((value): value is string => !!value)
 }
+
+/** #105：把模型返回的多种 cellId 写法规范成 #VSC-xxxxxxxx */
+export function normalizeCellId(cellId: string) {
+  const v = cellId.trim()
+  if (v.startsWith("#VSC-")) return v
+  if (v.startsWith("VSC-")) return `#${v}`
+  if (v.startsWith("#V-") && v.length === 11) return `#VSC-${v.substring(3)}`
+  if (v.toLowerCase().startsWith("vscode-") && v.length === 15) return `#VSC-${v.substring(7)}`
+  if (/^[a-f0-9]{8}$/i.test(v)) return `#VSC-${v}`
+  return v
+}
+
 
 /** LLM 可见的 cN 显示编号为一基，内部 VS Code 索引仍为零基。 */
 export const c1 = (cell: vscode.NotebookCell) => cell.index + 1
