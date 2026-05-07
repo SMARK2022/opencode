@@ -2,9 +2,9 @@ export const VscodeNotebookDescriptions = {
   summary: [
     "Inspect a VS Code notebook and return a compact cell map.",
     "Use this first for notebook work unless a fresh summary is already visible. filePath is required; the bridge never infers a notebook from VS Code focus or open documents.",
-    "It returns stable #VSC cell IDs, display indexes, 1-based virtual source ranges, execution state, output MIME summaries, dirty state, and runtime metadata.",
+    "It returns #VSC cell IDs (stable within the current session for existing cells), display indexes, 1-based virtual source ranges, execution state, output MIME summaries, dirty state, and runtime metadata.",
     "Cell indexes cN are 1-based display indexes and can shift after insert/delete. Use #VSC cell IDs for source, edit, run, and output calls.",
-    "After editing a notebook, call this again before relying on cell indexes, virtual ranges, or output locations.",
+    "After editing a notebook, cell IDs may change on type changes — the edit response shows the updated ID. Re-run summary when referencing cells not mentioned in edit responses.",
   ].join("\n"),
 
   source: [
@@ -36,7 +36,7 @@ export const VscodeNotebookDescriptions = {
     "For insert, cellId=TOP inserts at the top, cellId=BOTTOM appends, and cellId=#VSC-xxx inserts after that anchor cell. newCode is required.",
     "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source.",
     "For delete, pass cellId=#VSC-xxx. Use language='markdown' for Markdown cells; other languages create or keep code cells, usually 'python'. Do not use this tool for ordinary text files.",
-    "After any successful edit, call vscode_notebook_summary again before further cell-index-sensitive operations.",
+    "The edit response includes the updated cell ID and shifted neighbor info.",
   ].join("\n"),
 
   env: [

@@ -3,7 +3,7 @@
  */
 import * as vscode from "vscode"
 import { uriFromInput } from "../util"
-import { cellIdentifiers } from "./format"
+import { cellIdentifiers, normalizeCellId } from "./format"
 
 // ---------------------------------------------------------------------------
 // Notebook resolution
@@ -29,12 +29,13 @@ export async function resolveNotebook(filePath: string) {
  */
 export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex?: number, cellId?: string) {
   if (cellId) {
-    const normalized = cellId.replace(/^#/, "")
+    const normalized = normalizeCellId(cellId)
+    const stripped = normalized.replace(/^#/, "")
     const cell = notebook
       .getCells()
-      .find((candidate) => cellIdentifiers(candidate).some((id) => id.replace(/^#/, "") === normalized))
+      .find((candidate) => cellIdentifiers(candidate).some((id) => id.replace(/^#/, "") === stripped))
     if (cell) return cell
-    throw new Error(`Notebook cell not found: ${cellId}`)
+    throw new Error(`Notebook cell not found: ${cellId}. The edit response contains updated cell IDs after type changes.`)
   }
 
   if (cellIndex !== undefined) return notebook.cellAt(cellIndex)

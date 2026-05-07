@@ -71,10 +71,14 @@ export function isTextLikeMime(mime: string) {
 // ---------------------------------------------------------------------------
 
 /**
- * Generates a Copilot-compatible stable cell identifier: `#VSC-` + first 8 hex chars
+ * Generates a Copilot-compatible cell identifier: `#VSC-` + first 8 hex chars
  * of SHA1(cell.document.uri.toString()). This is the same algorithm Copilot uses
- * (`getCellId` in platform/notebook/common/helpers.ts), making the ID stable across
- * insert/delete/move operations since it's derived from the cell's VS Code document URI.
+ * (`getCellId` in platform/notebook/common/helpers.ts).
+ *
+ * The ID is derived from the cell's VS Code document URI and is stable for
+ * existing cells within the current open notebook session (insert/delete/move
+ * preserves the URI). Cell replacement (e.g. type change via replaceCells)
+ * creates a new URI and thus a new ID.
  *
  * ≠ cell.index (which shifts on insert/delete)
  * ≠ cell.metadata.id (the .ipynb id field)
@@ -100,6 +104,17 @@ export function cellIdentifiers(cell: vscode.NotebookCell) {
     nestedStringAt(cell.metadata, "vscode", "cellId"),
     nestedStringAt(cell.metadata, "custom", "id"),
   ].filter((value): value is string => !!value)
+}
+
+/** Normalizes model-returned cell IDs to canonical #VSC-xxxxxxxx format. */
+export function normalizeCellId(cellId: string) {
+  const v = cellId.trim()
+  if (v.startsWith("#VSC-")) return v
+  if (v.startsWith("VSC-")) return `#${v}`
+  if (v.startsWith("#V-") && v.length === 11) return `#VSC-${v.substring(3)}`
+  if (v.toLowerCase().startsWith("vscode-") && v.length === 15) return `#VSC-${v.substring(7)}`
+  if (/^[a-f0-9]{8}$/i.test(v)) return `#VSC-${v}`
+  return v
 }
 
 /** Returns 1-based display index for summary text. All LLM-facing cN MUST use this. */

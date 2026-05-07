@@ -129,7 +129,24 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
 // ---------------------------------------------------------------------------
 
 async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
-  const targetCell = resolveNotebookCell(notebook, undefined, cellId)
+  let targetCell: vscode.NotebookCell
+  try {
+    targetCell = resolveNotebookCell(notebook, undefined, cellId)
+  } catch (resolveErr) {
+    const oldCodeRaw = sourceProp(input, "oldCode")
+    if (!oldCodeRaw) throw resolveErr
+    const candidates = scanNotebookCellsForOldCode(notebook, oldCodeRaw)
+    if (candidates.length === 0) throw resolveErr
+    const parts = candidates.map((c) =>
+      `c${c1(c)} id=${copilotLikeCellId(c)} ${cellTypeLabel(c.kind)}/${c.document.languageId} first=${JSON.stringify(previewText((c.document.getText().split("\n")[0] ?? "").trim(), 50))}`
+    )
+    throw new Error(
+      `Cell not found: ${cellId}. ` +
+      (candidates.length === 1
+        ? `Did you mean ${parts[0]}? Retry with this cellId.`
+        : `oldCode matches ${candidates.length} cells:\n  ${parts.join("\n  ")}\nSpecify the correct cellId.`)
+    )
+  }
   const language = stringProp(input, "language")
   const oldCodeRaw = sourceProp(input, "oldCode")
   const typeChange = language !== undefined && language !== targetCell.document.languageId
@@ -194,6 +211,7 @@ async function handleTypeChange(
   }
 
   const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
+  newCell.metadata = targetCell.metadata ? { ...targetCell.metadata } : undefined
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(targetCell.index, targetCell.index + 1), [newCell])])
   const targetIndex = targetCell.index
@@ -222,7 +240,6 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
 
 function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCode: string) {
   const content = targetCell.document.getText()
-  const eol = documentEol(targetCell.document)
   const normalize = (s: string) => s.replace(/\r\n/g, "\n")
   const src = normalize(content)
   const old = normalize(oldCode)
@@ -235,11 +252,14 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
   // 1. Exact match
   matchIdx = src.indexOf(old)
   if (matchIdx !== -1) {
+    if (src.indexOf(old, matchIdx + 1) !== -1) {
+      throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
+    }
     matchLen = old.length
     strategy = "exact"
   }
 
-  // 2. Line-trimmed match (trim each line's whitespace)
+  // 2. Line-trimmed match
   if (matchIdx === -1) {
     const result = lineTrimmedMatch(src, old)
     if (result) {
@@ -249,13 +269,18 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
     }
   }
 
-  // 3. Boundary-trimmed match (trim leading/trailing whitespace from oldCode)
+  // 3. Boundary-trimmed match
   if (matchIdx === -1) {
     const trimmedOld = old.trim()
-    matchIdx = src.indexOf(trimmedOld)
-    if (matchIdx !== -1) {
-      matchLen = trimmedOld.length
-      strategy = "border-trimmed"
+    if (trimmedOld && trimmedOld !== old) {
+      matchIdx = src.indexOf(trimmedOld)
+      if (matchIdx !== -1) {
+        if (src.indexOf(trimmedOld, matchIdx + 1) !== -1) {
+          throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context.`)
+        }
+        matchLen = trimmedOld.length
+        strategy = "border-trimmed"
+      }
     }
   }
 
@@ -263,13 +288,20 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
     throw new Error(`oldCode not found in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`)
   }
 
-  // Check for duplicates
-  const secondIdx = src.indexOf(old, matchIdx + 1)
-  if (secondIdx !== -1 && strategy === "exact") {
-    throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
+  // Indent migration: for non-exact strategies, carry source block indentation to newCode
+  let replacement = rep
+  if (strategy !== "exact") {
+    const matchedBlock = src.slice(matchIdx, matchIdx + matchLen)
+    const srcIndent = baseIndent(matchedBlock)
+    if (srcIndent) {
+      const firstNewLine = rep.split("\n").find((l) => l.trim())
+      if (firstNewLine && !firstNewLine.startsWith(srcIndent)) {
+        replacement = migrateIndent(rep, srcIndent)
+      }
+    }
   }
 
-  const source = content.substring(0, matchIdx) + rep + content.substring(matchIdx + matchLen)
+  const source = content.substring(0, matchIdx) + replacement + content.substring(matchIdx + matchLen)
 
   // Compute 1-based (local) line range of the match for context
   const preMatch = content.substring(0, matchIdx)
@@ -286,6 +318,7 @@ function lineTrimmedMatch(src: string, old: string) {
   const srcLines = src.split("\n")
   if (oldLines.length > srcLines.length) return undefined
 
+  let found: { index: number; length: number } | undefined
   for (let i = 0; i <= srcLines.length - oldLines.length; i++) {
     let matches = true
     for (let j = 0; j < oldLines.length; j++) {
@@ -294,19 +327,44 @@ function lineTrimmedMatch(src: string, old: string) {
         break
       }
     }
-    if (matches) {
-      // Build the exact substring from source
-      let start = 0
-      for (let k = 0; k < i; k++) start += srcLines[k].length + 1
-      let end = start
-      for (let k = 0; k < oldLines.length; k++) {
-        end += srcLines[i + k].length
-        if (k < oldLines.length - 1) end += 1
-      }
-      return { index: start, length: end - start }
+    if (!matches) continue
+    if (found) throw new Error("oldCode matches multiple locations (line-trimmed). Provide more surrounding context.")
+    let start = 0
+    for (let k = 0; k < i; k++) start += srcLines[k].length + 1
+    let end = start
+    for (let k = 0; k < oldLines.length; k++) {
+      end += srcLines[i + k].length
+      if (k < oldLines.length - 1) end += 1
     }
+    found = { index: start, length: end - start }
   }
-  return undefined
+  return found
+}
+
+function baseIndent(text: string) {
+  const lines = text.split("\n").filter((l) => l.trim())
+  if (!lines.length) return ""
+  const indents = lines.map((l) => l.match(/^[ \t]*/)?.[0] ?? "")
+  let prefix = indents[0]
+  for (const indent of indents.slice(1)) {
+    let i = 0
+    while (i < prefix.length && i < indent.length && prefix[i] === indent[i]) i++
+    prefix = prefix.slice(0, i)
+    if (!prefix) return ""
+  }
+  return prefix
+}
+
+function migrateIndent(newCode: string, targetIndent: string) {
+  const lines = newCode.split("\n")
+  const srcBase = baseIndent(newCode)
+  return lines
+    .map((line) => {
+      if (!line.trim()) return line
+      if (srcBase && line.startsWith(srcBase)) return targetIndent + line.slice(srcBase.length)
+      return targetIndent + line.trimStart()
+    })
+    .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +512,9 @@ function compactEditResult(
       ? `${info.oldKind}/${info.oldLang}->${info.kind}/${info.language}`
       : `${cellTypeLabel(info.anchorCell.kind)}/${info.anchorCell.document.languageId}`
     lines.push(`Anchor: c${displayIdx} id=${anchorId} ${typePart}.`)
+    if (info.oldKind) {
+      lines.push(`NOTE: Type change replaced the cell. Use id=${anchorId} for subsequent operations on this cell.`)
+    }
   }
 
   // --- Affected ---
@@ -485,4 +546,10 @@ function compactEditResult(
       language: info.language,
     },
   }
+}
+
+function scanNotebookCellsForOldCode(notebook: vscode.NotebookDocument, oldCode: string) {
+  const normalize = (s: string) => s.replace(/\r\n/g, "\n")
+  const old = normalize(oldCode)
+  return notebook.getCells().filter((c) => normalize(c.document.getText()).includes(old))
 }

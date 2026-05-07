@@ -15,7 +15,7 @@
 import * as vscode from "vscode"
 import { stringProp, numberProp } from "../util"
 import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
-import { resolveNotebook } from "./resolve"
+import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -34,9 +34,13 @@ export async function notebookSource(input: Record<string, unknown>) {
 
   const ranges = computeVirtualRanges(notebook)
 
-  // Resolve target cell via cellId (only stable identifier; no cellIndex in schema)
+  // Resolve target cell via cellId (stable identifier; no cellIndex in schema)
   const cellId = stringProp(input, "cellId")
-  const cell = cellId ? notebook.getCells().find((c) => copilotLikeCellId(c) === cellId) : undefined
+  let cell: vscode.NotebookCell | undefined
+  if (cellId) {
+    try { cell = resolveNotebookCell(notebook, undefined, cellId) }
+    catch { cell = undefined }
+  }
   const targetCellIndex = cell?.index
 
   // Determine line window
