@@ -165,6 +165,9 @@ const layer = Layer.effect(
                 plan_enter: "allow",
                 // 未获授权的命令需确认；已有持久授权仍由权限服务处理。
                 bash: "ask",
+                // #101：interactive 下 notebook 运行/环境操作需确认
+                vscode_notebook_run: "ask",
+                vscode_notebook_env: "ask",
               }),
               // 全局用户规则后合并，允许显式放行或禁止命令。
               user,

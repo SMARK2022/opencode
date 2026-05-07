@@ -50,7 +50,8 @@ const runArgs = {
     .enum(["cell", "range"])
     .optional()
     .describe("Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell."),
-  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx."),
+  // #101：cellId 支持 TOP/BOTTOM 快捷定位首末 cell
+  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Also supports TOP and BOTTOM for the first/last cell."),
   endCellId: z
     .string()
     .optional()
