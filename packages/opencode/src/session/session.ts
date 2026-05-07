@@ -777,12 +777,10 @@ const layer: Layer.Layer<
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
       if (input.limit) {
+        // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
         return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
           Effect.provideService(Database.Service, database),
-        )).items.filter(
-          // 隐藏消息不返回给调用方，但仍在数据库中保留
-          (m) => !m.info.hidden,
-        )
+        )).items
       }
 
       // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。

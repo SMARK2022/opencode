@@ -441,6 +441,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
   limit: number
   before?: string
+  // 显式审计读取保留隐藏内容，普通分页在 LIMIT 前筛选可见消息。
   includeHidden?: boolean
 }) {
   const { db } = yield* Database.Service
@@ -464,7 +465,8 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
       .where(eq(SessionTable.id, input.sessionID))
       .get()
       .pipe(Effect.orDie)
-    if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+    // #106：与 Session.get 一致用 Effect.fail，确保 Effect.flip 得到 NotFoundError 实例
+    if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${input.sessionID}` }))
     return {
       items: [] as WithParts[],
       more: false,
@@ -534,7 +536,8 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
     .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
     .get()
     .pipe(Effect.orDie)
-  if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
+  // #106：message 缺失同样 Effect.fail
+  if (!row) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
   return {
     info: info(row),
     parts: yield* parts(input.messageID),
