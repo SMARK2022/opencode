@@ -115,7 +115,9 @@ export function SubagentFooter() {
   const previousShortcut = useCommandShortcut("session.child.previous")
   const nextShortcut = useCommandShortcut("session.child.next")
   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
-  useTerminalDimensions()
+  // #109：窄终端隐藏累计 token
+  const dimensions = useTerminalDimensions()
+  const showCumulative = createMemo(() => dimensions().width > 120)
 
   return (
     <box flexShrink={0}>
@@ -144,8 +146,8 @@ export function SubagentFooter() {
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>

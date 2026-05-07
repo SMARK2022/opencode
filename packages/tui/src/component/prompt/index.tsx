@@ -1,7 +1,6 @@
 import {
   BoxRenderable,
   // #107：renderBefore 清屏需要 OptimizedBuffer 类型
-  OptimizedBuffer,
   RGBA,
   TextareaRenderable,
   MouseEvent,
@@ -170,6 +169,8 @@ export function Prompt(props: PromptProps) {
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
+  // #109：窄终端隐藏累计 token 括号
+  const showCumulative = createMemo(() => dimensions().width > 120)
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -1414,17 +1415,7 @@ export function Prompt(props: PromptProps) {
 
   return (
     <>
-      <box
-        ref={(r: BoxRenderable) => (anchor = r)}
-        visible={props.visible !== false}
-        width="100%"
-        // #107：清掉 prompt 下方残留像素，避免滚动后 ghost 行
-        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
-          if (this.screenY && buffer.height > this.screenY) {
-            buffer.fillRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))
-          }
-        }}
-      >
+      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
         <box
           width="100%"
           border={["left"]}
@@ -1752,8 +1743,8 @@ export function Prompt(props: PromptProps) {
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
                           {/* 只改变箭头前景色，数值与可选后缀仍从同一 item 快照读取，保持文本布局稳定。 */}
-                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
-                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
+                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
                           {item().context ? ` · ${item().context}` : ""}
                           {item().cost ? ` · ${item().cost}` : ""}
                         </text>

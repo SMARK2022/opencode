@@ -32,8 +32,10 @@ import {
   RGBA,
   MouseButton,
   type MouseEvent,
+  type OptimizedBuffer,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
+import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
 import type {
   AssistantMessage,
   Part,
@@ -295,6 +297,30 @@ export function Session() {
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+  // #109：user 消息 agent 色映射为滚动条 marker
+  const userMessageAgentColors = createMemo(() => {
+    return new Map(
+      messages()
+        .filter((m) => m.role === "user")
+        .map((m) => [m.id, local.agent.color(m.agent)]),
+    )
+  })
+  // #109：renderAfter 回调：委托 smooth-scrollbar 重绘
+  function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
+    const s = scroll
+    if (!s) return
+    const colors = userMessageAgentColors()
+    drawSmoothScrollbar({
+      buffer,
+      scrollBox: s,
+      markers: s.content.getChildrenSortedByPrimaryAxis().flatMap((child): SmoothScrollbarMarker[] => {
+        const color = colors.get(child.id)
+        if (!color) return []
+        // #109：content 坐标 = screenY 差
+        return [{ offset: Math.max(0, child.screenY - s.content.screenY), color }]
+      }),
+    })
+  }
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
@@ -1173,6 +1199,8 @@ export function Session() {
                   trackOptions: {
                     backgroundColor: theme.backgroundElement,
                     foregroundColor: theme.textMuted, // 跟随终端主题，避免固定颜色在深浅背景上失去对比度。
+                    // #109：原生滚动条后接平滑重绘
+                    renderAfter: drawSessionScrollbar,
                   },
                 }}
                 stickyScroll={true}
@@ -1278,7 +1306,20 @@ export function Session() {
                   )}
                 </For>
               </scrollbox>
-              <box flexShrink={0}>
+              <box
+              flexShrink={0}
+              // #109：从 prompt 顶清到屏底，消除滚动残影
+              renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+                const x = Math.max(0, this.screenX)
+                const y = Math.max(0, this.screenY)
+                const width = Math.min(this.width, buffer.width - x)
+                // #109：高度必须是剩余全高，不能只刷一行
+                const height = buffer.height - y
+                if (width > 0 && height > 0) {
+                  buffer.fillRect(x, y, width, height, theme.background)
+                }
+              }}
+            >
                 <Show when={permissions().length > 0}>
                   <PermissionPrompt
                     request={permissions()[0]}
@@ -2072,7 +2113,7 @@ function BlockTool(props: {
       paddingBottom={1}
       paddingLeft={2}
       marginTop={1}
-      gap={1}
+      // #109：去掉 gap，改由子块 marginTop 承担间距
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
@@ -2106,9 +2147,11 @@ function BlockTool(props: {
           </Show>
         )}
       </Show>
-      {props.children}
+      <box marginTop={1}>{props.children}</box>
       <Show when={error()}>
+        <box marginTop={1}>
         <text fg={theme.error}>{error()}</text>
+      </box>
       </Show>
     </box>
   )
