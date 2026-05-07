@@ -1,5 +1,7 @@
 import {
   BoxRenderable,
+  // #107：renderBefore 清屏需要 OptimizedBuffer 类型
+  OptimizedBuffer,
   RGBA,
   TextareaRenderable,
   MouseEvent,
@@ -1412,7 +1414,17 @@ export function Prompt(props: PromptProps) {
 
   return (
     <>
-      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
+      <box
+        ref={(r: BoxRenderable) => (anchor = r)}
+        visible={props.visible !== false}
+        width="100%"
+        // #107：清掉 prompt 下方残留像素，避免滚动后 ghost 行
+        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+          if (this.screenY && buffer.height > this.screenY) {
+            buffer.fillRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))
+          }
+        }}
+      >
         <box
           width="100%"
           border={["left"]}
