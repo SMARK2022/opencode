@@ -696,9 +696,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
 
     const messages = Effect.fn("Session.messages")(function* (input: { sessionID: SessionID; limit?: number }) {
       if (input.limit) {
-        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items.filter(
-          (m) => !m.info.hidden,
-        )
+        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items
       }
       return Array.from(MessageV2.stream(input.sessionID)).reverse()
     })

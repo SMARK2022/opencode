@@ -1026,7 +1026,7 @@ export function toModelMessages(
   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
 }
 
-export function page(input: { sessionID: SessionID; limit: number; before?: string }) {
+export function page(input: { sessionID: SessionID; limit: number; before?: string; includeHidden?: boolean }) {
   const before = input.before ? cursor.decode(input.before) : undefined
   const where = before
     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
@@ -1055,6 +1055,15 @@ export function page(input: { sessionID: SessionID; limit: number; before?: stri
   const slice = more ? rows.slice(0, input.limit) : rows
   const items = hydrate(slice)
   items.reverse()
+  if (!input.includeHidden) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].info.hidden) {
+        items.splice(i, 1)
+        continue
+      }
+      items[i].parts = items[i].parts.filter((p) => !p.hidden)
+    }
+  }
   const tail = slice.at(-1)
   return {
     items,
@@ -1067,7 +1076,7 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }
   const size = 50
   let before: string | undefined
   while (true) {
-    const next = page({ sessionID, limit: size, before })
+    const next = page({ sessionID, limit: size, before, includeHidden: true })
     if (next.items.length === 0) break
     for (let i = next.items.length - 1; i >= 0; i--) {
       const msg = next.items[i]
