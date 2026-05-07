@@ -1,4 +1,4 @@
-import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
+import { BoxRenderable, OptimizedBuffer, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
 import { createEffect, createMemo, onMount, createSignal, onCleanup, on, untrack, Show, Switch, Match } from "solid-js"
 import "opentui-spinner/solid"
 import path from "path"
@@ -1189,7 +1189,15 @@ export function Prompt(props: PromptProps) {
         agentStyleId={agentStyleId}
         promptPartTypeId={() => promptPartTypeId}
       />
-      <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
+      <box
+        ref={(r) => (anchor = r)}
+        visible={props.visible !== false}
+        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+          if (this.screenY && buffer.height > this.screenY) {
+            buffer.fillRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))
+          }
+        }}
+      >
         <box
           border={["left"]}
           borderColor={borderHighlight()}
