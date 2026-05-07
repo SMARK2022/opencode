@@ -92,6 +92,7 @@ jobs:
           path: |
             packages/opencode/dist/opencode-linux-x64-*.tar.gz
             packages/opencode/dist/opencode_*_amd64.deb
+          if-no-files-found: error
 
   build-macos:
     runs-on: macos-latest
@@ -123,6 +124,7 @@ jobs:
           path: |
             packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
             packages/opencode/dist/opencode-darwin-x64-*.tar.gz
+          if-no-files-found: error
 
   build-windows:
     runs-on: windows-latest
@@ -143,7 +145,8 @@ jobs:
         shell: pwsh
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --skip-embed-web-ui
+          # #103：显式 --arch=x64，避免 Windows 默认双架构产物膨胀
+          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --arch=x64 --skip-embed-web-ui
 
       - name: Package Windows zip
         shell: pwsh
@@ -152,15 +155,13 @@ jobs:
           $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
           # --os 使用 win32，而 build.ts 目录名转成 windows；pwsh 路径须沿此映射
           cd packages/opencode/dist/opencode-windows-x64/bin
-          # Windows 编译生成 .exe；从 bin 回退两级写入 dist，保持双架构归档与上传一致
+          # 本项仅发布 x64，归档继续写入 dist，保持上传路径一致。
           Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-$VERSION.zip"
-          cd ../../opencode-windows-arm64/bin
-          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-arm64-$VERSION.zip"
 
-      # Windows 保留源双架构 zip 集合，不把 runner 架构当作唯一发布架构
+      # Windows 的产物集合与显式 x64 构建保持一致。
       - uses: actions/upload-artifact@v4
         with:
           name: opencode-windows
           path: |
             packages/opencode/dist/opencode-windows-x64-*.zip
-            packages/opencode/dist/opencode-windows-arm64-*.zip
+          if-no-files-found: error
