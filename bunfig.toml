@@ -1,5 +1,7 @@
 [install]
 exact = true
+# 与 CI 一致：hoisted 避免 peer 变体冲突
+linker = "hoisted"
 # 镜像仅作为 registry 包的默认源，保留直接 URL、锁定版本及 integrity 哈希。
 registry = "https://registry.npmmirror.com"
 # Only install newly resolved package versions published at least 3 days ago.
