@@ -91,7 +91,6 @@
     "@typescript/native-preview": "catalog:",
     "glob": "13.0.5",
     "husky": "9.1.7",
-    "node-gyp": "11.2.0",
     "oxlint": "1.60.0",
     "oxlint-tsgolint": "0.21.0",
     "prettier": "3.6.2",
@@ -122,7 +121,6 @@
     "protobufjs",
     "tree-sitter",
     "tree-sitter-bash",
-    "tree-sitter-powershell",
     "web-tree-sitter",
     "electron"
   ],

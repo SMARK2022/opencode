@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (e.g., 1.14.25-smark)'
+        description: 'Version (e.g., 1.14.31-smark)'
         required: false
         type: string
   push:
@@ -17,7 +17,7 @@ on:
       - "bun.lock"
 
 env:
-  DEFAULT_VERSION: "1.14.25-smark"
+  DEFAULT_VERSION: "1.14.31-smark"
 
 jobs:
   build-linux:
