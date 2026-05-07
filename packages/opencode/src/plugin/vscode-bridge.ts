@@ -49,7 +49,7 @@ const runArgs = {
     .enum(["cell", "range"])
     .optional()
     .describe("Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell."),
-  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx."),
+  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Also supports TOP and BOTTOM for the first/last cell."),
   endCellId: z
     .string()
     .optional()

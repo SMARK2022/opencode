@@ -121,10 +121,16 @@ export async function runNotebook(input: Record<string, unknown>) {
 // ---------------------------------------------------------------------------
 
 function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {
-  const startCell = resolveNotebookCell(notebook, undefined, cellId)
+  function resolveCell(id: string) {
+    const upper = id.toUpperCase()
+    if (upper === "TOP") return notebook.cellAt(0)
+    if (upper === "BOTTOM") return notebook.cellAt(Math.max(0, notebook.cellCount - 1))
+    return resolveNotebookCell(notebook, undefined, id)
+  }
+  const startCell = resolveCell(cellId)
   if (!endCellId) return [startCell]
 
-  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
+  const endCell = resolveCell(endCellId)
   if (endCell.index < startCell.index) {
     throw new Error("endCellId must refer to the same cell or a later cell than cellId")
   }

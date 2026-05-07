@@ -134,6 +134,8 @@ export const layer = Layer.effect(
                 question: "allow",
                 plan_enter: "allow",
                 bash: "ask",
+                vscode_notebook_run: "ask",
+                vscode_notebook_env: "ask",
               }),
               user,
             ),
