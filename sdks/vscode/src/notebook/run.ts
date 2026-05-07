@@ -140,10 +140,17 @@ async function compactRunResult(notebook: vscode.NotebookDocument, target: strin
 
 function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {
   // 两端都经完整别名解析器定位，同格的不同 ID 写法仍只选择同一格。
-  const startCell = resolveNotebookCell(notebook, undefined, cellId)
+  // #101：TOP/BOTTOM 解析为首/末 code-or-any cell 索引快捷方式
+  function resolveCell(id: string) {
+    const upper = id.toUpperCase()
+    if (upper === "TOP") return notebook.cellAt(0)
+    if (upper === "BOTTOM") return notebook.cellAt(Math.max(0, notebook.cellCount - 1))
+    return resolveNotebookCell(notebook, undefined, id)
+  }
+  const startCell = resolveCell(cellId)
   // endCellId 才是范围信号，省略它时即使提示 type=range 也沿源规则执行单格。
   if (!endCellId) return [startCell]
-  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
+  const endCell = resolveCell(endCellId)
   // 逆序直接拒绝，不能让空 slice 被当作一次成功执行。
   if (endCell.index < startCell.index) throw new Error("endCellId must refer to the same cell or a later cell than cellId")
   return notebook.getCells().slice(startCell.index, endCell.index + 1)

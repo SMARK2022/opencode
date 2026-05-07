@@ -141,6 +141,8 @@ export const Plugin = define({
               { action: "plan_enter", resource: "*", effect: "allow" },
               // ask 触发原生审批；持久授权和拒绝仍由 PermissionV2 判定。
               { action: "bash", resource: "*", effect: "ask" },
+              // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
+              ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
               // V2 的 edit/write/apply_patch 共用 edit 动作，不能只按工具名设审批。
               ...(id === "review" ? [{ action: "edit", resource: "*", effect: "ask" as const }] : []),
               // 笔记本桥接使用独立动作名，沿用 review 的编辑审批，且保留后续用户覆盖。
