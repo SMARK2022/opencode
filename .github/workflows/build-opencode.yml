@@ -2,44 +2,91 @@ name: Build OpenCode CLI
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version (e.g., 1.14.31-smark)'
-        required: false
-        type: string
   push:
     branches:
       - dev-smark
     paths:
       - ".github/workflows/build-opencode.yml"
+      - ".github/actions/setup-bun/action.yml"
       - "packages/opencode/**"
       - "package.json"
       - "bun.lock"
 
-env:
-  DEFAULT_VERSION: "1.14.31-smark"
-
 jobs:
-  build-linux:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
+      tag: ${{ steps.pkg.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pkg
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./packages/opencode/package.json').version")"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
+            echo "Failed to read packages/opencode/package.json version" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+          echo "Resolved tag: v$VERSION"
+
+  ensure-release:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; assets will be replaced by build jobs."
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes "OpenCode smark build $VERSION"
+          fi
+
+  build-linux:
+    needs: [version, ensure-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
 
       - name: Build Linux
+        shell: bash
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=linux --skip-embed-web-ui
+          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=linux --skip-embed-web-ui
 
       - name: Package Linux tar.gz
+        shell: bash
         run: |
+          VERSION="${{ needs.version.outputs.version }}"
           cd packages/opencode/dist/opencode-linux-x64/bin
-          tar -czf ../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
+          tar -czf ../../opencode-linux-x64-${VERSION}.tar.gz opencode
 
       - name: Package Linux .deb
+        shell: bash
         run: |
-          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
+          VERSION="${{ needs.version.outputs.version }}"
           DEB_DIR="/tmp/deb_build"
           PKG_NAME="opencode_${VERSION}_amd64"
           BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
@@ -63,44 +110,62 @@ jobs:
 
           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opencode-linux
-          path: |
-            packages/opencode/dist/opencode-linux-x64-*.tar.gz
-            packages/opencode/dist/opencode_*_amd64.deb
-          if-no-files-found: error
+      - name: Upload Linux assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            packages/opencode/dist/opencode-linux-x64-*.tar.gz \
+            packages/opencode/dist/opencode_*_amd64.deb \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
   build-macos:
+    needs: [version, ensure-release]
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
 
       - name: Build macOS
+        shell: bash
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=darwin --skip-embed-web-ui
+          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=darwin --skip-embed-web-ui
 
       - name: Package macOS tar.gz
+        shell: bash
         run: |
-          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
+          VERSION="${{ needs.version.outputs.version }}"
           cd packages/opencode/dist/opencode-darwin-arm64/bin
           tar -czf ../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
           cd ../../opencode-darwin-x64/bin
           tar -czf ../../opencode-darwin-x64-${VERSION}.tar.gz opencode
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opencode-macos
-          path: |
-            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
-            packages/opencode/dist/opencode-darwin-x64-*.tar.gz
-          if-no-files-found: error
+      - name: Upload macOS assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz \
+            packages/opencode/dist/opencode-darwin-x64-*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
   build-windows:
+    needs: [version, ensure-release]
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -116,22 +181,29 @@ jobs:
 
       - uses: ./.github/actions/setup-bun
 
-      - name: Build Windows
+      - name: Build Windows x64
         shell: pwsh
         run: |
           cd packages/opencode
-          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --arch=x64 --skip-embed-web-ui
+          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
 
-      - name: Package Windows zip
+      - name: Package Windows x64 exe
         shell: pwsh
         run: |
-          $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
-          cd packages/opencode/dist/opencode-windows-x64/bin
-          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-$VERSION.zip"
+          $VERSION = "${{ needs.version.outputs.version }}"
+          Copy-Item "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe" "packages/opencode/dist/opencode-windows-x64-$VERSION.exe" -Force
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opencode-windows
-          path: |
-            packages/opencode/dist/opencode-windows-x64-*.zip
-          if-no-files-found: error
+      - name: Upload Windows assets to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $files = @(Get-ChildItem "packages/opencode/dist/opencode-windows-x64-*.exe" -ErrorAction Stop)
+          if ($files.Count -eq 0) {
+            throw "No Windows exe assets found"
+          }
+          foreach ($file in $files) {
+            gh release upload $env:TAG $file.FullName --repo $env:GITHUB_REPOSITORY --clobber
+          }
