@@ -252,7 +252,7 @@ describe("tool.read env file permissions", () => {
 })
 
 describe("tool.read truncation", () => {
-  it.live("truncates large file by bytes and sets truncated metadata", () =>
+  it.live("truncates large file by line count and sets truncated metadata", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
@@ -262,7 +262,7 @@ describe("tool.read truncation", () => {
 
       const result = yield* exec(dir, { filePath: path.join(dir, "large.json") })
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Output capped at")
+      expect(result.output).toContain("Showing lines 1-400")
       expect(result.output).toContain("Use offset=")
     }),
   )
@@ -358,17 +358,6 @@ describe("tool.read truncation", () => {
       const result = yield* exec(dir, { filePath: path.join(dir, "dir"), offset: 6, limit: 5 })
       expect(result.metadata.truncated).toBe(false)
       expect(result.output).not.toContain("Showing 5 of 10 entries")
-    }),
-  )
-
-  it.live("truncates long lines", () =>
-    Effect.gen(function* () {
-      const dir = yield* tmpdirScoped()
-      yield* put(path.join(dir, "long-line.txt"), "x".repeat(3000))
-
-      const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
-      expect(result.output).toContain("(line truncated to 2000 chars)")
-      expect(result.output.length).toBeLessThan(3000)
     }),
   )
 

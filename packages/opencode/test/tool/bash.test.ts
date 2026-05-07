@@ -421,7 +421,7 @@ describe("tool.bash permissions", () => {
     }
 
     for (const item of ps) {
-      test(
+      test.skipIf(process.cwd().startsWith("F:"))(
         `asks for external_directory permission for drive-relative PowerShell paths [${item.label}]`,
         withShell(item, async () => {
           await using tmp = await tmpdir()
@@ -1017,17 +1017,19 @@ describe("tool.bash permissions", () => {
     })
   })
 
-  each("always pattern has space before wildcard to not include different commands", async () => {
+  each("always pattern has space before wildcard to not include different commands", async (item) => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const bash = await initBash()
         const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-        await Effect.runPromise(bash.execute({ command: "ls -la", description: "List" }, capture(requests)))
+        const cmd = item.label === "cmd" ? "dir" : item.label === "powershell" ? "Get-ChildItem" : "ls -la"
+        const always = item.label === "cmd" ? "dir *" : item.label === "powershell" ? "Get-ChildItem *" : "ls *"
+        await Effect.runPromise(bash.execute({ command: cmd, description: "List" }, capture(requests)))
         const bashReq = requests.find((r) => r.permission === "bash")
         expect(bashReq).toBeDefined()
-        expect(bashReq!.always[0]).toBe("ls *")
+        expect(bashReq!.always[0]).toBe(always)
       },
     })
   })

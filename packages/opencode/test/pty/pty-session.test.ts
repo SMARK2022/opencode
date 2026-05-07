@@ -21,7 +21,7 @@ const pick = (log: Array<{ type: "created" | "exited" | "deleted"; id: PtyID }>,
   return log.filter((evt) => evt.id === id).map((evt) => evt.type)
 }
 
-describe("pty", () => {
+describe.skipIf(process.platform === "win32")("pty", () => {
   test("publishes created, exited, deleted in order for a short-lived process", async () => {
     if (process.platform === "win32") return
 

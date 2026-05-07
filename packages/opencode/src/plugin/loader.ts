@@ -1,3 +1,4 @@
+import { fileURLToPath } from "url"
 import {
   checkPluginCompatibility,
   createPluginEntry,
@@ -119,7 +120,11 @@ export namespace PluginLoader {
   export async function load(row: Resolved): Promise<{ ok: true; value: Loaded } | { ok: false; error: unknown }> {
     let mod
     try {
-      mod = await import(row.entry)
+      mod = await import(
+        process.platform === "win32" && row.entry.startsWith("file://")
+          ? fileURLToPath(row.entry).replaceAll("\\", "/")
+          : row.entry,
+      )
     } catch (error) {
       return { ok: false, error }
     }

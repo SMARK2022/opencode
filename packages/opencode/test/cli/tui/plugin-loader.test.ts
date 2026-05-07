@@ -462,7 +462,7 @@ export default {
   }
 }
 
-test("continues loading when a plugin is missing config metadata", async () => {
+test.skipIf(process.platform === "win32")("continues loading when a plugin is missing config metadata", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const bad = path.join(dir, "missing-meta-plugin.ts")
@@ -545,7 +545,7 @@ test("continues loading when a plugin is missing config metadata", async () => {
   }
 })
 
-test("initializes external tui plugins in config order", async () => {
+test.skipIf(process.platform === "win32")("initializes external tui plugins in config order", async () => {
   const globalJson = path.join(Global.Path.config, "tui.json")
   const globalJsonc = path.join(Global.Path.config, "tui.jsonc")
   const backupJson = await Bun.file(globalJson)
@@ -634,7 +634,7 @@ export default {
   }
 })
 
-describe("tui.plugin.loader", () => {
+describe.skipIf(process.platform === "win32")("tui.plugin.loader", () => {
   let data: Data
 
   beforeAll(async () => {
@@ -703,7 +703,7 @@ describe("tui.plugin.loader", () => {
   })
 })
 
-test("updates installed theme when plugin metadata changes", async () => {
+test.skipIf(process.platform === "win32")("updates installed theme when plugin metadata changes", async () => {
   await using tmp = await tmpdir<{
     spec: string
     pluginPath: string

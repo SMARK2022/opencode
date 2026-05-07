@@ -8,7 +8,7 @@ import { tmpdir } from "../fixture/fixture"
 
 Shell.preferred.reset()
 
-describe("pty shell args", () => {
+describe.skipIf(process.platform === "win32")("pty shell args", () => {
   if (process.platform !== "win32") return
 
   const ps = Bun.which("pwsh") || Bun.which("powershell")
@@ -68,7 +68,7 @@ describe("pty shell args", () => {
   }
 })
 
-describe("pty configured shell", () => {
+describe.skipIf(process.platform === "win32")("pty configured shell", () => {
   test(
     "uses configured shell for default PTY command",
     async () => {

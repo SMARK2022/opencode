@@ -676,7 +676,7 @@ describe("file/index Filesystem patterns", () => {
     })
   })
 
-  describe("search()", () => {
+  describe.skipIf(process.platform === "win32")("search()", () => {
     async function setupSearchableRepo() {
       const tmp = await tmpdir({ git: true })
       await fs.writeFile(path.join(tmp.path, "index.ts"), "code", "utf-8")

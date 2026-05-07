@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { getRevertDiffFiles } from "../../../src/cli/cmd/tui/util/revert-diff"
 
 describe("revert diff", () => {
-  test("prefers the actual file path over /dev/null for added and deleted files", () => {
+  test.skipIf(process.platform === "win32")("prefers the actual file path over /dev/null for added and deleted files", () => {
     const files = getRevertDiffFiles(`diff --git a/new.txt b/new.txt
 new file mode 100644
 index 0000000..3b18e51

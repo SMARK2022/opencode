@@ -13,7 +13,8 @@ afterAll(async () => {
   const { Database } = await import("../src/storage/db")
   Database.close()
   const busy = (error: unknown) =>
-    typeof error === "object" && error !== null && "code" in error && error.code === "EBUSY"
+    typeof error === "object" && error !== null && "code" in error &&
+    (error.code === "EBUSY" || error.code === "EACCES")
   const rm = async (left: number): Promise<void> => {
     Bun.gc(true)
     await sleep(100)

@@ -133,20 +133,30 @@ export function tui(input: {
       await TuiPluginRuntime.dispose()
     }
 
-    // On macOS, opentui 0.1.104+ may detect the terminal as using wcwidth mode,
-    // which relies on the system C library wcwidth() with locale support.
+    // On macOS and Windows, opentui may detect the terminal as using wcwidth
+    // mode, which relies on the system C library wcwidth() with locale support.
     // In compiled Bun binaries the locale context for the native Zig layer may
     // differ from the shell, causing wcwidth() to return -1 for CJK characters
     // and rendering them as empty cells. Force the built-in Unicode width tables
     // (mode 2026) instead, which is locale-independent and always correct.
     //
-    // Also wait up to 100 ms for the macOS PTY to report terminal dimensions:
+    // Respect explicit user overrides: skip if OPENTUI_FORCE_WCWIDTH is set
+    // (user intentionally wants wcwidth) or OPENTUI_FORCE_UNICODE is already
+    // set to an explicit value.
+    const shouldForceUnicodeWidth =
+      (process.platform === "darwin" || process.platform === "win32") &&
+      process.env.OPENTUI_FORCE_UNICODE === undefined &&
+      process.env.OPENTUI_FORCE_WCWIDTH === undefined
+    if (shouldForceUnicodeWidth) {
+      process.env.OPENTUI_FORCE_UNICODE = "1"
+    }
+
+    // Wait up to 100 ms for the macOS PTY to report terminal dimensions:
     // stdout.columns may be 0 immediately after process start if the PTY has not
     // finished initialising. Reading it too early causes createCliRenderer() to
     // fall back to 80×24, producing a garbled first frame that only a SIGWINCH
     // (e.g. dragging the window) would otherwise correct.
     if (process.platform === "darwin") {
-      process.env.OPENTUI_FORCE_UNICODE = "1"
       for (let i = 0; i < 10 && !process.stdout.columns; i++)
         await new Promise<void>((r) => setTimeout(r, 10))
     }

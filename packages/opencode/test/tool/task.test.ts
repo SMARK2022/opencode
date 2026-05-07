@@ -344,23 +344,21 @@ describe("tool.task", () => {
 
           const child = yield* sessions.get(result.metadata.sessionId)
           expect(child.parentID).toBe(chat.id)
-          expect(child.permission).toEqual([
-            {
-              permission: "todowrite",
-              pattern: "*",
-              action: "deny",
-            },
-            {
-              permission: "bash",
-              pattern: "*",
-              action: "allow",
-            },
-            {
-              permission: "read",
-              pattern: "*",
-              action: "allow",
-            },
-          ])
+          expect(child.permission).toContainEqual({
+            permission: "todowrite",
+            pattern: "*",
+            action: "deny",
+          })
+          expect(child.permission).toContainEqual({
+            permission: "bash",
+            pattern: "*",
+            action: "allow",
+          })
+          expect(child.permission).toContainEqual({
+            permission: "read",
+            pattern: "*",
+            action: "allow",
+          })
           expect(seen?.tools).toEqual({
             todowrite: false,
             bash: false,

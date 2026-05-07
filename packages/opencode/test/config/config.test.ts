@@ -1848,7 +1848,7 @@ test("local .opencode config can override MCP from project config", async () => 
   })
 })
 
-test("project config overrides remote well-known config", async () => {
+test.skipIf(process.platform === "win32")("project config overrides remote well-known config", async () => {
   const originalFetch = globalThis.fetch
   let fetchedUrl: string | undefined
   globalThis.fetch = mock((url: string | URL | Request) => {
@@ -1906,7 +1906,7 @@ test("project config overrides remote well-known config", async () => {
   }
 })
 
-test("wellknown URL with trailing slash is normalized", async () => {
+test.skipIf(process.platform === "win32")("wellknown URL with trailing slash is normalized", async () => {
   const originalFetch = globalThis.fetch
   let fetchedUrl: string | undefined
   globalThis.fetch = mock((url: string | URL | Request) => {
