@@ -19,8 +19,6 @@
         "@typescript/native-preview": "catalog:",
         "glob": "13.0.5",
         "husky": "9.1.7",
-        // 根构建依赖复用已锁定的 node-gyp@12.3.0 包条目，manifest 与 frozen 输入同步
-        "node-gyp": "12.3.0",
         "oxlint": "1.60.0",
         "oxlint-tsgolint": "0.21.0",
         "prettier": "3.6.2",
@@ -1062,11 +1060,12 @@
   },
   "trustedDependencies": [
     "esbuild",
-    "tree-sitter-powershell",
+    "node-pty",
     "protobufjs",
-    "electron",
-    "web-tree-sitter",
+    "tree-sitter",
     "tree-sitter-bash",
+    "web-tree-sitter",
+    "electron"
   ],
   "patchedDependencies": {
     "@pierre/trees@1.0.0-beta.4": "patches/@pierre%2Ftrees@1.0.0-beta.4.patch",

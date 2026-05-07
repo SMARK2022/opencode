@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (e.g., 1.14.25-smark)'
+        description: 'Version (e.g., 1.14.31-smark)'
         required: false
         type: string
   # push 自动触发：dev-smark 分支推送时自动构建，路径过滤避免无关变更触发 CI
@@ -27,7 +27,7 @@ on:
 
 # 默认版本号：push 触发时无 inputs.version，回退到此常量保证产物命名一致
 env:
-  DEFAULT_VERSION: "1.14.25-smark"
+  DEFAULT_VERSION: "1.14.31-smark"
 
 jobs:
   build-linux:
