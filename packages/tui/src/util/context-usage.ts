@@ -474,7 +474,8 @@ function messageTokens(messages: WithParts[], ratio: number) {
   }
 }
 
-function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
+// ratio 用于流式字符估 token（未完成 assistant 增量）
+function usageTotals(messages: WithParts[], ratio: number): ContextUsageData["details"]["usage"] {
   const usage: ContextUsageData["details"]["usage"] = {
     input: 0,
     output: 0,
@@ -484,29 +485,22 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
     total: 0,
     cost: 0,
   }
-  let confirmed = false
-  // 部件与消息携带同一生产者结果，存在确认部件时不能再加一次消息用量。
+  // 每条消息优先用 step-finish 精确账本；无则回退 assistant tokens
   for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (part.type !== "step-finish") continue
-      // 零 token 的 step-finish 也已确认，历史回退取决于部件存在性而非总额真值。
-      confirmed = true
-      usage.input += part.tokens.input
-      // getUsage 已扣除 reasoning；展示的 output 不应再次包含推理。
-      usage.output += part.tokens.output
-      usage.reasoning += part.tokens.reasoning
-      usage.cacheRead += part.tokens.cache.read
-      usage.cacheWrite += part.tokens.cache.write
-      usage.cost += part.cost
-    }
-  }
-
-  // 消息级字段仅服务没有确认部件的历史格式；这条回退不能与已有部件账本叠加。
-  if (!confirmed) {
-    for (const msg of messages) {
-      if (msg.info.role !== "assistant") continue
+    const hasStepFinish = msg.parts.some((p) => p.type === "step-finish")
+    if (hasStepFinish) {
+      for (const part of msg.parts) {
+        if (part.type !== "step-finish") continue
+        usage.input += part.tokens.input
+        // getUsage 已扣除 reasoning，输出与推理仍分别累计。
+        usage.output += part.tokens.output
+        usage.reasoning += part.tokens.reasoning
+        usage.cacheRead += part.tokens.cache.read
+        usage.cacheWrite += part.tokens.cache.write
+        usage.cost += part.cost
+      }
+    } else if (msg.info.role === "assistant") {
       usage.input += msg.info.tokens.input
-      // 助手消息与 step-finish 保存同一 getUsage 结果，回退也保持分栏。
       usage.output += msg.info.tokens.output
       usage.reasoning += msg.info.tokens.reasoning
       usage.cacheRead += msg.info.tokens.cache.read
@@ -514,6 +508,28 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
       usage.cost += msg.info.cost
     }
   }
+
+  // 未完成 assistant：把 step-finish 之后的流式增量按字符估 token
+  const lastMsg = messages.findLast((m) => m.info.role === "assistant" && !m.info.time.completed)
+  if (lastMsg) {
+    const lastParts = lastMsg.parts
+    const lastSFIdx = lastParts.reduce((i, p, idx) => (p.type === "step-finish" ? idx : i), -1)
+    let outputChars = 0
+    let inputChars = 0
+    for (let i = lastSFIdx + 1; i < lastParts.length; i++) {
+      const p = lastParts[i]
+      if (p.type === "text" && !p.ignored) outputChars += (p.text ?? "").length
+      if (p.type === "reasoning") outputChars += (p.text ?? "").length
+      if (p.type === "tool") {
+        if (p.state.status === "pending") outputChars += (p.state.raw ?? "").length
+        else outputChars += JSON.stringify(p.state.input ?? {}).length
+        if (p.state.status === "completed") inputChars += (p.state.output ?? "").length
+      }
+    }
+    usage.output += Math.round(outputChars / ratio)
+    usage.input += Math.round(inputChars / ratio)
+  }
+
   // total 各加一次 output/reasoning；cost 是金额，不能进入 token 总额。
   usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
   return usage
@@ -1097,8 +1113,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const maxTokens = frozen ?? modelInfo.model?.limit.context ?? 0
 
   const msg = messageTokens(compacted, ratio)
-  // raw 保存整场会话用量；窗口分类仍由 compacted 估算。
-  const usage = usageTotals(raw)
+  // #99：usage 用 raw 全量消息 + ratio 估流式增量
+  const usage = usageTotals(raw, ratio)
   const instructions = await gatherInstructionFiles(input)
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
   const messageText = msg.text.join("\n")

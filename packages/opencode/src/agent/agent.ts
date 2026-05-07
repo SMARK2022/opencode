@@ -188,6 +188,10 @@ const layer = Layer.effect(
                 edit: "ask",
                 write: "ask",
                 apply_patch: "ask",
+                // review 对笔记本变更沿用编辑审批，用户规则仍最后覆盖。
+                vscode_notebook_run: "ask",
+                vscode_notebook_edit: "ask",
+                vscode_notebook_env: "ask",
               }),
               // 同名代理的专属配置还会在注册表构建后覆盖这些规则。
               user,
@@ -197,7 +201,7 @@ const layer = Layer.effect(
           },
           plan: {
             name: "plan",
-            description: "Plan mode. Disallows all edit tools.",
+            description: "Plan mode. Disallows all edit tools and notebook mutations.",
             options: {},
             permission: Permission.merge(
               defaults,
@@ -215,6 +219,10 @@ const layer = Layer.effect(
                   [path.join(".opencode", "plans", "*.md")]: "allow",
                   [path.relative(ctx.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
                 },
+                // #99：plan 禁止 notebook run/edit/env 变异
+                vscode_notebook_run: "deny",
+                vscode_notebook_edit: "deny",
+                vscode_notebook_env: "deny",
               }),
               user,
             ),
