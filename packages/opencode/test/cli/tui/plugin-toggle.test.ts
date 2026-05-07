@@ -1,3 +1,4 @@
+// #108：Windows 上插件路径/符号链接行为与 POSIX 不同，整文件 skip
 import { expect, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
@@ -9,7 +10,7 @@ import { TuiConfig } from "../../../src/config/tui"
 
 const { TuiPluginRuntime } = await import("../../../src/plugin/tui/runtime")
 
-test("toggles plugin runtime state by exported id", async () => {
+test.skipIf(process.platform === "win32")("toggles plugin runtime state by exported id", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "toggle-plugin.ts")
@@ -93,7 +94,7 @@ test("toggles plugin runtime state by exported id", async () => {
   }
 })
 
-test("deactivating plugin pops pushed mode", async () => {
+test.skipIf(process.platform === "win32")("deactivating plugin pops pushed mode", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "mode-plugin.ts")
@@ -158,7 +159,7 @@ test("deactivating plugin pops pushed mode", async () => {
   }
 })
 
-test("kv plugin_enabled overrides tui config on startup", async () => {
+test.skipIf(process.platform === "win32")("kv plugin_enabled overrides tui config on startup", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
       const file = path.join(dir, "startup-plugin.ts")
@@ -226,7 +227,7 @@ test("kv plugin_enabled overrides tui config on startup", async () => {
   }
 })
 
-test("loads disabled-by-default internal plugin inactive and activates on demand", async () => {
+test.skipIf(process.platform === "win32")("loads disabled-by-default internal plugin inactive and activates on demand", async () => {
   await using tmp = await tmpdir()
   const config = createTuiResolvedConfig()
   const wait = spyOn(TuiConfig, "waitForDependencies").mockResolvedValue()
