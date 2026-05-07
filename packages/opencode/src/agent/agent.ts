@@ -153,6 +153,9 @@ export const layer = Layer.effect(
                 edit: "ask",
                 write: "ask",
                 apply_patch: "ask",
+                vscode_notebook_run: "ask",
+                vscode_notebook_edit: "ask",
+                vscode_notebook_env: "ask",
               }),
               user,
             ),
@@ -161,7 +164,7 @@ export const layer = Layer.effect(
           },
           plan: {
             name: "plan",
-            description: "Plan mode. Disallows all edit tools.",
+            description: "Plan mode. Disallows all edit tools and notebook mutations.",
             options: {},
             permission: Permission.merge(
               defaults,
@@ -176,6 +179,9 @@ export const layer = Layer.effect(
                   [path.join(".opencode", "plans", "*.md")]: "allow",
                   [path.relative(ctx.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
                 },
+                vscode_notebook_run: "deny",
+                vscode_notebook_edit: "deny",
+                vscode_notebook_env: "deny",
               }),
               user,
             ),

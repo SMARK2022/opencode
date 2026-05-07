@@ -295,7 +295,7 @@ function messageTokens(messages: WithParts[], ratio: number) {
   }
 }
 
-function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
+function usageTotals(messages: WithParts[], ratio: number): ContextUsageData["details"]["usage"] {
   const usage: ContextUsageData["details"]["usage"] = {
     input: 0,
     output: 0,
@@ -305,23 +305,19 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
     total: 0,
     cost: 0,
   }
-  let confirmed = false
   for (const msg of messages) {
-    for (const part of msg.parts) {
-      if (part.type !== "step-finish") continue
-      confirmed = true
-      usage.input += part.tokens.input
-      usage.output += part.tokens.output
-      usage.reasoning += part.tokens.reasoning
-      usage.cacheRead += part.tokens.cache.read
-      usage.cacheWrite += part.tokens.cache.write
-      usage.cost += part.cost
-    }
-  }
-
-  if (!confirmed) {
-    for (const msg of messages) {
-      if (msg.info.role !== "assistant") continue
+    const hasStepFinish = msg.parts.some((p) => p.type === "step-finish")
+    if (hasStepFinish) {
+      for (const part of msg.parts) {
+        if (part.type !== "step-finish") continue
+        usage.input += part.tokens.input
+        usage.output += part.tokens.output
+        usage.reasoning += part.tokens.reasoning
+        usage.cacheRead += part.tokens.cache.read
+        usage.cacheWrite += part.tokens.cache.write
+        usage.cost += part.cost
+      }
+    } else if (msg.info.role === "assistant") {
       usage.input += msg.info.tokens.input
       usage.output += msg.info.tokens.output
       usage.reasoning += msg.info.tokens.reasoning
@@ -330,6 +326,27 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
       usage.cost += msg.info.cost
     }
   }
+
+  const lastMsg = messages.findLast((m) => m.info.role === "assistant" && !m.info.time.completed)
+  if (lastMsg) {
+    const lastParts = lastMsg.parts
+    const lastSFIdx = lastParts.reduce((i, p, idx) => (p.type === "step-finish" ? idx : i), -1)
+    let outputChars = 0
+    let inputChars = 0
+    for (let i = lastSFIdx + 1; i < lastParts.length; i++) {
+      const p = lastParts[i]
+      if (p.type === "text" && !p.ignored) outputChars += (p.text ?? "").length
+      if (p.type === "reasoning") outputChars += (p.text ?? "").length
+      if (p.type === "tool") {
+        if (p.state.status === "pending") outputChars += (p.state.raw ?? "").length
+        else outputChars += JSON.stringify(p.state.input ?? {}).length
+        if (p.state.status === "completed") inputChars += (p.state.output ?? "").length
+      }
+    }
+    usage.output += Math.round(outputChars / ratio)
+    usage.input += Math.round(inputChars / ratio)
+  }
+
   usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
   return usage
 }
@@ -862,7 +879,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
 
   // 消息部分始终用 TUI 实时迭代（messages 内容随每轮变化）
   const msg = messageTokens(compacted, ratio)
-  const usage = usageTotals(raw)
+  const usage = usageTotals(raw, ratio)
 
   // ── 各组件 token 估算 ──
   let envTokens: number

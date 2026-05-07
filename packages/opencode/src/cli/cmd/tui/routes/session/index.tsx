@@ -1548,19 +1548,26 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
           setExpanded((prev) => !prev)
         }}
       >
-        {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
-        <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
-        <code
-          filetype="markdown"
-          drawUnstyledText={false}
-          streaming={true}
-          syntaxStyle={subtleSyntax()}
-          content={preview()}
-          conceal={ctx.conceal()}
-          fg={theme.textMuted}
-        />
+        {/* Wrap elements in separate boxes to isolate rendering bounds during fast streaming, preventing overlap */}
+        <box>
+          {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
+          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
+        </box>
+        <box>
+          <code
+            filetype="markdown"
+            drawUnstyledText={false}
+            streaming={true}
+            syntaxStyle={subtleSyntax()}
+            content={preview()}
+            conceal={ctx.conceal()}
+            fg={theme.textMuted}
+          />
+        </box>
         <Show when={overflow()}>
-          <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
+          <box>
+            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
+          </box>
         </Show>
       </box>
     </Show>
