@@ -143,13 +143,15 @@ export const Plugin = define({
               { action: "bash", resource: "*", effect: "ask" },
               // V2 的 edit/write/apply_patch 共用 edit 动作，不能只按工具名设审批。
               ...(id === "review" ? [{ action: "edit", resource: "*", effect: "ask" as const }] : []),
+              // 笔记本桥接使用独立动作名，沿用 review 的编辑审批，且保留后续用户覆盖。
+              ...(id === "review" ? ["vscode_notebook_run", "vscode_notebook_edit", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
             ]),
           )
         })
       }
 
       draft.update(AgentV2.ID.make("plan"), (item) => {
-        item.description = "Plan mode. Disallows all edit tools."
+        item.description = "Plan mode. Disallows all edit tools and notebook mutations."
         item.mode = "primary"
         item.permissions.push(
           ...PermissionV2.merge(defaults, [
@@ -157,6 +159,10 @@ export const Plugin = define({
             { action: "plan_exit", resource: "*", effect: "allow" },
             { action: "external_directory", resource: path.join(Global.Path.data, "plans", "*"), effect: "allow" },
             { action: "edit", resource: "*", effect: "deny" },
+            // 与 V1 相同，plan 不能通过独立的 notebook 动作绕过编辑限制。
+            { action: "vscode_notebook_run", resource: "*", effect: "deny" },
+            { action: "vscode_notebook_edit", resource: "*", effect: "deny" },
+            { action: "vscode_notebook_env", resource: "*", effect: "deny" },
             { action: "edit", resource: path.join(".opencode", "plans", "*.md"), effect: "allow" },
             {
               action: "edit",
