@@ -1,7 +1,7 @@
 // resolve 在调用方指定的文档内解释路径和格身份，不能跨文档借用活动选区。
 import vscode from "vscode"
 import { uriFromInput } from "../util"
-import { cellIdentifiers, shortId } from "./format"
+import { cellIdentifiers, shortId, normalizeCellId } from "./format"
 
 export async function resolveNotebook(filePath: string) {
   // 明确路径是所有工具的共同边界，缺失时不能借用活动文档或首个打开文档。
@@ -22,14 +22,15 @@ export async function resolveNotebook(filePath: string) {
 // resolve 接口在调用方给定的文档内匹配 canonical ID，不能跨文档借用全局选区。
 export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex?: number, cellId?: string) {
   if (cellId) {
-    const normalized = cellId.replace(/^#/, "")
+    // 先接受模型返回的 ID 别名，再沿既有多格歧义检查匹配。
+    const normalized = normalizeCellId(cellId)
     // 仅在给定文档内以 summary 同款 canonical ID 匹配，不比较截短显示片段。
     const cells = notebook.getCells().filter((candidate) => cellIdentifiers(candidate).some((id) => shortId(id) === shortId(normalized)))
     // 多个别名命中同一格不算歧义，多个不同格命中必须拒绝。
     if (cells.length > 1) throw new Error(`Ambiguous notebook cell ID: ${cellId}`)
     if (cells.length === 1) return cells[0]
     // 显式 ID 不命中直接抛错，不能猜前缀或降级选择首格。
-    throw new Error(`Notebook cell not found: ${cellId}`)
+    throw new Error(`Notebook cell not found: ${cellId}. The edit response contains updated cell IDs after type changes.`)
   }
 
   // 显式 ID 的不命中或歧义先拒绝，不能被同时传入的数字位置掩盖。

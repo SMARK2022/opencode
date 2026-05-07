@@ -98,6 +98,8 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     const definitions = yield* toolDefinitions(registry)
     expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
     expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
+    expect(definitions.find(item => item.name === "vscode_notebook_summary")?.description).toContain("stable within the current session for existing cells")
+    expect(definitions.find(item => item.name === "vscode_notebook_edit")?.description).toContain("updated cell ID and shifted neighbor info")
     // 检查实际广告的输入Schema，不能只更新V1插件而漏掉V2模型参数说明。
     expect(JSON.stringify(definitions.find(item => item.name === "vscode_notebook_run"))).toContain("Also supports TOP and BOTTOM")
     expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")

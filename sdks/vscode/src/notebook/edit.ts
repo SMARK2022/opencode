@@ -145,7 +145,25 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
 }
 
 async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
-  const targetCell = resolveNotebookCell(notebook, undefined, cellId)
+  let targetCell: vscode.NotebookCell
+  try {
+    targetCell = resolveNotebookCell(notebook, undefined, cellId)
+  } catch (resolveErr) {
+    // #105：cellId 失效时用 oldCode 扫描候选，只提示不自动改写
+    const oldCodeRaw = sourceProp(input, "oldCode")
+    if (!oldCodeRaw) throw resolveErr
+    const candidates = scanNotebookCellsForOldCode(notebook, oldCodeRaw)
+    if (candidates.length === 0) throw resolveErr
+    const parts = candidates.map((c) =>
+      `c${c1(c)} id=${copilotLikeCellId(c)} ${cellTypeLabel(c.kind)}/${c.document.languageId} first=${JSON.stringify(previewText((c.document.getText().split("\n")[0] ?? ""), 40))}`,
+    )
+    throw new Error(
+      `Cell not found: ${cellId}. ` +
+      (candidates.length === 1
+        ? `Did you mean ${parts[0]}? Retry with this cellId.`
+        : `oldCode matches ${candidates.length} cells:\n  ${parts.join("\n  ")}\nSpecify the correct cellId.`),
+    )
+  }
   const language = stringProp(input, "language")
   // oldCode 从格内文本定位，不接受仍可能随编辑漂移的 range 坐标。
   const oldCodeRaw = sourceProp(input, "oldCode")
@@ -213,6 +231,8 @@ async function handleTypeChange(
 
   // NotebookCellData 的结构替换会产生新 URI 身份，不能继续返回旧格 ID 作为编辑后目标。
   const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
+  // #105：type change 保留原 metadata，避免丢失自定义键
+  newCell.metadata = targetCell.metadata ? { ...targetCell.metadata } : undefined
   const anchorCellIndex = targetCell.index
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(anchorCellIndex, anchorCellIndex + 1), [newCell])])
@@ -271,11 +291,16 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
   // 只有前两阶均未命中才裁块边界，避免宽松规则掩盖精确匹配。
   if (matchIdx === -1) {
     const trimmedOld = old.trim()
-    matchIdx = src.indexOf(trimmedOld)
-    if (matchIdx !== -1) {
-      // 替换跨度取裁剪后的实际长度，保留命中片段外的原始空白。
-      matchLen = trimmedOld.length
-      strategy = "border-trimmed"
+    // #105：空 trim 或与 old 相同则跳过，避免假匹配
+    if (trimmedOld && trimmedOld !== old) {
+      matchIdx = src.indexOf(trimmedOld)
+      if (matchIdx !== -1) {
+        if (src.indexOf(trimmedOld, matchIdx + 1) !== -1) {
+          throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context.`)
+        }
+        matchLen = trimmedOld.length
+        strategy = "border-trimmed"
+      }
     }
   }
 
@@ -294,8 +319,20 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
     throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
   }
 
-  // 拼接也使用 LF 索引，再恢复目标 EOL，避免在 CRLF 原文中切错前后缀。
-  const source = (src.substring(0, matchIdx) + rep + src.substring(matchIdx + matchLen)).replace(/\n/g, eol)
+  // #105：line/border 策略携带源缩进到 newCode
+  let replacement = rep
+  if (strategy !== "exact") {
+    const matchedBlock = src.slice(matchIdx, matchIdx + matchLen)
+    const srcIndent = baseIndent(matchedBlock)
+    if (srcIndent) {
+      const firstNewLine = rep.split("\n").find((l) => l.trim())
+      if (firstNewLine && !firstNewLine.startsWith(srcIndent)) {
+        replacement = migrateIndent(rep, srcIndent)
+      }
+    }
+  }
+  // 替换正文仍按 LF 坐标拼接后恢复原 EOL，缩进迁移不改变范围外内容。
+  const source = (src.substring(0, matchIdx) + replacement + src.substring(matchIdx + matchLen)).replace(/\n/g, eol)
 
   const preMatch = src.substring(0, matchIdx)
   const preLines = preMatch.split("\n")
@@ -313,6 +350,7 @@ function lineTrimmedMatch(src: string, old: string) {
   const srcLines = src.split("\n")
   if (oldLines.length > srcLines.length) return undefined
 
+  let found: { index: number; length: number } | undefined
   for (let i = 0; i <= srcLines.length - oldLines.length; i++) {
     let matches = true
     // trim 只参与比较，不能将实际写回的源码也去掉缩进。
@@ -323,6 +361,8 @@ function lineTrimmedMatch(src: string, old: string) {
       }
     }
     if (matches) {
+      // 行级宽松匹配也必须唯一，不能静默选择第一处。
+      if (found) throw new Error("oldCode matches multiple locations (line-trimmed). Provide more surrounding context.")
       // 起点包含命中首行的完整缩进，不能按 trim 后长度回推源偏移。
       let start = 0
       // 输入已归一为 LF，每条前置行只累计一个换行字符。
@@ -333,11 +373,10 @@ function lineTrimmedMatch(src: string, old: string) {
         end += srcLines[i + k].length
         if (k < oldLines.length - 1) end += 1
       }
-      // 保留原算法的首个宽松命中；多命中拒绝仅属于 exact 策略。
-      return { index: start, length: end - start }
+      found = { index: start, length: end - start }
     }
   }
-  return undefined
+  return found
 }
 
 function buildContext(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, result: { matchStartLine: number; matchEndLine: number; strategy: string }, newCode: string) {
@@ -518,6 +557,12 @@ function compactEditResult(
     lines.push(`Preview: ${JSON.stringify(previewText(info.sourcePreview, 50))}`)
   }
 
+  // #105：type change 后强制提示新 cellId
+  if (info.oldKind) {
+    const anchorId = info.anchorCell ? copilotLikeCellId(info.anchorCell) : "unknown"
+    lines.push(`NOTE: Type change replaced the cell. Use id=${anchorId} for subsequent operations on this cell.`)
+  }
+
   return {
     ran: false,
     summary: lines.join("\n"),
@@ -533,4 +578,41 @@ function compactEditResult(
       language: info.language,
     },
   }
+}
+
+// #105：cellId 失效时用 oldCode 扫描候选，提示正确 #VSC id（不自动改写）
+// #105：仅扫描 contains(oldCode) 的 cell，供 Did-you-mean 提示
+function scanNotebookCellsForOldCode(notebook: vscode.NotebookDocument, oldCode: string) {
+  const normalize = (s: string) => s.replace(/\r\n/g, "\n")
+  const old = normalize(oldCode)
+  return notebook.getCells().filter((c) => normalize(c.document.getText()).includes(old))
+}
+
+// #105：非 exact 策略时把 newCode 缩进迁移到源块缩进，避免错位写入
+// #105：取非空行公共前导空白作为块缩进
+function baseIndent(text: string) {
+  const lines = text.split("\n").filter((l) => l.trim())
+  if (!lines.length) return ""
+  const indents = lines.map((l) => l.match(/^[ \t]*/)?.[0] ?? "")
+  let prefix = indents[0]
+  for (const indent of indents.slice(1)) {
+    let i = 0
+    while (i < prefix.length && i < indent.length && prefix[i] === indent[i]) i++
+    prefix = prefix.slice(0, i)
+    if (!prefix) return ""
+  }
+  return prefix
+}
+
+// #105：把 newCode 相对缩进映射到 matched 源块缩进
+function migrateIndent(newCode: string, targetIndent: string) {
+  const lines = newCode.split("\n")
+  const srcBase = baseIndent(newCode)
+  return lines
+    .map((line) => {
+      if (!line.trim()) return line
+      if (srcBase && line.startsWith(srcBase)) return targetIndent + line.slice(srcBase.length)
+      return targetIndent + line.trimStart()
+    })
+    .join("\n")
 }
