@@ -1,4 +1,4 @@
-import { BoxRenderable, OptimizedBuffer, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
+import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
 import { createEffect, createMemo, onMount, createSignal, onCleanup, on, untrack, Show, Switch, Match } from "solid-js"
 import "opentui-spinner/solid"
 import path from "path"
@@ -139,6 +139,7 @@ export function Prompt(props: PromptProps) {
   const command = useCommandDialog()
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
+  const showCumulative = createMemo(() => dimensions().width > 120)
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -1189,15 +1190,7 @@ export function Prompt(props: PromptProps) {
         agentStyleId={agentStyleId}
         promptPartTypeId={() => promptPartTypeId}
       />
-      <box
-        ref={(r) => (anchor = r)}
-        visible={props.visible !== false}
-        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
-          if (this.screenY && buffer.height > this.screenY) {
-            buffer.fillRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))
-          }
-        }}
-      >
+      <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
         <box
           border={["left"]}
           borderColor={borderHighlight()}
@@ -1585,8 +1578,8 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
-                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
+                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
                           {item().context ? ` · ${item().context}` : ""}
                           {item().cost ? ` · ${item().cost}` : ""}
                         </text>

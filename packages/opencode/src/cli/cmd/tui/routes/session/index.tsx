@@ -29,7 +29,9 @@ import {
   RGBA,
   MouseButton,
   type MouseEvent as TuiMouseEvent,
+  type OptimizedBuffer,
 } from "@opentui/core"
+import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type {
   AssistantMessage,
@@ -193,6 +195,31 @@ export function Session() {
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+  const userMessageAgentColors = createMemo(() => {
+    return new Map(
+      messages()
+        .filter((m) => m.role === "user")
+        .map((m) => [m.id, local.agent.color(m.agent)]),
+    )
+  })
+  function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
+    const s = scroll
+    if (!s) return
+
+    const colors = userMessageAgentColors()
+    drawSmoothScrollbar({
+      buffer,
+      scrollBox: s,
+      markers: s.content.getChildrenSortedByPrimaryAxis().flatMap((child): SmoothScrollbarMarker[] => {
+        const color = colors.get(child.id)
+        if (!color) return []
+
+        // screenY includes scroll translation; subtract content screenY to get
+        // the stable content-space offset for this user message.
+        return [{ offset: Math.max(0, child.screenY - s.content.screenY), color }]
+      }),
+    })
+  }
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
@@ -1111,6 +1138,7 @@ export function Session() {
                 trackOptions: {
                   backgroundColor: theme.backgroundElement,
                   foregroundColor: theme.textMuted,
+                  renderAfter: drawSessionScrollbar,
                 },
               }}
               stickyScroll={true}
@@ -1215,7 +1243,18 @@ export function Session() {
                 )}
               </For>
             </scrollbox>
-            <box flexShrink={0}>
+            <box
+              flexShrink={0}
+              renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+                const x = Math.max(0, this.screenX)
+                const y = Math.max(0, this.screenY)
+                const width = Math.min(this.width, buffer.width - x)
+                const height = buffer.height - y
+                if (width > 0 && height > 0) {
+                  buffer.fillRect(x, y, width, height, theme.background)
+                }
+              }}
+            >
               <Show when={permissions().length > 0}>
                 <PermissionPrompt request={permissions()[0]} />
               </Show>
@@ -1347,7 +1386,7 @@ function UserMessage(props: {
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>
-                  {(file) => {
+          {(file, index) => {
                     const bg = createMemo(() => {
                       if (file.mime.startsWith("image/")) return theme.accent
                       if (file.mime === "application/pdf") return theme.primary
@@ -1815,7 +1854,9 @@ function InlineTool(props: {
         </Match>
       </Switch>
       <Show when={error() && !denied()}>
-        <text fg={theme.error}>{error()}</text>
+        <box marginTop={1}>
+          <text fg={theme.error}>{error()}</text>
+        </box>
       </Show>
     </box>
   )
@@ -1855,7 +1896,6 @@ function BlockTool(props: {
       paddingBottom={1}
       paddingLeft={2}
       marginTop={1}
-      gap={1}
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
@@ -1886,16 +1926,21 @@ function BlockTool(props: {
         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
       </Show>
       <box
+        marginTop={1}
         maxHeight={canCollapse && !expanded() ? previewLines : undefined}
         overflow={canCollapse && !expanded() ? "hidden" : undefined}
       >
         {props.children}
       </box>
       <Show when={canCollapse}>
-        <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+        <box marginTop={1}>
+          <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+        </box>
       </Show>
       <Show when={error()}>
-        <text fg={theme.error}>{error()}</text>
+        <box marginTop={1}>
+          <text fg={theme.error}>{error()}</text>
+        </box>
       </Show>
     </box>
   )
@@ -2006,7 +2051,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
   return (
     <Switch>
       <Match when={isOverwrite()}>
-        <BlockTool 
+        <BlockTool
           title={"← Write " + normalizePath(props.input.filePath!) + (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")}
           part={props.part}
           maxLines={10}
@@ -2041,7 +2086,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
         </BlockTool>
       </Match>
       <Match when={props.metadata.diagnostics !== undefined}>
-        <BlockTool 
+        <BlockTool
           title={"# Wrote " + normalizePath(props.input.filePath!)} 
           part={props.part}
           maxLines={10}
@@ -2240,7 +2285,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
   return (
     <Switch>
       <Match when={props.metadata.diff !== undefined}>
-        <BlockTool 
+        <BlockTool
           title={"← Edit " + normalizePath(props.input.filePath!) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
           maxLines={10}
@@ -2322,7 +2367,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
         <For each={files()}>
           {(file) => {
             return (
-              <BlockTool 
+              <BlockTool
                 title={title(file)} 
                 part={props.part}
                 maxLines={10}
