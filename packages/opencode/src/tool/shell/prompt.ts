@@ -25,8 +25,10 @@ export function parameterSchema() {
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
     }),
     // false 只关闭有损呈现，不绕过权限、执行限额或原文保留。
+    // #116：可选关闭压缩，避免快照/二进制等场景被压扁
     compress_output: Schema.optional(Schema.Boolean).annotate({
-      description: "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important.",
+      description:
+        "Whether this shell call may compress repetitive output before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
     }),
   })
 }
