@@ -24,7 +24,7 @@ This VS Code extension provides an HTTP bridge server that connects the OpenCode
 | `name` | `opencode-ide-bridge` |
 | `displayName` | `OpenCode IDE Bridge` |
 | `publisher` | `SMARK2022` |
-| `version` | `1.19.6` |
+| `version` | `1.19.7` |
 | `engines.vscode` | `^1.94.0` |
 | `main` | `./dist/extension.js` |
 | `license` | `MIT` |
@@ -62,7 +62,7 @@ This runs `check-types && lint && node esbuild.js --production`.
 
 <!-- #110：Windows/Bun 下 vsce 嵌套 npm prepublish 会丢 PATH；package.json 已删除该 hook -->
 <!-- #110：vsix 必须 npm exec + --no-dependencies + dist 输出 -->
-<!-- #110：扩展版本与 CLI 1.19.6-smark 对齐 -->
+<!-- #110：扩展版本与 CLI 1.19.7-smark 对齐 -->
 This project intentionally does not define `vscode:prepublish`. `vsce package` runs that hook through an internal `npm run vscode:prepublish` child process. In some Windows/Bun terminal environments that nested child process can lose `npm` from `PATH`, producing:
 
 ```text
@@ -87,7 +87,7 @@ npx @vscode/vsce ls
 
 ```powershell
 $env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix"
+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.19.7.vsix"
 ```
 
 The output file is written under `sdks/vscode/dist/` together with the compiled extension bundle.
@@ -103,7 +103,7 @@ bun run vsix
 <!-- 「VSIX Artifact Structure」：回滚：uninstall 后清缓存再装旧包 -->
 
 ```
-dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix
+dist/SMARK2022.opencode-ide-bridge-1.19.7.vsix
 ├─ [Content_Types].xml
 ├─ extension.vsixmanifest
 └─ extension/
@@ -132,7 +132,7 @@ dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix
 <!-- 「Local VSIX Install」：scripts.vsix 的 dist 输出是安装契约 -->
 
 ```powershell
-code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix --force
+code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.19.7.vsix --force
 ```
 
 ### From VS Code UI
@@ -179,7 +179,7 @@ npx @vscode/vsce publish
 
 ```powershell
 npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
-npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix -p <OPENVSX_TOKEN>
+npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.19.7.vsix -p <OPENVSX_TOKEN>
 ```
 
 ## CLI Integration
