@@ -6,15 +6,16 @@ import z from "zod"
 import { BusEvent } from "@/bus/bus-event"
 import { SyncEvent } from "@/sync"
 import { GlobalBus } from "@/bus/global"
+import { Bus } from "@/bus"
 import { AppRuntime } from "@/effect/app-runtime"
 import { AsyncQueue } from "@/util/queue"
-import { Instance } from "../../project/instance"
 import { Installation } from "@/installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import * as Log from "@opencode-ai/core/util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "@/config/config"
 import { errors } from "../error"
+import { disposeAllInstancesAndEmitGlobalDisposed } from "../global-lifecycle"
 
 const log = Log.create({ service: "server" })
 
@@ -28,7 +29,6 @@ let onSseCountChange: ((n: number) => void) | undefined
 export function onSseClientCountChange(cb: (n: number) => void) {
   onSseCountChange = cb
 }
-
 async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>) => () => void) {
   sseClientCount++
   onSseCountChange?.(sseClientCount)
@@ -40,6 +40,7 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
     q.push(
       JSON.stringify({
         payload: {
+          id: Bus.createID(),
           type: "server.connected",
           properties: {},
         },
@@ -51,6 +52,7 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
       q.push(
         JSON.stringify({
           payload: {
+            id: Bus.createID(),
             type: "server.heartbeat",
             properties: {},
           },
@@ -192,8 +194,13 @@ export const GlobalRoutes = lazy(() =>
       validator("json", Config.Info.zod),
       async (c) => {
         const config = c.req.valid("json")
-        const next = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.updateGlobal(config)))
-        return c.json(next)
+        const result = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.updateGlobal(config)))
+        if (result.changed) {
+          void AppRuntime.runPromise(disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true })).catch(
+            () => undefined,
+          )
+        }
+        return c.json(result.info)
       },
     )
     .post(
@@ -214,14 +221,7 @@ export const GlobalRoutes = lazy(() =>
         },
       }),
       async (c) => {
-        await Instance.disposeAll()
-        GlobalBus.emit("event", {
-          directory: "global",
-          payload: {
-            type: GlobalDisposedEvent.type,
-            properties: {},
-          },
-        })
+        await AppRuntime.runPromise(disposeAllInstancesAndEmitGlobalDisposed())
         return c.json(true)
       },
     )

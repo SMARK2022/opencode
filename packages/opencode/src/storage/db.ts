@@ -141,6 +141,7 @@ export const Client = lazy(() => {
 })
 
 export function close() {
+  if (!Client.loaded()) return
   try {
     Client().$client.run("PRAGMA wal_checkpoint(TRUNCATE)")
   } catch (e) {

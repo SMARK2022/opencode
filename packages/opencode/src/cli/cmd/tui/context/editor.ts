@@ -87,6 +87,7 @@ const EditorServerInfoSchema = z.object({
 type JsonRpcMessage = z.infer<typeof JsonRpcMessageSchema>
 export type EditorSelection = z.infer<typeof EditorSelectionSchema>
 export type EditorMention = z.infer<typeof EditorMentionSchema>
+export type EditorLabelState = "pending" | "sent" | "none"
 type EditorServerInfo = z.infer<typeof EditorServerInfoSchema>
 
 type EditorConnection = {
@@ -111,10 +112,12 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     const [store, setStore] = createStore<{
       status: "disabled" | "connecting" | "connected"
       selection: EditorSelection | undefined
+      selectionSent: boolean
       server: EditorServerInfo | undefined
     }>({
       status: "disabled",
       selection: undefined,
+      selectionSent: false,
       server: undefined,
     })
 
@@ -127,7 +130,23 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     let zedSelection: Promise<void> | undefined
     let lastZedSelectionKey: string | undefined
     let directory = process.cwd()
+    let preserveSelectionOnReconnect = false
     const pending = new Map<number, string>()
+
+    const setSelection = (selection: EditorSelection | undefined) => {
+      const changed = editorSelectionKey(selection) !== editorSelectionKey(store.selection)
+      setStore("selection", selection)
+      if (changed) setStore("selectionSent", false)
+    }
+
+    const clearSelectionForReconnect = (options?: { resetZedSelectionKey?: boolean }) => {
+      if (preserveSelectionOnReconnect) {
+        preserveSelectionOnReconnect = false
+        return
+      }
+      if (options?.resetZedSelectionKey) lastZedSelectionKey = undefined
+      setSelection(undefined)
+    }
 
     const send = (payload: JsonRpcMessage) => {
       if (!socket || socket.readyState !== 1) return
@@ -150,6 +169,36 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         setStore("selection", { ...bridge, source: "bridge" })
         setStore("status", "connected")
         scheduleBridgePoll()
+        return
+      }
+
+      const connection = resolveEditorConnection(directory)
+      if (!connection) {
+        const dbPath = resolveZedDbPath()
+        if (!dbPath) {
+          setStore("status", "disabled")
+          scheduleReconnect()
+          return
+        }
+        zedSelection ??= resolveZedSelection(dbPath, directory)
+          .then((result) => {
+            if (closed || socket) return
+            if (result.type === "unavailable") return
+            const selection = result.type === "selection" ? result.selection : undefined
+            const key = editorSelectionKey(selection)
+            if (key !== lastZedSelectionKey) {
+              lastZedSelectionKey = key
+              setSelection(selection)
+              setStore("status", selection ? "connected" : "disabled")
+            }
+          })
+          .catch(() => {
+            // Keep the last known Zed selection for transient polling failures.
+          })
+          .finally(() => {
+            zedSelection = undefined
+          })
+        scheduleZedPoll()
         return
       }
 
@@ -182,7 +231,7 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         const selection =
           message.method === "selection_changed" ? EditorSelectionSchema.safeParse(message.params) : undefined
         if (selection?.success) {
-          setStore("selection", { ...selection.data, source: "websocket" })
+          setSelection({ ...selection.data, source: "websocket" })
           return
         }
 
@@ -269,12 +318,13 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
 
     const reconnectWithDirectory = (nextDirectory?: string) => {
       const resolved = nextDirectory || process.cwd()
-      if (directory === resolved) return
+      const sameDirectory = directory === resolved
+      clearSelectionForReconnect({ resetZedSelectionKey: !sameDirectory })
+      if (sameDirectory) return
 
       directory = resolved
       attempt = 0
       pending.clear()
-      lastZedSelectionKey = undefined
       if (reconnect) clearTimeout(reconnect)
       reconnect = undefined
       if (bridgePoll) clearTimeout(bridgePoll)
@@ -285,7 +335,6 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         current.close()
       }
       setStore("status", "disabled")
-      setStore("selection", undefined)
       setStore("server", undefined)
       connect()
     }
@@ -313,7 +362,19 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       },
       clearSelection() {
         lastZedSelectionKey = undefined
-        setStore("selection", undefined)
+        zedSelection = undefined
+        setSelection(undefined)
+      },
+      preserveSelectionFromNewSession() {
+        preserveSelectionOnReconnect = true
+      },
+      markSelectionSent() {
+        if (!store.selection) return
+        setStore("selectionSent", true)
+      },
+      labelState(): EditorLabelState {
+        if (!store.selection) return "none"
+        return store.selectionSent ? "sent" : "pending"
       },
       onMention(listener: (mention: EditorMention) => void) {
         mentionListeners.add(listener)
@@ -323,7 +384,6 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
         return store.server
       },
       reconnect(directory?: string) {
-        setStore("selection", undefined)
         reconnectWithDirectory(directory)
       },
     }

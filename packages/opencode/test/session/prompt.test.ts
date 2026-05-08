@@ -19,6 +19,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
+import { SessionMessageTable } from "../../src/session/session.sql"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -31,6 +32,7 @@ import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
+import { SessionV2 } from "../../src/v2/session"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
 import { Shell } from "../../src/shell/shell"
@@ -39,6 +41,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import * as Log from "@opencode-ai/core/util/log"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import * as Database from "../../src/storage/db"
 import { Ripgrep } from "../../src/file/ripgrep"
 import { Format } from "../../src/format"
 import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
@@ -366,6 +369,47 @@ it.live("loop calls LLM and returns assistant message", () =>
       const parts = result.parts.filter((p) => p.type === "text")
       expect(parts.some((p) => p.type === "text" && p.text === "world")).toBe(true)
       expect(yield* llm.hits).toHaveLength(1)
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+it.live("prompt emits v2 prompted and synthetic events", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          { type: "text", text: "hello v2" },
+          {
+            type: "file",
+            mime: "text/plain",
+            filename: "note.txt",
+            url: "data:text/plain;base64,bm90ZSBjb250ZW50",
+          },
+        ],
+      })
+
+      const messages = yield* SessionV2.Service.use((session) => session.messages({ sessionID: chat.id })).pipe(
+        Effect.provide(SessionV2.layer),
+      )
+      const row = Database.use((db) =>
+        db.select().from(SessionMessageTable).where(Database.eq(SessionMessageTable.session_id, chat.id)).get(),
+      )
+      expect(messages.find((message) => message.type === "user")).toMatchObject({ type: "user", text: "hello v2" })
+      expect(typeof row?.data.time.created).toBe("number")
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "synthetic", text: expect.stringContaining("Called the Read tool") }),
+          expect.objectContaining({ type: "synthetic", text: "note content" }),
+        ]),
+      )
     }),
     { git: true, config: providerCfg },
   ),
@@ -704,12 +748,12 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 // Cancel semantics
 
-unix(
+it.live(
   "cancel interrupts loop and resolves with an assistant message",
   () =>
     provideTmpdirServer(
@@ -734,10 +778,10 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
-unix(
+it.live(
   "cancel records MessageAbortedError on interrupted process",
   () =>
     provideTmpdirServer(
@@ -762,7 +806,7 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 it.live(
@@ -814,7 +858,44 @@ it.live(
   30_000,
 )
 
-unix(
+it.live(
+  "cancel propagates from slash command subtask to child session",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const status = yield* SessionStatus.Service
+        const chat = yield* sessions.create({ title: "Pinned" })
+        yield* llm.hang
+        const msg = yield* user(chat.id, "hello")
+        yield* addSubtask(chat.id, msg.id)
+
+        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+        yield* llm.wait(1)
+
+        const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+        const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+        const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
+        const sessionID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
+        expect(typeof sessionID).toBe("string")
+        if (typeof sessionID !== "string") throw new Error("missing child session id")
+        const childID = SessionID.make(sessionID)
+        expect((yield* status.get(childID)).type).toBe("busy")
+
+        yield* prompt.cancel(chat.id)
+        const exit = yield* Fiber.await(fiber)
+        expect(Exit.isSuccess(exit)).toBe(true)
+
+        expect((yield* status.get(chat.id)).type).toBe("idle")
+        expect((yield* status.get(childID)).type).toBe("idle")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  10_000,
+)
+
+it.live(
   "cancel with queued callers resolves all cleanly",
   () =>
     provideTmpdirServer(
@@ -840,7 +921,7 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 // Queue semantics
@@ -864,7 +945,7 @@ it.live("concurrent loop callers get same result", () =>
   ),
 )
 
-unix(
+it.live(
   "concurrent loop callers all receive same error result",
   () =>
     provideTmpdirServer(
@@ -884,10 +965,10 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
-unix(
+it.live(
   "prompt submitted during an active run is included in the next LLM input",
   () =>
     provideTmpdirServer(
@@ -953,7 +1034,7 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 it.live(
@@ -983,7 +1064,7 @@ it.live(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 it.live("assertNotBusy succeeds when idle", () =>
@@ -1003,7 +1084,7 @@ it.live("assertNotBusy succeeds when idle", () =>
 
 // Shell semantics
 
-unix(
+it.live(
   "shell rejects with BusyError when loop running",
   () =>
     provideTmpdirServer(
@@ -1028,7 +1109,7 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 unix("shell captures stdout and stderr in completed tool output", () =>
@@ -1213,7 +1294,7 @@ unix(
   30_000,
 )
 
-unix(
+it.live(
   "loop waits while shell runs and starts after shell exits",
   () =>
     provideTmpdirServer(
@@ -1248,10 +1329,10 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
-unix(
+it.live(
   "shell completion resumes queued loop callers",
   () =>
     provideTmpdirServer(
@@ -1288,7 +1369,7 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 unix(
@@ -1763,7 +1844,7 @@ it.live("does not loop empty assistant turns for a simple reply", () =>
   ),
 )
 
-unix(
+it.live(
   "records aborted errors when prompt is cancelled mid-stream",
   () =>
     provideTmpdirServer(
@@ -1803,7 +1884,7 @@ unix(
       }),
       { git: true, config: providerCfg },
     ),
-  10_000,
+  3_000,
 )
 
 // Agent variant
