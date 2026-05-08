@@ -99,7 +99,7 @@ import { getScrollAcceleration } from "../../util/scroll"
 import { createThrottledSignal } from "../../util/signal"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogGoUpsell } from "../../component/dialog-go-upsell"
-import { SessionRetry } from "@/session/retry"
+import { GO_UPSELL_MESSAGE } from "@/session/retry-constants"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 
 addDefaultParsers(parsers.parsers)
@@ -298,7 +298,7 @@ export function Session() {
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
     if (evt.properties.status.type !== "retry") return
-    if (evt.properties.status.message !== SessionRetry.GO_UPSELL_MESSAGE) return
+    if (evt.properties.status.message !== GO_UPSELL_MESSAGE) return
     if (dialog.stack.length > 0) return
 
     const seen = kv.get(GO_UPSELL_LAST_SEEN_AT)

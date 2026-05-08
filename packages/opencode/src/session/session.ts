@@ -40,20 +40,11 @@ import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
 
+import { createDefaultTitle, isDefaultTitle } from "./title"
+
 const log = Log.create({ service: "session" })
 
-const parentTitlePrefix = "New session - "
-const childTitlePrefix = "Child session - "
-
-function createDefaultTitle(isChild = false) {
-  return (isChild ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
-}
-
-export function isDefaultTitle(title: string) {
-  return new RegExp(
-    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
-  ).test(title)
-}
+export { isDefaultTitle }
 
 type SessionRow = typeof SessionTable.$inferSelect
 

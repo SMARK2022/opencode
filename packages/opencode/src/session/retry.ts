@@ -1,13 +1,12 @@
 import type { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
+import { GO_UPSELL_MESSAGE } from "./retry-constants"
 import { iife } from "@/util/iife"
 
-export type Err = ReturnType<NamedError["toObject"]>
+export { GO_UPSELL_MESSAGE }
 
-// This exported message is shared with the TUI upsell detector. Matching on a
-// literal error string kind of sucks, but it is the simplest for now.
-export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go https://opencode.ai/go"
+export type Err = ReturnType<NamedError["toObject"]>
 
 export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
