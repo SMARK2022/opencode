@@ -2193,6 +2193,130 @@ it.effect("opencode loader keeps paid models when config apiKey is present", () 
   }).pipe(provideMultiInstance),
 )
 
+// #114：别名映射与 oauth 判定（不依赖网络）
+// #114：纯函数单测，保证 buildBaseProviderMap 契约不回退
+test("provider alias map resolves extends and openai oauth", async () => {
+  const { buildBaseProviderMap, isOpenaiOauthProvider, isOpenaiOauthByModelNpm } = await import("../../src/provider/alias")
+  const map = buildBaseProviderMap({
+    OpenAIA: { extends: "openai" },
+    GeminiA: { extends: "google" },
+    plain: {},
+  })
+  expect(map.OpenAIA).toBe("openai")
+  expect(map.GeminiA).toBe("google")
+  expect(map.plain).toBeUndefined()
+  expect(isOpenaiOauthProvider("openai", map)).toBe(true)
+  expect(isOpenaiOauthProvider("OpenAIA", map)).toBe(true)
+  expect(isOpenaiOauthProvider("GeminiA", map)).toBe(false)
+  expect(isOpenaiOauthByModelNpm("OpenAIA", "@ai-sdk/openai")).toBe(true)
+  expect(isOpenaiOauthByModelNpm("other", "@ai-sdk/anthropic")).toBe(false)
+})
+
+it.instance(
+  "provider extending openai inherits models and npm",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const a = ProviderV2.ID.make("OpenAIA")
+    const provider = providers[a]
+    expect(provider).not.toBeUndefined()
+    expect(provider.name).toBe("OpenAI Account A")
+    expect(provider.options.baseURL).toBe("https://custom-openai.example.com/v1")
+    const gptModel = Object.values(provider.models).find((m) => m.api.id.includes("gpt") || m.api.npm === "@ai-sdk/openai")
+    // #114：别名应继承 openai npm 与独立 providerID
+    // #114：name/baseURL 来自 alias 配置，不可回落到基类展示名
+    expect(gptModel).not.toBeUndefined()
+    expect(gptModel?.api.npm).toBe("@ai-sdk/openai")
+    expect(gptModel?.providerID).toBe(a)
+  }),
+  {
+    config: {
+      provider: {
+        OpenAIA: {
+          extends: "openai",
+          name: "OpenAI Account A",
+          options: {
+            baseURL: "https://custom-openai.example.com/v1",
+            apiKey: "test-key",
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "alias providers appear as independent list entries",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const a = ProviderV2.ID.make("OpenAIA")
+    const b = ProviderV2.ID.make("OpenAIB")
+    expect(providers[a]).not.toBeUndefined()
+    expect(providers[b]).not.toBeUndefined()
+    expect(a).not.toBe(b)
+    // #114：两个 openai 别名各自独立，不共享同一 provider 键
+    expect(Object.keys(providers).filter((k) => k.startsWith("OpenAI")).length).toBe(2)
+  }),
+  {
+    config: {
+      provider: {
+        OpenAIA: { extends: "openai", options: { apiKey: "a" } },
+        OpenAIB: { extends: "openai", options: { apiKey: "b" } },
+      },
+    },
+  },
+)
+
+// #114：google 多账号 extends 集成测（original 源测试适配 tip harness）
+// #114：验证 projectId/options 与 providerID 不串号
+it.instance(
+  "provider extending google inherits models and npm",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const a = ProviderV2.ID.make("GeminiA")
+    const b = ProviderV2.ID.make("GeminiB")
+    expect(providers[a]).not.toBeUndefined()
+    expect(providers[a].name).toBe("Gemini Account A")
+    expect(providers[a].options.projectId).toBe("project-a")
+    expect(providers[b]).not.toBeUndefined()
+    expect(providers[b].name).toBe("Gemini Account B")
+    expect(providers[b].options.projectId).toBe("project-b")
+    const geminiModelA = Object.values(providers[a].models).find((m) => m.api.id.includes("gemini") || m.api.npm === "@ai-sdk/google")
+    // #114：google 别名继承 npm 且 providerID 独立
+    // #114：A/B 各自 models 归属不可落到基类 google id
+    expect(geminiModelA).not.toBeUndefined()
+    expect(geminiModelA?.api.npm).toBe("@ai-sdk/google")
+    expect(geminiModelA?.providerID).toBe(a)
+    const geminiModelB = Object.values(providers[b].models).find((m) => m.api.id.includes("gemini") || m.api.npm === "@ai-sdk/google")
+    expect(geminiModelB).not.toBeUndefined()
+    expect(geminiModelB?.api.npm).toBe("@ai-sdk/google")
+    expect(geminiModelB?.providerID).toBe(b)
+  }),
+  {
+    config: {
+      provider: {
+        GeminiA: {
+          extends: "google",
+          name: "Gemini Account A",
+          options: {
+            projectId: "project-a",
+            apiKey: "test-key-a",
+          },
+        },
+        // #114：第二 google 别名，证明列表键与 options 独立
+        GeminiB: {
+          extends: "google",
+          name: "Gemini Account B",
+          options: {
+            projectId: "project-b",
+            apiKey: "test-key-b",
+          },
+        },
+      },
+    },
+  },
+)
+
+
 it.instance(
   "routes Snowflake PAT transformations through NetworkProxy",
   () =>

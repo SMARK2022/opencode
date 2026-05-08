@@ -21,6 +21,7 @@ import {
 } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
+import { isOpenaiOauthByModelNpm } from "@/provider/alias"
 
 export type RuntimeStatus =
   | { readonly type: "supported"; readonly apiKey: string; readonly baseURL?: string }
@@ -61,7 +62,11 @@ function statusWithFetch(
   const npm = input.model.api.npm
   if (npm !== "@ai-sdk/openai" && npm !== "@ai-sdk/openai-compatible" && npm !== "@ai-sdk/anthropic")
     return { type: "unsupported", reason: "provider package is not OpenAI, OpenAI-compatible, or Anthropic" }
-  if (input.auth?.type === "oauth" && !(input.provider.id === "openai" && fetch)) {
+  // #114：oauth + openai(含别名 npm) + fetch 才支持 native
+  if (
+    input.auth?.type === "oauth" &&
+    !(isOpenaiOauthByModelNpm(input.provider.id, input.model.api.npm) && fetch)
+  ) {
     return { type: "unsupported", reason: "OAuth auth requires a provider fetch override" }
   }
 
@@ -166,7 +171,12 @@ export function stream(input: StreamInput): StreamResult {
 }
 
 function providerFetch(input: Pick<StreamInput, "provider" | "auth">): typeof globalThis.fetch | undefined {
-  if (input.provider.id !== "openai" || input.auth?.type !== "oauth") return undefined
+  // #114：openai 别名 oauth：id 为 openai 或模型 npm 为 @ai-sdk/openai
+  // #114：providerFetch 无 model 参数，只能扫 provider.models 推断 npm
+  if (input.auth?.type !== "oauth") return undefined
+  const npmHit = Object.values(input.provider.models ?? {}).some((m) => m.api?.npm === "@ai-sdk/openai")
+  // #114：非 openai id 且无 openai npm 模型则不是目标别名
+  if (input.provider.id !== "openai" && !npmHit) return undefined
   const value: unknown = input.provider.options.fetch
   if (typeof value !== "function") return undefined
   return value as typeof globalThis.fetch

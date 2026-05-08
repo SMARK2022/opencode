@@ -15,10 +15,20 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     const registry = yield* Integration.Service
-    yield* ctx.integration.transform(
+    yield* registry.transform(
       Effect.fn(function* (integrations) {
         // 上游 owner 的记录不可删除，保存凭据另由 registry 查询，不复制基础账号。
         const initial = new Set(integrations.list().map((integration) => integration.id))
+        const originals = new Map<Integration.ID, Integration.Implementation[]>()
+        // 只克隆方法描述，函数仍复用原实现；凭据和连接从不成为继承数据。
+        const methods = (id: Integration.ID) => integrations.method.list(id).flatMap<Integration.Implementation>((method) => {
+          if (method.type === "oauth") {
+            const implementation = integrations.method.get(id, method.id)
+            return implementation ? [{ ...implementation, method: structuredClone(method) }] : []
+          }
+          if (method.type === "key") return [{ integrationID: id, method: structuredClone(method) }]
+          return [{ integrationID: id, method: structuredClone(method) }]
+        })
         const files = (yield* config.entries()).filter((entry): entry is Config.Document => entry.type === "document")
         const configuredIntegrations = new Set(
           files.flatMap((file) =>
@@ -31,20 +41,28 @@ export const Plugin = define({
         const configured = new Map<string, ConfigProvider.Info>()
         for (const file of files) {
           for (const [id, item] of Object.entries(file.info.providers ?? {})) {
-            const integrationID = id
+            const integrationID = Integration.ID.make(id)
             const previous = configured.get(id)
             const provider = { ...item, extends: item.extends ?? previous?.extends, env: item.env ?? previous?.env, name: item.name ?? previous?.name }
             configured.set(id, provider)
-            // 只继承环境方法，不能借用基础账号的已保存连接或 OAuth 身份。
+            if (provider.extends !== undefined) {
+              // 先捕获基础以兼容自继承；换基础时清理旧继承，但不删除原有自有方法。
+              const inherited = methods(Integration.ID.make(provider.extends))
+              const own = originals.get(integrationID) ?? methods(integrationID)
+              originals.set(integrationID, own)
+              for (const method of [...integrations.method.list(integrationID)]) integrations.method.remove(integrationID, method)
+              for (const implementation of [...inherited, ...own]) integrations.method.update({ ...implementation, integrationID })
+            }
+            // 显式环境覆盖最后应用，env:[] 不得同时禁用独立 key/OAuth 登录。
             const env = provider.env ?? (provider.extends === undefined ? undefined :
-              integrations.method.list(provider.extends).find((method) => method.type === "env")?.names ?? [])
+              integrations.method.list(Integration.ID.make(provider.extends)).find((method) => method.type === "env")?.names ?? [])
             if (env === undefined && !configuredIntegrations.has(id) && !integrations.get(integrationID)) continue
             // 无鉴权基础不制造空 Integration；只清除本 owner 自动创建且无自有认证的记录。
-            if (provider.env === undefined && env?.length === 0) {
+            if (provider.env === undefined && env?.length === 0 && integrations.method.list(integrationID).every((method) => method.type === "env")) {
               const method = integrations.method.list(integrationID).find((method) => method.type === "env")
               if (method) integrations.method.remove(integrationID, method)
-              if (!initial.has(id) && integrations.method.list(id).length === 0 &&
-                (yield* registry.connection.active(Integration.ID.make(id)))?.type !== "credential") integrations.remove(id)
+              if (!initial.has(integrationID) && integrations.method.list(integrationID).length === 0 &&
+                (yield* registry.connection.active(integrationID))?.type !== "credential") integrations.remove(integrationID)
               continue
             }
             integrations.update(integrationID, (integration) => {

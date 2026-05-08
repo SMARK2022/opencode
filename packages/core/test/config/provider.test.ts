@@ -66,6 +66,67 @@ function request(headers: Record<string, string>, variant?: string) {
 const decode = Schema.decodeUnknownSync(Config.Info)
 
 describe("ConfigProviderPlugin.Plugin", () => {
+  it.effect("inherits alias authentication without sharing credentials or refresh ownership", () =>
+    Effect.gen(function* () {
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      const base = Integration.ID.make("base-auth")
+      const alternate = Integration.ID.make("alternate-auth")
+      const first = Integration.ID.make("account-a")
+      const second = Integration.ID.make("account-b")
+      const only = Integration.ID.make("oauth-copy")
+      const methodID = Integration.MethodID.make("account-oauth")
+      yield* integrations.transform((draft) => {
+        draft.method.update({ integrationID: base, method: { type: "key", label: "API key" } })
+        draft.method.update({ integrationID: alternate, method: { type: "key", label: "Alternate key" } })
+        for (const integrationID of [base, Integration.ID.make("oauth-only")]) {
+          draft.method.update({
+            integrationID,
+            method: { type: "oauth", id: methodID, label: "Account OAuth" },
+            authorize: () => Effect.succeed({
+              mode: "code" as const,
+              url: "https://auth.example.test/authorize",
+              instructions: "Paste the code",
+              callback: (code: string) => Effect.succeed(Credential.OAuth.make({ type: "oauth", methodID, access: code, refresh: "refresh", expires: 0 })),
+            }),
+            refresh: (value) => Effect.succeed(Credential.OAuth.make({ ...value, access: `${value.access}-refreshed`, expires: Number.MAX_SAFE_INTEGER })),
+          })
+        }
+      })
+      // 测试只注册本地确定性方法，正式连接与刷新仍走真实服务，不调用外部授权。
+      yield* integrations.connection.key({ integrationID: base, key: "base-key" })
+      const baseCredentials = yield* credentials.list(base)
+      yield* addPlugin(Config.Service.of({ entries: () => Effect.succeed([
+        new Config.Document({ type: "document", info: decode({ providers: { "account-a": { extends: base, env: [] }, "account-b": { extends: base }, "oauth-copy": { extends: "oauth-only" }, switched: { extends: base } } }) }),
+        new Config.Document({ type: "document", info: decode({ providers: { switched: { extends: alternate } } }) }),
+      ]) }))
+      for (const id of [first, second, only]) {
+        const info = required(yield* integrations.get(id))
+        expect(info.methods.filter((method) => method.type === "oauth").map((method) => method.id)).toEqual([methodID])
+      }
+      expect((yield* integrations.get(first))?.methods).toContainEqual({ type: "key", label: "API key" })
+      expect((yield* integrations.get(first))?.methods).toContainEqual({ type: "env", names: [] })
+      expect((yield* integrations.get(Integration.ID.make("switched")))?.methods.filter((method) => method.type === "oauth")).toEqual([])
+      // 空环境只禁用环境查找；两个别名分别通过正式 key 入口保存自身密钥。
+      yield* integrations.connection.key({ integrationID: first, key: "first-key" })
+      expect((yield* credentials.list(first))[0]?.value).toEqual(Credential.Key.make({ type: "key", key: "first-key" }))
+      yield* integrations.connection.key({ integrationID: second, key: "second-key" })
+      const secondCredentials = yield* credentials.list(second)
+      // 完成与刷新都保留别名 ID 和 methodID，基础账号及另一别名保持原记录。
+      const attempt = yield* integrations.connection.oauth({ integrationID: first, methodID, inputs: {} })
+      yield* integrations.attempt.complete({ attemptID: attempt.attemptID, code: "first-access" })
+      const before = required((yield* credentials.list(first))[0])
+      expect(before.integrationID).toBe(first)
+      const connection = required(yield* integrations.connection.active(first))
+      expect(yield* integrations.connection.resolve(connection)).toMatchObject({ type: "oauth", methodID, access: "first-access-refreshed" })
+      expect((yield* credentials.list(first))[0]).toMatchObject({ id: before.id, integrationID: first, value: { access: "first-access-refreshed" } })
+      expect(yield* credentials.list(base)).toEqual(baseCredentials)
+      expect(yield* credentials.list(second)).toEqual(secondCredentials)
+      yield* integrations.reload()
+      expect((yield* integrations.get(first))?.methods.filter((method) => method.type === "oauth").map((method) => method.id)).toEqual([methodID])
+    }),
+  )
+
   it.effect("preserves configured API keys through availability and native authentication", () =>
     Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
       Effect.gen(function* () {
