@@ -24,6 +24,10 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
       "description": "The command to execute",
       "type": "string",
     },
+    "compress_output": {
+      "description": "Whether this shell call may compress repetitive output before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
+      "type": "boolean",
+    },
     "timeout": {
       "description": "Optional timeout in milliseconds",
       "exclusiveMinimum": 0,

@@ -646,9 +646,15 @@ export const ShellTool = Tool.define(
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
-        // 使用既有 per-shell renderer 的正文，不恢复第二套 shell 语法说明。
+        // #116：压缩指引；tip 已默认压缩，补全 SMARK 全文案（含 raw 落盘说明）
         const compressionEnabled = cfg.tool_output?.bash_compression ?? true
-        const compressionGuidance = compressionEnabled ? "Bash output compression is enabled by default. Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting." : ""
+        // #116：启用时提示默认压缩 + 需要精确格式时关 compress_output
+        const compressionGuidance = compressionEnabled
+          ? [
+              "Bash output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
+              "Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting.",
+            ].join(" ")
+          : ""
         yield* Effect.logInfo("shell tool using shell", { shell })
 
         return {

@@ -196,8 +196,9 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       }
 
       // ② Fallback: Claude Code lock / WebSocket
-      const connection = resolveEditorConnection(directory, port, editor.connection)
-      if (!connection) {
+      // #116：conn 局部名缩短，避免与 editor.connection 配置字段混淆
+      const conn = resolveEditorConnection(directory, port, editor.connection)
+      if (!conn) {
         if (!zedTerminal) {
           setStore("status", "disabled")
           scheduleReconnect()
@@ -234,7 +235,8 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       }
 
       setStore("status", "connecting")
-      const current = openEditorSocket(connection, WebSocketImpl)
+      // #116：使用 conn 打开编辑器 WebSocket
+      const current = openEditorSocket(conn, WebSocketImpl)
       socket = current
 
       current.addEventListener("open", () => {
