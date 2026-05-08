@@ -583,12 +583,14 @@ async function findUpAll(filename: string, start: string, stop?: string) {
 
 // 技能目录缺失是可选配置，不生成空技能；递归只收集普通文件 SKILL.md，目录名不能充当技能。
 async function scanSkillFiles(root: string, result: Set<string>) {
-  // 一处不可访问目录只终止该分支，其余项目/home/config 来源仍可进入去重集合。
-  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null)
+  // #117：显式 DirentLike，避免 readdir 重载把 entries 推成 string[]
+  type DirentLike = { name: string | Buffer; isDirectory(): boolean; isFile(): boolean }
+  // #117：.catch 代替 try/let，失败即跳过目录
+  const entries = (await fs.readdir(root, { withFileTypes: true }).catch(() => null)) as DirentLike[] | null
   if (!entries) return
   for (const entry of entries) {
-    // readdir 默认 utf8 返回字符串；目录路径必须保持平台编码，不能按字节拆成多个技能路径。
-    const name = entry.name as string
+    // #117：name 在部分类型版本为 Buffer
+    const name = String(entry.name)
     const item = path.join(root, name)
     if (entry.isDirectory()) {
       await scanSkillFiles(item, result)
