@@ -27,6 +27,7 @@ import { PluginLoader } from "./loader"
 import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } from "./shared"
 import { registerAdaptor } from "@/control-plane/adaptors"
 import type { WorkspaceAdaptor } from "@/control-plane/types"
+import { aliasContext, buildBaseProviderMap } from "@/provider/alias"
 
 const log = Log.create({ service: "plugin" })
 
@@ -122,6 +123,101 @@ async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks:
   }
 }
 
+function wrapClientForAlias(raw: ReturnType<typeof createOpencodeClient>) {
+  return new Proxy(raw, {
+    get(target, prop, receiver) {
+      if (prop === "auth") {
+        return new Proxy(Reflect.get(target, prop, receiver), {
+          get(authTarget, authProp, authReceiver) {
+            if (authProp === "set") {
+              const origSet = Reflect.get(authTarget, authProp, authReceiver)
+              return async (params: { path: { id: string }; body: any }) => {
+                const alias = aliasContext.getStore()
+                if (alias && params.path.id === alias.baseProviderID) {
+                  return origSet.call(authTarget, {
+                    ...params,
+                    path: { ...params.path, id: alias.providerID },
+                  })
+                }
+                return origSet.call(authTarget, params)
+              }
+            }
+            return Reflect.get(authTarget, authProp, authReceiver)
+          },
+        })
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+}
+
+function createAliasHook(baseHook: Hooks, providerID: string, baseProviderID: string): Hooks {
+  const aliasHook: Hooks = {}
+
+  if (baseHook.auth) {
+    aliasHook.auth = {
+      ...baseHook.auth,
+      provider: providerID,
+      loader: baseHook.auth.loader
+        ? async (getAuth, provider) => {
+            return aliasContext.run({ providerID, baseProviderID }, () =>
+              baseHook.auth!.loader!(getAuth, provider),
+            )
+          }
+        : undefined,
+    }
+  }
+
+  if (baseHook.provider) {
+    aliasHook.provider = {
+      ...baseHook.provider,
+      id: providerID,
+      models: baseHook.provider.models
+        ? async (provider, ctx) => {
+            return aliasContext.run({ providerID, baseProviderID }, () =>
+              baseHook.provider!.models!(provider, ctx),
+            )
+          }
+        : undefined,
+    }
+  }
+
+  const chatHeaders = baseHook["chat.headers"]
+  if (chatHeaders) {
+    aliasHook["chat.headers"] = async (input, output) => {
+      const mappedInput = {
+        ...input,
+        model: input.model ? { ...input.model, providerID: baseProviderID } : input.model,
+      }
+      return chatHeaders(mappedInput as any, output)
+    }
+  }
+
+  const chatParams = baseHook["chat.params"]
+  if (chatParams) {
+    aliasHook["chat.params"] = async (input, output) => {
+      const mappedInput = {
+        ...input,
+        model: input.model ? { ...input.model, providerID: baseProviderID } : input.model,
+      }
+      return chatParams(mappedInput as any, output)
+    }
+  }
+
+  const systemTransform = baseHook["experimental.chat.system.transform"]
+  if (systemTransform) {
+    aliasHook["experimental.chat.system.transform"] = async (input, output) => {
+      const mappedInput = {
+        ...input,
+        model: input.model ? { ...input.model, providerID: baseProviderID } : input.model,
+      }
+      return systemTransform(mappedInput as any, output)
+    }
+  }
+
+  return aliasHook
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -139,7 +235,7 @@ export const layer = Layer.effect(
 
         const { Server } = yield* Effect.promise(() => import("../server/server"))
 
-        const client = createOpencodeClient({
+        const baseClient = createOpencodeClient({
           baseUrl: "http://localhost:4096",
           directory: ctx.directory,
           headers: Flag.OPENCODE_SERVER_PASSWORD
@@ -149,6 +245,7 @@ export const layer = Layer.effect(
             : undefined,
           fetch: async (...args) => Server.Default().app.fetch(...args),
         })
+        const client = wrapClientForAlias(baseClient)
         const cfg = yield* config.get()
         const input: PluginInput = {
           client,
@@ -256,6 +353,29 @@ export const layer = Layer.effect(
             try: () => Promise.resolve((hook as any).config?.(cfg)),
             catch: (err) => {
               log.error("plugin config hook failed", { error: err })
+            },
+          }).pipe(Effect.ignore)
+        }
+
+        // Generate alias hooks for extended providers (multi-account isolation)
+        const baseProviderMap = buildBaseProviderMap(cfg.provider ?? {})
+        const aliasHooks: Hooks[] = []
+        for (const baseHook of hooks) {
+          const baseAuthProvider = baseHook.auth?.provider
+          if (!baseAuthProvider) continue
+          for (const [aliasID, baseType] of Object.entries(baseProviderMap)) {
+            if (baseType !== baseAuthProvider) continue
+            const aliasHook = createAliasHook(baseHook, aliasID, baseType)
+            aliasHooks.push(aliasHook)
+            log.info("created alias hook", { alias: aliasID, base: baseType })
+          }
+        }
+        for (const aliasHook of aliasHooks) {
+          hooks.push(aliasHook)
+          yield* Effect.tryPromise({
+            try: () => Promise.resolve((aliasHook as any).config?.(cfg)),
+            catch: (err) => {
+              log.error("plugin alias config hook failed", { error: err })
             },
           }).pipe(Effect.ignore)
         }

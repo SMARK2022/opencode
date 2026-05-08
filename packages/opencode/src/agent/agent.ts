@@ -23,6 +23,7 @@ import { InstanceState } from "@/effect/instance-state"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { zod } from "@/util/effect-zod"
+import { isOpenaiOauthProvider, buildBaseProviderMap } from "@/provider/alias"
 import { withStatics, type DeepMutable } from "@/util/schema"
 
 export const Info = Schema.Struct({
@@ -389,7 +390,8 @@ export const layer = Layer.effect(
 
         // TODO: clean this up so provider specific logic doesnt bleed over
         const authInfo = yield* auth.get(model.providerID).pipe(Effect.orDie)
-        const isOpenaiOauth = model.providerID === "openai" && authInfo?.type === "oauth"
+        const oauthBaseMap = buildBaseProviderMap(cfg.provider ?? {})
+        const isOpenaiOauth = isOpenaiOauthProvider(model.providerID, oauthBaseMap) && authInfo?.type === "oauth"
 
         const params = {
           experimental_telemetry: {

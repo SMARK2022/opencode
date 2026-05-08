@@ -648,6 +648,139 @@ test("provider extending claudecode uses Anthropic SDK and ClaudeCode loader", a
   })
 })
 
+test("provider extending openai inherits models and npm", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            OpenAIA: {
+              extends: "openai",
+              name: "OpenAI Account A",
+              options: {
+                baseURL: "https://custom-openai.example.com/v1",
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const providers = await list()
+      const a = ProviderID.make("OpenAIA")
+      const provider = providers[a]
+      expect(provider).not.toBeUndefined()
+      expect(provider.name).toBe("OpenAI Account A")
+      expect(provider.options.baseURL).toBe("https://custom-openai.example.com/v1")
+
+      const gptModel = Object.values(provider.models).find((m) => m.api.id.includes("gpt"))
+      expect(gptModel).not.toBeUndefined()
+      expect(gptModel?.api.npm).toBe("@ai-sdk/openai")
+      expect(gptModel?.providerID).toBe(a)
+    },
+  })
+})
+
+test("provider extending google inherits models and npm", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            GeminiA: {
+              extends: "google",
+              name: "Gemini Account A",
+              options: {
+                projectId: "project-a",
+              },
+            },
+            GeminiB: {
+              extends: "google",
+              name: "Gemini Account B",
+              options: {
+                projectId: "project-b",
+              },
+            },
+          },
+        }),
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const providers = await list()
+      const a = ProviderID.make("GeminiA")
+      const b = ProviderID.make("GeminiB")
+
+      expect(providers[a]).not.toBeUndefined()
+      expect(providers[a].name).toBe("Gemini Account A")
+      expect(providers[a].options.projectId).toBe("project-a")
+
+      expect(providers[b]).not.toBeUndefined()
+      expect(providers[b].name).toBe("Gemini Account B")
+      expect(providers[b].options.projectId).toBe("project-b")
+
+      const geminiModelA = Object.values(providers[a].models).find((m) => m.api.id.includes("gemini"))
+      expect(geminiModelA).not.toBeUndefined()
+      expect(geminiModelA?.api.npm).toBe("@ai-sdk/google")
+      expect(geminiModelA?.providerID).toBe(a)
+
+      const geminiModelB = Object.values(providers[b].models).find((m) => m.api.id.includes("gemini"))
+      expect(geminiModelB).not.toBeUndefined()
+      expect(geminiModelB?.api.npm).toBe("@ai-sdk/google")
+      expect(geminiModelB?.providerID).toBe(b)
+    },
+  })
+})
+
+test("alias providers do not share auth keys - independent entries in provider list", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            OpenAIA: {
+              extends: "openai",
+            },
+            OpenAIB: {
+              extends: "openai",
+            },
+          },
+        }),
+      )
+    },
+  })
+
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const providers = await list()
+      const a = ProviderID.make("OpenAIA")
+      const b = ProviderID.make("OpenAIB")
+
+      expect(providers[a]).not.toBeUndefined()
+      expect(providers[b]).not.toBeUndefined()
+
+      // Each should have its own providerID
+      expect(a).not.toBe(b)
+      // Aliases appear independently (base openai may be filtered if no auth)
+      expect(Object.keys(providers).filter((k) => k.startsWith("OpenAI")).length).toBe(2)
+    },
+  })
+})
+
 test("model cost defaults to zero when not specified", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

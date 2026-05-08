@@ -29,6 +29,7 @@ import { optionalOmitUndefined, withStatics } from "@/util/schema"
 
 import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
+import { runWithAlias, buildBaseProviderMap } from "./alias"
 
 const log = Log.create({ service: "provider" })
 const DEFAULT_TIMEOUT_MS = 300_000
@@ -1343,6 +1344,38 @@ const layer: Layer.Layer<
           database[providerID] = parsed
         }
 
+        // re-run provider.models hook for alias providers (e.g. codex filter, gemini cost zero)
+        const baseProviderMap = buildBaseProviderMap(cfg.provider ?? {})
+        for (const hook of plugins) {
+          const p = hook.provider
+          const models = p?.models
+          if (!p || !models) continue
+          const baseProviderID = p.id
+          for (const [aliasID, baseType] of Object.entries(baseProviderMap)) {
+            if (baseType !== baseProviderID) continue
+            const aliasProviderID = ProviderID.make(aliasID)
+            const aliasDB = database[aliasProviderID]
+            if (!aliasDB) continue
+            if (disabled.has(aliasProviderID)) continue
+            const pluginAuth = yield* auth.get(aliasProviderID).pipe(Effect.orDie)
+            aliasDB.models = yield* Effect.promise(async () => {
+              const next = await runWithAlias(aliasID, baseType, () =>
+                models(aliasDB, { auth: pluginAuth }),
+              )
+              return Object.fromEntries(
+                Object.entries(next).map(([id, model]) => [
+                  id,
+                  {
+                    ...model,
+                    id: ModelID.make(id),
+                    providerID: aliasProviderID,
+                  },
+                ]),
+              )
+            })
+          }
+        }
+
         // load env
         const envs = yield* env.all()
         for (const [id, provider] of Object.entries(database)) {
@@ -1388,6 +1421,42 @@ const layer: Layer.Layer<
           const opts = options ?? {}
           const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
           mergeProvider(providerID, patch)
+        }
+
+        // alias plugin auth loader - run base plugin loader for alias providers
+        for (const plugin of plugins) {
+          if (!plugin.auth) continue
+          const baseProvider = plugin.auth.provider
+          for (const [aliasID, baseType] of Object.entries(baseProviderMap)) {
+            if (baseType !== baseProvider) continue
+            const aliasProviderID = ProviderID.make(aliasID)
+            if (disabled.has(aliasProviderID)) continue
+            const aliasDB = database[aliasProviderID]
+            if (!aliasDB) continue
+
+            const stored = yield* auth.get(aliasProviderID).pipe(Effect.orDie)
+            if (!stored) continue
+            if (!plugin.auth.loader) continue
+
+            const options = yield* Effect.promise(() =>
+              runWithAlias(aliasID, baseProvider, () =>
+                plugin.auth!.loader!(
+                  () => bridge.promise(auth.get(aliasProviderID).pipe(Effect.orDie)) as any,
+                  aliasDB,
+                ),
+              ),
+            )
+            const opts = options ?? {}
+            if (opts.fetch) {
+              const origFetch = opts.fetch
+              opts.fetch = (...args: Parameters<typeof origFetch>): ReturnType<typeof origFetch> =>
+                runWithAlias(aliasID, baseProvider, () => origFetch(...args))
+            }
+            const patch: Partial<Info> = providers[aliasProviderID]
+              ? { options: opts }
+              : { source: "custom", options: opts }
+            mergeProvider(aliasProviderID, patch)
+          }
         }
 
         const customLoaders = custom(dep)

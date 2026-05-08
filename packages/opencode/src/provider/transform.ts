@@ -907,7 +907,7 @@ export function options(input: {
     }
   }
 
-  if (input.model.providerID === "openai" || input.providerOptions?.setCacheKey) {
+  if (input.model.providerID === "openai" || input.model.api.npm === "@ai-sdk/openai" || input.providerOptions?.setCacheKey) {
     result["promptCacheKey"] = input.sessionID
   }
 
@@ -1011,7 +1011,7 @@ export function smallOptions(model: Provider.Model) {
     }
     return { store: false }
   }
-  if (model.providerID === "google") {
+  if (model.providerID === "google" || model.api.npm === "@ai-sdk/google") {
     // gemini-3 uses thinkingLevel, gemini-2.5 uses thinkingBudget
     if (model.api.id.includes("gemini-3")) {
       return { thinkingConfig: { thinkingLevel: "minimal" } }

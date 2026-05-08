@@ -18,6 +18,7 @@ import { PermissionID } from "@/permission/schema"
 import { Bus } from "@/bus"
 import { Wildcard } from "@/util/wildcard"
 import { ToolSelection } from "@/tool/selection"
+import { isOpenaiOauthProvider, buildBaseProviderMap } from "@/provider/alias"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
 import { Installation } from "@/installation"
@@ -99,7 +100,8 @@ const live: Layer.Layer<
       )
 
       // TODO: move this to a proper hook
-      const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
+      const oauthBaseMap = buildBaseProviderMap(cfg.provider ?? {})
+      const isOpenaiOauth = isOpenaiOauthProvider(item.id, oauthBaseMap) && info?.type === "oauth"
 
       const system: string[] = []
       system.push(
