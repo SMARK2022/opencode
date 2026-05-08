@@ -90,7 +90,7 @@ bun run vsix
 Install the generated package (path matches `scripts.vsix` output):
 
 ```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.31.vsix --force
+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.19.6.vsix --force
 ```
 
 ## Development
