@@ -21,7 +21,7 @@ import type { TextPart } from "@opencode-ai/sdk/v2"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
 
-const SESSION_LIST_PREVIEW_LINES = 1
+const SESSION_LIST_PREVIEW_LINES = 2
 const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
 const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
 
