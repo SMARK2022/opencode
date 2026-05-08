@@ -1,8 +1,9 @@
+import type { TextPart } from "@opencode-ai/sdk/v2"
 import { useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
 import { useSync } from "../context/sync"
-import { createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { Locale } from "../util/locale"
 import { useProject } from "../context/project"
@@ -42,6 +43,13 @@ export function loadDialogSessionList<T>(input: {
   )
 }
 
+// #112：默认预览 1 行（#115 改为 2）
+const SESSION_LIST_PREVIEW_LINES = 1
+// #112：最近用户消息拉取条数上限
+const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
+// #112：并发预加载会话数上限
+const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
+
 export function DialogSessionList() {
   const dialog = useDialog()
   const route = useRoute()
@@ -55,6 +63,46 @@ export function DialogSessionList() {
   const [toDelete, setToDelete] = createSignal<string>()
   const [deleted, setDeleted] = createSignal(new Set<string>())
   const [search, setSearch] = createDebouncedSignal("", 150)
+  // #112：sessionID -> 预览纯文本
+  const [previews, setPreviews] = createSignal<Record<string, string>>({})
+
+  createEffect(
+    on(
+      () => sessions(),
+      (sessions) => {
+        if (SESSION_LIST_PREVIEW_LINES <= 0) return
+        // #112：跳过已加载预览的会话
+        const unloaded = sessions
+          .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
+          .filter((s) => !(s.id in (previews() ?? {})))
+        if (unloaded.length === 0) return
+        void Promise.all(
+          unloaded.map(async (session) => {
+            try {
+              const result = await sdk.client.session.messages({
+                sessionID: session.id,
+                limit: SESSION_LIST_PREVIEW_MESSAGE_LIMIT,
+              })
+              // #112：与 tip sync 一致，只认 result.data 契约形态
+              const list = Array.isArray((result as any)?.data) ? ((result as any).data as any[]) : []
+              // #112：最近一条用户消息；role 只读 info.role
+              const userMsg = [...list].reverse().find((x: any) => x.info?.role === "user")
+              if (!userMsg) return
+              const text = ((userMsg.parts ?? []) as TextPart[])
+                .filter((p) => p.type === "text" && !(p as any).synthetic && !(p as any).ignored)
+                .map((p) => p.text)
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim()
+              if (text) setPreviews((prev) => ({ ...prev, [session.id]: text }))
+            } catch {
+              // #112：预览失败不阻断列表
+            }
+          }),
+        )
+      },
+    ),
+  )
   const deleteHint = useCommandShortcut("session.delete")
   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
@@ -249,6 +297,25 @@ export function DialogSessionList() {
         category,
         footer,
         gutter,
+        // #112：按词折成最多 N 行，交给 DialogSelect.Option
+        previewLines:
+          SESSION_LIST_PREVIEW_LINES > 0 && previews()[x.id]
+            ? previews()[x.id]
+                .split(" ")
+                .reduce((lines: string[], word: string) => {
+                  // #112：超宽换行；超出行数则并入末行
+                  const cur = lines[lines.length - 1] ?? ""
+                  if (!cur) return [word]
+                  if (lines.length >= SESSION_LIST_PREVIEW_LINES) {
+                    lines[lines.length - 1] = (cur + " " + word).trim()
+                    return lines
+                  }
+                  if ((cur + " " + word).length > 72) return [...lines, word]
+                  lines[lines.length - 1] = (cur + " " + word).trim()
+                  return lines
+                }, [] as string[])
+                .slice(0, SESSION_LIST_PREVIEW_LINES)
+            : undefined,
       }
     }
 
