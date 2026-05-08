@@ -44,6 +44,7 @@ export interface DialogSelectOption<T = any> {
   bg?: RGBA
   gutter?: () => JSX.Element
   margin?: JSX.Element
+  previewLines?: string[]
   onSelect?: (ctx: DialogContext) => void
 }
 
@@ -134,7 +135,8 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       if (!category) return acc
       return acc + (i > 0 ? 2 : 1)
     }, 0)
-    return flat().length + headers
+    const previewLines = flat().reduce((acc, option) => acc + (option.previewLines?.length ?? 0), 0)
+    return flat().length + headers + previewLines
   })
 
   const dimensions = useTerminalDimensions()
@@ -352,6 +354,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                           active={active()}
                           current={current()}
                           gutter={option.gutter}
+                          previewLines={option.previewLines}
                         />
                       </box>
                     )
@@ -408,41 +411,62 @@ function Option(props: {
   current?: boolean
   footer?: JSX.Element | string
   gutter?: () => JSX.Element
+  previewLines?: string[]
   onMouseOver?: () => void
 }) {
   const { theme } = useTheme()
   const fg = selectedForeground(theme)
 
   return (
-    <>
-      <Show when={props.current}>
-        <text flexShrink={0} fg={props.active ? fg : props.current ? theme.primary : theme.text} marginRight={0}>
-          ●
-        </text>
-      </Show>
-      <Show when={!props.current && props.gutter}>
-        <box flexShrink={0} marginRight={0}>
-          {props.gutter?.()}
-        </box>
-      </Show>
-      <text
-        flexGrow={1}
-        fg={props.active ? fg : props.current ? theme.primary : theme.text}
-        attributes={props.active ? TextAttributes.BOLD : undefined}
-        overflow="hidden"
-        wrapMode="none"
-        paddingLeft={3}
-      >
-        {Locale.truncate(props.title, 61)}
-        <Show when={props.description}>
-          <span style={{ fg: props.active ? fg : theme.textMuted }}> {props.description}</span>
+    <box flexGrow={1} flexDirection="column">
+      <box flexDirection="row">
+        <Show when={props.current}>
+          <text flexShrink={0} fg={props.active ? fg : props.current ? theme.primary : theme.text} marginRight={0}>
+            ●
+          </text>
         </Show>
-      </text>
-      <Show when={props.footer}>
-        <box flexShrink={0}>
-          <text fg={props.active ? fg : theme.textMuted}>{props.footer}</text>
-        </box>
+        <Show when={!props.current && props.gutter}>
+          <box flexShrink={0} marginRight={0}>
+            {props.gutter?.()}
+          </box>
+        </Show>
+        <text
+          flexGrow={1}
+          fg={props.active ? fg : props.current ? theme.primary : theme.text}
+          attributes={props.active ? TextAttributes.BOLD : undefined}
+          overflow="hidden"
+          wrapMode="none"
+          paddingLeft={3}
+        >
+          {Locale.truncate(props.title, 61)}
+          <Show when={props.description}>
+            <span style={{ fg: props.active ? fg : theme.textMuted }}> {props.description}</span>
+          </Show>
+        </text>
+        <Show when={props.footer}>
+          <box flexShrink={0}>
+            <text fg={props.active ? fg : theme.textMuted}>{props.footer}</text>
+          </box>
+        </Show>
+      </box>
+      <Show when={props.previewLines}>
+        <For each={props.previewLines}>
+          {(line, index) => {
+            const isLast = () => index() === (props.previewLines?.length ?? 0) - 1
+            const prefix = isLast() ? "  └─ " : "  ├─ "
+            return (
+              <text
+                fg={props.active ? fg : theme.textMuted}
+                overflow="hidden"
+                wrapMode="none"
+                paddingLeft={3}
+              >
+                {prefix}{line}
+              </text>
+            )
+          }}
+        </For>
       </Show>
-    </>
+    </box>
   )
 }

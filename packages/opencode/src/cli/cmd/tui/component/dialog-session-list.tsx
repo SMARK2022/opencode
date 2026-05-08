@@ -2,7 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { createMemo, createResource, createSignal, onMount } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, on, onMount } from "solid-js"
 import { Locale } from "@/util/locale"
 import { useProject } from "@tui/context/project"
 import { useKeybind } from "../context/keybind"
@@ -17,8 +17,13 @@ import { DialogWorkspaceCreate, openWorkspaceSession, restoreWorkspaceSession } 
 import { Spinner } from "./spinner"
 import { errorMessage } from "@/util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
+import type { TextPart } from "@opencode-ai/sdk/v2"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
+
+const SESSION_LIST_PREVIEW_LINES = 1
+const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
+const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
 
 export function DialogSessionList() {
   const dialog = useDialog()
@@ -31,6 +36,43 @@ export function DialogSessionList() {
   const toast = useToast()
   const [toDelete, setToDelete] = createSignal<string>()
   const [search, setSearch] = createDebouncedSignal("", 150)
+  const [previews, setPreviews] = createSignal<Record<string, string>>({})
+
+  createEffect(
+    on(
+      () => sessions(),
+      (sessions) => {
+        if (SESSION_LIST_PREVIEW_LINES <= 0) return
+        const unloaded = sessions
+          .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
+          .filter((s) => !(s.id in (previews() ?? {})))
+
+        if (unloaded.length === 0) return
+
+        void Promise.all(
+          unloaded.map(async (session) => {
+            try {
+              const result = await sdk.client.session.messages({
+                sessionID: session.id,
+                limit: SESSION_LIST_PREVIEW_MESSAGE_LIMIT,
+              })
+              const userMsg = result.data?.findLast((x) => x.info.role === "user")
+              if (!userMsg) return
+              const text = (userMsg.parts
+                .filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
+                .map((p) => p.text)
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim()
+              if (text) {
+                setPreviews((prev) => ({ ...prev, [session.id]: text }))
+              }
+            } catch {}
+          }),
+        )
+      },
+    ),
+  )
 
   const [searchResults, { refetch }] = createResource(
     () => ({ query: search(), filter: sync.session.query() }),
@@ -119,7 +161,7 @@ export function DialogSessionList() {
       .toSorted((a, b) => {
         const updatedDay = new Date(b.time.updated).setHours(0, 0, 0, 0) - new Date(a.time.updated).setHours(0, 0, 0, 0)
         if (updatedDay !== 0) return updatedDay
-        return b.time.created - a.time.created
+        return b.time.updated - a.time.updated
       })
       .map((x) => {
         const workspace = x.workspaceID ? project.workspace.get(x.workspaceID) : undefined
@@ -162,6 +204,8 @@ export function DialogSessionList() {
         const isDeleting = toDelete() === x.id
         const status = sync.data.session_status?.[x.id]
         const isWorking = status?.type === "busy"
+        const previewText = previews()[x.id]
+        const previewLines = SESSION_LIST_PREVIEW_LINES > 0 && previewText ? [previewText] : undefined
         return {
           title: isDeleting ? `Press ${keybind.print("session_delete")} again to confirm` : x.title,
           bg: isDeleting ? theme.error : undefined,
@@ -169,6 +213,7 @@ export function DialogSessionList() {
           category,
           footer,
           gutter: isWorking ? () => <Spinner /> : undefined,
+          previewLines,
         }
       })
   })
