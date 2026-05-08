@@ -392,9 +392,9 @@ async function findUpAll(filename: string, start: string, stop?: string) {
 }
 
 async function scanSkillFiles(root: string, result: Set<string>) {
-  let entries: Awaited<ReturnType<typeof fs.readdir>>
+  let entries: { name: string; isDirectory(): boolean; isFile(): boolean }[]
   try {
-    entries = await fs.readdir(root, { withFileTypes: true })
+    entries = await fs.readdir(root, { withFileTypes: true }) as any
   } catch {
     return
   }

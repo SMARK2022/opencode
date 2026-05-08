@@ -577,7 +577,7 @@ test("claudecode config models infer Anthropic thinking variants", async () => {
       )
     },
   })
-  await Instance.provide({
+  await WithInstance.provide({
     directory: tmp.path,
     fn: async () => {
       const providers = await list()
@@ -614,7 +614,7 @@ test("provider extending claudecode uses Anthropic SDK and ClaudeCode loader", a
       )
     },
   })
-  await Instance.provide({
+  await WithInstance.provide({
     directory: tmp.path,
     fn: async () => {
       const providers = await list()
@@ -648,7 +648,7 @@ test("provider extending openai inherits models and npm", async () => {
     },
   })
 
-  await Instance.provide({
+  await WithInstance.provide({
     directory: tmp.path,
     fn: async () => {
       const providers = await list()
@@ -694,7 +694,7 @@ test("provider extending google inherits models and npm", async () => {
     },
   })
 
-  await Instance.provide({
+  await WithInstance.provide({
     directory: tmp.path,
     fn: async () => {
       const providers = await list()
@@ -742,7 +742,7 @@ test("alias providers do not share auth keys - independent entries in provider l
     },
   })
 
-  await Instance.provide({
+  await WithInstance.provide({
     directory: tmp.path,
     fn: async () => {
       const providers = await list()

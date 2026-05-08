@@ -63,6 +63,10 @@ const it = testEffect(
             status: () => Effect.die("unused"),
             diff: () => Effect.die("unused"),
             stats: () => Effect.die("unused"),
+            patch: () => Effect.die("unused"),
+            patchAll: () => Effect.die("unused"),
+            patchUntracked: () => Effect.die("unused"),
+            statUntracked: () => Effect.die("unused"),
           }),
         ),
         Layer.succeed(
