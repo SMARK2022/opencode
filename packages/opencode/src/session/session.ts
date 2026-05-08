@@ -46,15 +46,9 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionMessage } from "@opencode-ai/schema/session-message"
-
-const parentTitlePrefix = "New session - "
-const childTitlePrefix = "Child session - "
-
-export function isDefaultTitle(title: string) {
-  return new RegExp(
-    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
-  ).test(title)
-}
+import { createDefaultTitle, isDefaultTitle } from "./title"
+// #113：兼容 Session.isDefaultTitle 导出名
+export { isDefaultTitle }
 
 type SessionRow = typeof SessionTable.$inferSelect & { request?: RequestUsage }
 
@@ -465,7 +459,7 @@ const layer: Layer.Layer<
         path: input.path,
         workspaceID: input.workspaceID,
         parentID: input.parentID,
-        title: input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString(),
+        title: input.title ?? createDefaultTitle(!!input.parentID),
         agent: input.agent,
         model: input.model,
         metadata: input.metadata,
