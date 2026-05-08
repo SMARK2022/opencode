@@ -68,6 +68,8 @@ export interface DialogSelectOption<T = any> {
   bg?: RGBA
   gutter?: () => JSX.Element
   margin?: JSX.Element
+  // #112：会话列表最近用户消息预览行
+  previewLines?: string[]
   onSelect?: (ctx: DialogContext) => void
 }
 
@@ -206,7 +208,11 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       if (!category) return acc
       return acc + (i > 0 ? 2 : 1)
     }, 0)
-    return flat().reduce((acc, option) => acc + 1 + (option.details?.length ?? 0), headers)
+    // #112：details + previewLines 计入虚拟高度，避免滚动裁切
+    return flat().reduce(
+      (acc, option) => acc + 1 + (option.details?.length ?? 0) + (option.previewLines?.length ?? 0),
+      headers,
+    )
   })
 
   const dimensions = useTerminalDimensions()
@@ -700,6 +706,17 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                               <box paddingLeft={3} paddingRight={3}>
                                 <text fg={theme.textMuted} wrapMode="none">
                                   {Locale.truncateMiddle(detail, Math.max(1, Math.min(76, dimensions().width - 12)))}
+                                </text>
+                              </box>
+                            )}
+                          </For>
+                          {/* #112：previewLines 与 details 同为外层 column 子项，勿塞进 title row */}
+                          <For each={option.previewLines}>
+                            {(line, index) => (
+                              <box paddingLeft={3} paddingRight={3}>
+                                <text fg={theme.textMuted} wrapMode="none">
+                                  {(index() === (option.previewLines?.length ?? 0) - 1 ? "└─ " : "├─ ") +
+                                    Locale.truncateMiddle(line, Math.max(1, Math.min(72, dimensions().width - 16)))}
                                 </text>
                               </box>
                             )}
