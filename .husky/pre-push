@@ -1,5 +1,18 @@
 #!/bin/sh
 set -e
+
+# #119：Windows Git Bash 可能缺少 Bun PATH，优先补上用户安装目录
+if ! command -v bun >/dev/null 2>&1 && [ -d "$HOME/.bun/bin" ]; then
+  PATH="$HOME/.bun/bin:$PATH"
+  export PATH
+fi
+
+# #119：仍找不到 bun 则明确失败，避免后续脚本抛难读错误
+if ! command -v bun >/dev/null 2>&1; then
+  echo "bun: command not found. Add ~/.bun/bin to PATH or install bun." >&2
+  exit 127
+fi
+
 # Check if bun version matches package.json
 # keep in sync with packages/script/src/index.ts semver qualifier
 bun -e '

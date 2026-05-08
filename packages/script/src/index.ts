@@ -1,3 +1,5 @@
+// #119：pre-push 在 Windows 上需确保 bun 在 PATH（见 .husky/pre-push）
+// #119：标准用户安装路径为 ~/.bun/bin
 import { $ } from "bun"
 import semver from "semver"
 import path from "path"
