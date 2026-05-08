@@ -7,6 +7,7 @@ import type {
   WorkspaceAdapter as PluginWorkspaceAdapter,
 } from "@opencode-ai/plugin"
 import { Config } from "@/config/config"
+import { aliasContext, buildBaseProviderMap } from "@/provider/alias"
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import { ServerAuth } from "@/server/auth"
 import { CodexAuthPlugin } from "./openai/codex"
@@ -149,6 +150,101 @@ async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks:
   }
 }
 
+
+// #114：auth.set 时把基类 provider id 改写为当前 ALS 中的 alias id
+// #114：只代理 auth.set；其它 SDK 方法透传，避免扩大 Proxy 面
+function wrapClientForAlias(raw: ReturnType<typeof createOpencodeClient>) {
+  return new Proxy(raw, {
+    get(target, prop, receiver) {
+      if (prop === "auth") {
+        return new Proxy(Reflect.get(target, prop, receiver), {
+          get(authTarget, authProp, authReceiver) {
+            if (authProp === "set") {
+              const origSet = Reflect.get(authTarget, authProp, authReceiver)
+              return async (params: { path: { id: string }; body: any }) => {
+                const alias = aliasContext.getStore()
+                if (alias && params.path.id === alias.baseProviderID) {
+                  return origSet.call(authTarget, {
+                    ...params,
+                    path: { ...params.path, id: alias.providerID },
+                  })
+                }
+                return origSet.call(authTarget, params)
+              }
+            }
+            return Reflect.get(authTarget, authProp, authReceiver)
+          },
+        })
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+}
+
+// #114：为 extends 别名克隆基类 hook，provider/auth id 指向 alias
+// #114：chat.* 入参 model.providerID 映射回基类，复用基类插件逻辑
+function createAliasHook(baseHook: Hooks, providerID: string, baseProviderID: string): Hooks {
+  const aliasHook: Hooks = {}
+  if (baseHook.auth) {
+    aliasHook.auth = {
+      ...baseHook.auth,
+      provider: providerID,
+      loader: baseHook.auth.loader
+        ? async (getAuth, provider) => {
+            return aliasContext.run({ providerID, baseProviderID }, () =>
+              baseHook.auth!.loader!(getAuth, provider),
+            )
+          }
+        : undefined,
+    }
+  }
+  if (baseHook.provider) {
+    aliasHook.provider = {
+      ...baseHook.provider,
+      id: providerID,
+      models: baseHook.provider.models
+        ? async (provider, ctx) => {
+            return aliasContext.run({ providerID, baseProviderID }, () =>
+              baseHook.provider!.models!(provider, ctx),
+            )
+          }
+        : undefined,
+    }
+  }
+  const chatHeaders = baseHook["chat.headers"]
+  if (chatHeaders) {
+    aliasHook["chat.headers"] = async (input, output) => {
+      const mappedInput = {
+        ...input,
+        model: input.model ? { ...input.model, providerID: baseProviderID } : input.model,
+      }
+      return chatHeaders(mappedInput as any, output)
+    }
+  }
+  const chatParams = baseHook["chat.params"]
+  if (chatParams) {
+    aliasHook["chat.params"] = async (input, output) => {
+      const mappedInput = {
+        ...input,
+        model: input.model ? { ...input.model, providerID: baseProviderID } : input.model,
+      }
+      return chatParams(mappedInput as any, output)
+    }
+  }
+  const systemTransform = baseHook["experimental.chat.system.transform"]
+  if (systemTransform) {
+    aliasHook["experimental.chat.system.transform"] = async (input, output) => {
+      const mappedInput = {
+        ...input,
+        model: input.model ? { ...input.model, providerID: baseProviderID } : input.model,
+      }
+      return systemTransform(mappedInput as any, output)
+    }
+  }
+  return aliasHook
+}
+
+
 // 预热只求值外部模块，不能提前调用 server hook 或安装事件订阅。
 export const warmupExternalPlugins = Effect.fn("Plugin.warmupExternalPlugins")(function* () {
   const flags = yield* RuntimeFlags.Service
@@ -188,12 +284,14 @@ const layer = Layer.effect(
         const { Server } = yield* Effect.promise(() => import("../server/server"))
 
         const serverUrl = Server.url
-        const client = createOpencodeClient({
+        const baseClient = createOpencodeClient({
           baseUrl: serverUrl?.toString() ?? "http://localhost:4096",
           directory: ctx.directory,
           headers: ServerAuth.headers(),
           ...(serverUrl ? {} : { fetch: async (...args) => Server.Default().app.fetch(...args) }),
         })
+        // #114：SDK client 经 alias 代理，auth.set 写到真实 alias id
+        const client = wrapClientForAlias(baseClient)
         const cfg = yield* config.get()
         const input: PluginInput = {
           client,
@@ -285,6 +383,22 @@ const layer = Layer.effect(
             }),
           )
         }
+
+        // #114：为 extends 别名生成独立 hook（多账号隔离）
+        // #114：在 config notify 前 push，确保 alias 也收到 config hook
+        const baseProviderMap = buildBaseProviderMap(cfg.provider ?? {})
+        const aliasHooks: Hooks[] = []
+        for (const baseHook of hooks) {
+          // #114：仅对带 auth.provider 的基类 hook 生成别名（oauth 插件主路径）
+          const baseAuthProvider = baseHook.auth?.provider
+          if (!baseAuthProvider) continue
+          for (const [aliasID, baseType] of Object.entries(baseProviderMap)) {
+            if (baseType !== baseAuthProvider) continue
+            aliasHooks.push(createAliasHook(baseHook, aliasID, baseType))
+          }
+        }
+        // #114：先收集再 push，避免遍历 hooks 时修改同一数组
+        for (const aliasHook of aliasHooks) hooks.push(aliasHook)
 
         // Notify plugins of current config
         for (const hook of hooks) {

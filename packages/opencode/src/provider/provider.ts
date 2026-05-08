@@ -27,6 +27,7 @@ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { isRecord } from "@/util/record"
 import { optional } from "@opencode-ai/core/schema"
 import { ProviderTransform } from "./transform"
+import { runWithAlias, buildBaseProviderMap } from "./alias"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
@@ -1702,6 +1703,43 @@ const layer = Layer.effect(
           database[providerID] = parsed
         }
 
+        // #114：config extends 落库后，对别名再跑 provider.models hook
+        // #114：必须在 extend database 之后，否则 aliasDB 尚不存在
+        const baseProviderMap = buildBaseProviderMap(cfg.provider ?? {})
+        for (const hook of plugins) {
+          const p = hook.provider
+          const models = p?.models
+          if (!p || !models) continue
+          // #114：hook.provider.id 是基类（如 openai），映射到所有 extends 它的别名
+          const baseProviderID = p.id
+          for (const [aliasID, baseType] of Object.entries(baseProviderMap)) {
+            if (baseType !== baseProviderID) continue
+            const aliasProviderID = ProviderV2.ID.make(aliasID)
+            const aliasDB = database[aliasProviderID]
+            // #114：别名未启用或未落库则跳过，避免污染主 provider
+            if (!aliasDB) continue
+            if (disabled.has(aliasProviderID)) continue
+            const pluginAuth = yield* auth.get(aliasProviderID).pipe(Effect.orDie)
+            aliasDB.models = yield* Effect.promise(async () => {
+              // #114：runWithAlias 保证 models hook 内 auth.set 写到 alias id
+              const next = await runWithAlias(aliasID, baseType, () =>
+                models(toPublicInfo(aliasDB), { auth: pluginAuth }),
+              )
+              return Object.fromEntries(
+                Object.entries(next).map(([id, model]) => [
+                  id,
+                  {
+                    ...model,
+                    id: ModelV2.ID.make(id),
+                    // #114：模型归属写回别名 providerID，禁止残留基类 id
+                    providerID: aliasProviderID,
+                  },
+                ]),
+              )
+            })
+          }
+        }
+
         // load env
         const envs = yield* env.all()
         for (const [id, provider] of Object.entries(database)) {
@@ -1747,6 +1785,45 @@ const layer = Layer.effect(
           const opts = options ?? {}
           const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
           mergeProvider(providerID, patch)
+        }
+
+        // #114：别名账号复用基类 auth.loader，fetch 保持 runWithAlias
+        // #114：与 tip customLoader extends 路径并存：这里专管 plugin.auth 注入
+        for (const plugin of plugins) {
+          if (!plugin.auth) continue
+          // #114：基类 auth.provider（如 openai）对应所有 extends 别名
+          const baseProvider = plugin.auth.provider
+          for (const [aliasID, baseType] of Object.entries(baseProviderMap)) {
+            if (baseType !== baseProvider) continue
+            const aliasProviderID = ProviderV2.ID.make(aliasID)
+            if (disabled.has(aliasProviderID)) continue
+            const aliasDB = database[aliasProviderID]
+            if (!aliasDB) continue
+            // #114：别名自身无凭证则不跑 loader，避免空 oauth 污染 options
+            const stored = yield* auth.get(aliasProviderID).pipe(Effect.orDie)
+            if (!stored) continue
+            if (!plugin.auth.loader) continue
+            const options = yield* Effect.promise(() =>
+              runWithAlias(aliasID, baseProvider, () =>
+                plugin.auth!.loader!(
+                  // #114：getAuth 读别名自己的凭证，不是基类凭证
+                  () => bridge.promise(auth.get(aliasProviderID).pipe(Effect.orDie)) as any,
+                  toPublicInfo(aliasDB),
+                ),
+              ),
+            )
+            const opts = options ?? {}
+            if (opts.fetch) {
+              const origFetch = opts.fetch
+              // #114：后续每次 fetch 仍带着 ALS，保证刷新 token 写回别名
+              opts.fetch = (...args: Parameters<typeof origFetch>): ReturnType<typeof origFetch> =>
+                runWithAlias(aliasID, baseProvider, () => origFetch(...args))
+            }
+            const patch: Partial<Info> = providers[aliasProviderID]
+              ? { options: opts }
+              : { source: "custom", options: opts }
+            mergeProvider(aliasProviderID, patch)
+          }
         }
 
         const customLoaders = custom(dep)

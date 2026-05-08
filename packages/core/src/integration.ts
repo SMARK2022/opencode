@@ -132,6 +132,8 @@ export type Draft = {
   remove: (id: ID) => void
   method: {
     list: (integrationID: ID) => readonly Method[]
+    // 别名复用完整 OAuth 实现，公开方法描述不携带 authorize/refresh 回调。
+    get: (integrationID: ID, methodID: MethodID) => OAuthImplementation | undefined
     update: (implementation: Implementation) => void
     remove: (integrationID: ID, method: Method) => void
   }
@@ -243,6 +245,7 @@ export const locationLayer = Layer.effect(
         remove: (id) => draft.integrations.delete(id),
         method: {
           list: (integrationID) => (draft.integrations.get(integrationID)?.methods as Method[] | undefined) ?? [],
+          get: (integrationID, methodID) => draft.integrations.get(integrationID)?.implementations.get(methodID),
           update: (implementation) => {
             const current = draft.integrations.get(implementation.integrationID) ?? {
               ref: {

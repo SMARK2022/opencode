@@ -31,6 +31,7 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { Location } from "@opencode-ai/core/location"
 import { PluginV2 } from "@opencode-ai/core/plugin"
+import { isOpenaiOauthProvider, buildBaseProviderMap } from "@/provider/alias"
 
 export const Info = Schema.Struct({
   name: Schema.String,
@@ -436,7 +437,11 @@ const layer = Layer.effect(
 
         // TODO: clean this up so provider specific logic doesnt bleed over
         const authInfo = yield* auth.get(model.providerID).pipe(Effect.orDie)
-        const isOpenaiOauth = model.providerID === "openai" && authInfo?.type === "oauth"
+        // #114：extends openai 的别名同样走 oauth 系统提示剥离
+        // #114：map 来自当前 instance cfg，避免跨项目串号
+        const oauthBaseMap = buildBaseProviderMap(cfg.provider ?? {})
+        // #114：仅 oauth 凭证触发；api key 账号保持原 system 注入
+        const isOpenaiOauth = isOpenaiOauthProvider(model.providerID, oauthBaseMap) && authInfo?.type === "oauth"
 
         const params = {
           experimental_telemetry: {
