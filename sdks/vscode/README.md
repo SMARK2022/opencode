@@ -68,13 +68,21 @@ Build and package from the `sdks/vscode` directory:
 bun run check-types
 bun run lint
 bun run package
-npx @vscode/vsce package -o "dist/SMARK2022.opencode-ide-bridge-1.14.31.vsix"
+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.32.vsix"
 ```
+
+Or use the bundled shortcut:
+
+```powershell
+bun run vsix
+```
+
+The shortcut builds first, then packages directly into `dist/`. It intentionally does not use `vscode:prepublish`, because `vsce` runs that hook through an internal `npm run vscode:prepublish` child process, which can lose `npm` from `PATH` in some Windows/Bun terminal environments.
 
 Install:
 
 ```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.31.vsix --force
+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.32.vsix --force
 ```
 
 ## Architecture
