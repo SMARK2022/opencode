@@ -203,10 +203,10 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
       }
 
       // ② Fallback: Claude Code lock file / WebSocket
-      const connection = resolveEditorConnection(directory)
-      if (connection) {
+      const conn = resolveEditorConnection(directory)
+      if (conn) {
         setStore("status", "connecting")
-        const current = openEditorSocket(connection, WebSocketImpl)
+        const current = openEditorSocket(conn, WebSocketImpl)
         socket = current
 
       current.addEventListener("open", () => {

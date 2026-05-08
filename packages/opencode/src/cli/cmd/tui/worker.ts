@@ -6,6 +6,7 @@ import { WithInstance } from "@/project/with-instance"
 import { Rpc } from "@/util/rpc"
 import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config/config"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { GlobalBus } from "@/bus/global"
 import { ServerAuth } from "@/server/auth"
 import { writeHeapSnapshot } from "node:v8"
@@ -107,7 +108,7 @@ async function gracefulShutdown() {
   shutdownInProgress = true
   Log.Default.info("daemon shutting down")
   await ServerLock.clearIfOwner(lockToken)
-  await Instance.disposeAll()
+  await InstanceRuntime.disposeAllInstances()
   if (externalServer) await externalServer.stop(true)
   await internalServer.stop(true)
   Database.close()
@@ -119,7 +120,7 @@ process.on("SIGTERM", () => void gracefulShutdown())
 // Config reload on SIGUSR2 (Unix only — Windows does not support this signal).
 if (process.platform !== "win32") {
   process.on("SIGUSR2", () => {
-    AppRuntime.runPromise(Config.Service.use((cfg) => cfg.invalidate(true))).catch(() => {})
+    AppRuntime.runPromise(Config.Service.use((cfg) => cfg.invalidate())).catch(() => {})
   })
 }
 

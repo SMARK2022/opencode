@@ -27,6 +27,10 @@ export function parameterSchema(description: string) {
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
     }),
     description: Schema.String.annotate({ description }),
+    compress_output: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Whether this shell call may compress repetitive output before returning it. Defaults to the user's shell output compression setting. Set false when exact raw formatting is important.",
+    }),
   })
 }
 
@@ -279,6 +283,8 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits) 
       intro: selected.intro,
       os: platform,
       shell: name,
+      shellGuidance: "",
+      compressionGuidance: "",
       tmp: Global.Path.tmp,
       workdirSection: selected.workdirSection,
       commandSection: selected.commandSection,

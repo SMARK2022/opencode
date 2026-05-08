@@ -143,7 +143,7 @@ export const SessionListCommand = effectCmd({
   }),
 })
 
-export const SessionInfoCommand = cmd({
+export const SessionInfoCommand = effectCmd({
   command: "info",
   describe: "show detailed session info with token usage by model",
   builder: (yargs: Argv) => {
@@ -154,42 +154,36 @@ export const SessionInfoCommand = cmd({
       demandOption: true,
     })
   },
-  handler: async (args) => {
-    await bootstrap(process.cwd(), async () => {
-      const sessionID = SessionID.make(args.session)
+  handler: Effect.fn("Cli.session.info")(function* (args) {
+    const sessionID = SessionID.make(args.session)
+    const session = yield* Session.Service.use((svc) =>
+      svc.get(sessionID).pipe(
+        Effect.catchIf(NotFoundError.isInstance, () => fail(`Session not found: ${args.session}`)),
+      ),
+    )
 
-      let session: Session.Info
-      try {
-        session = await AppRuntime.runPromise(Session.Service.use((svc) => svc.get(sessionID)))
-      } catch {
-        UI.error(`Session not found: ${args.session}`)
-        process.exit(1)
-        return
-      }
+    // Per-model breakdown from request_usage_assistant.
+    const rows = Database.use((db) =>
+      db
+        .select({
+          providerId: RequestUsageAssistantTable.provider_id,
+          modelId: RequestUsageAssistantTable.model_id,
+          calls: sql<number>`count(*)`,
+          tokensInput: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
+          tokensOutput: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
+          tokensReasoning: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
+          tokensCacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
+          tokensCacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
+          costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
+        })
+        .from(RequestUsageAssistantTable)
+        .where(eq(RequestUsageAssistantTable.session_id, sessionID))
+        .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
+        .all(),
+    )
 
-      // Per-model breakdown from request_usage_assistant.
-      const rows = Database.use((db) =>
-        db
-          .select({
-            providerId: RequestUsageAssistantTable.provider_id,
-            modelId: RequestUsageAssistantTable.model_id,
-            calls: sql<number>`count(*)`,
-            tokensInput: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
-            tokensOutput: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
-            tokensReasoning: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
-            tokensCacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
-            tokensCacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
-            costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
-          })
-          .from(RequestUsageAssistantTable)
-          .where(eq(RequestUsageAssistantTable.session_id, sessionID))
-          .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
-          .all(),
-      )
-
-      displaySessionInfo(session, rows)
-    })
-  },
+    displaySessionInfo(session, rows)
+  }),
 })
 
 function formatSessionTable(

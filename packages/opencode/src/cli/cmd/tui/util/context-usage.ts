@@ -10,7 +10,7 @@ import { Shell } from "@/shell/shell"
 import { Skill } from "@/skill"
 import { Wildcard } from "@/util"
 import APPLY_PATCH_DESCRIPTION from "@/tool/apply_patch.txt"
-import BASH_DESCRIPTION from "@/tool/bash.txt"
+import BASH_DESCRIPTION from "@/tool/shell/shell.txt"
 import EDIT_DESCRIPTION from "@/tool/edit.txt"
 import GLOB_DESCRIPTION from "@/tool/glob.txt"
 import GREP_DESCRIPTION from "@/tool/grep.txt"
@@ -25,7 +25,7 @@ import WEBFETCH_DESCRIPTION from "@/tool/webfetch.txt"
 import WEBSEARCH_DESCRIPTION from "@/tool/websearch.txt"
 import WRITE_DESCRIPTION from "@/tool/write.txt"
 import { ApplyPatchTool, Parameters as ApplyPatchParameters } from "@/tool/apply_patch"
-import { BashTool, Parameters as BashParameters } from "@/tool/bash"
+import { ShellTool, Parameters as ShellParameters } from "@/tool/shell"
 import { EditTool, Parameters as EditParameters } from "@/tool/edit"
 import { GlobTool, Parameters as GlobParameters } from "@/tool/glob"
 import { GrepTool, Parameters as GrepParameters } from "@/tool/grep"
@@ -553,7 +553,7 @@ type ToolDefinitionTemplate = {
 const STATIC_TOOL_DEFINITIONS: ToolDefinitionTemplate[] = [
   { name: InvalidTool.id, description: "Do not use", parameters: InvalidParameters },
   { name: QuestionTool.id, description: QUESTION_DESCRIPTION, parameters: QuestionParameters },
-  { name: BashTool.id, description: BASH_DESCRIPTION, parameters: BashParameters },
+  { name: ShellTool.id, description: BASH_DESCRIPTION, parameters: ShellParameters },
   { name: ReadTool.id, description: READ_DESCRIPTION, parameters: ReadParameters },
   { name: GlobTool.id, description: GLOB_DESCRIPTION, parameters: GlobParameters },
   { name: GrepTool.id, description: GREP_DESCRIPTION, parameters: GrepParameters },

@@ -6,6 +6,7 @@ import { Database, eq } from "@/storage/db"
 import { SessionTable } from "../../session/session.sql"
 import { Project } from "@/project/project"
 import { Instance } from "../../project/instance"
+import { InstanceRef } from "@/effect/instance-ref"
 import { AppRuntime } from "@/effect/app-runtime"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
 

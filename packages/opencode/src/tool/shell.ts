@@ -91,6 +91,10 @@ const GIT_WRITES = new Set([
 const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch"])
 const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
 
+function bashCompressionEnabled(config?: Config.Info) {
+  return config?.tool_output?.bash_compression ?? true
+}
+
 type Part = {
   type: string
   text: string
@@ -533,10 +537,10 @@ export const ShellTool = Tool.define(
         env: NodeJS.ProcessEnv
         timeout: number
         description: string
+        compressOutput: boolean
       },
       ctx: Tool.Context,
     ) {
-      const started = Date.now()
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
@@ -548,6 +552,8 @@ export const ShellTool = Tool.define(
       let cut = false
       let expired = false
       let aborted = false
+      const started = Date.now()
+      const diag = new BashDiagnosticCollector()
 
       yield* ctx.metadata({
         metadata: {
@@ -562,6 +568,7 @@ export const ShellTool = Tool.define(
 
           yield* Effect.forkScoped(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
+              diag.push(chunk)
               const size = Buffer.byteLength(chunk, "utf-8")
               list.push({ text: chunk, size })
               used += size
@@ -645,7 +652,15 @@ export const ShellTool = Tool.define(
       }
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
-      const end = tail(raw, limits.maxLines, limits.maxBytes)
+      diag.end()
+      const diagnosticSnapshot = diag.snapshot()
+
+      // Compress output if enabled
+      const compressed = input.compressOutput
+        ? compressVisibleOutput(raw)
+        : { text: raw, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
+
+      const end = tail(input.compressOutput ? compressed.text : raw, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
       if (!file && end.cut) {
         file = yield* trunc.write(raw)
@@ -658,14 +673,12 @@ export const ShellTool = Tool.define(
         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
       }
 
-      const appendix = renderDiagnosticAppendix(
-        bashCompressionMetadata({ compression: compressVisibleOutput(output) }),
-        {
-          durationMs: Date.now() - started,
-          exitCode: code,
-          visibleOutput: output,
-        },
-      )
+      // Append diagnostic appendix for failed commands
+      const appendix = renderDiagnosticAppendix(diagnosticSnapshot, {
+        durationMs: Date.now() - started,
+        exitCode: code,
+        visibleOutput: output,
+      })
       if (appendix) {
         output += "\n\n" + appendix
       }
@@ -684,6 +697,7 @@ export const ShellTool = Tool.define(
         )
       }
 
+      const durationMs = Date.now() - started
       return {
         title: input.description,
         metadata: {
@@ -691,6 +705,10 @@ export const ShellTool = Tool.define(
           exit: code,
           description: input.description,
           truncated: cut,
+          durationMs,
+          diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
+          diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
+          ...(compressed.stats ? bashCompressionMetadata(compressed.stats) : {}),
           ...(cut && file ? { outputPath: file } : {}),
         },
         output,
@@ -706,8 +724,21 @@ export const ShellTool = Tool.define(
         const prompt = ShellPrompt.render(name, process.platform, limits)
         log.info("shell tool using shell", { shell })
 
+        const userCompressionEnabled = bashCompressionEnabled(cfg)
+        const compressionGuidance = userCompressionEnabled
+          ? [
+              "  - Shell output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
+              "  - Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result.",
+            ].join("\n")
+          : ""
+
+        const wsGuidance = shellGuidance(name)
+        let description = prompt.description
+        if (wsGuidance) description += "\n" + wsGuidance + "\n"
+        if (compressionGuidance) description += "\n" + compressionGuidance + "\n"
+
         return {
-          description: prompt.description,
+          description,
           parameters: prompt.parameters,
           execute: (params: Parameters, ctx: Tool.Context) =>
             Effect.gen(function* () {
@@ -733,6 +764,9 @@ export const ShellTool = Tool.define(
                 }),
               )
 
+              const configInfo = yield* config.get().pipe(Effect.catch(() => Effect.succeed(undefined as Config.Info | undefined)))
+              const compressOutput = bashCompressionEnabled(configInfo) && (params.compress_output ?? true)
+
               return yield* run(
                 {
                   shell,
@@ -741,6 +775,7 @@ export const ShellTool = Tool.define(
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
                   description: params.description,
+                  compressOutput,
                 },
                 ctx,
               )
