@@ -2177,8 +2177,14 @@ function Shell(props: ToolProps) {
     if (isRunning() || showContextOutput()) return { output: output(), overflow: false }
     return collapseToolOutput(output(), 19, maxChars() * 2)
   })
+  // #111：外置 collapseToolOutput 主路径 sticky（Shell 唯一折叠 owner）
+  const [shellCanCollapse, setShellCanCollapse] = createSignal(false)
+  createEffect(() => {
+    if (shellCanCollapse()) return
+    if (collapsed().overflow) setShellCanCollapse(true)
+  })
   const limited = createMemo(() => {
-    if (expanded() || !collapsed().overflow) return output()
+    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return output()
     return collapseToolOutput(output(), maxLines - 1, (maxLines - 1) * Math.max(20, ctx.width - 6)).output
   })
 
@@ -2208,7 +2214,7 @@ function Shell(props: ToolProps) {
         <BlockTool
           title={title()}
           part={props.part}
-          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+          onClick={shellCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
@@ -2224,7 +2230,7 @@ function Shell(props: ToolProps) {
             <Show when={output()}>
               <text fg={theme.text}>{limited()}</text>
             </Show>
-            <Show when={collapsed().overflow}>
+            <Show when={shellCanCollapse()}>
               <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
             </Show>
           </box>
@@ -2254,8 +2260,14 @@ function Write(props: ToolProps) {
   // 完整展示阈值为 20 行，折叠预览为 10 行；两者都保留字符预算。
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
   const collapsed = createMemo(() => collapseToolOutput(code(), 20, maxChars() * 2))
+  // #111：Write 外置折叠 sticky（唯一折叠 owner；勿传 totalLines 给 BlockTool）
+  const [writeCanCollapse, setWriteCanCollapse] = createSignal(false)
+  createEffect(() => {
+    if (writeCanCollapse()) return
+    if (collapsed().overflow) setWriteCanCollapse(true)
+  })
   const limited = createMemo(() => {
-    if (expanded() || !collapsed().overflow) return code()
+    if (expanded() || !writeCanCollapse()) return code()
     return collapseToolOutput(code(), maxLines, maxChars()).output
   })
   // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
@@ -2324,7 +2336,7 @@ function Write(props: ToolProps) {
         <BlockTool
           title={"# Wrote " + pathFormatter.format(filepath())}
           part={props.part}
-          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+          onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
         >
           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
             <code
@@ -2335,7 +2347,7 @@ function Write(props: ToolProps) {
               content={limited()}
             />
           </line_number>
-          <Show when={collapsed().overflow}>
+          <Show when={writeCanCollapse()}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
