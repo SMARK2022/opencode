@@ -1,5 +1,19 @@
 #!/bin/sh
 set -e
+
+# Git hooks on Windows are executed by Git Bash, which does not always inherit
+# the PowerShell/User PATH where Bun is installed. Prefer the standard Bun user
+# install location before failing.
+if ! command -v bun >/dev/null 2>&1 && [ -d "$HOME/.bun/bin" ]; then
+  PATH="$HOME/.bun/bin:$PATH"
+  export PATH
+fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "bun: command not found. Add ~/.bun/bin to PATH or install bun@1.3.13." >&2
+  exit 127
+fi
+
 # Check if bun version matches package.json
 # keep in sync with packages/script/src/index.ts semver qualifier
 bun -e '
