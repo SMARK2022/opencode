@@ -1884,10 +1884,15 @@ function BlockTool(props: {
     if (hover()) return theme.backgroundMenu
     return theme.backgroundPanel
   })
-  const previewLines = props.maxLines ?? 10
-  const threshold = props.threshold ?? 20
-  const contentLines = props.totalLines ?? 0
-  const canCollapse = previewLines > 0 && contentLines > threshold
+  const previewLines = createMemo(() => props.maxLines ?? 10)
+  const threshold = createMemo(() => props.threshold ?? 20)
+  const [canCollapse, setCanCollapse] = createSignal(false)
+  createEffect(() => {
+    if (canCollapse()) return
+    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) {
+      setCanCollapse(true)
+    }
+  })
   const [expanded, setExpanded] = createSignal(false)
   return (
     <box
@@ -1899,7 +1904,7 @@ function BlockTool(props: {
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
-      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse) && setHover(true)}
+      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: TuiMouseEvent) => {
         if (renderer.getSelection()?.getSelectedText()) return
@@ -1910,7 +1915,7 @@ function BlockTool(props: {
           props.onRightClick()
           return
         }
-        if (canCollapse) setExpanded((prev) => !prev)
+        if (canCollapse()) setExpanded((prev) => !prev)
         props.onClick?.()
       }}
     >
@@ -1927,12 +1932,12 @@ function BlockTool(props: {
       </Show>
       <box
         marginTop={1}
-        maxHeight={canCollapse && !expanded() ? previewLines : undefined}
-        overflow={canCollapse && !expanded() ? "hidden" : undefined}
+        maxHeight={canCollapse() && !expanded() ? previewLines() : undefined}
+        overflow={canCollapse() && !expanded() ? "hidden" : undefined}
       >
         {props.children}
       </box>
-      <Show when={canCollapse}>
+      <Show when={canCollapse()}>
         <box marginTop={1}>
           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
         </box>
