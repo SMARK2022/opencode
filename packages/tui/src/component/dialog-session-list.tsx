@@ -44,7 +44,8 @@ export function loadDialogSessionList<T>(input: {
 }
 
 // #112：默认预览 1 行（#115 改为 2）
-const SESSION_LIST_PREVIEW_LINES = 1
+// #115：会话列表预览默认 2 行
+const SESSION_LIST_PREVIEW_LINES = 2
 // #112：最近用户消息拉取条数上限
 const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
 // #112：并发预加载会话数上限
