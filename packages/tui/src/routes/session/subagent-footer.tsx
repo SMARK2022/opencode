@@ -5,7 +5,9 @@ import { useTheme } from "../../context/theme"
 import { SplitBorder } from "../../ui/border"
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
-import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
+import { getContextLimit } from "../../util/token-estimate"
+import { tokenAccounting } from "../../util/token-accounting"
+// #122：subagent footer 共用 accounting
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
@@ -74,7 +76,8 @@ export function SubagentFooter() {
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
     // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
     // 子会话的 prepared 密度只随它自己的请求读取，父会话与旧模型确认样本不参与。
-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
+    // 子代理传自己的完整投影，沿既有节流与费用范围展示统计。
+    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session: session(), last, parts: lastParts }).request
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 

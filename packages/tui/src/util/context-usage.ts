@@ -11,6 +11,7 @@ import { boolean, withDefault } from "effect/Config"
 // 过滤共享 Schema 的纯权限语法，避免新增 TUI 到 Core 的运行时入口。
 import { Wildcard } from "@opencode-ai/schema/wildcard"
 import { estimateDataUrlInputTokens } from "./token-estimate"
+import { tokenAccounting } from "./token-accounting"
 import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
 import GIT_SAFETY from "../../../core/src/git-safety.txt"
 import SHELL_DESCRIPTION from "../../../opencode/src/tool/shell/shell.txt"
@@ -1114,9 +1115,16 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     ? { ...modelInfo.model, limit: { ...modelInfo.model.limit, context: frozen } } : modelInfo.model
   const maxTokens = frozen ?? modelInfo.model?.limit.context ?? 0
 
+  const last = input.messages.findLast((item): item is AssistantMessage => item.role === "assistant" &&
+    (input.session?.request
+      ? item.id === input.session.request.assistantID
+      : item.providerID === modelInfo.providerID && item.modelID === modelInfo.modelID))
+  const acc = tokenAccounting(input.messages, (id) => input.parts[id] ?? [], maxTokens,
+    { session: input.session, last, parts: last ? input.parts[last.id] ?? [] : [] })
+  // 分类与统计消费同一入口；会话累计来自持久 Session，不受可见消息窗口限制。
   const msg = messageTokens(compacted, ratio)
-  // #99：usage 用 raw 全量消息 + ratio 估流式增量
-  const usage = usageTotals(raw, ratio)
+  const usage = { ...acc.session, total: acc.session.input + acc.session.output + acc.session.reasoning
+    + acc.session.cacheRead + acc.session.cacheWrite }
   const instructions = await gatherInstructionFiles(input)
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
   const messageText = msg.text.join("\n")
@@ -1130,7 +1138,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
 
   const skills = await gatherSkills(input)
   const skillListing = skillsSection(skillInfo(skills))
-  const skillTokens = bd ? Math.round(bd.skills / ratio) : estimate(skillListing, ratio)
+  const skillTokens = acc.breakdown?.skills ?? estimate(skillListing, ratio)
   const skillDetails = skills.map((skill) => ({
     name: skill.name,
     path: skill.path,
@@ -1144,15 +1152,16 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     lastUser?.role === "user" ? lastUser.system : undefined,
   ].filter(Boolean).join("\n")
   // 文本分类消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
-  const envTokens = bd ? Math.round(bd.system / ratio) : estimate(systemText, ratio)
-  const instructionTokens = bd ? Math.round(bd.instructions / ratio) : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+  const envTokens = acc.breakdown?.system ?? estimate(systemText, ratio)
+  const instructionTokens = acc.breakdown?.instructions ?? instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
-  const toolDefTokens = bd ? Math.round(bd.tools / ratio) : toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-  const messageDetails = bd ? {
-    userText: Math.round(bd.messages.userText / ratio), assistantText: Math.round(bd.messages.assistantText / ratio),
-    reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
-    // 附件沿用视觉估算，不把 base64 字符除以文本密度。
-    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: msg.details.attachments, compactionSummary: 0,
+  const toolDefTokens = acc.breakdown?.tools ?? toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+  // 上传历史与当前输出的分配只由 accounting 计算，分类和明细读取同一份整数。
+  const messageDetails = acc.breakdown ? {
+    userText: acc.breakdown.userMessages, assistantText: acc.breakdown.assistantText,
+    reasoning: acc.breakdown.reasoning, toolCalls: acc.breakdown.toolCalls,
+    toolResults: acc.breakdown.toolResults + acc.breakdown.pending,
+    attachments: acc.breakdown.attachments, compactionSummary: 0,
   } : msg.details
   const userMessageTokens = messageDetails.userText + messageDetails.attachments
   const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
@@ -1162,7 +1171,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   // 四桶只重组同一份冻结整数，直接相加才能保留拆分前 used；逐桶重估会引入额外舍入误差。
   const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens
   const window = windowDetails(input, windowModel, maxTokens)
-  // used 只包含发送载荷；free、模型预留与压缩缓冲不是 token 消费，不能再次加入分子。
+  // used 包含上传输入与本 step 输出；free、模型预留和压缩缓冲不计入消费。
   // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
   // 超出 usable 时自由空间归零，但 used 保留真实估算，不能为了百分比好看裁掉超额载荷。

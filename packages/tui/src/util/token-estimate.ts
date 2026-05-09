@@ -53,6 +53,7 @@ export function computeFinalTokens(
   lastAssistant: AssistantMessage | undefined,
   lastParts: ReadonlyArray<Part>,
   request: SessionRequestUsage,
+  outputRatio = 4,
 ) {
   const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
   const streamingOut = !lastAssistant || lastAssistant.time.completed !== undefined
@@ -81,7 +82,8 @@ export function computeFinalTokens(
   const density = request.inputEstimate?.charsPerToken
   const ratio = density !== undefined && Number.isFinite(density) && density > 0 ? density : 4
   const pendingInputTokens = Math.round(pendingIn / ratio)
-  const pendingOutputTokens = Math.round(streamingOut / ratio)
+  // 输出使用独立历史校准；请求体的 JSON/附件输入密度不能解释新生成的文本与参数。
+  const pendingOutputTokens = Math.round(streamingOut / outputRatio)
   // 可见尾部可能先于 Session 快照到达；立即遮掉旧 step，保留请求历史累计。
   const hasInFlightTail = !!lastAssistant && lastAssistant.time.completed === undefined && lastParts.some((_, i) => i > lastSFIdx)
   const lastStepFinish = lastParts[lastSFIdx]

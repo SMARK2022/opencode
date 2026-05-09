@@ -42,7 +42,9 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
 import { formatDuration, formatDurationCompact } from "../../util/format"
-import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
+import { getContextLimit } from "../../util/token-estimate"
+import { tokenAccounting } from "../../util/token-accounting"
+// #122：统一 token 统计入口
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
@@ -302,7 +304,8 @@ export function Prompt(props: PromptProps) {
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
     // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
     // 密度随完整 request.inputEstimate 投影到达，100条窗口不再重新校准或累加确认点。
-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
+    // 统一统计入口保留完整请求投影与当前尾部，不因分页或首包前无助手而丢失计数。
+    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session, last, parts: lastParts }).request
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
     if (requestTokens <= 0 && totalTokens <= 0) {
