@@ -270,21 +270,30 @@ export function tokenAccounting(
   stepInput += pendingToolResultTokens + pendingAttachTokens
 
   // ── 6. request totals（confirmed + in-flight）─────────
-  const stepDelta = stepConfirmed ? 0 : stepInput + stepOutput
-  const totalInput = confirmedRequest.input + stepDelta
+  // #124：input 与 output 必须分开，stepOutput 不能混进 totalInput
+  const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
 
-  // ── 7. breakdown（来自 latest assistant 的 step-finish）───────
-  // #122：有 inputBreakdown 时按字符占比分配确认 input 总量
+  // ── 7. breakdown（优先 step-finish confirmed，fallback step-start）───────
+  // #124：streaming 期间可用 step-start 的 daemon 字符快照
   let breakdown: TokenAccounting["breakdown"] = null
-  if (stepSF && stepSF.inputBreakdown && stepSF.inputChars) {
-    const bd = stepSF.inputBreakdown as {
+  // #124：定位最近的 step-start 字符快照
+  const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
+  // #124：无 step-start 时 breakdown 仅能等 step-finish
+  const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
+  const breakdownSrc = stepSF?.inputBreakdown ? stepSF : stepSS
+  if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars) {
+    const bd = breakdownSrc.inputBreakdown as {
       system: number; instructions: number; skills: number; tools: number
       messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
     }
-    const confirmedInput = stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-    const denom = stepSF.inputChars as number
+    // #124：确认量用 provider tokens；否则用 daemon inputTokens/chars
+    const confirmedInput = stepSF?.tokens
+      ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
+      : (Number(stepSS?.inputTokens) || Math.round((Number(stepSS?.inputChars) || 0) / inputRatio))
+    const denom = Number(breakdownSrc.inputChars)
 
+    // #124：按字符占比把确认/估算 input 分到各分类
     const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
@@ -295,7 +304,8 @@ export function tokenAccounting(
     const attachments = alloc(bd.messages.attachments)
 
     let assistantText: number; let reasoning: number; let toolCalls: number
-    if (stepConfirmed) {
+    if (stepConfirmed && stepSF?.tokens) {
+      // #124：仅 confirmed step-finish 拆 output/reasoning
       reasoning = stepSF.tokens.reasoning
       const visibleOutput = stepSF.tokens.output
       const textChars = bd.messages.assistantText

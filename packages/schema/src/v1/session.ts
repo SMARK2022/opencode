@@ -246,6 +246,10 @@ export const StepStartPart = Schema.Struct({
   ...partBase,
   type: Schema.Literal("step-start"),
   snapshot: Schema.optional(Schema.String),
+  // 请求发出前的估算快照与确认点共用细分定义，不建立另一套字符格式。
+  inputChars: optional(NonNegativeInt),
+  inputTokens: optional(NonNegativeInt),
+  inputBreakdown: optional(SessionMessage.InputBreakdown),
 }).annotate({ identifier: "StepStartPart" })
 export type StepStartPart = Types.DeepMutable<Schema.Schema.Type<typeof StepStartPart>>
 
