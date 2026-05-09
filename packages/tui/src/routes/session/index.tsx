@@ -195,6 +195,8 @@ export function Session() {
   const route = useRouteData("session")
   const { navigate } = useRoute()
   const sync = useSync()
+  // #123：首屏前固定 local，避免 Bun TDZ 在 memo/handler 中抛错
+  const local = useLocal()
   const event = useEvent()
   const project = useProject()
   const paths = useTuiPaths()
@@ -469,7 +471,6 @@ export function Session() {
     }, 50)
   }
 
-  const local = useLocal()
 
   function enterChild(sessionID: string) {
     navigate({
