@@ -196,6 +196,11 @@ export function Session() {
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+
+  // Keep `local` available before any memo or handler reads it.
+  // Bun's bundled TDZ checks can otherwise throw at first render.
+  const local = useLocal()
+
   const userMessageAgentColors = createMemo(() => {
     return new Map(
       messages()
@@ -394,8 +399,6 @@ export function Session() {
       scroll.scrollTo(scroll.scrollHeight)
     }, 50)
   }
-
-  const local = useLocal()
 
   function moveFirstChild() {
     if (children().length === 1) return
