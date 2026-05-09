@@ -39,6 +39,7 @@ import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
+import { searchCondition } from "./search"
 
 import { createDefaultTitle, isDefaultTitle } from "./title"
 
@@ -836,7 +837,8 @@ function* listByProject(
     conditions.push(gte(SessionTable.time_updated, input.start))
   }
   if (input.search) {
-    conditions.push(like(SessionTable.title, `%${input.search}%`))
+    const condition = searchCondition(input.search)
+    if (condition) conditions.push(condition)
   }
 
   const limit = input.limit ?? 100
@@ -879,7 +881,8 @@ export function* listGlobal(input?: {
     conditions.push(lt(SessionTable.time_updated, input.cursor))
   }
   if (input?.search) {
-    conditions.push(like(SessionTable.title, `%${input.search}%`))
+    const condition = searchCondition(input.search)
+    if (condition) conditions.push(condition)
   }
   if (!input?.archived) {
     conditions.push(isNull(SessionTable.time_archived))

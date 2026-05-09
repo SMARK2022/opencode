@@ -74,7 +74,7 @@ export const SessionRoutes = lazy(() =>
             .number()
             .optional()
             .meta({ description: "Filter sessions updated on or after this timestamp (milliseconds since epoch)" }),
-          search: z.string().optional().meta({ description: "Filter sessions by title (case-insensitive)" }),
+          search: z.string().optional().meta({ description: "Filter sessions by title or message content (case-insensitive)" }),
           limit: z.coerce.number().optional().meta({ description: "Maximum number of sessions to return" }),
         }),
       ),

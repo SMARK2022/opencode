@@ -12,6 +12,7 @@ import { SessionEvent } from "./session-event"
 import { V2Schema } from "./schema"
 import { optionalOmitUndefined } from "@/util/schema"
 import { Modelv2 } from "./model"
+import { searchCondition } from "@/session/search"
 
 export const Delivery = Schema.Literals(["immediate", "deferred"]).annotate({
   identifier: "Session.Delivery",
@@ -164,7 +165,10 @@ export const layer = Layer.effect(
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
         if (input.roots) conditions.push(isNull(SessionTable.parent_id))
         if (input.start) conditions.push(gte(SessionTable.time_created, input.start))
-        if (input.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
+        if (input.search) {
+          const condition = searchCondition(input.search)
+          if (condition) conditions.push(condition)
+        }
         if (input.cursor) {
           conditions.push(
             order === "asc"
