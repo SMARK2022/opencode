@@ -32,7 +32,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
-import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
+import { tokenAccounting } from "../../util/token-accounting"
 import { formatDuration, formatDurationCompact } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
@@ -331,60 +331,30 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) return
     const isRunning = status().type !== "idle"
     const msg = sync.data.message[props.sessionID] ?? []
-    const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-    const users = msg.filter((item): item is UserMessage => item.role === "user")
-
     const getParts = (id: string) => sync.data.part[id] ?? []
 
-    const lastUser = users.at(-1)
-    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
-
-    if (requestAssistants.length === 0) {
-      return
-    }
-
-    // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
-    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
-    const ratio = charsPerTokenFromHistory(msg, getParts)
-
-    // Add streaming estimates from the last (potentially in-flight) message of current request
-    const last = requestAssistants.at(-1)!
-    const lastParts = sync.data.part[last.id] ?? []
-    const {
-      input: currentInput,
-      output: currentOutput,
-      totalInput,
-      totalOutput,
-    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
-    const requestTokens = currentInput + currentOutput
-    const actualTotalTokens = currentInput + currentOutput
-    const totalTokens = totalInput + totalOutput
-
-    if (requestTokens <= 0 && totalTokens <= 0) {
-      if (!isRunning) return
-      return {
-        input: 0,
-        output: 0,
-        totalInput,
-        totalOutput,
-        context: undefined,
-        cost: undefined,
-      }
-    }
+    const lastUser = msg.findLast((item) => item.role === "user")
+    const last = lastUser ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id) : undefined
+    if (!last) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const pct =
-      actualTotalTokens > 0 && model?.limit.context
-        ? `${Math.round((actualTotalTokens / model.limit.context) * 100)}%`
-        : undefined
-    const cost = requestAssistants.reduce((sum, item) => sum + (item.cost || 0), 0)
+    const acc = tokenAccounting(msg, getParts, model?.limit.context)
+    const stepTotal = acc.step.input + acc.step.output
+    const requestTotal = acc.request.totalInput + acc.request.totalOutput
+
+    if (stepTotal <= 0 && requestTotal <= 0) {
+      if (!isRunning) return
+      return { input: 0, output: 0, totalInput: acc.request.totalInput, totalOutput: acc.request.totalOutput, context: undefined, cost: undefined }
+    }
+
+    const pct = acc.contextPercent != null ? `${acc.contextPercent}%` : undefined
     return {
-      input: currentInput,
-      output: currentOutput,
-      totalInput,
-      totalOutput,
-      context: actualTotalTokens > 0 ? (pct ? `${Locale.number(actualTotalTokens)} (${pct})` : Locale.number(actualTotalTokens)) : undefined,
-      cost: cost > 0 ? money.format(cost) : undefined,
+      input: acc.step.input,
+      output: acc.step.output,
+      totalInput: acc.request.totalInput,
+      totalOutput: acc.request.totalOutput,
+      context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
+      cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
     }
   })
 

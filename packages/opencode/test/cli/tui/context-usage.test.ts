@@ -77,26 +77,24 @@ function text(messageID: string, value: string): Part {
 }
 
 describe("context usage", () => {
-  test("counts message, instruction, skill, tool, buffer, and free categories", async () => {
+  test("precise allocation from daemon step-finish inputBreakdown", async () => {
     const messages = [user("1", { bash: true }), assistant("2", "1")]
     const parts: Record<string, Part[]> = {
       "1": [text("1", "abcdefgh")],
       "2": [
         text("2", "abcdefghijkl"),
         {
-          id: "2-tool",
+          id: "sf",
           sessionID: "s",
           messageID: "2",
-          type: "tool",
-          callID: "call",
-          tool: "bash",
-          state: {
-            status: "completed",
-            input: { command: "pwd" },
-            output: "abcdefghijklmnop",
-            title: "pwd",
-            metadata: {},
-            time: { start: 1, end: 2 },
+          type: "step-finish",
+          reason: "stop",
+          cost: 0,
+          tokens: { input: 400, output: 150, reasoning: 50, cache: { read: 0, write: 0 } },
+          inputChars: 1000,
+          inputBreakdown: {
+            system: 300, instructions: 100, skills: 0, tools: 100,
+            messages: { userText: 50, assistantText: 80, reasoning: 60, toolInput: 40, toolOutput: 70, attachments: 100, total: 500 },
           },
         } as Part,
       ],
@@ -111,27 +109,25 @@ describe("context usage", () => {
       paths: { cwd: process.cwd(), worktree: process.cwd() },
       columns: 100,
       instructionFiles: [{ path: "/tmp/AGENTS.md", content: "abcdefgh" }],
-      skills: [{ name: "demo", description: "abcdefgh", path: "/tmp/SKILL.md" }],
       toolDefinitions: [{ name: "bash", text: "abcdefghijklmnop" }],
     })
 
-    expect(data.details.messages.userText).toBe(2)
-    expect(data.details.messages.assistantText).toBe(3)
-    expect(data.details.messages.toolResults).toBe(4)
-    expect(data.details.instructions[0]?.tokens).toBe(2)
-    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
-    expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
-    // tool input/output 独立 category: userText(2) / toolResults(4) / assistantText(3) / toolCalls(4)
-    expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(2)
-    expect(data.categories.find((item) => item.name === "Tool results")?.tokens).toBe(4)
-    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(3)
-    expect(data.categories.find((item) => item.name === "Tool calls")?.tokens).toBe(4)
-    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(100)
-    expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(100)
+    // confirmedInput = 400 (tokens.input)
+    // alloc = round(chars * 400 / 1000)
+    // system: round(300 * 0.4) = 120
+    // instructions: round(100 * 0.4) = 40
+    expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBe(120)
+    expect(data.categories.find((item) => item.name === "Instructions")?.tokens).toBe(40)
+    // tools: round(100 * 0.4) = 40
+    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBe(40)
+    // output: reasoning=50, visible=150
+    // assistant text chars=80, tool call chars=40, total=120
+    // assistantText = round(150 * 80/120) = 100, toolCalls = 50
+    expect(data.details.messages.assistantText).toBe(100)
+    expect(data.details.messages.reasoning).toBe(50)
+    expect(data.details.messages.toolCalls).toBe(50)
+    // window still valid
     expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 19_800, compactionBuffer: 100 })
-    expect(data.categories.find((item) => item.name === "Free space")?.tokens).toBeGreaterThan(0)
-    expect(data.gridRows.flat()).toHaveLength(100)
-    expect(data.gridRows.flat().at(-1)?.categoryName).toBe("Autocompact buffer")
   })
 
   test("splits provider input reserve from the real autocompact buffer", async () => {

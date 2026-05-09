@@ -241,7 +241,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
     }
   })
 
-  const [data] = createResource(() => computeContextData(input()))
+  const [data] = createResource(input, computeContextData)
 
   useKeyboard((evt) => {
     if (dialog.stack.length > 0) return

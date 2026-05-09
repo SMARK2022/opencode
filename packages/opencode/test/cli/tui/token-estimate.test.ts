@@ -1,217 +1,126 @@
 import { describe, expect, test } from "bun:test"
-import type { AssistantMessage, Message, Part } from "@opencode-ai/sdk/v2"
-import { computeFinalTokens, charsPerTokenFromHistory } from "@/cli/cmd/tui/util/token-estimate"
+import { tokenAccounting } from "@/cli/cmd/tui/util/token-accounting"
 
-function assistant(tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read: number; write: number } }, completed?: number): AssistantMessage {
+/** 精简的 part 工厂函数，减少测试噪音 */
+function assistantMsg(id: string, parentID: string, tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }, completed?: number) {
   return {
-    id: "2",
-    sessionID: "s",
-    role: "assistant",
-    time: { created: 2, completed },
-    parentID: "1",
-    modelID: "model",
-    providerID: "test",
-    mode: "general",
-    agent: "general",
-    path: { cwd: ".", root: "." },
+    id, role: "assistant", parentID,
     cost: 0,
-    tokens: { input: tokens?.input ?? 0, output: tokens?.output ?? 0, reasoning: tokens?.reasoning ?? 0, cache: tokens?.cache ?? { read: 0, write: 0 } },
-  } as AssistantMessage
+    tokens: tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, completed },
+  }
 }
 
-function text(id: string, text: string): Part {
-  return { id, sessionID: "s", messageID: "2", type: "text", text } as Part
+function userMsg(id: string) {
+  return { id, role: "user" }
 }
 
-function stepFinish(input: number, output: number, reasoning = 0, cacheRead = 0, cacheWrite = 0, inputChars?: number): Part {
+function stepFinish(input: number, output: number, reasoning = 0, cacheRead = 0, cacheWrite = 0, inputChars?: number) {
   return {
-    id: "sf",
-    sessionID: "s",
-    messageID: "2",
-    type: "step-finish",
-    reason: "stop",
-    cost: 0,
+    id: "sf", sessionID: "s", messageID: "m2", type: "step-finish",
+    reason: "stop", cost: 0,
     tokens: { input, output, reasoning, cache: { read: cacheRead, write: cacheWrite } },
     ...(inputChars != null ? { inputChars } : {}),
-  } as Part
+  }
 }
 
-function userMsg(id: string): Message {
-  return { id, sessionID: "s", role: "user", time: { created: 1 }, agent: "general", model: { providerID: "test", modelID: "model" } } as Message
-}
-function asstMsg(id: string): Message {
-  return { id, sessionID: "s", role: "assistant", time: { created: 2 }, parentID: "1", modelID: "model", providerID: "test", mode: "general", agent: "general", path: { cwd: ".", root: "." }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } } as Message
+function textPart(id: string, text: string) {
+  return { id, sessionID: "s", messageID: "m2", type: "text", text }
 }
 
-describe("charsPerTokenFromHistory", () => {
-  test("computes correct ratio from step-finish with inputChars", () => {
-    // 模拟 DeepSeek 输入：100000 chars → 40000 input tokens (ratio ≈ 2.5)
-    const getParts = (_id: string) => [stepFinish(40000, 5000, 0, 0, 0, 100000)]
-    const ratio = charsPerTokenFromHistory(
-      [{ role: "assistant", id: "msg" }],
-      getParts,
-    )
-    expect(ratio).toBe(2.5)
+describe("tokenAccounting", () => {
+  test("step.input = confirmed tokens when last step-finish exists and message completed", () => {
+    const msgs = [userMsg("1"), assistantMsg("2", "1", { input: 100, output: 200, reasoning: 0, cache: { read: 5, write: 10 } }, 10)]
+    const getParts = (_id: string) => [stepFinish(100, 200, 0, 5, 10, 2000)]
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.step.input).toBe(115)
+    expect(acc.step.output).toBe(200)
+    expect(acc.step.confirmed).toBe(true)
   })
 
-  test("includes cache tokens in the ratio calculation", () => {
-    const getParts = (_id: string) => [stepFinish(30000, 5000, 0, 5000, 5000, 100000)]
-    const ratio = charsPerTokenFromHistory(
-      [{ role: "assistant", id: "msg" }],
-      getParts,
-    )
-    // tokens: input(30000) + cache.read(5000) + cache.write(5000) = 40000
-    expect(ratio).toBe(2.5)
+  test("step.input = daemon estimate when no step-finish yet", () => {
+    const msgs = [userMsg("1"), assistantMsg("2", "1", { input: 8000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })]
+    const getParts = (_id: string) => [textPart("p1", "hello world")]
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.step.input).toBe(8000)
+    expect(acc.step.confirmed).toBe(false)
   })
 
-  test("returns fallback 4 when no data", () => {
-    const getParts = (_id: string) => []
-    const ratio = charsPerTokenFromHistory(
-      [],
-      getParts,
-    )
-    expect(ratio).toBe(4)
-  })
-
-  test("returns fallback 4 when inputChars < 100", () => {
-    const getParts = (_id: string) => [stepFinish(10, 5, 0, 0, 0, 50)]
-    const ratio = charsPerTokenFromHistory(
-      [{ role: "assistant", id: "msg" }],
-      getParts,
-    )
-    expect(ratio).toBe(4)
-  })
-
-  test("returns fallback 4 when total chars < 500", () => {
-    const getParts = (_id: string) => [stepFinish(2, 1, 0, 0, 0, 200)]
-    const ratio = charsPerTokenFromHistory(
-      [{ role: "assistant", id: "msg" }],
-      getParts,
-    )
-    expect(ratio).toBe(4)
-  })
-
-  test("accumulates across multiple messages until 100k chars", () => {
+  test("session accumulates step-finish data across messages", () => {
+    const msgs = [
+      userMsg("1"),
+      assistantMsg("2", "1", undefined, 10),
+      assistantMsg("3", "1", undefined, 20),
+    ]
     const getParts = (id: string) => {
-      if (id === "m1") return [stepFinish(20000, 3000, 0, 0, 0, 50000)]
-      if (id === "m2") return [stepFinish(20000, 3000, 0, 0, 0, 50000)]
+      if (id === "2") return [stepFinish(100, 200, 0, 0, 0)]
+      if (id === "3") return [stepFinish(300, 400, 50, 10, 5)]
       return []
     }
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.session.input).toBe(400)
+    expect(acc.session.output).toBe(600)
+    expect(acc.session.reasoning).toBe(50)
+    expect(acc.session.cacheRead).toBe(10)
+    expect(acc.session.cacheWrite).toBe(5)
+    expect(acc.session.cost).toBe(0)
+  })
+
+  test("request.input/output only include requestAssistants", () => {
     const msgs = [
-      { role: "assistant" as const, id: "m1" },
-      { role: "assistant" as const, id: "m2" },
+      userMsg("u1"),
+      assistantMsg("a1", "u1", undefined, 10),
+      userMsg("u2"),
+      assistantMsg("a2", "u2", undefined, 20),
     ]
-    // totalChars = 100000, totalTokens = 40000, ratio = 2.5
-    expect(charsPerTokenFromHistory(msgs, getParts)).toBe(2.5)
+    const getParts = (id: string) => {
+      if (id === "a1") return [stepFinish(100, 200, 0, 5, 0)]
+      if (id === "a2") return [stepFinish(300, 400, 0, 10, 5)]
+      return []
+    }
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.request.input).toBe(315)
+    expect(acc.request.output).toBe(400)
+    expect(acc.session.input).toBe(400)
+    expect(acc.session.output).toBe(600)
   })
 
-  test("ignores user messages", () => {
-    const getParts = (_id: string) => []
-    const msgs = [{ role: "user" as const, id: "u1" }]
-    expect(charsPerTokenFromHistory(msgs, getParts)).toBe(4)
-  })
-})
-
-describe("computeFinalTokens with custom ratio", () => {
-  // DeepSeek 典型比值：JSON 输入 ~2.5 chars/token
-  const deepseekRatio = 2.5
-
-  test("streaming estimate uses custom ratio instead of hardcoded /4", () => {
-    const result = computeFinalTokens(
-      assistant({ input: 8000 }),
-      [text("p1", "abcdefgh")], // 8 chars
-      { input: 0, output: 0 },
-      deepseekRatio,
-    )
-    // 8 / 2.5 = 3 (not 8/4 = 2)
-    expect(result.input).toBe(8000)
-    expect(result.output).toBe(3)
+  test("ratio calibration from history", () => {
+    const msgs = [
+      userMsg("1"),
+      assistantMsg("2", "1", undefined, 10),
+    ]
+    // inputChars=1000, inputTokens=100+5+5=110 → ratio ≈ 1000/110 ≈ 9.09
+    const getParts = (_id: string) => [stepFinish(100, 200, 0, 5, 5, 1000)]
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.ratio.input).toBeCloseTo(9.09, 1)
+    // output: text part chars / output tokens (200)
+    // If there are text parts between step-start and step-finish
   })
 
-  test("defaults to /4 when no ratio provided", () => {
-    const result = computeFinalTokens(
-      assistant({ input: 8000 }),
-      [text("p1", "abcdefgh")],
-      { input: 0, output: 0 },
-    )
-    expect(result.output).toBe(2) // 8/4 = 2
-  })
-
-  test("pending tool call uses custom ratio for streaming estimate", () => {
-    const toolPending: Part = {
-      id: "t1", sessionID: "s", messageID: "2", type: "tool",
-      callID: "c1", tool: "bash",
-      state: { status: "pending", input: {}, raw: "pending-raw-text" },
-    } as Part
-
-    const result = computeFinalTokens(
-      assistant({ input: 5000 }),
-      [text("p1", "ab"), toolPending, text("p2", "cd")],
-      { input: 0, output: 0 },
-      deepseekRatio,
-    )
-    // streaming: 2 + 17 + 2 = 21 chars → 21/2.5 = 8
-    expect(result.output).toBe(8)
-  })
-})
-
-describe("calibration accuracy — simulated DeepSeek session", () => {
-  // 模拟真实 DeepSeek session 的 step-finish 数据
-  // 确认 token 数 vs 估算 token 数的对比
-
-  test("ratio=2.5 estimates are much closer to confirmed than ratio=4", () => {
-    const longJson = JSON.stringify({
-      messages: Array.from({ length: 50 }, (_, i) => ({
-        role: i % 2 ? "assistant" : "user",
-        content: `message content with various words and some code blocks like \`\`\`\nconst x = ${i};\n\`\`\` and more text here to fill space making it look like real conversation data with tool calls and their results embedded in JSON format.`,
-      })),
-      tools: Array.from({ length: 5 }, (_, i) => ({
-        name: `tool_${i}`,
-        description: `Tool number ${i} for doing things with parameters and structured output`,
-        inputSchema: { type: "object", properties: { input: { type: "string" } } },
-      })),
-    })
-    // ~10000 chars of JSON
-    const chars = longJson.length
-
-    // 真实 DeepSeek tokenizer: ~2.5 chars/token for JSON
-    const realTokens = Math.round(chars / 2.5)
-
-    // 旧方法: /4
-    const oldEstimate = Math.round(chars / 4)
-
-    // 新方法: /2.5
-    const newEstimate = Math.round(chars / 2.5)
-
-    // 新方法应完全等于真实值（因为我们用相同比值估算）
-    expect(newEstimate).toBe(realTokens)
-
-    // 旧方法偏差：低估 ~37%
-    // e.g. 10000 / 4 = 2500, real = 4000, diff = 1500 (37%)
-    expect(oldEstimate).toBeLessThan(realTokens)
-    expect(realTokens - oldEstimate).toBeGreaterThan(0)
-  })
-
-  test("deepseek ratio for mixed content is between 2.0 and 3.5", () => {
-    // 混合内容：natural language + JSON + code
-    const naturalLang = "The quick brown fox jumps over the lazy dog. ".repeat(100)
-    const jsonContent = JSON.stringify({ key: "value", nested: { array: [1, 2, 3, 4, 5] } }).repeat(50)
-    const codeContent = "function example(x: number): string { return x.toString(); }\n".repeat(30)
-
-    const mixed = naturalLang + jsonContent + codeContent
-    const chars = mixed.length
-
-    // 自然语言: ~4.0 chars/token
-    // JSON: ~2.0-2.5 chars/token
-    // Code: ~2.5-3.0 chars/token
-    // 混合: ~2.5-3.5 chars/token
-    const ratioEstimate4 = Math.round(chars / 4)
-    const ratioEstimate2 = Math.round(chars / 2)
-    const ratioEstimate3 = Math.round(chars / 3)
-
-    // /4 明显低估
-    expect(ratioEstimate4).toBeLessThan(ratioEstimate3)
-    // /2 高估
-    expect(ratioEstimate2).toBeGreaterThan(ratioEstimate3)
+  test("breakdown = precise allocation from confirmed inputBreakdown", () => {
+    const msgs = [userMsg("1"), assistantMsg("2", "1", undefined, 10)]
+    const getParts = (_id: string) => [{
+      ...stepFinish(500, 200, 0, 0, 0, 10000),
+      inputBreakdown: {
+        system: 5000, instructions: 2000, skills: 0, tools: 1000,
+        messages: { userText: 500, assistantText: 300, reasoning: 0, toolInput: 200, toolOutput: 300, attachments: 700, total: 2000 },
+      },
+    }]
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.breakdown).not.toBeNull()
+    const bd = acc.breakdown!
+    // system = round(500 * 5000/10000) = 250
+    expect(bd.system).toBe(250)
+    // instructions = round(500 * 2000/10000) = 100
+    expect(bd.instructions).toBe(100)
+    // tools = round(500 * 1000/10000) = 50
+    expect(bd.tools).toBe(50)
+    // Alloc output: reasoning=0, visible=200
+    // text chars=300, tool call chars=200, total=500
+    // assistantText = round(200 * 300/500) = 120
+    // toolCalls = 200 - 120 = 80
+    expect(bd.assistantText).toBe(120)
+    expect(bd.toolCalls).toBe(80)
   })
 })

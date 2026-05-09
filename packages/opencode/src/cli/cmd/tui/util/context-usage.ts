@@ -40,14 +40,9 @@ import { TodoWriteTool, Parameters as TodoWriteParameters } from "@/tool/todo"
 import { WebFetchTool, Parameters as WebFetchParameters } from "@/tool/webfetch"
 import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websearch"
 import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
-import {
-  provider as systemProviderPrompt,
-  skillsSection as systemSkillsSection,
-  staticSections as systemStaticSections,
-  toolUsageSection as systemToolUsageSection,
-} from "@/session/system"
 import { usable as overflowUsable } from "@/session/overflow"
-import { charsPerTokenFromHistory, estimateDataUrlInputTokens } from "./token-estimate"
+import { estimateDataUrlInputTokens } from "./token-estimate"
+import { tokenAccounting } from "./token-accounting"
 
 type WithParts = {
   info: Message
@@ -145,46 +140,6 @@ function estimate(input: unknown, ratio = DEFAULT_CHARS_PER_TOKEN) {
   return Math.max(0, Math.round((text || "").length / ratio))
 }
 
-/** 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token。
- *  委托给 token-estimate 的 charsPerTokenFromHistory，避免重复实现。 */
-function computeInputRatio(messages: WithParts[]): number {
-  return charsPerTokenFromHistory(
-    messages.map((m) => ({ role: m.info.role, id: m.info.id })),
-    (id) => messages.find((m) => m.info.id === id)?.parts ?? [],
-  )
-}
-
-type InputBreakdown = {
-  system: number
-  instructions: number
-  skills: number
-  tools: number
-  messages: {
-    userText: number
-    assistantText: number
-    reasoning: number
-    toolInput: number
-    toolOutput: number
-    attachments: number
-    total: number
-  }
-}
-
-/** 从 session 历史取最近一个由 daemon 记录的 per-component 字符数，用于替代 TUI 自行重建。 */
-function latestBreakdown(messages: WithParts[]): InputBreakdown | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.info.role !== "assistant") continue
-    for (let j = msg.parts.length - 1; j >= 0; j--) {
-      const p = msg.parts[j] as any
-      if (p.type !== "step-finish") continue
-      const bd = p.inputBreakdown as InputBreakdown | undefined
-      if (bd && bd.system >= 0 && bd.messages && bd.messages.total >= 0) return bd
-    }
-  }
-  return undefined
-}
-
 function stableJson(input: unknown): string {
   if (input === undefined) return ""
   try {
@@ -195,11 +150,6 @@ function stableJson(input: unknown): string {
   } catch {
     return String(input)
   }
-}
-
-function estimateFileToken(url: string, mime: string, ratio = DEFAULT_CHARS_PER_TOKEN) {
-  if (url.startsWith("data:")) return estimateDataUrlInputTokens(url, mime)
-  return estimate(url, ratio)
 }
 
 export function filterCompactedMessages(msgs: Iterable<WithParts>) {
@@ -226,129 +176,6 @@ export function filterCompactedMessages(msgs: Iterable<WithParts>) {
   }
   result.reverse()
   return result
-}
-
-function messageTokens(messages: WithParts[], ratio: number) {
-  const details: ContextUsageData["details"]["messages"] = {
-    userText: 0,
-    assistantText: 0,
-    reasoning: 0,
-    toolCalls: 0,
-    toolResults: 0,
-    attachments: 0,
-    compactionSummary: 0,
-  }
-  const loadedInstructionPaths = new Set<string>()
-  const text = [] as string[]
-  const toolNames = new Set<string>()
-
-  for (const msg of messages) {
-    for (const part of msg.parts) {
-      switch (part.type) {
-        case "text": {
-          if (part.ignored || part.synthetic) continue
-          text.push(part.text)
-          const tokens = estimate(part.text, ratio)
-          if (msg.info.role === "user") details.userText += tokens
-          else if (msg.info.role === "assistant" && msg.info.summary === true) details.compactionSummary += tokens
-          else details.assistantText += tokens
-          break
-        }
-        case "reasoning":
-          details.reasoning += estimate(part.text, ratio)
-          break
-        case "tool": {
-          toolNames.add(part.tool)
-          details.toolCalls += estimate(part.state.input, ratio)
-          if (part.state.status === "completed") {
-            const loaded = part.tool === "read" ? part.state.metadata?.loaded : undefined
-            if (Array.isArray(loaded)) {
-              for (const item of loaded) if (typeof item === "string") loadedInstructionPaths.add(item)
-            }
-            details.toolResults += part.state.time.compacted
-              ? estimate("[Old tool result content cleared]", ratio)
-              : estimate(part.state.output, ratio)
-            for (const attachment of part.state.attachments ?? []) {
-              details.attachments += estimateFileToken(attachment.url, attachment.mime, ratio)
-            }
-          }
-          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw, ratio)
-          if (part.state.status === "error") details.toolResults += estimate(part.state.error, ratio)
-          break
-        }
-        case "file":
-          details.attachments += estimateFileToken(part.url, part.mime, ratio)
-          break
-        case "subtask":
-          details.userText += estimate(`${part.prompt}\n${part.description}`, ratio)
-          break
-      }
-    }
-  }
-
-  return {
-    details,
-    text,
-    loadedInstructionPaths,
-    toolNames,
-    total: Object.values(details).reduce((sum, value) => sum + value, 0),
-  }
-}
-
-function usageTotals(messages: WithParts[], ratio: number): ContextUsageData["details"]["usage"] {
-  const usage: ContextUsageData["details"]["usage"] = {
-    input: 0,
-    output: 0,
-    reasoning: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    total: 0,
-    cost: 0,
-  }
-  for (const msg of messages) {
-    const hasStepFinish = msg.parts.some((p) => p.type === "step-finish")
-    if (hasStepFinish) {
-      for (const part of msg.parts) {
-        if (part.type !== "step-finish") continue
-        usage.input += part.tokens.input
-        usage.output += part.tokens.output
-        usage.reasoning += part.tokens.reasoning
-        usage.cacheRead += part.tokens.cache.read
-        usage.cacheWrite += part.tokens.cache.write
-        usage.cost += part.cost
-      }
-    } else if (msg.info.role === "assistant") {
-      usage.input += msg.info.tokens.input
-      usage.output += msg.info.tokens.output
-      usage.reasoning += msg.info.tokens.reasoning
-      usage.cacheRead += msg.info.tokens.cache.read
-      usage.cacheWrite += msg.info.tokens.cache.write
-      usage.cost += msg.info.cost
-    }
-  }
-
-  const lastMsg = messages.findLast((m) => m.info.role === "assistant" && !m.info.time.completed)
-  if (lastMsg) {
-    const lastParts = lastMsg.parts
-    const lastSFIdx = lastParts.reduce((i, p, idx) => (p.type === "step-finish" ? idx : i), -1)
-    let outputChars = 0
-    let inputChars = 0
-    for (let i = lastSFIdx + 1; i < lastParts.length; i++) {
-      const p = lastParts[i]
-      if (p.type === "text" && !p.ignored) outputChars += (p.text ?? "").length
-      if (p.type === "reasoning") outputChars += (p.text ?? "").length
-      if (p.type === "tool") {
-        if (p.state.status === "pending") outputChars += (p.state.raw ?? "").length
-        else outputChars += JSON.stringify(p.state.input ?? {}).length
-        if (p.state.status === "completed") inputChars += (p.state.output ?? "").length
-      }
-    }
-    usage.output += Math.round(outputChars / ratio)
-    usage.input += Math.round(inputChars / ratio)
-  }
-
-  usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
-  return usage
 }
 
 async function exists(filepath: string) {
@@ -718,40 +545,6 @@ async function toolDefinitionTokens(
     .toSorted((a, b) => a.name.localeCompare(b.name))
 }
 
-function baseSystemPrompt(
-  input: ComputeContextDataInput,
-  lastUser: Message | undefined,
-  model: Provider["models"][string] | undefined,
-) {
-  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
-  if (agent?.prompt) return agent.prompt
-  if (!model) return ""
-  return systemProviderPrompt(model as any).join("\n")
-}
-
-function environmentText(input: ComputeContextDataInput, modelID: string, providerID: string, toolNames: string[]) {
-  const lines = [
-    `You are powered by the model named ${modelID}. The exact model ID is ${providerID}/${modelID}`,
-    "Here is some useful information about the environment you are running in:",
-    "<env>",
-    `  Working directory: ${input.paths.cwd}`,
-    `  Workspace root folder: ${input.paths.worktree ?? input.paths.cwd}`,
-    "  Is directory a git repo: unknown",
-    `  Current branch: ${input.vcs?.branch ?? "(unknown)"}`,
-    `  Platform: ${process.platform}`,
-    ...(process.platform === "win32"
-      ? [
-          "  Shell syntax: use PowerShell syntax, not Unix shell syntax.",
-          "  Do NOT use Unix-only commands such as tail, head, sed, awk, or grep in shell commands.",
-        ]
-      : []),
-    `  OS Version: ${os.type()} ${os.release()}`,
-    `  Today's date: ${new Date().toDateString()}`,
-    "</env>",
-  ]
-  return [lines.join("\n"), systemToolUsageSection(toolNames), ...systemStaticSections()].join("\n\n")
-}
-
 function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
   const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
   const provider = input.providers.find((item) => item.id === selected?.providerID)
@@ -865,47 +658,41 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
 }
 
 export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
-  const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
-  const compacted = filterCompactedMessages(raw.toReversed())
-  const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
+  const lastUser = input.messages.findLast((msg) => msg.role === "user")
   const modelInfo = currentModel(input, lastUser)
   const maxTokens = modelInfo.model?.limit.context ?? 0
 
-  // 从历史 step-finish 校准输入侧 chars-per-token 比值
-  const ratio = computeInputRatio(raw)
+  const acc = tokenAccounting(input.messages, (id) => input.parts[id] ?? [], maxTokens)
 
-  // 从历史 step-finish 取最近一次 daemon 记录的真实组件字符数
-  const bd = latestBreakdown(raw)
+  let envTokens = 0
+  let instructionTokens = 0
+  let skillTokens = 0
+  let toolDefTokens = 0
+  let instructionDetails: Array<{ path: string; tokens: number }> = []
+  let skillDetails: Array<{ name: string; tokens: number; path: string }> = []
+  let toolDefs: Array<{ name: string; tokens: number }> = []
+  let msgDetails: ContextUsageData["details"]["messages"] = {
+    userText: 0, assistantText: 0, reasoning: 0, toolCalls: 0, toolResults: 0, attachments: 0, compactionSummary: 0,
+  }
 
-  // 消息部分始终用 TUI 实时迭代（messages 内容随每轮变化）
-  const msg = messageTokens(compacted, ratio)
-  const usage = usageTotals(raw, ratio)
+  if (acc.breakdown) {
+    const bd = acc.breakdown
+    envTokens = bd.system
+    instructionTokens = bd.instructions
+    skillTokens = bd.skills
+    toolDefTokens = bd.tools
 
-  // ── 各组件 token 估算 ──
-  let envTokens: number
-  let instructionTokens: number
-  let loadedInstructionTokens = 0
-  let skillTokens: number
-  let toolDefTokens: number
-  let inputMessageTokens: number
-  let outputMessageTokens: number
-  let instructionDetails: Array<{ path: string; tokens: number }>
-  let loadedInstructions: Array<{ path: string; tokens: number }> = []
-  let skillDetails: Array<{ name: string; tokens: number; path: string }>
-  let toolDefs: Array<{ name: string; tokens: number }>
+    msgDetails = {
+      userText: bd.userMessages,
+      assistantText: bd.assistantText,
+      reasoning: bd.reasoning,
+      toolCalls: bd.toolCalls,
+      toolResults: bd.toolResults,
+      attachments: bd.attachments,
+      compactionSummary: 0,
+    }
 
-  if (bd) {
-    // Daemon 的 breakdown 直接给出各组件字符数，除以校准 ratio 即得准确 token 估算
-    envTokens = Math.round(bd.system / ratio)
-    instructionTokens = Math.round(bd.instructions / ratio)
-    skillTokens = Math.round(bd.skills / ratio)
-    toolDefTokens = Math.round(bd.tools / ratio)
-
-    // 消息子组件也使用 daemon 的真实 char 数（而非 TUI 自行从 parts 估算）
-    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput) / ratio) + msg.details.attachments
-    outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)
-
-    // detail 列表仍需文件内容（用于展示），但 token 用 breakdown 等比分配
+    // 展示明细：文件系统只用于列出路径/名称，token 按 breakdown 预算等比分配
     const instructions = await gatherInstructionFiles(input)
     const instructionCharsTotal = instructions.reduce((s, i) => s + i.content.length, 0)
     instructionDetails = instructions.map((item) => ({
@@ -922,74 +709,34 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
       tokens: skills.length > 0 ? Math.round(skillTokens / skills.length) : 0,
     }))
 
-    const rawToolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, ratio)
-    const rawToolCharsTotal = rawToolDefs.reduce((s, t) => s + t.tokens * ratio, 0)
+    const rawToolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, acc.ratio.input)
+    const rawToolCharsTotal = rawToolDefs.reduce((s, t) => s + t.tokens * acc.ratio.input, 0)
     toolDefs = rawToolDefs.map((t) => ({
       name: t.name,
       tokens: rawToolCharsTotal > 0
-        ? Math.round((t.tokens * ratio / rawToolCharsTotal) * toolDefTokens)
+        ? Math.round((t.tokens * acc.ratio.input / rawToolCharsTotal) * toolDefTokens)
         : t.tokens,
     }))
-  } else {
-    // 降级路径：TUI 自行重建（无历史 breakdown 时，如 session 第一轮）
-    const instructions = await gatherInstructionFiles(input)
-    instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
-    const messageText = msg.text.join("\n")
-    for (const filepath of msg.loadedInstructionPaths) {
-      if (messageText.includes(`Instructions from: ${filepath}`)) continue
-      const content = await readText(filepath)
-      if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
-    }
-    const skills = await gatherSkills(input)
-    const skillListing = systemSkillsSection(skillInfo(skills))
-    skillTokens = estimate(skillListing, ratio)
-    skillDetails = skills.map((skill) => ({
-      name: skill.name,
-      path: skill.path,
-      tokens: estimate(systemSkillsSection(skillInfo([skill])), ratio),
-    }))
-    toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, ratio)
-    const systemText = [
-      baseSystemPrompt(input, lastUser, modelInfo.model),
-      environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
-      lastUser?.role === "user" ? lastUser.system : undefined,
-    ].filter(Boolean).join("\n")
-    envTokens = estimate(systemText, ratio)
-    instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
-    loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
-    toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-    inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
-    outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
   }
 
-  // 从 messages 拆出 tool call input 和 tool result output 作为独立 category
-  const toolCallTokens = bd
-    ? Math.round(bd.messages.toolInput / ratio)
-    : msg.details.toolCalls
-  const toolResultTokens = bd
-    ? Math.round(bd.messages.toolOutput / ratio)
-    : msg.details.toolResults
-  const userMessageTokens = inputMessageTokens - toolResultTokens
-  const assistantMessageTokens = outputMessageTokens - toolCallTokens
-  const window = windowDetails(input, modelInfo.model)
-  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens
-    + userMessageTokens + assistantMessageTokens + toolCallTokens + toolResultTokens
-  const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
+  const wind = windowDetails(input, modelInfo.model)
+  const used = acc.step.input + acc.step.output
+  const free = maxTokens ? Math.max(0, wind.usableInput - used) : 0
 
   const categories: ContextCategory[] = [
     { name: "System prompt", tokens: envTokens, color: "primary" },
-    { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
+    { name: "Instructions", tokens: instructionTokens, color: "info" },
     { name: "Skills", tokens: skillTokens, color: "success" },
     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-    { name: "Input Messages", tokens: userMessageTokens, color: "warning" },
-    { name: "Tool results", tokens: toolResultTokens, color: "warning" },
-    { name: "Output Messages", tokens: assistantMessageTokens, color: "accent" },
-    { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
+    { name: "Input Messages", tokens: msgDetails.userText, color: "warning" },
+    { name: "Tool results", tokens: msgDetails.toolResults, color: "warning" },
+    { name: "Output Messages", tokens: msgDetails.assistantText + msgDetails.reasoning, color: "accent" },
+    { name: "Tool calls", tokens: msgDetails.toolCalls, color: "accent" },
     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
-    ...(window.providerReserve > 0
-      ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
+    ...(wind.providerReserve > 0
+      ? [{ name: "Model reserve", tokens: wind.providerReserve, color: "textMuted" as const, isDeferred: true }]
       : []),
-    { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
+    { name: "Autocompact buffer", tokens: wind.compactionBuffer, color: "textMuted", isDeferred: true },
   ]
 
   return {
@@ -998,25 +745,15 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     maxTokens,
     percentage: maxTokens ? used / maxTokens : 0,
     categories,
-    gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
+    gridRows: contextGrid(categories, maxTokens || Math.max(used + wind.compactionBuffer + free, 1), { columns: input.columns }),
     details: {
       instructions: instructionDetails,
-      loadedInstructions,
+      loadedInstructions: [],
       skills: skillDetails,
       toolDefs,
-      messages: bd
-        ? {
-            userText: Math.round(bd.messages.userText / ratio),
-            assistantText: Math.round(bd.messages.assistantText / ratio),
-            reasoning: Math.round(bd.messages.reasoning / ratio),
-            toolCalls: Math.round(bd.messages.toolInput / ratio),
-            toolResults: Math.round(bd.messages.toolOutput / ratio),
-            attachments: msg.details.attachments,
-            compactionSummary: 0,
-          }
-        : msg.details,
-      usage,
-      window,
+      messages: msgDetails,
+      usage: { ...acc.session, total: acc.session.input + acc.session.output + acc.session.reasoning + acc.session.cacheRead + acc.session.cacheWrite },
+      window: wind,
     },
   }
 }
