@@ -2,7 +2,7 @@
   "name": "opencode-ide-bridge",
   "displayName": "OpenCode IDE Bridge",
   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
-  "version": "1.14.39",
+  "version": "1.14.39.0",
   "publisher": "SMARK2022",
   "homepage": "https://github.com/anomalyco/opencode",
   "repository": {
@@ -100,7 +100,7 @@
     ]
   },
   "scripts": {
-    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.39.vsix",
+    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.39.0.vsix",
     "compile": "bun run check-types && bun run lint && node esbuild.js",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

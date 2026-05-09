@@ -16,14 +16,16 @@ import { openWorkspaceSelect, type WorkspaceSelection, warpWorkspaceSession } fr
 import { Spinner } from "./spinner"
 import { errorMessage } from "@/util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
-import type { TextPart } from "@opencode-ai/sdk/v2"
+import type { Part, TextPart } from "@opencode-ai/sdk/v2"
 import { WorkspaceLabel } from "./workspace-label"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
 
 const SESSION_LIST_PREVIEW_LINES = 2
-const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
+const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
+const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
 const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
+const SESSION_LIST_PREVIEW_CONCURRENCY = 6
 
 export function DialogSessionList() {
   const dialog = useDialog()
@@ -36,40 +38,80 @@ export function DialogSessionList() {
   const toast = useToast()
   const [toDelete, setToDelete] = createSignal<string>()
   const [search, setSearch] = createDebouncedSignal("", 150)
-  const [previews, setPreviews] = createSignal<Record<string, string>>({})
+  const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
+
+  function textFromUserMessage(parts: Part[]) {
+    return (parts.filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
+      .map((p) => p.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  async function loadPreviewLines(sessionID: string) {
+    const lines: string[] = []
+    let before: string | undefined
+    let scanned = 0
+
+    while (lines.length < SESSION_LIST_PREVIEW_LINES && scanned < SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT) {
+      const limit = Math.min(SESSION_LIST_PREVIEW_PAGE_SIZE, SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT - scanned)
+      const result = await sdk.client.session.messages({
+        sessionID,
+        limit,
+        before,
+      })
+
+      const messages = result.data ?? []
+      scanned += limit
+
+      for (let i = messages.length - 1; i >= 0 && lines.length < SESSION_LIST_PREVIEW_LINES; i--) {
+        const message = messages[i]
+        if (message.info.role !== "user") continue
+
+        const text = textFromUserMessage(message.parts)
+        if (text) lines.push(text)
+      }
+
+      const cursor = result.response.headers.get("X-Next-Cursor")
+      if (!cursor) break
+      before = cursor
+    }
+
+    return lines
+  }
 
   createEffect(
     on(
       () => sessions(),
       (sessions) => {
         if (SESSION_LIST_PREVIEW_LINES <= 0) return
+
         const unloaded = sessions
           .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
           .filter((s) => !(s.id in (previews() ?? {})))
 
         if (unloaded.length === 0) return
 
-        void Promise.all(
-          unloaded.map(async (session) => {
-            try {
-              const result = await sdk.client.session.messages({
-                sessionID: session.id,
-                limit: SESSION_LIST_PREVIEW_MESSAGE_LIMIT,
-              })
-              const userMsg = result.data?.findLast((x) => x.info.role === "user")
-              if (!userMsg) return
-              const text = (userMsg.parts
-                .filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
-                .map((p) => p.text)
-                .join(" ")
-                .replace(/\s+/g, " ")
-                .trim()
-              if (text) {
-                setPreviews((prev) => ({ ...prev, [session.id]: text }))
-              }
-            } catch {}
-          }),
-        )
+        void (async () => {
+          const next: Record<string, string[]> = {}
+
+          for (let i = 0; i < unloaded.length; i += SESSION_LIST_PREVIEW_CONCURRENCY) {
+            const chunk = unloaded.slice(i, i + SESSION_LIST_PREVIEW_CONCURRENCY)
+
+            await Promise.all(
+              chunk.map(async (session) => {
+                try {
+                  const lines = await loadPreviewLines(session.id)
+                  if (lines.length > 0) next[session.id] = lines
+                } catch {}
+              }),
+            )
+          }
+
+          if (Object.keys(next).length > 0) {
+            setPreviews((prev) => ({ ...prev, ...next }))
+          }
+        })()
       },
     ),
   )
@@ -197,8 +239,7 @@ export function DialogSessionList() {
         const isDeleting = toDelete() === x.id
         const status = sync.data.session_status?.[x.id]
         const isWorking = status?.type === "busy"
-        const previewText = previews()[x.id]
-        const previewLines = SESSION_LIST_PREVIEW_LINES > 0 && previewText ? [previewText] : undefined
+        const previewLines = previews()[x.id]
         return {
           title: isDeleting ? `Press ${keybind.print("session_delete")} again to confirm` : x.title,
           bg: isDeleting ? theme.error : undefined,
