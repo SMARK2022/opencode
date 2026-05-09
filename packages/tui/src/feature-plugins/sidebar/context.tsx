@@ -5,7 +5,9 @@ import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { useLocal } from "../../context/local"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
+import { getContextLimit } from "../../util/token-estimate"
+import { tokenAccounting } from "../../util/token-accounting"
+// #122：侧栏 context 与 prompt 共用 accounting
 
 const id = "internal:sidebar-context"
 // 探测完成后再计下一秒，慢连接不会叠加并发请求。
@@ -54,7 +56,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const lastParts = last ? props.api.state.part(last.id) : []
     // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
     // 插件读取同一冻结密度，不能另扫 sidebar 的消息窗口建立第二份历史估算。
-    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
+    // 侧栏使用同一会话投影，保留未到首个助手及窗口外累计的显示。
+    const { input, output, totalInput, totalOutput } = tokenAccounting(messages, (id) => props.api.state.part(id), undefined, { session: session(), last, parts: lastParts }).request
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     // 未确认请求可用其用户模型；已确认 native 请求不依赖用户仍在显示窗口。

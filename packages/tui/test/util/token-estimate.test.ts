@@ -88,9 +88,10 @@ test("prepared input yields to confirmation and preserves projected request tota
   expect(getContextLimit(providers, "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
   expect(getContextLimit(providers, "p", "api-test-model", 0)).toBe(0)
   expect(getContextLimit([], "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
-  // 固定prepared输入777，仅改变尾部密度；未确认字符应变而请求的4000/30确认累计必须保持。
+  // 输入密度只影响新增工具结果；live 输出使用独立密度，完整请求累计保持不变。
   const dense = { ...prepared, inputEstimate: { input: 777, bodyChars: 1943, confirmed: false, charsPerToken: 2.5 } }
-  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense)).toEqual({ input: 777, output: 3, totalInput: 4777, totalOutput: 33 })
+  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense)).toEqual({ input: 777, output: 2, totalInput: 4777, totalOutput: 32 })
+  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense, 8)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
   expect(computeFinalTokens(nextAssistant, [tool], dense)).toEqual({ input: 780, output: 1, totalInput: 4780, totalOutput: 31 })
   // captured的游标已覆盖该工具结果，新密度不能把同一份结果再次追加到prepared输入。
   expect(computeFinalTokens(captured, [tool], dense)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
@@ -101,8 +102,8 @@ test("prepared input yields to confirmation and preserves projected request tota
     state: { status: "pending", input: {}, raw: "pending-raw-text" } }
   const before = { ...text, text: "ab", messageID: "next" }
   const after = { ...text, id: "after", text: "cd", messageID: "next" }
-  // raw参数16字符与两段正文共20字符，8与5的差值能发现pending输入被丢弃或密度未传入。
-  expect(computeFinalTokens(nextAssistant, [before, pending, after], dense).output).toBe(8)
+  // 同样的输出字符不随输入密度变化；传入输出校准后才改变估算。
+  expect(computeFinalTokens(nextAssistant, [before, pending, after], dense, 2.5).output).toBe(8)
   expect(computeFinalTokens(nextAssistant, [before, pending, after], prepared).output).toBe(5)
   // 非法密度只影响显示估算，沿默认密度得到有限尾部值，不得产生Infinity/NaN污染整帧用量。
   for (const density of [0, -1, NaN, Infinity]) {
