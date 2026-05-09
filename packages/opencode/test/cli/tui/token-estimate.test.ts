@@ -123,4 +123,30 @@ describe("tokenAccounting", () => {
     expect(bd.assistantText).toBe(120)
     expect(bd.toolCalls).toBe(80)
   })
+
+  test("breakdown available from step-start during streaming (before step-finish)", () => {
+    // 模拟 daemon 写入的 step-start input snapshot；assistant 正在 streaming 中
+    const msgs = [userMsg("1"), assistantMsg("2", "1", { input: 400, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })]
+    const getParts = (_id: string) => [
+      {
+        id: "ss", type: "step-start",
+        inputChars: 1000,
+        inputTokens: 400,
+        inputBreakdown: {
+          system: 300, instructions: 200, skills: 0, tools: 100,
+          messages: { userText: 100, assistantText: 80, reasoning: 0, toolInput: 40, toolOutput: 80, attachments: 100, total: 400 },
+        },
+      },
+      textPart("p1", "hello world"),
+    ]
+    const acc = tokenAccounting(msgs, getParts)
+    expect(acc.breakdown).not.toBeNull()
+    expect(acc.step.confirmed).toBe(false)
+    // daemon inputTokens=400, inputChars=1000 → alloc = round(chars * 400/1000)
+    expect(acc.breakdown!.system).toBe(120)
+    expect(acc.breakdown!.instructions).toBe(80)
+    expect(acc.breakdown!.tools).toBe(40)
+    // output streaming estimate: "hello world" 11 chars / outputRatio=4 → 3
+    expect(acc.breakdown!.assistantText).toBe(3)
+  })
 })

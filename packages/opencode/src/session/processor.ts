@@ -480,6 +480,12 @@ export const layer: Layer.Layer<
               sessionID: ctx.sessionID,
               snapshot: ctx.snapshot,
               type: "step-start",
+              // Expose the daemon's pre-request input snapshot so the TUI can
+              // show per-category context usage immediately during streaming,
+              // before the provider confirms token totals via step-finish.
+              inputChars: ctx.inputChars,
+              inputTokens: ctx.assistantMessage.tokens.input + ctx.assistantMessage.tokens.cache.read + ctx.assistantMessage.tokens.cache.write,
+              inputBreakdown: ctx.inputBreakdown,
             })
             return
 

@@ -260,10 +260,45 @@ export type RetryPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof RetryPa
   error: APIError
 }
 
+/** Per-component character counts of the request body as assembled by the daemon.
+ *  Used by TUI to show accurate per-category context usage without reconstructing prompt text.
+ *  Shared between step-start (live estimate) and step-finish (confirmed). */
+const InputBreakdownSchema = Schema.Struct({
+  system: NonNegativeInt,
+  instructions: NonNegativeInt,
+  skills: NonNegativeInt,
+  tools: NonNegativeInt,
+  messages: Schema.Struct({
+    /** User message text (part text from user role messages) */
+    userText: NonNegativeInt,
+    /** Assistant message text (part text from assistant role messages) */
+    assistantText: NonNegativeInt,
+    /** Reasoning/thinking content character count */
+    reasoning: NonNegativeInt,
+    /** Tool call input (JSON arguments) character count */
+    toolInput: NonNegativeInt,
+    /** Tool call output (result text) character count */
+    toolOutput: NonNegativeInt,
+    /** File/image attachment URLs (data: or path) character count */
+    attachments: NonNegativeInt,
+    /** Total serialized JSON character count — must equal the wire-format length */
+    total: NonNegativeInt,
+  }),
+})
+
 export const StepStartPart = Schema.Struct({
   ...partBase,
   type: Schema.Literal("step-start"),
   snapshot: Schema.optional(Schema.String),
+  /** Character count of the request body sent to the provider at step-start.
+   *  The TUI uses this as an early input snapshot before step-finish confirms tokens. */
+  inputChars: Schema.optional(NonNegativeInt),
+  /** Estimated input tokens at upload time (inputChars / historical ratio).
+   *  Confirmed input/cache split arrives later on the matching step-finish part. */
+  inputTokens: Schema.optional(NonNegativeInt),
+  /** Per-component request-body character counts captured by the daemon.
+   *  Live during assistant running; step-finish carries the same snapshot with confirmed totals. */
+  inputBreakdown: Schema.optional(InputBreakdownSchema),
 })
   .annotate({ identifier: "StepStartPart" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
@@ -288,31 +323,8 @@ export const StepFinishPart = Schema.Struct({
   /** Character count of the full request body (system + messages + tools) sent to the provider.
    *  Used together with confirmed tokens to compute a session-specific chars-per-token ratio. */
   inputChars: Schema.optional(NonNegativeInt),
-  /** Per-component character counts of the request body as assembled by the daemon.
-   *  The TUI reads these to show accurate per-category context usage instead of
-   *  re-constructing prompt text independently. */
-  inputBreakdown: Schema.optional(Schema.Struct({
-    system: NonNegativeInt,
-    instructions: NonNegativeInt,
-    skills: NonNegativeInt,
-    tools: NonNegativeInt,
-    messages: Schema.Struct({
-      /** User message text (part text from user role messages) */
-      userText: NonNegativeInt,
-      /** Assistant message text (part text from assistant role messages) */
-      assistantText: NonNegativeInt,
-      /** Reasoning/thinking content character count */
-      reasoning: NonNegativeInt,
-      /** Tool call input (JSON arguments) character count */
-      toolInput: NonNegativeInt,
-      /** Tool call output (result text) character count */
-      toolOutput: NonNegativeInt,
-      /** File/image attachment URLs (data: or path) character count */
-      attachments: NonNegativeInt,
-      /** Total serialized JSON character count — must equal the wire-format length */
-      total: NonNegativeInt,
-    }),
-  })),
+  /** Per-component character counts — same snapshot as step-start, persisted with confirmed token totals. */
+  inputBreakdown: Schema.optional(InputBreakdownSchema),
 })
   .annotate({ identifier: "StepFinishPart" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))

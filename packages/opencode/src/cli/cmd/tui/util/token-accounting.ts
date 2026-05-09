@@ -242,21 +242,31 @@ export function tokenAccounting(
   stepInput += pendingToolResultTokens + pendingAttachTokens
 
   // ── 6. request totals（confirmed + in-flight）─────────
-  const stepDelta = stepConfirmed ? 0 : stepInput + stepOutput
-  const totalInput = confirmedRequest.input + stepDelta
+  // input 和 output 必须分开，stepOutput 不能混进 totalInput
+  const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
 
-  // ── 7. breakdown（来自 latest assistant 的 step-finish）───────
+  // ── 7. breakdown（优先 step-finish confirmed，fallback step-start daemon estimate）───────
   let breakdown: TokenAccounting["breakdown"] = null
-  if (stepSF && stepSF.inputBreakdown && stepSF.inputChars) {
-    const bd = stepSF.inputBreakdown as {
+  // step-start 携带 deamon 在请求发出前记录的各组件字符数；streaming 期间即可展示 input 分类
+  const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
+  const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
+  const breakdownSrc = stepSF?.inputBreakdown ? stepSF : stepSS
+
+  if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars) {
+    const bd = breakdownSrc.inputBreakdown as {
       system: number; instructions: number; skills: number; tools: number
       messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
     }
-    const confirmedInput = stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-    const denom = stepSF.inputChars as number
+    const isConfirmed = breakdownSrc.type === "step-finish" && stepConfirmed
+    // input 总量：confirmed 从 provider tokens，estimate 从 daemon estimate 或 chars/ratio
+    // 当 isConfirmed 时 stepSF 一定存在（由 stepConfirmed 保证），下同
+    const allocInput = isConfirmed
+      ? stepSF!.tokens.input + stepSF!.tokens.cache.read + stepSF!.tokens.cache.write
+      : (stepSS?.inputTokens ?? Math.round((stepSS?.inputChars ?? 0) / inputRatio))
+    const denom = breakdownSrc.inputChars as number
 
-    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
+    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * allocInput) : 0
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
     const skills = alloc(bd.skills)
@@ -266,17 +276,21 @@ export function tokenAccounting(
     const attachments = alloc(bd.messages.attachments)
 
     let assistantText: number; let reasoning: number; let toolCalls: number
-    if (stepConfirmed) {
-      reasoning = stepSF.tokens.reasoning
-      const visibleOutput = stepSF.tokens.output
+    if (isConfirmed) {
+      // confirmed output → 精确分配：reasoning 独立，text vs toolCalls 按字符比
+      reasoning = stepSF!.tokens.reasoning
+      const visibleOutput = stepSF!.tokens.output
       const textChars = bd.messages.assistantText
       const toolCallChars = bd.messages.toolInput
       const totalOutChars = textChars + toolCallChars
       assistantText = totalOutChars > 0 ? Math.round((visibleOutput * textChars) / totalOutChars) : visibleOutput
       toolCalls = Math.max(0, visibleOutput - assistantText)
     } else {
+      // estimate（streaming 或无确认数据）→ chars / outputRatio
       let textC = 0, reasonC = 0, toolC = 0
-      for (let i = sfIdx + 1; i < lastParts.length; i++) {
+      // 从 breakdown source 之后扫 output parts
+      const markerIdx = breakdownSrc.type === "step-finish" ? sfIdx : ssIdx
+      for (let i = markerIdx + 1; i < lastParts.length; i++) {
         const p = lastParts[i]
         if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
         if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
