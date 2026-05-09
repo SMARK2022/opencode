@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/component/dialog-session-list"
+import { createDialogSessionListQuery, loadDialogSessionList, matchesDialogSessionSearch } from "../../src/component/dialog-session-list"
 
 describe("dialog session list", () => {
+  test("retains body matches without admitting unrelated pinned sessions", () => {
+    const session = { id: "body-match", title: "Deployment notes" }
+    // 标题不含搜索词时，已由服务端正文匹配的会话也必须出现在结果中。
+    expect(matchesDialogSessionSearch(session, "needle", [session])).toBe(true)
+    expect(matchesDialogSessionSearch(session, "needle", [])).toBe(false)
+    expect(matchesDialogSessionSearch(session, "deployment", [])).toBe(true)
+  })
+
   test("requests root sessions for the default browse list", () => {
     expect(createDialogSessionListQuery({ filter: { path: "packages/tui" } })).toEqual({
       roots: true,

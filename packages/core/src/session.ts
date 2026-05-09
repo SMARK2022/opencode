@@ -15,6 +15,7 @@ import { EventV2 } from "./event"
 import { Database } from "./database/database"
 import { SessionProjector } from "./session/projector"
 import { SessionMessageTable, SessionTable } from "./session/sql"
+import { searchCondition } from "./session/search"
 import { SessionSchema } from "./session/schema"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
 import { AgentV2 } from "./agent"
@@ -282,7 +283,11 @@ const layer = Layer.effect(
         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
         if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
-        if (input.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
+        // #121：V2 list 与 opencode 共用 searchCondition
+        if (input.search) {
+          const condition = searchCondition(input.search)
+          if (condition) conditions.push(condition)
+        }
         if (input.anchor) {
           conditions.push(
             order === "asc"
