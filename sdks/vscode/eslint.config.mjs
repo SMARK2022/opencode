@@ -25,10 +25,9 @@ export default [
         },
       ],
 
-      curly: "warn",
+      // #120：去掉过严 curly/semi 警告，保留 eqeqeq
       eqeqeq: "warn",
       "no-throw-literal": "warn",
-      semi: "warn",
     },
   },
 ]

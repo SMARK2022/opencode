@@ -1,4 +1,4 @@
-import type { TextPart } from "@opencode-ai/sdk/v2"
+import type { Part, TextPart } from "@opencode-ai/sdk/v2"
 import { useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
@@ -43,13 +43,16 @@ export function loadDialogSessionList<T>(input: {
   )
 }
 
-// #112：默认预览 1 行（#115 改为 2）
 // #115：会话列表预览默认 2 行
 const SESSION_LIST_PREVIEW_LINES = 2
-// #112：最近用户消息拉取条数上限
-const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
-// #112：并发预加载会话数上限
+// #120：分页拉取消息页大小
+const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
+// #120：最多扫描消息条数，避免全历史
+const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
+// #120：同时预加载预览的会话数上限
 const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
+// #120：会话预览并发度
+const SESSION_LIST_PREVIEW_CONCURRENCY = 6
 
 export function DialogSessionList() {
   const dialog = useDialog()
@@ -64,43 +67,79 @@ export function DialogSessionList() {
   const [toDelete, setToDelete] = createSignal<string>()
   const [deleted, setDeleted] = createSignal(new Set<string>())
   const [search, setSearch] = createDebouncedSignal("", 150)
-  // #112：sessionID -> 预览纯文本
-  const [previews, setPreviews] = createSignal<Record<string, string>>({})
+  // #120：sessionID -> 多行用户消息预览（非单行再折词）
+  const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
+
+  // #120：从用户消息 parts 提取纯文本
+  function textFromUserMessage(parts: Part[]) {
+    return (parts.filter((p) => p.type === "text" && !(p as any).synthetic && !(p as any).ignored) as TextPart[])
+      .map((p) => p.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  // #120：分页向后扫消息，收集最多 N 条用户文本行
+  async function loadPreviewLines(sessionID: string) {
+    const lines: string[] = []
+    let before: string | undefined
+    let scanned = 0
+    while (lines.length < SESSION_LIST_PREVIEW_LINES && scanned < SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT) {
+      const limit = Math.min(SESSION_LIST_PREVIEW_PAGE_SIZE, SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT - scanned)
+      const result = await sdk.client.session.messages({
+        sessionID,
+        limit,
+        before,
+      } as any)
+      // #120：只认 data 数组契约（与 tip sync 一致）
+      const messages = Array.isArray((result as any)?.data) ? ((result as any).data as any[]) : []
+      scanned += limit
+      for (let i = messages.length - 1; i >= 0 && lines.length < SESSION_LIST_PREVIEW_LINES; i--) {
+        const message = messages[i]
+        if (message.info?.role !== "user") continue
+        const text = textFromUserMessage((message.parts ?? []) as Part[])
+        if (text) lines.push(text)
+      }
+      const cursor =
+        typeof (result as any)?.response?.headers?.get === "function"
+          ? (result as any).response.headers.get("X-Next-Cursor")
+          : undefined
+      if (!cursor) break
+      before = cursor
+    }
+    return lines
+  }
 
   createEffect(
     on(
       () => sessions(),
       (sessions) => {
         if (SESSION_LIST_PREVIEW_LINES <= 0) return
-        // #112：跳过已加载预览的会话
+        // #120：跳过已加载预览的会话
         const unloaded = sessions
           .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
           .filter((s) => !(s.id in (previews() ?? {})))
         if (unloaded.length === 0) return
-        void Promise.all(
-          unloaded.map(async (session) => {
-            try {
-              const result = await sdk.client.session.messages({
-                sessionID: session.id,
-                limit: SESSION_LIST_PREVIEW_MESSAGE_LIMIT,
-              })
-              // #112：与 tip sync 一致，只认 result.data 契约形态
-              const list = Array.isArray((result as any)?.data) ? ((result as any).data as any[]) : []
-              // #112：最近一条用户消息；role 只读 info.role
-              const userMsg = [...list].reverse().find((x: any) => x.info?.role === "user")
-              if (!userMsg) return
-              const text = ((userMsg.parts ?? []) as TextPart[])
-                .filter((p) => p.type === "text" && !(p as any).synthetic && !(p as any).ignored)
-                .map((p) => p.text)
-                .join(" ")
-                .replace(/\s+/g, " ")
-                .trim()
-              if (text) setPreviews((prev) => ({ ...prev, [session.id]: text }))
-            } catch {
-              // #112：预览失败不阻断列表
-            }
-          }),
-        )
+        void (async () => {
+          const next: Record<string, string[]> = {}
+          // #120：按并发度分块预取
+          for (let i = 0; i < unloaded.length; i += SESSION_LIST_PREVIEW_CONCURRENCY) {
+            const chunk = unloaded.slice(i, i + SESSION_LIST_PREVIEW_CONCURRENCY)
+            await Promise.all(
+              chunk.map(async (session) => {
+                try {
+                  const lines = await loadPreviewLines(session.id)
+                  if (lines.length > 0) next[session.id] = lines
+                } catch {
+                  // #120：预览失败不阻断列表
+                }
+              }),
+            )
+          }
+          if (Object.keys(next).length > 0) {
+            setPreviews((prev) => ({ ...prev, ...next }))
+          }
+        })()
       },
     ),
   )
@@ -298,25 +337,8 @@ export function DialogSessionList() {
         category,
         footer,
         gutter,
-        // #112：按词折成最多 N 行，交给 DialogSelect.Option
-        previewLines:
-          SESSION_LIST_PREVIEW_LINES > 0 && previews()[x.id]
-            ? previews()[x.id]
-                .split(" ")
-                .reduce((lines: string[], word: string) => {
-                  // #112：超宽换行；超出行数则并入末行
-                  const cur = lines[lines.length - 1] ?? ""
-                  if (!cur) return [word]
-                  if (lines.length >= SESSION_LIST_PREVIEW_LINES) {
-                    lines[lines.length - 1] = (cur + " " + word).trim()
-                    return lines
-                  }
-                  if ((cur + " " + word).length > 72) return [...lines, word]
-                  lines[lines.length - 1] = (cur + " " + word).trim()
-                  return lines
-                }, [] as string[])
-                .slice(0, SESSION_LIST_PREVIEW_LINES)
-            : undefined,
+        // #120：直接使用已分页收集的多行预览
+        previewLines: SESSION_LIST_PREVIEW_LINES > 0 ? previews()[x.id] : undefined,
       }
     }
 
