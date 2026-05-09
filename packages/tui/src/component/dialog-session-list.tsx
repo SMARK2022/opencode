@@ -43,6 +43,15 @@ export function loadDialogSessionList<T>(input: {
   )
 }
 
+export function matchesDialogSessionSearch(
+  session: { id: string; title: string },
+  query: string,
+  results?: { id: string }[],
+) {
+  // 服务端命中也可能来自正文；只对额外附加的会话保留标题过滤。
+  return !query || results?.some((item) => item.id === session.id) || session.title.toLowerCase().includes(query)
+}
+
 // #115：会话列表预览默认 2 行
 const SESSION_LIST_PREVIEW_LINES = 2
 // #120：分页拉取消息页大小
@@ -177,7 +186,7 @@ export function DialogSessionList() {
     const query = search().trim().toLowerCase()
     return [...result.map((session) => synced.get(session.id) ?? session), ...extra]
       .filter((session) => !deleted().has(session.id))
-      .filter((session) => !query || session.title.toLowerCase().includes(query))
+      .filter((session) => matchesDialogSessionSearch(session, query, searchResults()))
   })
 
   onCleanup(

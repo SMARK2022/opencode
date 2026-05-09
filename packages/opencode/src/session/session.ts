@@ -47,6 +47,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { createDefaultTitle, isDefaultTitle } from "./title"
+import { searchCondition } from "./search"
 // #113：兼容 Session.isDefaultTitle 导出名
 export { isDefaultTitle }
 
@@ -499,7 +500,11 @@ const layer: Layer.Layer<
       if (input?.roots) conditions.push(isNull(SessionTable.parent_id))
       if (input?.start) conditions.push(gte(SessionTable.time_updated, input.start))
       if (input?.cursor) conditions.push(lt(SessionTable.time_updated, input.cursor))
-      if (input?.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
+      // #121：全局列表——标题或消息内容
+      if (input?.search) {
+        const condition = searchCondition(input.search)
+        if (condition) conditions.push(condition)
+      }
       if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
 
       const query =
@@ -924,8 +929,10 @@ function listByProject(
   if (input.start) {
     conditions.push(gte(SessionTable.time_updated, input.start))
   }
+  // #121：项目列表——空白 search 不注入条件
   if (input.search) {
-    conditions.push(like(SessionTable.title, `%${input.search}%`))
+    const condition = searchCondition(input.search)
+    if (condition) conditions.push(condition)
   }
 
   const limit = input.limit ?? 100
