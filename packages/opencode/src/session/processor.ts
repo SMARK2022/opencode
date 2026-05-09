@@ -506,12 +506,17 @@ const layer = Layer.effect(
 
           case "step-start":
             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+            // #124：把 daemon 请求前快照写入 step-start，供 streaming 展示分类
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.sessionID,
               snapshot: ctx.snapshot,
               type: "step-start",
+              // 读取发送前已准备的估算，不能把上一步确认 tokens 冒充本次输入。
+              inputChars: ctx.assistantMessage.inputEstimate?.bodyChars,
+              inputTokens: ctx.assistantMessage.inputEstimate?.input,
+              inputBreakdown: ctx.assistantMessage.inputEstimate?.inputBreakdown,
             })
             return
 

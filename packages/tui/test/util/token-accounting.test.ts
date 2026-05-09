@@ -59,6 +59,50 @@ describe("tokenAccounting", () => {
     expect(acc.ratio.input).toBeGreaterThan(1)
   })
 
+  // #124：streaming 期间 step-start breakdown 可用
+  test("breakdown available from step-start during streaming (before step-finish)", () => {
+    const msgs = [
+      { id: "u1", role: "user", time: { created: 0 } },
+      {
+        id: "a1",
+        role: "assistant",
+        parentID: "u1",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1 },
+      },
+    ]
+    const parts: Record<string, any[]> = {
+      a1: [
+        {
+          id: "ss",
+          type: "step-start",
+          inputChars: 1000,
+          inputTokens: 400,
+          inputBreakdown: {
+            system: 200,
+            instructions: 100,
+            skills: 50,
+            tools: 50,
+            messages: {
+              userText: 100,
+              assistantText: 80,
+              reasoning: 0,
+              toolInput: 40,
+              toolOutput: 80,
+              attachments: 100,
+              total: 400,
+            },
+          },
+        },
+      ],
+    }
+    const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
+    expect(acc.breakdown).not.toBeNull()
+    // #124：200/1000 * 400 = 80
+    expect(acc.breakdown!.system).toBe(80)
+  })
+
   test("durable projection survives an empty visible history and preserves prepared input", () => {
     const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }
     const snapshot = (request: SessionRequestUsage) => tokenAccounting([], () => [], undefined, {
