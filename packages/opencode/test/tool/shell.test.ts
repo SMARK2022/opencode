@@ -1298,3 +1298,41 @@ describe("tool.shell truncation", () => {
     ),
   )
 })
+
+
+// #126：非 Windows 也可用的 UTF-16LE 字节输出解码路径
+describe("tool.shell text decoding", () => {
+  it.live(
+    "decodes raw UTF-16LE output from Windows-style byte streams",
+    () =>
+      withShell(
+        { label: "default", shell: Shell.acceptable() },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const bash = yield* initBash()
+              // 写出 UTF-16LE 中文再读回，验证 createAutoTextDecoder 路径
+              // 非 Windows 用当前 Bun 写原始字节；Windows PowerShell 保留原生 UTF-16LE producer。
+              const code = `process.stdout.write(Buffer.from([${Array.from(Buffer.from("默认分发: Ubuntu-22.04", "utf16le"))}]))`
+              const result = yield* bash.execute(
+                {
+                  // #126：混入 ASCII 以触发无 BOM UTF-16LE 的 NUL 启发式（纯中文无 NUL）
+                  command: PS.has(sh())
+                    ? '$bytes = [System.Text.Encoding]::Unicode.GetBytes("默认分发: Ubuntu-22.04"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)'
+                    : `${bin} -e ${evalarg(code)}`,
+                },
+                ctx,
+              )
+              expect(result.metadata.exit).toBe(0)
+              expect(result.output).toContain("默认分发: Ubuntu-22.04")
+              expect(result.output).not.toContain("\u0000")
+              expect(result.output).not.toContain("\uFFFD")
+            }),
+          )
+        }),
+      ),
+  )
+})
+

@@ -435,6 +435,21 @@ describe("BashTool", () => {
               expect((yield* settleTool(registry, call({ command: "Write-Output '中文'" }))).output?.structured).toMatchObject({ exit: 0 })
               expect((yield* settleTool(registry, call({ command: "Write-Output '中文'; exit 9" }))).output?.structured).toMatchObject({ exit: 9 })
             }), LayerNode.compile(AppProcess.node), shell)
+            const raw = Buffer.from("warning: 默认分发: Ubuntu-22.04\r\n", "utf16le")
+            const bytesCommand = `$bytes = [byte[]](${Array.from(raw)}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)`
+            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+              const settled = yield* settleTool(registry, call({ command: bytesCommand, compress_output: false }))
+              expect(settled.result.type).toBe("content")
+              const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
+              expect(text).toContain("warning: 默认分发: Ubuntu-22.04")
+              expect(text).not.toContain("\u0000")
+              expect(text).not.toContain("\uFFFD")
+              expect(settled.output?.structured).toMatchObject({ exit: 0, truncated: false, diagnosticWarningLikeLines: 1 })
+              const retained = settled.outputPaths?.[0]
+              if (!retained) throw new Error("expected retained UTF-16LE output")
+              expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(raw)
+              expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
+            }), LayerNode.compile(AppProcess.node), shell)
           }
         }),
         (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

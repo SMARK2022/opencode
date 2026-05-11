@@ -19,6 +19,7 @@ import { SystemContextRegistry } from "../system-context/registry"
 import { Shell } from "../shell"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
+import { createAutoTextDecoder } from "../text-decoding"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -159,7 +160,7 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.make({
           // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
           input: Input,
           output: Output,
           structured: StructuredOutput,
@@ -240,7 +241,7 @@ const layer = Layer.effectDiscard(
               const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
               // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
               const diag = new BashDiagnosticCollector({ enabled })
-              const decoder = new TextDecoder()
+              const decoder = createAutoTextDecoder()
               const parts: string[] = []
               let captured = 0
               let cut = false
@@ -286,14 +287,14 @@ const layer = Layer.effectDiscard(
                   timeout: Duration.millis(timeout),
                   maxOutputBytes: MAX_CAPTURE_BYTES,
                   // 写盘失败适配既有 AppProcessError 并保留 StorageError cause；解码仍跨字节块续接。
-                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.decode(chunk, { stream: true }))))),
+                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.write(chunk))))),
                 })
                 .pipe(
                   Effect.catchTag("AppProcessError", (error) =>
                     isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
                   ),
                 )
-              observe(decoder.decode())
+              observe(decoder.end())
               diag.end()
               const diagnostic = diag.snapshot()
               const durationMs = (yield* Clock.currentTimeMillis) - started

@@ -20,6 +20,8 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { createAutoTextDecoder } from "@/util/text-decoding"
+// #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
 
 // 只有写操作失去 always 前缀建议；只读 Git 仍保留现有权限匹配路径。
 const GIT_WRITES = new Set(["add", "commit", "merge", "rebase", "cherry-pick", "revert", "pull", "push", "checkout", "switch", "restore", "reset", "clean"])
@@ -507,53 +509,63 @@ export const ShellTool = Tool.define(
           yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
+          // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
+          // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
+          const decoder = createAutoTextDecoder()
+          // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
+          const onChunk = (chunk: string) => {
+            if (!chunk) return Effect.void
+            // 收集诊断信息用于压缩后的附录生成
+            diag.push(chunk)
+            const size = Buffer.byteLength(chunk, "utf-8")
+            list.push({ text: chunk, size })
+            used += size
+            while (used > keep && list.length > 1) {
+              const item = list.shift()
+              if (!item) break
+              used -= item.size
+              cut = true
+            }
+
+            last = preview(last + chunk)
+
+            if (file) {
+              sink?.write(chunk)
+            } else {
+              full += chunk
+              if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
+                return trunc.write(full).pipe(
+                  Effect.andThen((next) =>
+                    Effect.sync(() => {
+                      file = next
+                      cut = true
+                      sink = createWriteStream(next, { flags: "a" })
+                      full = ""
+                    }),
+                  ),
+                  Effect.andThen(
+                    ctx.metadata({
+                      metadata: {
+                        output: last,
+                      },
+                    }),
+                  ),
+                )
+              }
+            }
+
+            return ctx.metadata({
+              metadata: {
+                output: last,
+              },
+            })
+          }
+
           yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-              const size = Buffer.byteLength(chunk, "utf-8")
-              list.push({ text: chunk, size })
-              // 采样容量独立于 capture 限额，无换行输出也不能无限积累。
-              diag.push(chunk)
-              used += size
-              while (used > keep && list.length > 1) {
-                const item = list.shift()
-                if (!item) break
-                used -= item.size
-                cut = true
-              }
-
-              last = preview(last + chunk)
-
-              if (file) {
-                sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                        },
-                      }),
-                    ),
-                  )
-                }
-              }
-
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                },
-              })
-            }),
+            // #126：end 时 flush decoder 尾部不完整码点
+            Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
+              Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
+            ),
           )
 
           const abort = Effect.callback<void>((resume) => {
