@@ -65,6 +65,8 @@ type Msg = {
   cost?: number
   tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
   time?: { created?: number; completed?: number }
+  // 请求发出前的快照由既有准备链发布，类型与实际消息保持一致。
+  inputEstimate?: AssistantMessage["inputEstimate"]
 }
 
 type Pt = { id?: string; type: string; [key: string]: any }
@@ -274,26 +276,48 @@ export function tokenAccounting(
   const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
 
-  // ── 7. breakdown（优先 step-finish confirmed，fallback step-start）───────
-  // #124：streaming 期间可用 step-start 的 daemon 字符快照
+  // ── 7. breakdown 优先级（#127）──────────────────────────────
+  // #127：inputBreakdown=上传上下文；当前 step 输出单独叠加（input + live）
   let breakdown: TokenAccounting["breakdown"] = null
   // #124：定位最近的 step-start 字符快照
   const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
-  // #124：无 step-start 时 breakdown 仅能等 step-finish
+  // #124：无 step-start 时 breakdown 仅能等 step-finish 或 pending
   const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
-  const breakdownSrc = stepSF?.inputBreakdown ? stepSF : stepSS
-  if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars) {
+  // 当前请求没有快照时不能借旧助手；显式零字符、零估算也是有效快照。
+  const estimate = projection?.session?.request ? projection.session.request.inputEstimate : latestAssistant?.inputEstimate
+  const pendingMsg =
+    estimate?.inputBreakdown
+      ? {
+          type: "pending" as const,
+          inputBreakdown: estimate.inputBreakdown,
+          inputChars: estimate.bodyChars,
+          inputTokens: estimate.input,
+        }
+      : undefined
+  // 下一轮 prepared 游标越过旧 finish/start 时，旧确认不能接管新请求体。
+  const breakdownSrc = pendingMsg && estimate?.confirmed === false &&
+    (estimate.afterPartID ?? "") >= (stepSF?.id ?? "") && (estimate.afterPartID ?? "") >= (stepSS?.id ?? "")
+    ? pendingMsg
+    : stepSF?.inputBreakdown && sfIdx > ssIdx
+    ? stepSF
+    : stepSS?.inputBreakdown
+      ? stepSS
+      : pendingMsg
+  if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars !== undefined) {
     const bd = breakdownSrc.inputBreakdown as {
       system: number; instructions: number; skills: number; tools: number
       messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
     }
-    // #124：确认量用 provider tokens；否则用 daemon inputTokens/chars
-    const confirmedInput = stepSF?.tokens
+    // provider 确认优先于旧 prepared 密度，不必等整条消息 completed。
+    const isConfirmed = breakdownSrc.type === "step-finish" || (breakdownSrc === pendingMsg && estimate?.confirmed === true)
+    const confirmedInput = breakdownSrc.type === "step-finish" && stepSF?.tokens
       ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-      : (Number(stepSS?.inputTokens) || Math.round((Number(stepSS?.inputChars) || 0) / inputRatio))
-    const denom = Number(breakdownSrc.inputChars)
+      : isConfirmed ? projection?.session?.request?.stepInput ?? (latestAssistant?.tokens
+        ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write : 0)
+      : breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio)
+    const denom = breakdownSrc.inputChars
 
-    // #124：按字符占比把确认/估算 input 分到各分类
+    // #124/#127：按字符占比分配 input 分类
     const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
@@ -302,35 +326,55 @@ export function tokenAccounting(
     const userMessages = alloc(bd.messages.userText)
     const toolResults = alloc(bd.messages.toolOutput)
     const attachments = alloc(bd.messages.attachments)
+    // #127：历史 assistant/reasoning/tool-call 属于 input context，不是当前 step 新输出
+    const inputAssistantText = alloc(bd.messages.assistantText)
+    const inputReasoning = alloc(bd.messages.reasoning)
+    const inputToolCalls = alloc(bd.messages.toolInput)
 
-    let assistantText: number; let reasoning: number; let toolCalls: number
-    if (stepConfirmed && stepSF?.tokens) {
-      // #124：仅 confirmed step-finish 拆 output/reasoning
-      reasoning = stepSF.tokens.reasoning
-      const visibleOutput = stepSF.tokens.output
-      const textChars = bd.messages.assistantText
-      const toolCallChars = bd.messages.toolInput
-      const totalOutChars = textChars + toolCallChars
-      assistantText = totalOutChars > 0 ? Math.round((visibleOutput * textChars) / totalOutChars) : visibleOutput
-      toolCalls = Math.max(0, visibleOutput - assistantText)
-    } else {
-      let textC = 0, reasonC = 0, toolC = 0
-      for (let i = sfIdx + 1; i < lastParts.length; i++) {
-        const p = lastParts[i]
-        if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
-        if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
-        if (p.type === "tool") {
-          toolC += p.state?.status === "pending"
-            ? (p.state.raw?.length ?? 0)
-            : JSON.stringify(p.state?.input ?? {}).length
-        }
+    // #127：当前 step live output：只统计本 step 新生成的 text/reasoning/tool
+    let liveAssistantText = 0, liveReasoning = 0, liveToolCalls = 0
+    // finish 只扫描它之前的本 step；prepared 游标隔开已上传历史与新输出。
+    const outputStartIdx = breakdownSrc.type === "step-finish"
+      ? lastParts.slice(0, sfIdx).findLastIndex((p) => p.type === "step-start")
+      : Math.max(ssIdx, sfIdx, estimate?.afterPartID ? lastParts.findLastIndex((p) => (p.id ?? "") <= estimate.afterPartID!) : -1)
+    const outputEndIdx = breakdownSrc.type === "step-finish" ? sfIdx : lastParts.length
+    let textC = 0, reasonC = 0, toolC = 0
+    // #127：扫描当前 step 的 live text/reasoning/tool 字符
+    for (let i = outputStartIdx + 1; i < outputEndIdx; i++) {
+      const p = lastParts[i]
+      if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
+      if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
+      if (p.type === "tool") {
+        toolC += p.state?.status === "pending"
+          ? (p.state.raw?.length ?? 0)
+          : JSON.stringify(p.state?.input ?? {}).length
       }
-      assistantText = Math.round(textC / outputRatio)
-      reasoning = Math.round(reasonC / outputRatio)
-      toolCalls = Math.round(toolC / outputRatio)
+    }
+    const outputTokens = breakdownSrc.type === "step-finish" ? stepSF?.tokens : latestAssistant?.tokens
+    if (isConfirmed && outputTokens) {
+      // reasoning 保留 provider 真值，visible output 仅按本 step 的 text/tool 字符分配。
+      liveReasoning = outputTokens.reasoning
+      const visibleOutput = outputTokens.output
+      // #127：visible output 在 live text/tool 字符间分配
+      const totalVisibleChars = textC + toolC
+      liveAssistantText = totalVisibleChars > 0 ? Math.round((visibleOutput * textC) / totalVisibleChars) : visibleOutput
+      // #127：toolCalls 吃掉 visible 余量，避免双重计数
+      liveToolCalls = Math.max(0, visibleOutput - liveAssistantText)
+    } else {
+      // #127：未确认时 live 用历史 output 字符比估算
+      liveAssistantText = Math.round(textC / outputRatio)
+      liveReasoning = Math.round(reasonC / outputRatio)
+      liveToolCalls = Math.round(toolC / outputRatio)
     }
 
-    breakdown = { system, instructions, skills, tools, userMessages, toolResults, attachments, assistantText, reasoning, toolCalls, pending: pendingToolResultTokens + pendingAttachTokens }
+    breakdown = {
+      system, instructions, skills, tools, userMessages, toolResults, attachments,
+      // #127：UI 展示 = 上传上下文份额 + 本 step 新输出
+      assistantText: inputAssistantText + liveAssistantText,
+      reasoning: inputReasoning + liveReasoning,
+      toolCalls: inputToolCalls + liveToolCalls,
+      pending: pendingToolResultTokens + pendingAttachTokens,
+    }
   }
 
   // ── 8. contextPercent ──
