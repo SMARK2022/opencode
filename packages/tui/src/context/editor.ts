@@ -8,6 +8,7 @@ import { isRecord } from "../util/record"
 import { useTuiPaths } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { editorIntegration } from "../editor"
+import { fileURLToPath } from "url"
 
 const MCP_PROTOCOL_VERSION = "2025-11-25"
 
@@ -427,6 +428,36 @@ export function editorSelectionKey(selection: EditorSelection | undefined) {
 
 // 从 opencode IDE registry 读取最近 active notebook/text 文件（按 workspace 路径打分）
 // 读 ~/.local/state/opencode/ide 注册表 JSON，按 workspace 路径最长前缀打分
+
+// #125：bridge registry URI → 本地路径（file/git；notebook-cell 忽略）
+function bridgeUriToPath(value?: string) {
+  if (!value) return
+  // #125：file:// 用 fileURLToPath 解 percent-encoding
+  if (value.startsWith("file://")) {
+    try {
+      return fileURLToPath(value)
+    } catch {
+      return decodeURIComponent(new URL(value).pathname)
+    }
+  }
+  if (value.startsWith("vscode-notebook-cell:")) return
+  // #125：git: 从 query JSON.path 取真实路径
+  if (value.startsWith("git:")) {
+    const uri = new URL(value)
+    const search = uri.search ? decodeURIComponent(uri.search.slice(1)) : undefined
+    let parsed: unknown
+    try {
+      parsed = search ? JSON.parse(search) : undefined
+    } catch {
+      parsed = undefined
+    }
+    if (parsed && typeof parsed === "object" && typeof (parsed as any).path === "string") return (parsed as any).path
+    const pathname = decodeURIComponent(uri.pathname)
+    return /^\/[a-z]:/i.test(pathname) ? pathname.slice(1) : pathname
+  }
+  return value
+}
+
 function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
   const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
   let entries: string[]
@@ -461,7 +492,8 @@ function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelecti
 
   const active = best.entry.active as Record<string, string> | undefined
   // notebook 优先于 textEditor：笔记本会话更依赖路径绑定
-  const filePath = active?.notebook || active?.textEditor
+  // #125：notebook/textEditor 可能是 URI，需解码为路径
+  const filePath = bridgeUriToPath(active?.notebook) ?? bridgeUriToPath(active?.textEditor)
   if (!filePath) return
 
   return { filePath, source: "bridge", ranges: [] as EditorSelection["ranges"] }
@@ -476,7 +508,8 @@ function bridgeRegistryWorkspaceScore(entry: Record<string, unknown>, activeDire
     0,
     ...folders.map((folder) => {
       const fsPath = typeof folder.fsPath === "string" ? folder.fsPath : ""
-      const uri = typeof folder.uri === "string" ? folder.uri : ""
+      // #125：workspace folder.uri 同样可能是 file://
+      const uri = typeof folder.uri === "string" ? bridgeUriToPath(folder.uri) ?? folder.uri : ""
       return Math.max(
         fsPath ? pathContainsLength(fsPath, activeDirectory) : 0,
         uri ? pathContainsLength(uri, activeDirectory) : 0,

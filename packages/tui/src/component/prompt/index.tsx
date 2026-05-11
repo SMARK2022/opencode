@@ -1744,13 +1744,25 @@ export function Prompt(props: PromptProps) {
                   <Switch>
                     <Match when={usage()}>
                       {(item) => (
-                        <text fg={theme.textMuted} wrapMode="none">
-                          {/* 只改变箭头前景色，数值与可选后缀仍从同一 item 快照读取，保持文本布局稳定。 */}
-                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
-                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
-                          {item().context ? ` · ${item().context}` : ""}
-                          {item().cost ? ` · ${item().cost}` : ""}
-                        </text>
+                        <Show
+                          when={showCumulative()}
+                          fallback={
+                            // #125：窄屏合并 ↑↓，只保留 context/cost
+                            <text fg={theme.textMuted} wrapMode="none">
+                              <span style={{ fg: usageFlow().input || usageFlow().output ? theme.text : theme.textMuted }}>↑↓</span>
+                              {item().context ? ` ${item().context}` : ""}
+                              {item().cost ? ` · ${item().cost}` : ""}
+                            </text>
+                          }
+                        >
+                          <text fg={theme.textMuted} wrapMode="none">
+                            {/* 宽屏：分向箭头 + 可选累计括号 */}
+                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+                            <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                            {item().context ? ` · ${item().context}` : ""}
+                            {item().cost ? ` · ${item().cost}` : ""}
+                          </text>
+                        </Show>
                       )}
                     </Match>
                     <Match when={true}>
