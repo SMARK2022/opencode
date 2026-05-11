@@ -120,12 +120,11 @@ describe("context usage", () => {
     expect(data.categories.find((item) => item.name === "Instructions")?.tokens).toBe(40)
     // tools: round(100 * 0.4) = 40
     expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBe(40)
-    // output: reasoning=50, visible=150
-    // assistant text chars=80, tool call chars=40, total=120
-    // assistantText = round(150 * 80/120) = 100, toolCalls = 50
-    expect(data.details.messages.assistantText).toBe(100)
-    expect(data.details.messages.reasoning).toBe(50)
-    expect(data.details.messages.toolCalls).toBe(50)
+    // input context: assistantText=32, reasoning=24, toolCalls=16
+    // live output: text part gets all visible output=150, reasoning=50, no live tool-call output
+    expect(data.details.messages.assistantText).toBe(182)
+    expect(data.details.messages.reasoning).toBe(74)
+    expect(data.details.messages.toolCalls).toBe(16)
     // window still valid
     expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 19_800, compactionBuffer: 100 })
   })

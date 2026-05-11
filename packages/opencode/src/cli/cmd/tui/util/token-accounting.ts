@@ -77,6 +77,17 @@ type Msg = {
   cost?: number
   tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
   time?: { created?: number; completed?: number }
+  /** Per-component character counts of the pending request body,
+   *  persisted on the assistant message before the provider stream starts.
+   *  Carries the daemon's exact request-body breakdown. */
+  inputBreakdown?: {
+    system: number; instructions: number; skills: number; tools: number
+    messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
+  }
+  /** Character count of the pending request body before the provider stream starts. */
+  inputChars?: number
+  /** Estimated input tokens for the pending request (chars-per-token ratio). */
+  inputTokens?: number
 }
 
 type Pt = { id?: string; type: string; [key: string]: any }
@@ -246,27 +257,36 @@ export function tokenAccounting(
   const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
 
-  // ── 7. breakdown（优先 step-finish confirmed，fallback step-start daemon estimate）───────
+  // ── 7. breakdown（固定两层语义：input context composition + current step output）───────
+  // 三个固定阶段的输入快照，按权威递进：
+  //   pending → assistant message 上的 inputBreakdown（stream 开始前即已落库）
+  //   stream-started → step-start part 的 inputBreakdown（首个 chunk 到达后）
+  //   confirmed → step-finish part 的 inputBreakdown（provider 返回 token 确认后）
+  // inputBreakdown 表示本次请求上传给 provider 的完整上下文；当前 step 输出单独叠加。
   let breakdown: TokenAccounting["breakdown"] = null
-  // step-start 携带 deamon 在请求发出前记录的各组件字符数；streaming 期间即可展示 input 分类
   const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
   const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
-  const breakdownSrc = stepSF?.inputBreakdown ? stepSF : stepSS
+  // 取 pending 数据源：assistant message 自身携带的 pre-stream input snapshot
+  const pendingMsg = (latestAssistant?.inputBreakdown && latestAssistant.inputChars)
+    ? latestAssistant
+    : undefined
+  const breakdownSrc = stepSF?.inputBreakdown
+    ? stepSF      // confirmed — provider 已返回 token 总量
+    : stepSS?.inputBreakdown
+      ? stepSS    // stream-started — daemon 请求体，AI SDK 已开始消费
+      : pendingMsg // pending — daemon 请求体，stream 尚未开始
 
-  if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars) {
-    const bd = breakdownSrc.inputBreakdown as {
-      system: number; instructions: number; skills: number; tools: number
-      messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
-    }
-    const isConfirmed = breakdownSrc.type === "step-finish" && stepConfirmed
-    // input 总量：confirmed 从 provider tokens，estimate 从 daemon estimate 或 chars/ratio
-    // 当 isConfirmed 时 stepSF 一定存在（由 stepConfirmed 保证），下同
+  if (breakdownSrc?.inputBreakdown && (breakdownSrc as any).inputChars) {
+    const bd = breakdownSrc.inputBreakdown
+    const isConfirmed = (breakdownSrc as any).type === "step-finish" && stepConfirmed
+    // allocInput: confirmed 用 provider tokens，否则用当前源提供的 estimated tokens 或 chars/ratio 估算
     const allocInput = isConfirmed
       ? stepSF!.tokens.input + stepSF!.tokens.cache.read + stepSF!.tokens.cache.write
-      : (stepSS?.inputTokens ?? Math.round((stepSS?.inputChars ?? 0) / inputRatio))
-    const denom = breakdownSrc.inputChars as number
+      : (breakdownSrc.inputTokens ?? Math.round(((breakdownSrc as any).inputChars as number) / inputRatio))
+    const denom = (breakdownSrc as any).inputChars as number
 
     const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * allocInput) : 0
+    // 7a. input context composition：全部来自本次 request 上传的历史上下文。
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
     const skills = alloc(bd.skills)
@@ -274,38 +294,48 @@ export function tokenAccounting(
     const userMessages = alloc(bd.messages.userText)
     const toolResults = alloc(bd.messages.toolOutput)
     const attachments = alloc(bd.messages.attachments)
+    // 历史 assistant/reasoning/tool-call 也是 input context，不是当前 step 新输出。
+    const inputAssistantText = alloc(bd.messages.assistantText)
+    const inputReasoning = alloc(bd.messages.reasoning)
+    const inputToolCalls = alloc(bd.messages.toolInput)
 
-    let assistantText: number; let reasoning: number; let toolCalls: number
-    if (isConfirmed) {
-      // confirmed output → 精确分配：reasoning 独立，text vs toolCalls 按字符比
-      reasoning = stepSF!.tokens.reasoning
-      const visibleOutput = stepSF!.tokens.output
-      const textChars = bd.messages.assistantText
-      const toolCallChars = bd.messages.toolInput
-      const totalOutChars = textChars + toolCallChars
-      assistantText = totalOutChars > 0 ? Math.round((visibleOutput * textChars) / totalOutChars) : visibleOutput
-      toolCalls = Math.max(0, visibleOutput - assistantText)
-    } else {
-      // estimate（streaming 或无确认数据）→ chars / outputRatio
-      let textC = 0, reasonC = 0, toolC = 0
-      // 从 breakdown source 之后扫 output parts
-      const markerIdx = breakdownSrc.type === "step-finish" ? sfIdx : ssIdx
-      for (let i = markerIdx + 1; i < lastParts.length; i++) {
-        const p = lastParts[i]
-        if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
-        if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
-        if (p.type === "tool") {
-          toolC += p.state?.status === "pending"
-            ? (p.state.raw?.length ?? 0)
-            : JSON.stringify(p.state?.input ?? {}).length
-        }
+    // 7b. current step live output：只统计本 step 新生成的 text/reasoning/tool-call。
+    let liveAssistantText = 0, liveReasoning = 0, liveToolCalls = 0
+    const outputStartIdx = ssIdx >= 0 ? ssIdx : isConfirmed ? -1 : lastParts.length
+    const outputEndIdx = isConfirmed && sfIdx >= 0 ? sfIdx : lastParts.length
+    let textC = 0, reasonC = 0, toolC = 0
+    for (let i = outputStartIdx + 1; i < outputEndIdx; i++) {
+      const p = lastParts[i]
+      if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
+      if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
+      if (p.type === "tool") {
+        toolC += p.state?.status === "pending"
+          ? (p.state.raw?.length ?? 0)
+          : JSON.stringify(p.state?.input ?? {}).length
       }
-      assistantText = Math.round(textC / outputRatio)
-      reasoning = Math.round(reasonC / outputRatio)
-      toolCalls = Math.round(toolC / outputRatio)
     }
 
-    breakdown = { system, instructions, skills, tools, userMessages, toolResults, attachments, assistantText, reasoning, toolCalls, pending: pendingToolResultTokens + pendingAttachTokens }
+    if (isConfirmed) {
+      // confirmed output：reasoning 直接来自 provider，visible output 按字符比分配。
+      liveReasoning = stepSF!.tokens.reasoning
+      const visibleOutput = stepSF!.tokens.output
+      const totalVisibleChars = textC + toolC
+      liveAssistantText = totalVisibleChars > 0 ? Math.round((visibleOutput * textC) / totalVisibleChars) : visibleOutput
+      liveToolCalls = Math.max(0, visibleOutput - liveAssistantText)
+    } else {
+      // streaming / pending output：按历史 output ratio 对当前 parts 字符数估算。
+      liveAssistantText = Math.round(textC / outputRatio)
+      liveReasoning = Math.round(reasonC / outputRatio)
+      liveToolCalls = Math.round(toolC / outputRatio)
+    }
+
+    breakdown = {
+      system, instructions, skills, tools, userMessages, toolResults, attachments,
+      assistantText: inputAssistantText + liveAssistantText,
+      reasoning: inputReasoning + liveReasoning,
+      toolCalls: inputToolCalls + liveToolCalls,
+      pending: pendingToolResultTokens + pendingAttachTokens,
+    }
   }
 
   // ── 8. contextPercent ──

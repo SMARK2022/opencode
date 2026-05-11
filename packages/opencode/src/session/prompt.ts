@@ -1769,6 +1769,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               : 4
             const estimatedInput = Math.round(inputChars / charsPerToken)
             handle.message.tokens.input = estimatedInput
+            // Persist the pending input snapshot on the assistant message so the TUI can
+            // render context usage immediately, before the provider emits the first chunk
+            // or the matching step-start part.
+            handle.message.inputChars = inputChars
+            handle.message.inputTokens = estimatedInput
+            handle.message.inputBreakdown = inputBreakdown
+            // Also set on the handle so the processor can copy to step-start/step-finish parts.
             handle.inputChars = inputChars
             handle.inputBreakdown = inputBreakdown
             yield* sessions.updateMessage(handle.message)

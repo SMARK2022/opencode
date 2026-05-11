@@ -116,12 +116,10 @@ describe("tokenAccounting", () => {
     expect(bd.instructions).toBe(100)
     // tools = round(500 * 1000/10000) = 50
     expect(bd.tools).toBe(50)
-    // Alloc output: reasoning=0, visible=200
-    // text chars=300, tool call chars=200, total=500
-    // assistantText = round(200 * 300/500) = 120
-    // toolCalls = 200 - 120 = 80
-    expect(bd.assistantText).toBe(120)
-    expect(bd.toolCalls).toBe(80)
+    // input context assistantText=round(500*300/10000)=15, no output parts → live visible=200
+    // input context toolInput=round(500*200/10000)=10, no live tool output
+    expect(bd.assistantText).toBe(215)
+    expect(bd.toolCalls).toBe(10)
   })
 
   test("breakdown available from step-start during streaming (before step-finish)", () => {
@@ -146,7 +144,9 @@ describe("tokenAccounting", () => {
     expect(acc.breakdown!.system).toBe(120)
     expect(acc.breakdown!.instructions).toBe(80)
     expect(acc.breakdown!.tools).toBe(40)
-    // output streaming estimate: "hello world" 11 chars / outputRatio=4 → 3
-    expect(acc.breakdown!.assistantText).toBe(3)
+    // input context assistantText=32, live text "hello world" 11 chars / outputRatio=4 → 3
+    expect(acc.breakdown!.assistantText).toBe(35)
+    // input context toolInput=16; no live tool-call output yet
+    expect(acc.breakdown!.toolCalls).toBe(16)
   })
 })

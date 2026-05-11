@@ -622,6 +622,16 @@ export const Assistant = Schema.Struct({
       write: NonNegativeInt,
     }),
   }),
+  /** Character count of the pending request body, captured before the provider stream starts.
+   *  The TUI reads this from the assistant message directly for live context breakdown
+   *  during the window before the first chunk / step-start part arrives. */
+  inputChars: Schema.optional(NonNegativeInt),
+  /** Estimated input tokens for the pending request (inputChars / historical chars-per-token ratio). */
+  inputTokens: Schema.optional(NonNegativeInt),
+  /** Per-component character counts of the pending request body.
+   *  Same shape as step-start/step-finish inputBreakdown; written before stream starts.
+   *  Carries the daemon's exact request-body breakdown, not a TUI-side reconstruction. */
+  inputBreakdown: Schema.optional(InputBreakdownSchema),
   structured: Schema.optional(Schema.Any),
   variant: Schema.optional(Schema.String),
   finish: Schema.optional(Schema.String),
