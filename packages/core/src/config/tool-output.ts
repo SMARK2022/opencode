@@ -16,4 +16,8 @@ export class Info extends Schema.Class<Info>("ConfigV2.ToolOutput")({
   bash_compression: Schema.Boolean.pipe(Schema.optional).annotate({
     description: "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
   }),
+  // #128：shell 输出文本编码（auto 探测或显式锁定）
+  shell_encoding: Schema.Literals(["auto", "utf-8", "gb18030", "utf-16le", "utf-16be"]).pipe(Schema.optional).annotate({
+    description: "Shell stdout/stderr text encoding. auto detects; set explicitly to lock the decoder for the whole stream.",
+  }),
 }) {}

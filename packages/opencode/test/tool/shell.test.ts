@@ -1299,6 +1299,65 @@ describe("tool.shell truncation", () => {
   )
 })
 
+// #128：Windows PowerShell 多编码 shell 输出（与 tip it.live 风格对齐）
+describe("tool.shell windows multi-encoding", () => {
+  if (process.platform !== "win32") return
+
+  for (const item of ps) {
+    it.live(
+      `decodes UTF-8 box drawing output from Windows commands [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const tmp = yield* tmpdirScoped()
+            yield* runIn(
+              tmp,
+              Effect.gen(function* () {
+                const bash = yield* initBash()
+                // #128：PS 写 UTF-8 盒线字符，验证 shell_encoding auto
+                const result = yield* bash.execute(
+                  {
+                    command: `Write-Output "┌─ TARGET OUTPUT ──"; Write-Output "— delivered"`,
+                  },
+                  ctx,
+                )
+                expect(result.output).toContain("TARGET OUTPUT")
+                expect(result.output).toContain("delivered")
+                expect(result.output).not.toContain("\uFFFD")
+              }),
+            )
+          }),
+        ),
+    )
+
+    it.live(
+      `decodes GB18030 legacy shell output from Windows commands [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const tmp = yield* tmpdirScoped()
+            yield* runIn(
+              tmp,
+              Effect.gen(function* () {
+                const bash = yield* initBash()
+                // #128：模拟 OpenStandardOutput 写入 GBK 字节
+                const result = yield* bash.execute(
+                  {
+                    command: `$bytes = [byte[]](0xD6,0xD0,0xCE,0xC4); [Console]::OpenStandardOutput().Write($bytes,0,$bytes.Length)`,
+                  },
+                  ctx,
+                )
+                expect(result.output).toContain("中文")
+              }),
+            )
+          }),
+        ),
+    )
+  }
+})
+
 
 // #126：非 Windows 也可用的 UTF-16LE 字节输出解码路径
 describe("tool.shell text decoding", () => {
