@@ -1189,6 +1189,33 @@ describe("tool.shell abort", () => {
       },
     })
   })
+
+  for (const item of ps) {
+    test(
+      `decodes raw UTF-16LE output from Windows commands [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const result = await Effect.runPromise(
+              bash.execute(
+                {
+                  command:
+                    '$bytes = [System.Text.Encoding]::Unicode.GetBytes("默认分发: Ubuntu-22.04"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)',
+                  description: "Write UTF-16LE bytes",
+                },
+                ctx,
+              ),
+            )
+            expect(result.output).toContain("默认分发: Ubuntu-22.04")
+            expect(result.output).not.toContain("\u0000")
+            expect(result.output).not.toContain("�")
+          },
+        })
+      }),
+    )
+  }
 })
 
 describe("tool.shell truncation", () => {

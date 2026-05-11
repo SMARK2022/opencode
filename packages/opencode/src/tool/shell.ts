@@ -23,6 +23,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { createAutoTextDecoder } from "@/util/text-decoding"
 import {
   BashDiagnosticCollector,
   bashCompressionMetadata,
@@ -317,7 +318,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
 
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32" && Shell.ps(shell)) {
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
       cwd,
       env,
       stdin: "ignore",
@@ -332,6 +333,20 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     stdin: "ignore",
     detached: process.platform !== "win32",
   })
+}
+
+// PowerShell expects -EncodedCommand input as UTF-16LE and this wrapper normalizes its pipe encoding to UTF-8.
+function psEncoded(command: string) {
+  return Buffer.from(
+    [
+      "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+      "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+      "$OutputEncoding = [Console]::OutputEncoding",
+      command,
+      "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+    ].join("\n"),
+    "utf16le",
+  ).toString("base64")
 }
 const parser = lazy(async () => {
   const { Parser } = await import("web-tree-sitter")
@@ -523,8 +538,10 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
+      const utf8Env = process.platform === "win32" ? { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } : {}
       return {
         ...process.env,
+        ...utf8Env,
         ...extra.env,
       }
     })
@@ -562,58 +579,64 @@ export const ShellTool = Tool.define(
         },
       })
 
+      const decoder = createAutoTextDecoder()
+      const onChunk = (chunk: string) => {
+        if (!chunk) return Effect.void
+        diag.push(chunk)
+        const size = Buffer.byteLength(chunk, "utf-8")
+        list.push({ text: chunk, size })
+        used += size
+        while (used > keep && list.length > 1) {
+          const item = list.shift()
+          if (!item) break
+          used -= item.size
+          cut = true
+        }
+
+        last = preview(last + chunk)
+
+        if (file) {
+          sink?.write(chunk)
+        } else {
+          full += chunk
+          if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
+            return trunc.write(full).pipe(
+              Effect.andThen((next) =>
+                Effect.sync(() => {
+                  file = next
+                  cut = true
+                  sink = createWriteStream(next, { flags: "a" })
+                  full = ""
+                }),
+              ),
+              Effect.andThen(
+                ctx.metadata({
+                  metadata: {
+                    output: last,
+                    description: input.description,
+                  },
+                }),
+              ),
+            )
+          }
+        }
+
+        return ctx.metadata({
+          metadata: {
+            output: last,
+            description: input.description,
+          },
+        })
+      }
+
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
           yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-              diag.push(chunk)
-              const size = Buffer.byteLength(chunk, "utf-8")
-              list.push({ text: chunk, size })
-              used += size
-              while (used > keep && list.length > 1) {
-                const item = list.shift()
-                if (!item) break
-                used -= item.size
-                cut = true
-              }
-
-              last = preview(last + chunk)
-
-              if (file) {
-                sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                          description: input.description,
-                        },
-                      }),
-                    ),
-                  )
-                }
-              }
-
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                  description: input.description,
-                },
-              })
-            }),
+            Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
+              Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
+            ),
           )
 
           const abort = Effect.callback<void>((resume) => {
