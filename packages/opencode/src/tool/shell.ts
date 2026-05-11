@@ -23,7 +23,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
-import { createAutoTextDecoder } from "@/util/text-decoding"
+import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decoding"
 import {
   BashDiagnosticCollector,
   bashCompressionMetadata,
@@ -94,6 +94,10 @@ const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
 
 function bashCompressionEnabled(config?: Config.Info) {
   return config?.tool_output?.bash_compression ?? true
+}
+
+function shellOutputEncoding(config?: Config.Info): TextEncodingMode {
+  return config?.tool_output?.shell_encoding ?? "auto"
 }
 
 type Part = {
@@ -555,6 +559,7 @@ export const ShellTool = Tool.define(
         timeout: number
         description: string
         compressOutput: boolean
+        encoding: TextEncodingMode
       },
       ctx: Tool.Context,
     ) {
@@ -579,7 +584,7 @@ export const ShellTool = Tool.define(
         },
       })
 
-      const decoder = createAutoTextDecoder()
+      const decoder = createAutoTextDecoder({ encoding: input.encoding })
       const onChunk = (chunk: string) => {
         if (!chunk) return Effect.void
         diag.push(chunk)
@@ -789,6 +794,7 @@ export const ShellTool = Tool.define(
 
               const configInfo = yield* config.get().pipe(Effect.catch(() => Effect.succeed(undefined as Config.Info | undefined)))
               const compressOutput = bashCompressionEnabled(configInfo) && (params.compress_output ?? true)
+              const encoding = shellOutputEncoding(configInfo)
 
               return yield* run(
                 {
@@ -799,6 +805,7 @@ export const ShellTool = Tool.define(
                   timeout,
                   description: params.description,
                   compressOutput,
+                  encoding,
                 },
                 ctx,
               )

@@ -1216,6 +1216,59 @@ describe("tool.shell abort", () => {
       }),
     )
   }
+
+  for (const item of ps) {
+    test(
+      `decodes UTF-8 box drawing output from Windows commands [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const result = await Effect.runPromise(
+              bash.execute(
+                {
+                  command:
+                    '[Console]::WriteLine("┌─ TARGET OUTPUT ──"); [Console]::WriteLine("— delivered")',
+                  description: "Write UTF-8 box drawing text",
+                },
+                ctx,
+              ),
+            )
+            expect(result.output).toContain("┌─ TARGET OUTPUT")
+            expect(result.output).toContain("— delivered")
+            expect(result.output).not.toContain("鈹")
+            expect(result.output).not.toContain("鈥")
+          },
+        })
+      }),
+    )
+  }
+
+  for (const item of ps) {
+    test(
+      `decodes GB18030 legacy shell output from Windows commands [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const result = await Effect.runPromise(
+              bash.execute(
+                {
+                  command:
+                    "$bytes = [byte[]](0xD6,0xD0,0xCE,0xC4,0x0A); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)",
+                  description: "Write GB18030 bytes",
+                },
+                ctx,
+              ),
+            )
+            expect(result.output).toContain("中文")
+          },
+        })
+      }),
+    )
+  }
 })
 
 describe("tool.shell truncation", () => {

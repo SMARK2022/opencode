@@ -120,6 +120,12 @@ const LogLevelRef = Schema.Literals(["DEBUG", "INFO", "WARN", "ERROR"]).annotate
   description: "Log level",
 })
 
+const ShellOutputEncodingRef = Schema.Literals(["auto", "utf-8", "gb18030", "utf-16le", "utf-16be"]).annotate({
+  identifier: "ShellOutputEncoding",
+  description:
+    "Shell tool output encoding strategy. auto detects UTF-16 and falls back to GB18030 for legacy Windows text; explicit values lock the entire stream to a single encoding.",
+})
+
 // The Effect Schema is the canonical source of truth. The `.zod` compatibility
 // surface is derived so existing Hono validators keep working without a parallel
 // Zod definition.
@@ -253,6 +259,10 @@ export const Info = Schema.Struct({
       bash_compression: Schema.optional(Schema.Boolean).annotate({
         description:
           "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
+      }),
+      shell_encoding: Schema.optional(ShellOutputEncodingRef).annotate({
+        description:
+          "Encoding strategy for shell tool output. auto prefers UTF-8, detects UTF-16, and uses GB18030 only as a local fallback for legacy Windows text. Use gb18030 for legacy Windows Chinese programs.",
       }),
     }),
   ).annotate({
