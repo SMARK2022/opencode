@@ -8,6 +8,7 @@ import { useLocal } from "../../context/local"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
 import { useTheme } from "../../context/theme"
+import { createThrottledSignal } from "../../util/signal"
 import { TextAttributes } from "@opentui/core"
 import { Locale } from "../../util/locale"
 import {
@@ -239,8 +240,11 @@ function Details(props: { data: ContextUsageData; columns: number }) {
 // SDK 输入只有 wire 数据；在 tracked memo 内序列化才能订阅嵌套字段，unwrap 不会建立订阅。
 export function contextUsageResource(input: () => ComputeContextDataInput) {
   const snapshot = createMemo<ComputeContextDataInput>(() => JSON.parse(JSON.stringify(input())))
+  // 深层快照先追踪原位变更，再首尾节流，避免连续 delta 让异步计算持续失效。
+  const [throttled, setThrottled] = createThrottledSignal(snapshot(), 500)
+  createEffect(() => setThrottled(snapshot()))
   // fetcher 被 Solid untrack；传入脱离 store proxy 的快照，异步 await 后也不会读到另一版本。
-  return createResource(snapshot, computeContextData)
+  return createResource(throttled, computeContextData)
 }
 
 // 此注册入口由面板与真实 keymap harness 共用，关闭键不经过另一个 matcher 或全局退出命令。

@@ -1052,11 +1052,25 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
   const tailCount = tail ? countFor(tail, total).count : 0
   const bodyLimit = total - tailCount
   // 剩余容量约束每次分配，即使估算超过窗口也不会渲染无限格子。
-  for (const category of body) {
-    const { exact, count } = countFor(category, bodyLimit - cells.length)
-    for (let i = 0; i < count; i++) {
+  // #125：先算各 body 分类格子数，余数并入 Free space 原位
+  const counts = body.map((_) => 0)
+  let remaining = bodyLimit
+  for (let ci = 0; ci < body.length; ci++) {
+    const count = countFor(body[ci], remaining).count
+    counts[ci] = count
+    remaining -= count
+  }
+  const freeIdx = body.findIndex((c) => c.name === "Free space")
+  // #125：舍入余数给 Free space，避免尾部追加打乱顺序
+  if (freeIdx >= 0 && remaining > 0) counts[freeIdx] += remaining
+
+  for (let ci = 0; ci < body.length; ci++) {
+    const category = body[ci]
+    const count = counts[ci]
+    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
+    for (let k = 0; k < count; k++) {
       // 超窗口估算的余量仍夹在 [0,1]，否则饱满度会越过已定义的两档填充符号。
-      const fullness = Math.max(0, Math.min(1, exact - i))
+      const fullness = Math.max(0, Math.min(1, exact - k))
       cells.push({
         symbol: category.name === "Free space" ? "⛶" : category.name === "Model reserve" ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
         categoryName: category.name,
@@ -1064,19 +1078,8 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
         fullness,
       })
     }
-    if (cells.length >= bodyLimit) break
   }
 
-  // 舍入产生的空格归 free，而不是再计入某个 prompt 分类；token 总额不由格子数反推。
-  const free = categories.find((item) => item.name === "Free space")
-  while (cells.length < bodyLimit) {
-    cells.push({
-      symbol: "⛶",
-      categoryName: "Free space",
-      color: free?.color ?? "textMuted",
-      fullness: 0,
-    })
-  }
   // 尾部饱满度使用 tail 自身比例而非总 used，安全缓冲不会因消息增长被画成消息占用。
   if (tail) {
     const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
@@ -1125,18 +1128,20 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const msg = messageTokens(compacted, ratio)
   const usage = { ...acc.session, total: acc.session.input + acc.session.output + acc.session.reasoning
     + acc.session.cacheRead + acc.session.cacheWrite }
-  const instructions = await gatherInstructionFiles(input)
+  // 发送中的快照已有分类总量，文件明细等确认后读取；历史无快照仍沿原路径展示。
+  const instructions = input.instructionFiles ?? (prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
   const messageText = msg.text.join("\n")
   // Read 的指令可能在工具 output 而非 text 部件；只为未在已计数正文内出现的 loaded 路径读盘。
   const loadedInstructions = [] as Array<{ path: string; tokens: number }>
-  for (const filepath of msg.loadedInstructionPaths) {
+  for (const filepath of prepared?.confirmed === false ? [] : msg.loadedInstructionPaths) {
     if (messageText.includes(`Instructions from: ${filepath}`)) continue
     const content = await readText(filepath)
     if (content && !bd) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
   }
 
-  const skills = await gatherSkills(input)
+  // 跳过技能读盘不跳过现有静态工具目录，避免历史工具调用分类塌缩。
+  const skills = input.skills ?? (prepared?.confirmed === false ? [] : await gatherSkills(input))
   const skillListing = skillsSection(skillInfo(skills))
   const skillTokens = acc.breakdown?.skills ?? estimate(skillListing, ratio)
   const skillDetails = skills.map((skill) => ({
