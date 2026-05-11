@@ -103,6 +103,170 @@ describe("tokenAccounting", () => {
     expect(acc.breakdown!.system).toBe(80)
   })
 
+  // #127：assistant 消息级 pending 快照在 step-start 前即可分配 breakdown
+  test("breakdown available from assistant message pending snapshot before step-start", () => {
+    const msgs = [
+      { id: "u1", role: "user", time: { created: 0 } },
+      {
+        id: "a1",
+        role: "assistant",
+        parentID: "u1",
+        cost: 0,
+        tokens: { input: 400, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1 },
+        inputEstimate: {
+          bodyChars: 1000,
+          input: 400,
+          confirmed: false,
+          inputBreakdown: {
+          system: 200,
+          instructions: 100,
+          skills: 50,
+          tools: 50,
+          messages: {
+            userText: 100,
+            assistantText: 80,
+            reasoning: 0,
+            toolInput: 40,
+            toolOutput: 80,
+            attachments: 100,
+            total: 400,
+          },
+        },
+        },
+      },
+    ]
+    const acc = tokenAccounting(msgs as any, () => [])
+    expect(acc.breakdown).not.toBeNull()
+    // #127：200/1000 * 400 = 80
+    expect(acc.breakdown!.system).toBe(80)
+    const zero = { ...msgs[1], inputEstimate: { ...msgs[1].inputEstimate!, input: 0, bodyChars: 0 } }
+    const cleared = tokenAccounting([msgs[0], zero], () => [])
+    expect(cleared.breakdown!.system).toBe(0)
+  })
+
+  // #127：confirmed 时 assistantText = input 份额 + live visible
+  test("confirmed breakdown adds input context assistantText to live visible output", () => {
+    const msgs = [
+      { id: "u1", role: "user", time: { created: 0 } },
+      {
+        id: "a1",
+        role: "assistant",
+        parentID: "u1",
+        cost: 0,
+        tokens: { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1, completed: 2 },
+      },
+    ]
+    const parts: Record<string, any[]> = {
+      a1: [
+        {
+          id: "ss",
+          type: "step-start",
+          inputChars: 10000,
+          inputTokens: 500,
+          inputBreakdown: {
+            system: 1000,
+            instructions: 1000,
+            skills: 500,
+            tools: 500,
+            messages: {
+              userText: 5000,
+              assistantText: 300,
+              reasoning: 0,
+              toolInput: 200,
+              toolOutput: 500,
+              attachments: 0,
+              total: 6000,
+            },
+          },
+        },
+        { id: "t1", type: "text", text: "x".repeat(300) },
+        {
+          id: "sf",
+          type: "step-finish",
+          tokens: { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } },
+          inputChars: 10000,
+          inputTokens: 500,
+          inputBreakdown: {
+            system: 1000,
+            instructions: 1000,
+            skills: 500,
+            tools: 500,
+            messages: {
+              userText: 5000,
+              assistantText: 300,
+              reasoning: 0,
+              toolInput: 200,
+              toolOutput: 500,
+              attachments: 0,
+              total: 6000,
+            },
+          },
+        },
+      ],
+    }
+    const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
+    expect(acc.breakdown).not.toBeNull()
+    // #127：15 + 200 = 215；toolCalls 仅 input 份额 10
+    expect(acc.breakdown!.assistantText).toBe(215)
+    expect(acc.breakdown!.toolCalls).toBe(10)
+    const unfinished = tokenAccounting(msgs.map((msg) => msg.role === "assistant" ? { ...msg, time: { created: 1 } } : msg),
+      (id) => parts[id] ?? [])
+    expect(unfinished.breakdown!.assistantText).toBe(215)
+  })
+
+  // #127：streaming 时 live text 估算叠加 input assistant 份额
+  test("streaming breakdown adds input context to live text estimate", () => {
+    const msgs = [
+      { id: "u1", role: "user", time: { created: 0 } },
+      {
+        id: "a1",
+        role: "assistant",
+        parentID: "u1",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1 },
+      },
+    ]
+    const parts: Record<string, any[]> = {
+      a1: [
+        {
+          id: "ss",
+          type: "step-start",
+          inputChars: 1000,
+          inputTokens: 400,
+          inputBreakdown: {
+            system: 200,
+            instructions: 100,
+            skills: 50,
+            tools: 50,
+            messages: {
+              userText: 100,
+              assistantText: 80,
+              reasoning: 0,
+              toolInput: 40,
+              toolOutput: 80,
+              attachments: 100,
+              total: 400,
+            },
+          },
+        },
+        { id: "tx", type: "text", text: "hello world" },
+      ],
+    }
+    const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
+    // #127：input 32 + live 3 = 35；toolCalls input 16
+    expect(acc.breakdown!.assistantText).toBe(35)
+    expect(acc.breakdown!.toolCalls).toBe(16)
+    const next = tokenAccounting(msgs, (id) => id === "a1" ? [
+      { ...parts.a1[0], id: "00-finish", type: "step-finish",
+        tokens: { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } } }, ...parts.a1,
+    ] : [])
+    expect(next.breakdown!.system).toBe(80)
+    expect(next.breakdown!.assistantText).toBe(35)
+  })
+
   test("durable projection survives an empty visible history and preserves prepared input", () => {
     const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }
     const snapshot = (request: SessionRequestUsage) => tokenAccounting([], () => [], undefined, {

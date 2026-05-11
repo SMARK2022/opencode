@@ -93,6 +93,65 @@ function text(messageID: string, value: string): TextPart {
 }
 
 describe("context usage", () => {
+  test("confirmed allocation composes input history and live output on the panel path", async () => {
+    const inputBreakdown = {
+      system: 300, instructions: 100, skills: 0, tools: 100,
+      messages: { userText: 50, assistantText: 80, reasoning: 60, toolInput: 40, toolOutput: 70, attachments: 100, total: 500 },
+    }
+    const finish: Part = {
+      id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0,
+      tokens: { input: 300, output: 150, reasoning: 50, cache: { read: 60, write: 40 } }, inputChars: 1000, inputBreakdown,
+    }
+    const request: NonNullable<Session["request"]> = {
+      messageID: "1", assistantID: "2", input: 4000, output: 300, cost: 2, stepInput: 400, stepOutput: 200,
+      model: { providerID: "test", modelID: "model", contextLimit: 20000 },
+      inputEstimate: { input: 250, bodyChars: 1000, confirmed: true, charsPerToken: 4, inputBreakdown },
+    }
+    const session: Session = {
+      id: "s", slug: "s", projectID: "p", directory: ".", title: "s", version: "1", time: { created: 0, updated: 0 },
+      tokens: { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }, cost: 3, request,
+    }
+    const input: ComputeContextDataInput = {
+      messages: [user("1"), assistant("2", "1")], parts: { "1": [text("1", "short")], "2": [text("2", "abcdefghijkl"), finish] },
+      session, providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
+    }
+    const data = await computeContextData(input)
+    // provider input 含缓存共 400，不能用旧 prepared 的 250 或输入密度 4 重解释分类。
+    expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBe(120)
+    expect(data.categories.find((item) => item.name === "Instructions")?.tokens).toBe(40)
+    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBe(40)
+    expect(data.details.messages).toMatchObject({ assistantText: 182, reasoning: 74, toolCalls: 16, attachments: 40 })
+    expect(data.details.usage).toMatchObject({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, total: 9850, cost: 3 })
+    const native = await computeContextData({ ...input,
+      messages: input.messages.map((message) => message.role === "assistant"
+        ? { ...message, tokens: finish.tokens, inputEstimate: request.inputEstimate } : message),
+      parts: { "2": [text("2", "abcdefghijkl")] },
+    })
+    expect(native.details.messages).toMatchObject({ assistantText: 182, reasoning: 74, toolCalls: 16 })
+    const estimate = { input: 777, bodyChars: 1554, confirmed: false, charsPerToken: 2, inputBreakdown, afterPartID: "sf" }
+    const pending = await computeContextData({ ...input,
+      messages: input.messages.map((message) => message.role === "assistant"
+        ? { ...message, time: { created: 2 }, inputEstimate: estimate } : message),
+      session: { ...session, request: { ...request, estimatedInput: 777, inputEstimate: estimate } },
+    })
+    // 新快照的 system=150；旧 finish 的 120 及其输出不能继续占据下一轮分类。
+    expect(pending.categories.find((item) => item.name === "System prompt")?.tokens).toBe(150)
+    expect(pending.details.messages).toMatchObject({ assistantText: 40, reasoning: 30, toolCalls: 20 })
+    const zeroBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
+      messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: 0 } }
+    const zero = await computeContextData({ ...input, messages: [], parts: {},
+      session: { ...session, request: { ...request, assistantID: "evicted", estimatedInput: 0,
+        inputEstimate: { input: 0, bodyChars: 0, confirmed: false, inputBreakdown: zeroBreakdown } } },
+    })
+    expect(zero.categories.filter((item) => !item.isDeferred).map((item) => item.tokens)).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
+    expect(zero.details.usage.total).toBe(9850)
+    const confirmed = await computeContextData({ ...input, messages: [], parts: {},
+      session: { ...session, request: { ...request, assistantID: "evicted" } },
+    })
+    expect(confirmed.categories.find((item) => item.name === "System prompt")?.tokens).toBe(120)
+    expect(confirmed.details.usage.total).toBe(9850)
+  })
+
   test("subscribes to in-place text, pending input, and confirmed token changes", async () => {
     const session: Session = {
       id: "ses_context", slug: "context", projectID: "p", directory: ".", title: "Session", version: "1",
@@ -797,9 +856,9 @@ describe("context usage", () => {
     // 确认输出600与费用来自 step-finish；细分的17000输入估算不能重写普通输入或抹掉缓存两栏。
     expect(legacy.details.usage).toMatchObject({ input: 12000, cacheRead: 3000, cacheWrite: 2000, output: 600, cost: 0.001 })
     expect(legacy.categories.slice(4, 8).map(item => [item.name, item.tokens])).toEqual([
-      ["User Messages", 4000], ["Tool Results", 1000], ["Assistant Messages", 4000], ["Tool Calls", 1000],
+      ["User Messages", 4000], ["Tool Results", 1000], ["Assistant Messages", 4600], ["Tool Calls", 1000],
     ])
-    expect(legacy.totalTokens).toBe(17000)
+    expect(legacy.totalTokens).toBe(17600)
     expect(legacy.details.usage.total).toBe(17600)
     // 小额与超过输入上限的 reserved 分别验证显式覆盖和可用窗口归零，不能沿用缺省缓冲公式。
     for (const reserved of [100, 20000]) {
@@ -885,11 +944,11 @@ describe("context usage", () => {
       ], "2": [finish] }, providers: [provider], paths: { cwd: process.cwd() },
       instructionFiles: [], skills: [], toolDefinitions: [] }
     const data = await computeContextData(input)
-    // 文本密度取 (10000-6000)/2000，附件取既有视觉估算，分类与明细必须同额。
-    expect(data.details.messages.userText).toBe(2000)
-    expect(data.details.messages.attachments).toBe(4)
-    expect(data.categories.find(item => item.name === "User Messages")?.tokens).toBe(2004)
-    expect(data.totalTokens).toBe(2004)
+    // 确认分类共享含缓存的 2000 输入，附件字符占比不能再次变成本地视觉估值。
+    expect(data.details.messages.userText).toBe(800)
+    expect(data.details.messages.attachments).toBe(1200)
+    expect(data.categories.find(item => item.name === "User Messages")?.tokens).toBe(2000)
+    expect(data.totalTokens).toBe(2000)
     expect(data.details.usage).toMatchObject({ input: 1600, cacheRead: 200, cacheWrite: 200 })
   })
 
