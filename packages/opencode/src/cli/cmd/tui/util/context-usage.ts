@@ -616,8 +616,26 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
 
   const tailCount = tail ? countFor(tail, total).count : 0
   const bodyLimit = total - tailCount
-  for (const category of body) {
-    const { exact, count } = countFor(category, bodyLimit - cells.length)
+
+  // Pre-compute all body category counts so rounding remainder can be given
+  // to Free space at its natural position, not appended after Model reserve.
+  const counts = body.map((_) => 0)
+  let remaining = bodyLimit
+  for (let ci = 0; ci < body.length; ci++) {
+    const count = countFor(body[ci], remaining).count
+    counts[ci] = count
+    remaining -= count
+  }
+
+  // Rounding remainder → add to Free space in place
+  const freeIdx = body.findIndex((c) => c.name === "Free space")
+  if (freeIdx >= 0 && remaining > 0) counts[freeIdx] += remaining
+
+  // Render in natural category order with pre-computed counts
+  for (let ci = 0; ci < body.length; ci++) {
+    const category = body[ci]
+    const count = counts[ci]
+    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
     for (let i = 0; i < count; i++) {
       const fullness = Math.max(0, Math.min(1, exact - i))
       cells.push({
@@ -627,17 +645,6 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
         fullness,
       })
     }
-    if (cells.length >= bodyLimit) break
-  }
-
-  const free = categories.find((item) => item.name === "Free space")
-  while (cells.length < bodyLimit) {
-    cells.push({
-      symbol: "⛶",
-      categoryName: "Free space",
-      color: free?.color ?? "textMuted",
-      fullness: 0,
-    })
   }
   if (tail) {
     const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
@@ -692,31 +699,35 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
       compactionSummary: 0,
     }
 
-    // 展示明细：文件系统只用于列出路径/名称，token 按 breakdown 预算等比分配
-    const instructions = await gatherInstructionFiles(input)
-    const instructionCharsTotal = instructions.reduce((s, i) => s + i.content.length, 0)
-    instructionDetails = instructions.map((item) => ({
-      path: item.path,
-      tokens: instructionCharsTotal > 0
-        ? Math.round((item.content.length / instructionCharsTotal) * instructionTokens)
-        : 0,
-    }))
+    // Streaming: skip instruction/skill/tool filesystem scans so the resource
+    // resolves immediately with live category totals. Details re-populate once the
+    // step is confirmed and the resource re-fetches.
+    if (acc.step.confirmed) {
+      const instructions = await gatherInstructionFiles(input)
+      const instructionCharsTotal = instructions.reduce((s, i) => s + i.content.length, 0)
+      instructionDetails = instructions.map((item) => ({
+        path: item.path,
+        tokens: instructionCharsTotal > 0
+          ? Math.round((item.content.length / instructionCharsTotal) * instructionTokens)
+          : 0,
+      }))
 
-    const skills = await gatherSkills(input)
-    skillDetails = skills.map((skill) => ({
-      name: skill.name,
-      path: skill.path,
-      tokens: skills.length > 0 ? Math.round(skillTokens / skills.length) : 0,
-    }))
+      const skills = await gatherSkills(input)
+      skillDetails = skills.map((skill) => ({
+        name: skill.name,
+        path: skill.path,
+        tokens: skills.length > 0 ? Math.round(skillTokens / skills.length) : 0,
+      }))
 
-    const rawToolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, acc.ratio.input)
-    const rawToolCharsTotal = rawToolDefs.reduce((s, t) => s + t.tokens * acc.ratio.input, 0)
-    toolDefs = rawToolDefs.map((t) => ({
-      name: t.name,
-      tokens: rawToolCharsTotal > 0
-        ? Math.round((t.tokens * acc.ratio.input / rawToolCharsTotal) * toolDefTokens)
-        : t.tokens,
-    }))
+      const rawToolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, acc.ratio.input)
+      const rawToolCharsTotal = rawToolDefs.reduce((s, t) => s + t.tokens * acc.ratio.input, 0)
+      toolDefs = rawToolDefs.map((t) => ({
+        name: t.name,
+        tokens: rawToolCharsTotal > 0
+          ? Math.round((t.tokens * acc.ratio.input / rawToolCharsTotal) * toolDefTokens)
+          : t.tokens,
+      }))
+    }
   }
 
   const wind = windowDetails(input, modelInfo.model)

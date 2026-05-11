@@ -1,4 +1,4 @@
-import { createMemo, createResource, For, Show } from "solid-js"
+import { createEffect, createMemo, createResource, For, Show } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { useDialog } from "@tui/ui/dialog"
 import { useKeybind } from "@tui/context/keybind"
@@ -8,6 +8,7 @@ import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
 import { TextAttributes } from "@opentui/core"
 import { Locale } from "@/util"
+import { createThrottledSignal } from "../../util/signal"
 import {
   computeContextData,
   type ContextCategoryColor,
@@ -224,7 +225,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   const { theme } = useTheme()
   useRenderer()
 
-  const input = createMemo(() => {
+  const inputRaw = createMemo(() => {
     const messages = [...(sync.data.message[props.sessionID] ?? [])]
     const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
     const paths = project.instance.path()
@@ -240,6 +241,11 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
       columns: dimensions().width,
     }
   })
+
+  // Throttle the resource source so streaming deltas don't starve computeContextData.
+  // leadingAndTrailing ensures the first update is immediate and the last one always flushes.
+  const [input, setInput] = createThrottledSignal(inputRaw(), 500)
+  createEffect(() => setInput(inputRaw()))
 
   const [data] = createResource(input, computeContextData)
 

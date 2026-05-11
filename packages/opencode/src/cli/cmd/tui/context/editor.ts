@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "url"
 import { onCleanup, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import z from "zod"
@@ -483,6 +484,39 @@ function pathContainsLength(parent: string, child: string) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)) ? resolved.length : 0
 }
 
+/**
+ * Converts a bridge registry URI string to a local file path.
+ * VS Code .toString() produces percent-encoded URIs for non-ASCII paths.
+ * Handles three VS Code URI schemes seen in the bridge registry:
+ *   file://  — notebook URI; decoded via fileURLToPath.
+ *   git:     — Git document URI; real file path extracted from the query JSON ({"path":"..."}).
+ *   vscode-notebook-cell: — cell-level URI; returns undefined (not a file path).
+ */
+function bridgeUriToPath(value?: string) {
+  if (!value) return
+  if (value.startsWith("file://")) {
+    try {
+      return fileURLToPath(value)
+    } catch {
+      return decodeURIComponent(new URL(value).pathname)
+    }
+  }
+  if (value.startsWith("vscode-notebook-cell:")) return
+  if (value.startsWith("git:")) {
+    const uri = new URL(value)
+    const search = uri.search ? decodeURIComponent(uri.search.slice(1)) : undefined
+    const parsed = search ? tryParseJson(search) : undefined
+    if (isRecord(parsed) && typeof parsed.path === "string") return parsed.path
+    const pathname = decodeURIComponent(uri.pathname)
+    return /^\/[a-z]:/i.test(pathname) ? pathname.slice(1) : pathname
+  }
+  return value
+}
+
+function tryParseJson(raw: string): unknown {
+  try { return JSON.parse(raw) } catch { return }
+}
+
 function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
   const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
   let entries: string[]
@@ -508,7 +542,7 @@ function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelecti
   if (!best) return
 
   const active = best.entry.active as Record<string, string> | undefined
-  const filePath = active?.notebook || active?.textEditor
+  const filePath = bridgeUriToPath(active?.notebook) ?? bridgeUriToPath(active?.textEditor)
   if (!filePath) return
 
   return { filePath, source: "bridge", ranges: [] }
@@ -522,7 +556,7 @@ function bridgeRegistryWorkspaceScore(entry: Record<string, unknown>, activeDire
     0,
     ...folders.map((folder) => {
       const fsPath = typeof folder.fsPath === "string" ? folder.fsPath : ""
-      const uri = typeof folder.uri === "string" ? folder.uri : ""
+      const uri = typeof folder.uri === "string" ? bridgeUriToPath(folder.uri) ?? folder.uri : ""
       return Math.max(
         fsPath ? pathContainsLength(fsPath, activeDirectory) : 0,
         uri ? pathContainsLength(uri, activeDirectory) : 0,

@@ -1664,12 +1664,20 @@ export function Prompt(props: PromptProps) {
                     })()}
                   </box>
                 </box>
-                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
-                  esc{" "}
-                  <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
-                  </span>
-                </text>
+                <box flexDirection="row" gap={1}>
+                  <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                    esc{" "}
+                    <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
+                      {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                    </span>
+                  </text>
+                  <Show when={store.agentLoopStartTime && elapsedSeconds() > 0}>
+                    <text fg={theme.textMuted}>
+                      {"· "}
+                      <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
+                    </text>
+                  </Show>
+                </box>
               </box>
             </Match>
             <Match when={warpNotice()}>
@@ -1709,14 +1717,6 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={true}>{props.hint ?? <text />}</Match>
           </Switch>
-          <Show when={store.agentLoopStartTime && elapsedSeconds() > 0}>
-            <box paddingLeft={3}>
-              <text fg={theme.textMuted}>
-                {"· "}
-                <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
-              </text>
-            </box>
-          </Show>
           <Show when={status().type !== "retry"}>
             <box gap={2} flexDirection="row">
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
@@ -1727,16 +1727,28 @@ export function Prompt(props: PromptProps) {
               <Switch>
                 <Match when={store.mode === "normal"}>
                   <Switch>
-                    <Match when={usage()}>
-                      {(item) => (
-                        <text fg={theme.textMuted} wrapMode="none">
-                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
-                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
-                          {item().context ? ` · ${item().context}` : ""}
-                          {item().cost ? ` · ${item().cost}` : ""}
-                        </text>
-                      )}
-                    </Match>
+                        <Match when={usage()}>
+                          {(item) => (
+                            <Show
+                              when={showCumulative()}
+                              fallback={
+                                // width <= 120: ↑↓ combined arrow, context + cost only
+                                <text fg={theme.textMuted} wrapMode="none">
+                                  <span style={{ fg: usageFlow().input || usageFlow().output ? theme.text : theme.textMuted }}>↑↓</span>
+                                  {item().context ? ` ${item().context}` : ""}
+                                  {item().cost ? ` · ${item().cost}` : ""}
+                                </text>
+                              }
+                            >
+                              <text fg={theme.textMuted} wrapMode="none">
+                                <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+                                <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                                {item().context ? ` · ${item().context}` : ""}
+                                {item().cost ? ` · ${item().cost}` : ""}
+                              </text>
+                            </Show>
+                          )}
+                        </Match>
                     <Match when={true}>
                       <text fg={theme.text}>
                         {keybind.print("agent_cycle")} <span style={{ fg: theme.textMuted }}>agents</span>
