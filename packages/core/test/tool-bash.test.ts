@@ -16,6 +16,7 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { Shell } from "@opencode-ai/core/shell"
 import { BashTool } from "@opencode-ai/core/tool/bash"
+import type { TextEncodingMode } from "@opencode-ai/core/text-decoding"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ConfigToolOutput } from "@opencode-ai/core/config/tool-output"
@@ -122,6 +123,7 @@ const withTool = <A, E, R>(
   shell?: string,
   compression?: boolean,
   filesystem: Layer.Layer<FSUtil.Service> = LayerNode.compile(FSUtil.node),
+  encoding?: TextEncodingMode,
 ) => {
   const activeLocation = Layer.succeed(
     Location.Service,
@@ -139,10 +141,12 @@ const withTool = <A, E, R>(
           [PermissionV2.node, permission],
           [AppProcess.node, processLayer],
           // 显式 Config 文档驱动真实 selectedShell，不改测试进程的 SHELL 或 platform。
-          [Config.node, shell === undefined && compression === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
+          [Config.node, shell === undefined && compression === undefined && encoding === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
             entries: () => Effect.succeed([new Config.Document({ type: "document", info: new Config.Info({
               shell,
-              tool_output: compression === undefined ? undefined : new ConfigToolOutput.Info({ bash_compression: compression }),
+              tool_output: compression === undefined && encoding === undefined ? undefined : new ConfigToolOutput.Info({
+                bash_compression: compression, shell_encoding: encoding,
+              }),
             }) })]),
           }))],
           // 托管日志放在本测试的临时目录，验证恢复后由 fixture 清理，不污染用户数据。
@@ -450,6 +454,28 @@ describe("BashTool", () => {
               expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(raw)
               expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
             }), LayerNode.compile(AppProcess.node), shell)
+            for (const encoding of ["auto", "gb18030", "utf-8"] as const) {
+              const raw = Buffer.concat([Buffer.from("warning: "), Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0x0a])])
+              const bytesCommand = `$bytes = [byte[]](${Array.from(raw)}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)`
+              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+                const settled = yield* settleTool(registry, call({ command: bytesCommand, compress_output: true }))
+                const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
+                expect(settled.result.type).toBe("content")
+                expect(settled.output?.structured).toMatchObject({ exit: 0, diagnosticWarningLikeLines: 1, compression: { compressed: false } })
+                if (encoding === "utf-8") {
+                  expect(text).toContain("\uFFFD")
+                  expect(text).not.toContain("中文")
+                }
+                if (encoding !== "utf-8") {
+                  expect(text).toContain("中文")
+                  expect(text).not.toContain("\uFFFD")
+                }
+                const retained = settled.outputPaths?.[0]
+                if (!retained) throw new Error("expected retained codepage output")
+                expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(raw)
+                expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
+              }), LayerNode.compile(AppProcess.node), shell, false, undefined, encoding)
+            }
           }
         }),
         (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

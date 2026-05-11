@@ -241,7 +241,7 @@ const layer = Layer.effectDiscard(
               const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
               // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
               const diag = new BashDiagnosticCollector({ enabled })
-              const decoder = createAutoTextDecoder()
+              const decoder = createAutoTextDecoder({ encoding: configured.shell_encoding ?? "auto" })
               const parts: string[] = []
               let captured = 0
               let cut = false

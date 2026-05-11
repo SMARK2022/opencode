@@ -20,7 +20,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
-import { createAutoTextDecoder } from "@/util/text-decoding"
+import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decoding"
 // #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
 
 // 只有写操作失去 always 前缀建议；只读 Git 仍保留现有权限匹配路径。
@@ -344,6 +344,11 @@ function shellCompatibilityError(root: Node, shellName: string) {
   return Shell.compatibilityError(commands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
 }
 
+// #128：config.tool_output.shell_encoding，默认 auto
+function shellOutputEncoding(config?: { tool_output?: { shell_encoding?: TextEncodingMode } }): TextEncodingMode {
+  return config?.tool_output?.shell_encoding ?? "auto"
+}
+
 export const ShellTool = Tool.define(
   ShellID.ToolID,
   Effect.gen(function* () {
@@ -453,6 +458,8 @@ export const ShellTool = Tool.define(
         env: NodeJS.ProcessEnv
         timeout: number
         compressOutput: boolean
+      // #128：输出文本编码策略
+      encoding: TextEncodingMode
       },
       ctx: Tool.Context,
     ) {
@@ -511,7 +518,8 @@ export const ShellTool = Tool.define(
 
           // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
-          const decoder = createAutoTextDecoder()
+          // #128：按 input.encoding 锁定或自动探测
+          const decoder = createAutoTextDecoder({ encoding: input.encoding })
           // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
           const onChunk = (chunk: string) => {
             if (!chunk) return Effect.void
@@ -699,6 +707,8 @@ export const ShellTool = Tool.define(
                 }),
               )
 
+              // #128：读取 shell_encoding 配置
+              const encoding = shellOutputEncoding(cfg)
               return yield* run(
                 {
                   shell,
@@ -707,6 +717,7 @@ export const ShellTool = Tool.define(
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
                   compressOutput,
+                  encoding,
                 },
                 ctx,
               )
