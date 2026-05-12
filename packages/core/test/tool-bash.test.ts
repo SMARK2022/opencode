@@ -79,9 +79,9 @@ const appProcess = Layer.succeed(
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
         // 仅在测试观察边界解码传输包装；完整argv仍保留，真实编码由另一个实进程用例验证。
         const argument = command.args.at(-1)
-        const original = command.args.includes("-EncodedCommand") && argument !== undefined
-          ? Buffer.from(argument, "base64").toString("utf16le").split("\n").slice(3, -1).join("\n")
-          : argument ?? command.command
+        // 只观察外层脚本块中的原始命令；偏好行数和末尾流重定向不属于用户输入。
+        const script = command.args.includes("-EncodedCommand") && argument !== undefined ? Buffer.from(argument, "base64").toString("utf16le") : undefined
+        const original = script === undefined ? argument ?? command.command : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
         runs.push({ command: original, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
           args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
         // 原有 process 替身必须履行新的观察回调契约，不能让 settlement 测试得到空原文。
@@ -278,8 +278,8 @@ describe("BashTool", () => {
             expect(definitions[0]?.description).toContain("Use workdir instead of changing directories")
             // 独立字节预期同时约束无profile、UTF-8前导与原命令，不能只检查编码标志。
             if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
-              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "pwd", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
+              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
+                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'Continue'", "$DebugPreference = 'Continue'", "& {", "pwd", "} *>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
           }),
         )
           .pipe(Effect.andThen(() => Effect.gen(function* () {
@@ -329,7 +329,7 @@ describe("BashTool", () => {
                   expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
                   expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
                   // 原命令观察不代替spawn契约；PowerShell必须实际使用非交互的编码argv。
-                  if (!cmd) expect(runs[0]?.args?.slice(0, 4)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"])
+                  if (!cmd) expect(runs[0]?.args?.slice(0, 6)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand"])
                 }
               }), appProcess, shell)
             }
