@@ -287,6 +287,13 @@ export function Session() {
     }
   })
 
+  event.on("server.connected", () => {
+    // A reconnect means the SSE stream may have missed message deltas while the
+    // daemon kept writing SQLite. Force a DB-backed refresh for the visible
+    // session so the UI cannot stay stuck on an old pending state.
+    void sync.session.sync(route.sessionID, { force: true })
+  })
+
   let seeded = false
   let scroll: ScrollBoxRenderable
   let prompt: PromptRef | undefined

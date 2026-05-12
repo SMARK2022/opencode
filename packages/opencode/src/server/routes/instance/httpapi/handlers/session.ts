@@ -16,6 +16,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
+import { InstanceStore } from "@/project/instance-store"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { NotFoundError } from "@/storage/storage"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -56,6 +57,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const requestUsage = yield* SessionRequestUsage.Service
     const summary = yield* SessionSummary.Service
     const bus = yield* Bus.Service
+    const store = yield* InstanceStore.Service
     const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
@@ -225,7 +227,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* promptSvc.cancel(ctx.params.sessionID)
+      const info = yield* session.get(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.NotFound({})))
+      // Session runners are stored per instance directory. Route abort through
+      // the session's own directory so a differently-normalized TUI request can
+      // still interrupt the run that created the session.
+      yield* store.provide({ directory: info.directory }, promptSvc.cancel(ctx.params.sessionID))
       return true
     })
 

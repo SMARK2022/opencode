@@ -11,6 +11,7 @@ import path from "path"
 import { Database } from "@/storage/db"
 import { SessionTable } from "@/session/session.sql"
 import { eq } from "drizzle-orm"
+import { SessionPath } from "@/session/path"
 
 void Log.init({ print: false })
 const originalWorkspaces = Flag.OPENCODE_EXPERIMENTAL_WORKSPACES
@@ -172,6 +173,40 @@ describe("session.list", () => {
         expect(pathIDs).not.toContain(sibling.id)
       },
     })
+  })
+
+  test("lists legacy Windows global sessions stored without drive", async () => {
+    if (process.platform !== "win32") return
+    Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
+    await using tmp = await tmpdir()
+
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await svc.create({ title: "legacy-drive-relative-path" })
+        const legacy = path.resolve(tmp.path).replaceAll("\\", "/").replace(/^[A-Za-z]:\//, "")
+        // Older Windows global sessions could persist a drive-relative `...`
+        // path when the daemon happened to run on the same drive. The list query
+        // should still find those rows from the drive-qualified current path.
+        Database.use((db) => db.update(SessionTable).set({ path: legacy }).where(eq(SessionTable.id, session.id)).run())
+
+        const ids = (
+          await svc.list({
+            directory: tmp.path,
+            path: SessionPath.relative("/", tmp.path),
+          })
+        ).map((s) => s.id)
+        expect(ids).toContain(session.id)
+
+        const pathOnlyIDs = (await svc.list({ path: SessionPath.relative("/", tmp.path) })).map((s) => s.id)
+        expect(pathOnlyIDs).toContain(session.id)
+      },
+    })
+  })
+
+  test("normalizes Windows global session paths against the request drive", () => {
+    if (process.platform !== "win32") return
+    expect(SessionPath.relative("/", "F:\\ML\\PythonAIProject\\Claude-Code")).toBe("F:/ML/PythonAIProject/Claude-Code")
   })
 
   test("filters root sessions", async () => {

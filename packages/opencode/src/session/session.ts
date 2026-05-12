@@ -40,6 +40,7 @@ import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
 import { searchCondition } from "./search"
+import { SessionPath } from "./path"
 
 import { createDefaultTitle, isDefaultTitle } from "./title"
 
@@ -130,7 +131,7 @@ function getForkedTitle(title: string): string {
 }
 
 function sessionPath(worktree: string, cwd: string) {
-  return path.relative(path.resolve(worktree), cwd).replaceAll("\\", "/")
+  return SessionPath.relative(worktree, cwd)
 }
 
 const Summary = Schema.Struct({
@@ -817,7 +818,11 @@ function* listByProject(
   }
   if (input.path !== undefined) {
     if (input.path) {
-      const conds = [eq(SessionTable.path, input.path), like(SessionTable.path, `${input.path}/%`)]
+      const conds = SessionPath.aliases({
+        path: input.path,
+        directory: input.directory,
+        global: input.projectID === ProjectID.global,
+      }).flatMap((item) => [eq(SessionTable.path, item), like(SessionTable.path, `${item}/%`)])
 
       conditions.push(
         input.directory

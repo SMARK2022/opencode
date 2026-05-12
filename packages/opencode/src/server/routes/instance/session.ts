@@ -29,6 +29,7 @@ import { Bus } from "@/bus"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { NotFoundError } from "@/storage"
 import { jsonRequest, runRequest } from "./trace"
+import { InstanceStore } from "@/project/instance-store"
 
 const log = Log.create({ service: "server" })
 
@@ -560,8 +561,14 @@ export const SessionRoutes = lazy(() =>
       ),
       async (c) =>
         jsonRequest("SessionRoutes.abort", c, function* () {
-          const svc = yield* SessionPrompt.Service
-          yield* svc.cancel(c.req.valid("param").sessionID)
+          const sessionID = c.req.valid("param").sessionID
+          const sessions = yield* Session.Service
+          const store = yield* InstanceStore.Service
+          const info = yield* sessions.get(sessionID)
+          // Runners live in InstanceState keyed by directory. Use the session's
+          // persisted directory so abort still reaches the original run even if
+          // the current TUI/request directory was normalized differently.
+          yield* store.provide({ directory: info.directory }, SessionPrompt.Service.use((svc) => svc.cancel(sessionID)))
           return true
         }),
     )

@@ -30,8 +30,8 @@ import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import * as Log from "@opencode-ai/core/util/log"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
-import path from "path"
 import { useKV } from "./kv"
+import { SessionPath } from "@/session/path"
 
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
@@ -113,14 +113,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     const fullSyncedSessions = new Set<string>()
     let syncedWorkspace = project.workspace.current()
+    let connectedOnce = false
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
       return {
-        path: path
-          .relative(path.resolve(project.data.instance.path.worktree), project.data.instance.path.directory)
-          .replaceAll("\\", "/"),
+        path: SessionPath.relative(project.data.instance.path.worktree, project.data.instance.path.directory),
       }
     }
 
@@ -132,6 +131,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     event.subscribe((event) => {
       switch (event.type) {
+        case "server.connected":
+          if (!connectedOnce) {
+            connectedOnce = true
+            break
+          }
+          // SSE has no replay buffer. After a reconnect, refresh persisted state
+          // from SQLite so missed message/status events cannot leave the TUI stale.
+          fullSyncedSessions.clear()
+          void bootstrap({ fatal: false }).catch(() => undefined)
+          break
         case "server.instance.disposed":
           void bootstrap()
           break
@@ -542,8 +551,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           if (last.role === "user") return "working"
           return last.time.completed ? "idle" : "working"
         },
-        async sync(sessionID: string) {
-          if (fullSyncedSessions.has(sessionID)) return
+        async sync(sessionID: string, options?: { force?: boolean }) {
+          if (!options?.force && fullSyncedSessions.has(sessionID)) return
           const [session, messages, todo, diff] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
             sdk.client.session.messages({ sessionID, limit: 100 }),
