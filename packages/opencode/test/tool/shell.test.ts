@@ -1272,6 +1272,32 @@ describe("tool.shell abort", () => {
 
   for (const item of ps) {
     test(
+      `preserves native CP936 stderr bytes from PowerShell wrapper [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const result = await Effect.runPromise(
+              bash.execute(
+                {
+                  command:
+                    "$bytes = [byte[]](0xBE,0xAF,0xB8,0xE6,0x3A,0x20,0x44,0x4F,0x4D,0xCA,0xC7,0xC4,0xDA,0xB2,0xBF,0xD7,0xA8,0xD3,0xC3,0x20,0x41,0x50,0x49,0x0A); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)",
+                  description: "Write CP936 stderr bytes",
+                },
+                ctx,
+              ),
+            )
+            expect(result.output).toContain("警告: DOM是内部专用 API")
+            expect(result.output).not.toContain("����")
+          },
+        })
+      }),
+    )
+  }
+
+  for (const item of ps) {
+    test(
       `keeps PowerShell output as plain text [${item.label}]`,
       withShell(item, async () => {
         await WithInstance.provide({
@@ -1281,7 +1307,8 @@ describe("tool.shell abort", () => {
             const result = await Effect.runPromise(
               bash.execute(
                 {
-                  command: "Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
+                  command:
+                    "Write-Progress -Activity '部署' -Status '传输中' -PercentComplete 50; Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
                   description: "Write staged plain text",
                 },
                 ctx,
@@ -1291,6 +1318,9 @@ describe("tool.shell abort", () => {
             expect(result.output).toContain("2/4 EXPORT")
             expect(result.output).toContain("3/4 TRANSFER")
             expect(result.output).toContain("4/4 RUN")
+            expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
+            expect(result.output).not.toContain("部署")
+            expect(result.output).not.toContain("传输中")
           },
         })
       }),

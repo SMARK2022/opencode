@@ -1401,6 +1401,13 @@ function transformPowerShellClixml(text: string): string | null {
 }
 
 function decodePowerShellClixmlBlock(block: string): string | null {
+  const plain = decodePowerShellClixmlPlain(block)
+  if (!plain) return null
+
+  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+}
+
+function decodePowerShellClixmlPlain(block: string): string | null {
   if (!isPurePowerShellClixmlBlock(block)) return null
 
   const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
@@ -1416,7 +1423,7 @@ function decodePowerShellClixmlBlock(block: string): string | null {
 
   if (!plain) return null
 
-  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+  return plain
 }
 
 // Only decode CLIXML blocks that are structurally pure XML-ish payloads.
@@ -1999,7 +2006,7 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
 export function normalizePowerShellOutput(text: string) {
   let changed = false
   const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
-    const decoded = decodePowerShellClixmlBlock(block)
+    const decoded = decodePowerShellClixmlPlain(block)
     if (!decoded) return block
     changed = true
     return decoded

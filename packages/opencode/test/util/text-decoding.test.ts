@@ -44,6 +44,38 @@ describe("text-decoding", () => {
     expect(decodeText(input).text).toBe("中文")
   })
 
+  test("decodes javac-style CP936 diagnostics", () => {
+    const input = bytes([
+      ...utf8("H:\\FRCheck\\src\\verifycmd\\VerifyCommand.java:3: "),
+      0xbe,
+      0xaf,
+      0xb8,
+      0xe6,
+      0x3a,
+      0x20,
+      0x44,
+      0x4f,
+      0x4d,
+      0xca,
+      0xc7,
+      0xc4,
+      0xda,
+      0xb2,
+      0xbf,
+      0xd7,
+      0xa8,
+      0xd3,
+      0xc3,
+      0x20,
+      0x41,
+      0x50,
+      0x49,
+      0x0a,
+    ])
+
+    expect(decodeText(input).text).toContain("警告: DOM是内部专用 API")
+  })
+
   test("honors explicit utf-8 without legacy fallback", () => {
     const input = bytes([0xd6, 0xd0, 0xce, 0xc4])
     expect(decodeText(input, { encoding: "utf-8" }).text).toContain("�")

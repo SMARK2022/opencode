@@ -28,6 +28,7 @@ import {
   BashDiagnosticCollector,
   bashCompressionMetadata,
   compressVisibleOutput,
+  normalizePowerShellOutput,
   renderDiagnosticAppendix,
 } from "./bash-compress"
 
@@ -351,8 +352,8 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
   })
 }
 
-// PowerShell expects -EncodedCommand input as UTF-16LE.
-// The wrapper also forces UTF-8 console encoding and collapses the information stream into stdout so shell output stays plain text.
+// PowerShell expects -EncodedCommand input as UTF-16LE. Keep native stderr as raw bytes:
+// redirecting stream 2 here makes PowerShell decode legacy tools (javac/GBK) before our decoder can.
 function psEncoded(command: string) {
   return Buffer.from(
     [
@@ -366,7 +367,7 @@ function psEncoded(command: string) {
       "$DebugPreference = 'Continue'",
       "& {",
       command,
-      "} *>&1",
+      "} 3>&1 4>&1 5>&1 6>&1",
       "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
     ].join("\n"),
     "utf16le",
@@ -700,18 +701,19 @@ export const ShellTool = Tool.define(
       }
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
+      const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
       diag.end()
       const diagnosticSnapshot = diag.snapshot()
 
       // Compress output if enabled
       const compressed = input.compressOutput
-        ? compressVisibleOutput(raw)
-        : { text: raw, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
+        ? compressVisibleOutput(normalized)
+        : { text: normalized, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
 
-      const end = tail(input.compressOutput ? compressed.text : raw, limits.maxLines, limits.maxBytes)
+      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
       if (!file && end.cut) {
-        file = yield* trunc.write(raw)
+        file = yield* trunc.write(normalized)
       }
 
       let output = end.text
