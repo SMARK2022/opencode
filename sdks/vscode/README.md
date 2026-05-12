@@ -68,7 +68,7 @@ Build and package from the `sdks/vscode` directory:
 bun run check-types
 bun run lint
 bun run package
-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.39.vsix"
+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix"
 ```
 
 Or use the bundled shortcut:
@@ -82,7 +82,7 @@ The shortcut builds first, then packages directly into `dist/`. It intentionally
 Install:
 
 ```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.39.vsix --force
+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.40.vsix --force
 ```
 
 ## Architecture
