@@ -185,13 +185,21 @@ export function cmd(file: string, command: string, platform: string = process.pl
     "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
     "$OutputEncoding = [Console]::OutputEncoding",
+    "$ProgressPreference = 'SilentlyContinue'",
+    "$InformationPreference = 'Continue'",
+    "$WarningPreference = 'Continue'",
+    "$VerbosePreference = 'Continue'",
+    "$DebugPreference = 'Continue'",
+    "& {",
     command,
+    "} *>&1",
     // 换行隔开用户尾注释；仅透传实际 native exit，不把 cmdlet 的空值变成退出码。
     "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
   ].join("\n")
   return {
     command: file,
-    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    // 显式文本格式降低 PowerShell 信息流被序列化为 CLIXML 的概率。
+    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     // 显式 argv 不能再经 shell 包装，否则引号和中文会被第二次解释。
     shell: false,
   }

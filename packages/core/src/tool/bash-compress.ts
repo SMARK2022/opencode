@@ -963,20 +963,148 @@ export function shouldCompressOutput(text: string) {
   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
 }
 
-// 保留源 CLIXML 节点提取与转义规则，ANSI 清洗复用现有实现。
+// #129：CLIXML 标准头与 <Objs> 块匹配
+const POWER_SHELL_CLIXML_HEADER_RE = /^\s*#<\s*CLIXML(?:\r?\n|$)/i
+// #129：匹配可选头 + 完整 <Objs>…</Objs>
+const POWER_SHELL_CLIXML_BLOCK_RE = /(?:#<\s*CLIXML(?:\r?\n)?)?<Objs\b[\s\S]*?<\/Objs>/gi
+// #129：S 与 ToString 节点正文捕获
+const POWER_SHELL_CLIXML_TEXT_NODE_RE = /<(S|ToString)\b([^>]*)>([\s\S]*?)<\/\1>/gi
+// #129：优先抽取有业务含义的 S 节点名，避免颜色/源等元数据淹没正文
+const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
+  "message",
+  "tostring",
+  "exception",
+  "errordetails",
+  "positionmessage",
+  "fullyqualifiederrorid",
+  "scriptstacktrace",
+  "stacktrace",
+  "line",
+  "statement",
+  "command",
+  "value",
+  "path",
+  "targetobject",
+  "categoryinfo",
+])
+
+/**
+ * Detects and decodes PowerShell CLIXML output back to plain text.
+ * CLIXML is PowerShell's XML-based error/info serialization format that usually
+ * starts with `#< CLIXML` and wraps visible text inside `<Objs>...<S ...>...`.
+ *
+ * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
+ * if the input is recognized CLIXML, or null otherwise.
+ */
 function transformPowerShellClixml(text: string) {
-  const trimmed = text.trimStart()
-  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
-  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
-  const parts: string[] = []
-  let match: RegExpExecArray | null
-  while ((match = decoded.exec(text)) !== null) {
-    parts.push(match[1].replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))))
-  }
+  // #129：按块替换纯 CLIXML，混合 stdout 块保持原样
+  // #129：整段扫描所有 CLIXML 块并替换
+  let changed = false
+  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
+    const decoded = decodePowerShellClixmlBlock(block)
+    // #129：非纯块返回原文
+    if (!decoded) return block
+    changed = true
+    return decoded
+  })
+  // #129：无变更返回 null 让压缩走默认路径
+  // 合法 CLIXML 的解码不受压缩收益支配，短消息同样保留可见正文。
+  return changed ? next : null
+}
+
+// #129：单块 CLIXML → high-entropy 包装纯文本
+function decodePowerShellClixmlBlock(block: string): string | null {
+  if (!isPurePowerShellClixmlBlock(block)) return null
+
+  // #129：去掉可选 #< CLIXML 头
+  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
+
+  const parts = extractPowerShellClixmlText(body)
+  // #129：无可见节点则不认作 CLIXML
   if (parts.length === 0) return null
-  const plain = stripAnsi(parts.join("")).replace(/\r\n/g, "\n").trimEnd()
+
+  let plain = parts.join("\n")
+  // #129：清 ANSI 颜色残留
+  plain = stripAnsi(plain)
+  // #129：统一 \r\n / \r 为 \n
+  plain = plain.replace(/\r\n?/g, "\n")
+  plain = plain.trimEnd()
+
   if (!plain) return null
   return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+}
+
+// #129：仅解码结构纯净的 XML 块，避免吞掉夹杂的真实命令输出
+function isPurePowerShellClixmlBlock(block: string) {
+  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
+  // 已识别文本节点内的换行是正文，只检查节点外是否夹杂真实stdout。
+  const lines = body.replace(POWER_SHELL_CLIXML_TEXT_NODE_RE, "").split(/\r?\n/)
+  let sawXml = false
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    // #129：XML 起止标签视为合法
+    if (trimmed.startsWith("<Objs") || trimmed.startsWith("</Objs>")) {
+      sawXml = true
+      continue
+    }
+    // #129：其它以 < 开头的 XML 行也合法
+    if (trimmed.startsWith("<")) {
+      sawXml = true
+      continue
+    }
+    // #129：出现非 XML 纯文本则判定混合块
+    return false
+  }
+
+  // #129：至少见过 XML 才算纯块
+  return sawXml
+}
+
+// #129：抽取 S/ToString 可见正文
+function extractPowerShellClixmlText(text: string) {
+  const collect = (fallback: boolean) => {
+    POWER_SHELL_CLIXML_TEXT_NODE_RE.lastIndex = 0
+    const parts: string[] = []
+    let match: RegExpExecArray | null
+
+    while ((match = POWER_SHELL_CLIXML_TEXT_NODE_RE.exec(text)) !== null) {
+      const nodeType = match[1]
+      const attrs = match[2]
+      const raw = match[3]
+      const name = /(?:^|\s)(?:N|S)="([^"]+)"/i.exec(attrs)?.[1]?.toLowerCase()
+      // #129：非 fallback 时跳过无意义 S 节点名
+      if (nodeType === "S" && !fallback && (!name || !POWER_SHELL_CLIXML_MEANINGFUL_NAMES.has(name))) continue
+
+      const decoded = clixmlDecodeHexEscapes(decodeXmlEntities(raw)).trimEnd()
+      if (decoded.trim().length === 0 || parts.at(-1) === decoded) continue
+      parts.push(decoded)
+    }
+
+    return parts
+  }
+
+  // #129：先取有名节点，空再 fallback 全部 S/ToString
+  const parts = collect(false)
+  if (parts.length > 0) return parts
+  return collect(true)
+}
+
+// #129：XML 实体还原，CLIXML 文本节点可能含 &lt; 等
+function decodeXmlEntities(value: string) {
+  return value.replace(/&(lt|gt|amp|quot|apos);/g, (_, entity) => {
+    if (entity === "lt") return "<"
+    if (entity === "gt") return ">"
+    if (entity === "amp") return "&"
+    if (entity === "quot") return '"'
+    return "'"
+  })
+}
+
+// PowerShell 使用 UTF-16 码元转义，保持原始码元顺序即可还原代理对。
+function clixmlDecodeHexEscapes(value: string) {
+  return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
 }
 
 /**
@@ -1431,6 +1559,22 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
  * 组装并渲染完整的诊断附录（Appendix），作为 Bash 输出结尾的后缀。
  * 只返回当前可见输出中没有出现的高信号错误上下文。
  */
+/**
+ * #129：把纯 CLIXML 块还原为可见纯文本，保留周围 stdout。
+ * 混合块不碰，避免丢失真实命令输出。
+ */
+export function normalizePowerShellOutput(text: string) {
+  let changed = false
+  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
+    const decoded = decodePowerShellClixmlBlock(block)
+    if (!decoded) return block
+    changed = true
+    return decoded
+  })
+
+  return changed ? next : text
+}
+
 export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
   const config = configOf(options.config)
 

@@ -1358,6 +1358,41 @@ describe("tool.shell windows multi-encoding", () => {
   }
 })
 
+// #129：PowerShell 输出保持纯文本（Information 流可见、无 CLIXML 噪声）
+describe("tool.shell windows plain text", () => {
+  if (process.platform !== "win32") return
+
+  for (const item of ps) {
+    it.live(
+      `keeps PowerShell output as plain text [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const tmp = yield* tmpdirScoped()
+            yield* runIn(
+              tmp,
+              Effect.gen(function* () {
+                const bash = yield* initBash()
+                // #129：Write-Host + Write-Information 应保持纯文本
+                const result = yield* bash.execute(
+                  {
+                    command: `Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'`,
+                  },
+                  ctx,
+                )
+                expect(result.output).toContain("1/4 BUILD")
+                expect(result.output).toContain("2/4 EXPORT")
+                expect(result.output).toContain("3/4 TRANSFER")
+                expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
+              }),
+            )
+          }),
+        ),
+    )
+  }
+})
+
 
 // #126：非 Windows 也可用的 UTF-16LE 字节输出解码路径
 describe("tool.shell text decoding", () => {
