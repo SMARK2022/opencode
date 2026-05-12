@@ -1013,7 +1013,17 @@ function transformPowerShellClixml(text: string) {
 }
 
 // #129：单块 CLIXML → high-entropy 包装纯文本
+// #130：compress 仍走包装，normalize 走 plain
 function decodePowerShellClixmlBlock(block: string): string | null {
+  // #130：压缩路径包装；normalize 走 plain
+  const plain = decodePowerShellClixmlPlain(block)
+  if (!plain) return null
+  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+}
+
+// #130：纯文本 CLIXML 解码（无 high-entropy 包装）
+// #130：plain 返回值不含 high-entropy 标签
+function decodePowerShellClixmlPlain(block: string): string | null {
   if (!isPurePowerShellClixmlBlock(block)) return null
 
   // #129：去掉可选 #< CLIXML 头
@@ -1031,7 +1041,7 @@ function decodePowerShellClixmlBlock(block: string): string | null {
   plain = plain.trimEnd()
 
   if (!plain) return null
-  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+  return plain
 }
 
 // #129：仅解码结构纯净的 XML 块，避免吞掉夹杂的真实命令输出
@@ -1566,7 +1576,8 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
 export function normalizePowerShellOutput(text: string) {
   let changed = false
   const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
-    const decoded = decodePowerShellClixmlBlock(block)
+    // #130：normalize 输出纯文本，不套 high-entropy 标签
+    const decoded = decodePowerShellClixmlPlain(block)
     if (!decoded) return block
     changed = true
     return decoded

@@ -12,7 +12,7 @@ import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -612,9 +612,11 @@ export const ShellTool = Tool.define(
       }
       if (aborted) meta.push("User aborted the command")
       const raw = list.map((item) => item.text).join("")
+      // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
+      const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
       // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
       // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
-      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput }, input.command)
+      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
       diag.end()
       const diagnostic = diag.snapshot()
       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
