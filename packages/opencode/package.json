@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "1.19.7-smark",
+  "version": "1.19.8-smark",
   "//version-note": "版本递增至 1.19.7-smark（#118 对齐版本一致性）",
   "name": "opencode",
   "type": "module",
