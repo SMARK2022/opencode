@@ -2,7 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FileMutation } from "@opencode-ai/core/file-mutation"
@@ -131,9 +131,10 @@ describe("EditTool", () => {
                   registry,
                   call({ path: "hello.txt", oldString: "before", newString: "after" }),
                 )
+                const shown = settled.result.type === "text" ? settled.result.value : ""
                 expect(settled.result).toEqual({
                   type: "text",
-                  value: "Edited file successfully: hello.txt\nReplacements: 1\n```diff\n-before\n+after\n```",
+                  value: expect.stringContaining("Edited file successfully: hello.txt\nReplacements: 1\nChanged:\n```diff\n"),
                 })
                 expect(settled.output?.structured).toEqual({
                   replacements: 1,
@@ -148,6 +149,7 @@ describe("EditTool", () => {
                   ],
                 })
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\nrest\n")
+                expect(shown).toContain("-before\n+after\n rest")
                 expect(assertions).toMatchObject([{ sessionID, action: "edit", resources: ["hello.txt"], save: ["*"] }])
                 expect(writes).toEqual([yield* Effect.promise(() => fs.realpath(target))])
               }),
@@ -353,6 +355,17 @@ describe("EditTool", () => {
               expect(settled.output?.structured).toMatchObject({ replacements: 3 })
               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after after after")
               expect(writes).toHaveLength(1)
+              const literal = "$&! $1 $` $' $$"
+              const replaced = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: "after", newString: literal, replaceAll: true })))
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe([literal, literal, literal].join(" "))
+              expect(replaced.result).toMatchObject({ type: "text", value: expect.stringContaining(literal) })
+              // 唯一变化在第七行，模型必须看到真实 diff，而非前六行输入片段。
+              const original = "a\nb\nc\nd\ne\nf\ng\n"
+              const final = "a\nb\nc\nd\ne\nf\nG\n"
+              yield* Effect.promise(() => fs.writeFile(target, original))
+              const lastLine = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: original, newString: final })))
+              expect(lastLine.result).toMatchObject({ value: expect.stringContaining("-g\n+G") })
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(final)
             }),
           ),
         )
@@ -361,22 +374,28 @@ describe("EditTool", () => {
     ),
   )
 
-  it.live("preserves BOM and CRLF line endings", () =>
+  it.live("preserves BOM and file line endings in edits and diffs", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
-      (tmp) => {
-        reset()
+      (tmp) => Effect.gen(function* () {
         const target = path.join(tmp.path, "windows.txt")
-        return Effect.promise(() => fs.writeFile(target, "\uFEFFbefore\r\nrest\r\n")).pipe(
-          Effect.andThen(
-            withTool(tmp.path, (registry) =>
-              executeTool(registry, call({ path: "windows.txt", oldString: "before\nrest", newString: "after\nrest" })),
-            ),
-          ),
-          Effect.andThen(() => Effect.promise(() => fs.readFile(target, "utf8"))),
-          Effect.tap((content) => Effect.sync(() => expect(content).toBe("\uFEFFafter\r\nrest\r\n"))),
-        )
-      },
+        for (const ending of ["\n", "\r\n", "\r"]) {
+          reset()
+          yield* Effect.promise(() => fs.writeFile(target, `\uFEFFbefore${ending}rest${ending}`))
+          // 真实 registry 结算还要校验逻辑 diff，不能只看到写盘正文正确。
+          const settled = yield* withTool(tmp.path, (registry) =>
+            settleTool(registry, call({ path: "windows.txt", oldString: "before\r\nrest", newString: "after\nrest" })),
+          )
+          const output = Schema.decodeUnknownSync(EditTool.Output)(settled.output?.structured)
+          expect(output.replacements).toBe(1)
+          expect(output.files[0]).toMatchObject({ additions: 1, deletions: 1 })
+          expect(output.files[0]?.patch).toContain("-before\n+after\n")
+          expect(output.files[0]?.patch).not.toContain("\r")
+          expect(output.files[0]?.patch).not.toContain("\uFEFF")
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(`\uFEFFafter${ending}rest${ending}`)
+          expect(writes).toHaveLength(1)
+        }
+      }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
@@ -424,7 +443,6 @@ test("keeps the locked edit schema, semantics docstring, and deferred TODOs visi
   )
   for (const todo of [
     "Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.",
-    "Add formatter integration after V2 formatter runtime exists.",
     "Publish watcher/file-edit events after V2 watcher integration exists.",
     "Add snapshots / undo after design exists.",
     "Add LSP notification and diagnostics after V2 LSP runtime exists.",

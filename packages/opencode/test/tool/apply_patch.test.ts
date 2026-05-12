@@ -546,4 +546,48 @@ EOF`
       expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
     }),
   )
+  // #131：对 CRLF 文件 apply 后内容正确且 ask 元数据 diff 归一
+  it.instance("applies patches to CRLF files without line-ending fallout in ask metadata", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx, calls } = makeCtx()
+      const target = path.join(test.directory, "patch-crlf.txt")
+      yield* writeText(target, "line1\r\nline2\r\n")
+      const patchText =
+        "*** Begin Patch\n*** Update File: patch-crlf.txt\n@@\n-line2\n+changed\n*** End Patch"
+      yield* execute({ patchText }, ctx)
+      const raw = yield* readText(target)
+      expect(raw).toBe("line1\r\nchanged\r\n")
+      const file = calls[0]?.metadata.files[0]
+      expect(calls).toHaveLength(1)
+      expect(file).toMatchObject({ additions: 1, deletions: 1 })
+      const diff = file?.patch ?? ""
+      expect(diff).toContain("-line2")
+      expect(diff).toContain("+changed")
+      expect(diff).not.toContain("-line1")
+      expect(diff).not.toContain("+line1")
+      yield* writeText(target, "\uFEFFline1\r\nline2\r\n")
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe("\uFEFFline1\r\nchanged\r\n")
+      expect(calls[1]?.metadata.files[0]?.patch).not.toContain("\uFEFF")
+    }),
+  )
+
+  // #131：CR-only 文件可 apply，逻辑行匹配
+  it.instance("applies patches to CR-only files", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx, calls } = makeCtx()
+      const target = path.join(test.directory, "patch-cr.txt")
+      yield* writeText(target, "line1\rline2\r")
+      const patchText =
+        "*** Begin Patch\n*** Update File: patch-cr.txt\n@@\n-line2\n+changed\n*** End Patch"
+      yield* execute({ patchText }, ctx)
+      const raw = yield* readText(target)
+      expect(raw).toBe("line1\rchanged\r")
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.metadata.files[0]).toMatchObject({ additions: 1, deletions: 1, patch: expect.stringContaining("-line2\n+changed") })
+    }),
+  )
+
 })

@@ -13,6 +13,8 @@ import { PermissionV2 } from "../permission"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
+import { Format } from "../format"
+import { normalizeLineEndings } from "../util/line-ending"
 
 export const name = "apply_patch"
 
@@ -40,6 +42,11 @@ export const toModelOutput = (output: Output) =>
     ...output.applied.map(
       (item) => `${item.type === "add" ? "A" : item.type === "delete" ? "D" : "M"} ${item.resource}`,
     ),
+    "",
+    "Changed:",
+    "```diff",
+    ...output.files.map((file) => file.patch),
+    "```",
   ].join("\n")
 
 type Prepared =
@@ -63,6 +70,7 @@ const layer = Layer.effectDiscard(
     const files = yield* FileMutation.Service
     const fs = yield* FSUtil.Service
     const permission = yield* PermissionV2.Service
+    const format = yield* Format.Service
 
     yield* tools
       .register({
@@ -155,7 +163,7 @@ const layer = Layer.effectDiscard(
                   }).pipe(Effect.mapError(() => fail(hunk.path)))
                 }
 
-                const patchFiles = prepared.map(patchFile)
+                const patchFiles: Array<typeof FileDiff.Info.Type> = []
                 yield* Effect.forEach(
                   prepared,
                   (change) =>
@@ -167,21 +175,26 @@ const layer = Layer.effectDiscard(
                             change.contents.endsWith("\n") || change.contents === ""
                               ? change.contents
                               : `${change.contents}\n`,
+                          format: format.file,
                         })
                         applied.push({ type: change.type, resource: result.resource, target: result.target })
+                        patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
                         return
                       }
                       if (change.type === "delete") {
                         const result = yield* files.remove({ target: change.target })
                         applied.push({ type: change.type, resource: result.resource, target: result.target })
+                        patchFiles.push(patchFile(change))
                         return
                       }
                       const result = yield* files.writeIfUnchanged({
                         target: change.target,
                         expected: change.source,
                         content: change.content,
+                        format: format.file,
                       })
                       applied.push({ type: change.type, resource: result.resource, target: result.target })
+                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
                     }).pipe(Effect.mapError(() => fail(change.path))),
                   { discard: true },
                 )
@@ -199,11 +212,14 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/apply-patch",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
 })
 
 function patchFile(change: Prepared): typeof FileDiff.Info.Type {
-  const counts = diffLines(change.before, change.after).reduce(
+  const before = normalizeLineEndings(change.before)
+  const after = normalizeLineEndings(change.after)
+  // 增删统计与展示共用同一逻辑行视图，写入仍使用 prepared 原始内容。
+  const counts = diffLines(before, after).reduce(
     (result, item) => ({
       additions: result.additions + (item.added ? (item.count ?? 0) : 0),
       deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
@@ -212,7 +228,7 @@ function patchFile(change: Prepared): typeof FileDiff.Info.Type {
   )
   return {
     file: change.target.resource,
-    patch: createTwoFilesPatch(change.target.resource, change.target.resource, change.before, change.after),
+    patch: createTwoFilesPatch(change.target.resource, change.target.resource, before, after),
     status: change.type === "add" ? "added" : change.type === "delete" ? "deleted" : "modified",
     ...counts,
   }

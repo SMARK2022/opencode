@@ -12,6 +12,7 @@ import { makeLocationNode } from "../effect/app-node"
 import { FileMutation } from "../file-mutation"
 import { LocationMutation } from "../location-mutation"
 import { PermissionV2 } from "../permission"
+import { Format } from "../format"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
@@ -34,14 +35,21 @@ export const Output = Schema.Struct({
   existed: Schema.Boolean,
   // canonical编码保留覆写diff，供TUI消费；模型成功正文保持原契约。
   diff: Schema.optionalKey(Schema.String),
+  formattedDiff: Schema.optionalKey(Schema.String),
+  formattedContent: Schema.optionalKey(Schema.String),
 })
 export type Output = typeof Output.Type
 
 export const toModelOutput = (output: Output) =>
-  `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`
+  [
+    `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`,
+    ...(output.formattedDiff ? ["", "Formatted changes (auto-format adjusted the file):", "```diff", output.formattedDiff, "```"] : []),
+  ].join("\n")
+
+// 最终内容反馈来自锁内实际回读；后续历史投影消费相同格式化结果。
+
 
 /** Deferred V2 write UX integrations remain visible at the model-facing seam. */
-// TODO: Add formatter integration after V2 formatter runtime exists.
 // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
 // TODO: Add snapshots / undo after design exists.
 // TODO: Add LSP notification and diagnostics after V2 LSP runtime exists.
@@ -52,6 +60,7 @@ const layer = Layer.effectDiscard(
     const mutation = yield* LocationMutation.Service
     const files = yield* FileMutation.Service
     const permission = yield* PermissionV2.Service
+    const format = yield* Format.Service
 
     yield* tools
       .register({
@@ -86,7 +95,7 @@ const layer = Layer.effectDiscard(
                   agent: context.agent,
                   source,
                 })
-                return yield* files.writeTextPreservingBom({ target, content: input.content })
+                return yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
               }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to write ${input.path}` }))),
           }),
           "edit",
@@ -99,5 +108,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/write",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, PermissionV2.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, PermissionV2.node, Format.node],
 })

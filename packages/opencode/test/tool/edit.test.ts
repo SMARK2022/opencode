@@ -571,4 +571,43 @@ describe("tool.edit", () => {
       }),
     )
   })
+  describe("line-ending metadata", () => {
+    // #131：CRLF 文件用 LF oldString 匹配并改内容，写回应保留 CRLF
+    it.instance("preserves CRLF when editing with LF oldString", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "edit-crlf.txt")
+        yield* put(filepath, "Line 1\r\nLine 2\r\n")
+        const result = yield* run({
+          filePath: filepath,
+          oldString: "Line 1\nLine 2\n",
+          newString: "Line 1\nLine X\n",
+        })
+        const raw = yield* loadRaw(filepath)
+        expect(raw).toContain("\r\n")
+        expect(raw).toBe("Line 1\r\nLine X\r\n")
+        expect(result.metadata.diff).toContain("-Line 2")
+        expect(result.metadata.diff).toContain("+Line X")
+      }),
+    )
+
+    // #131：CR-only 文件可被逻辑行匹配编辑，写回保留 CR
+    it.instance("preserves CR-only endings when editing with LF oldString", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "edit-cr.txt")
+        yield* put(filepath, "Line 1\rLine 2\r")
+        yield* run({
+          filePath: filepath,
+          oldString: "Line 1\nLine 2\n",
+          newString: "Line 1\nLine Y\n",
+        })
+        const raw = yield* loadRaw(filepath)
+        expect(raw.includes("\r")).toBe(true)
+        expect(raw.includes("\r\n")).toBe(false)
+        expect(raw).toBe("Line 1\rLine Y\r")
+      }),
+    )
+  })
+
 })
