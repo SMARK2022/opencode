@@ -108,6 +108,112 @@ test("stale session hydration does not overwrite live message parts", async () =
   }
 })
 
+test.each(["todo", "diff"] as const)("forced hydration waits for pending %s and restores a missed finish", async (pending) => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  let resolveMessages!: (response: Response) => void
+  const messages = new Promise<Response>((resolve) => { resolveMessages = resolve })
+  let resolvePending!: (response: Response) => void
+  const pendingResponse = new Promise<Response>((resolve) => { resolvePending = resolve })
+  let resolveFreshMessages!: (response: Response) => void
+  const freshMessages = new Promise<Response>((resolve) => { resolveFreshMessages = resolve })
+  const calls = { get: 0, message: 0, todo: 0, diff: 0 }
+  const stale = json([{
+    info: { ...assistant, time: { created: 1 } },
+    parts: [{ id: partID, sessionID, messageID, type: "text", text: "unfinished" }],
+  }])
+  const finished = { id: partID, sessionID, messageID, type: "text" as const, text: "completed while disconnected" }
+  const live = { ...finished, id: "prt_reconnect_live", text: "live during forced hydration" }
+  const { app, emit, sync } = await mount((url) => {
+    if (url.pathname === `/session/${sessionID}`) {
+      calls.get++
+      return json(calls.get === 1 ? session : { ...session, title: "reconnected" })
+    }
+    if (url.pathname === `/session/${sessionID}/message`) {
+      calls.message++
+      return calls.message === 1 ? messages : freshMessages
+    }
+    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) {
+      const kind = url.pathname.endsWith("/todo") ? "todo" : "diff"
+      calls[kind]++
+      return kind === pending && calls[kind] === 1 ? pendingResponse : json([])
+    }
+    return undefined
+  }, tmp.path)
+  try {
+    const hydrate = sync.session.sync(sessionID)
+    const joined = sync.session.sync(sessionID)
+    await wait(() => calls.message === 1 && calls[pending] === 1)
+    resolveMessages(stale)
+    // #132：messages 已读取但另一 RPC 尚未结束，force 不能复用这轮断线前快照。
+    await wait(() => stale.bodyUsed)
+    const forced = sync.session.sync(sessionID, { force: true })
+    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: 1 })
+    resolvePending(json([]))
+    await Promise.all([hydrate, joined])
+    await wait(() => calls.message === 2 && calls[pending] === 2)
+    expect(sync.session.status(sessionID)).toBe("working")
+    expect(sync.data.message[sessionID][0].time).not.toHaveProperty("completed")
+    emit(global({ id: "evt_reconnect_live_part", type: "message.part.updated", properties: {
+      sessionID, time: 3, part: live,
+    } }))
+    await wait(() => sync.data.part[messageID]?.some((part) => part.id === live.id) ?? false)
+    // #132：不发送完成事件；新快照恢复漏收的结束状态，同时保留本轮实时部件。
+    resolveFreshMessages(json([{ info: assistant, parts: [finished] }]))
+    await forced
+    expect(calls).toEqual({ get: 2, message: 2, todo: 2, diff: 2 })
+    expect(sync.session.get(sessionID)?.title).toBe("reconnected")
+    expect(sync.data.message[sessionID][0].time).toMatchObject({ completed: assistant.time.completed })
+    expect(sync.session.status(sessionID)).toBe("idle")
+    expect(sync.data.part[messageID]).toContainEqual(finished)
+    expect(sync.data.part[messageID]).toContainEqual(live)
+    await sync.session.sync(sessionID)
+    expect(calls).toEqual({ get: 2, message: 2, todo: 2, diff: 2 })
+  } finally {
+    resolveMessages(json([]))
+    resolvePending(json([]))
+    resolveFreshMessages(json([]))
+    app.renderer.destroy()
+  }
+})
+
+test.each(["success", "failure"] as const)("forced hydration after an old rejection preserves fresh %s", async (outcome) => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  let resolveSession!: (response: Response) => void
+  const response = new Promise<Response>((resolve) => { resolveSession = resolve })
+  let requested = 0
+  const { app, sync } = await mount((url) => {
+    if (url.pathname === `/session/${sessionID}`) {
+      requested++
+      if (requested === 1) return response
+      if (requested === 2 && outcome === "failure") return json({ message: "fresh snapshot failed" }, { status: 500 })
+      return json(session)
+    }
+    if (url.pathname === `/session/${sessionID}/message`) return json([{ info: assistant, parts: [] }])
+    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) return json([])
+    return undefined
+  }, tmp.path)
+  try {
+    const hydrate = sync.session.sync(sessionID)
+    const oldFailure = hydrate.catch((error: unknown) => error)
+    await wait(() => requested === 1)
+    const forced = sync.session.sync(sessionID, { force: true })
+    const fresh = forced.catch((error: unknown) => error)
+    resolveSession(json({ message: "old snapshot failed" }, { status: 500 }))
+    expect(await oldFailure).toMatchObject({ message: "old snapshot failed" })
+    expect(await fresh).toEqual(outcome === "success" ? undefined : expect.objectContaining({ message: "fresh snapshot failed" }))
+    expect(requested).toBe(2)
+    await sync.session.sync(sessionID)
+    expect(requested).toBe(outcome === "failure" ? 3 : 2)
+    expect(sync.session.status(sessionID)).toBe("idle")
+    expect(sync.data.message[sessionID][0].time).toMatchObject({ completed: assistant.time.completed })
+  } finally {
+    resolveSession(json([]))
+    app.renderer.destroy()
+  }
+})
+
 test("orphan live deltas do not suppress hydrated parts", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")

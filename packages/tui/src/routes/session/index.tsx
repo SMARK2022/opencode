@@ -368,6 +368,10 @@ export function Session() {
   })
 
   let lastSwitch: string | undefined = undefined
+  // #132：重连强制刷新当前会话
+  event.on("server.connected", () => {
+    void sync.session.sync(route.sessionID, { force: true })
+  })
   event.on("message.part.updated", (evt) => {
     const part = evt.properties.part
     if (part.type !== "tool") return
