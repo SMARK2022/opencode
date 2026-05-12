@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { describe, expect } from "bun:test"
-import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FileMutation } from "@opencode-ai/core/file-mutation"
@@ -130,6 +130,38 @@ const exists = (target: string) =>
 const it = testEffect(Layer.empty)
 
 describe("ApplyPatchTool", () => {
+  it.live("preserves logical lines, BOM and precise diffs for each file ending", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
+        for (const [index, ending] of ["\n", "\r\n", "\r"].entries()) {
+          reset()
+          const update = path.join(tmp.path, "update.txt")
+          const remove = path.join(tmp.path, "remove.txt")
+          yield* Effect.promise(() => fs.writeFile(update, `\uFEFFone${ending}two${ending}three${ending}`))
+          yield* Effect.promise(() => fs.writeFile(remove, `first${ending}last${ending}`))
+          const patch = ["*** Begin Patch", "*** Update File: update.txt", "@@", " one", "-two", "+changed", " three", "*** Delete File: remove.txt", "*** End Patch"].join(ending)
+          // 通过正式工具解析、准备、条件写入及结算，确认原始字节和展示各守其责。
+          const settled = yield* withTool(tmp.path, (registry) => settleTool(registry, call(patch, `call-ending-${index}`)))
+          const output = Schema.decodeUnknownSync(ApplyPatchTool.Output)(settled.output?.structured)
+          expect(output.files).toHaveLength(2)
+          expect(output.files[0]).toMatchObject({ additions: 1, deletions: 1, status: "modified" })
+          expect(output.files[0]?.patch).toContain("-two\n+changed\n")
+          expect(output.files[0]?.patch).not.toContain("-one")
+          expect(output.files[0]?.patch).not.toContain("+one")
+          expect(output.files[0]?.patch).not.toContain("\r")
+          expect(output.files[0]?.patch).not.toContain("\uFEFF")
+          expect(output.files[1]).toMatchObject({ additions: 0, deletions: 2, status: "deleted" })
+          expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe(`\uFEFFone${ending}changed${ending}three${ending}`)
+          expect(yield* exists(remove)).toBe(false)
+          expect(readsBeforeEditApproval).toBe(0)
+          expect(assertions).toMatchObject([{ action: "edit", resources: ["update.txt", "remove.txt"] }])
+        }
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("registers and sequentially applies add, update, and delete hunks", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -150,9 +182,10 @@ describe("ApplyPatchTool", () => {
                     "*** Begin Patch\n*** Add File: nested/new.txt\n+created\n*** Update File: update.txt\n@@\n-before\n+after\n*** Delete File: remove.txt\n*** End Patch",
                   ),
                 )
+                const shown = settled.result.type === "text" ? settled.result.value : ""
                 expect(settled.result).toEqual({
                   type: "text",
-                  value: "Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt",
+                  value: expect.stringContaining("Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt\n\nChanged:\n```diff"),
                 })
                 expect(settled.output?.structured).toMatchObject({
                   applied: [
@@ -192,6 +225,9 @@ describe("ApplyPatchTool", () => {
                   "created\n",
                 )
                 expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("after\n")
+                expect(shown).toContain("+created")
+                expect(shown).toContain("-before\n+after")
+                expect(shown).toContain("-remove")
                 expect(yield* exists(remove)).toBe(false)
               }),
             ),

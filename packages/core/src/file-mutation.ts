@@ -1,11 +1,12 @@
 export * as FileMutation from "./file-mutation"
 
 import { makeLocationNode } from "./effect/app-node"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Exit, Layer, Schema } from "effect"
 import { createTwoFilesPatch } from "diff"
 import { dirname } from "path"
 import { KeyedMutex } from "./effect/keyed-mutex"
 import { FSUtil } from "./fs-util"
+import { normalizeLineEndings } from "./util/line-ending"
 
 export interface Target {
   readonly canonical: string
@@ -15,11 +16,13 @@ export interface Target {
 export interface WriteInput {
   readonly target: Target
   readonly content: string | Uint8Array
+  readonly format?: (filepath: string) => Effect.Effect<boolean>
 }
 
 export interface TextWriteInput {
   readonly target: Target
   readonly content: string
+  readonly format?: (filepath: string) => Effect.Effect<boolean>
 }
 
 export interface ConditionalWriteInput extends WriteInput {
@@ -45,6 +48,9 @@ export interface WriteResult {
   readonly existed: boolean
   // 仅文本覆写生成展示patch，普通创建和二进制写入保持原结果。
   readonly diff?: string
+  readonly text?: string
+  readonly formattedDiff?: string
+  readonly formattedContent?: string
 }
 
 export interface RemoveResult {
@@ -91,6 +97,42 @@ const layer = Layer.effect(
       existed,
     })
 
+    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean) {
+      // 外部格式化可中断；最终回读与 BOM 修复始终受目标锁和退出收尾保护。
+      const readFinal = Effect.gen(function* () {
+        const final = yield* fs.readFile(input.target.canonical)
+        let offset = 0
+        while (hasUtf8Bom(final.subarray(offset))) offset += 3
+        // 以原字节修复前缀；字符串读取会隐藏 BOM，取消时也不能重编码 formatter 的半写入内容。
+        if (offset !== (bom ? 3 : 0)) {
+          const next = new Uint8Array(final.length - offset + (bom ? 3 : 0))
+          if (bom) next.set([0xef, 0xbb, 0xbf])
+          next.set(final.subarray(offset), bom ? 3 : 0)
+          yield* fs.writeFile(input.target.canonical, next)
+        }
+        return new TextDecoder().decode(final.subarray(offset))
+      })
+      const formatted = input.format ? yield* input.format(input.target.canonical).pipe(
+        Effect.interruptible,
+        Effect.onExit((exit) => Exit.isFailure(exit) ? readFinal.pipe(Effect.asVoid) : Effect.void),
+      ) : false
+      const text = yield* readFinal
+      const before = normalizeLineEndings(previous)
+      const after = normalizeLineEndings(text)
+      const submitted = normalizeLineEndings(splitBom(input.content).text)
+      return {
+        ...writeResult(input.target, existed),
+        diff: createTwoFilesPatch(input.target.resource, input.target.resource, before, after),
+        ...(formatted ? { text } : {}),
+        ...(formatted && submitted !== after ? {
+          // 回传请求与最终落盘之间的实际变化，不能用请求片段伪造 formatter 结果。
+          formattedDiff: createTwoFilesPatch(input.target.resource, input.target.resource, submitted, after),
+          formattedContent: text,
+        } : {}),
+      }
+    })
+
+
     const removeResult = (target: Target, existed: boolean): RemoveResult => ({
       operation: "remove",
       target: target.canonical,
@@ -119,18 +161,8 @@ const layer = Layer.effect(
             input.target.canonical,
             joinBom(next.text, Boolean(current && hasUtf8Bom(current)) || next.bom),
           )
-          if (current === undefined) return writeResult(input.target, false)
-          // 前像与最终回读位于同一目标锁，不能把后继写入混进本次覆写diff。
-          const final = yield* fs.readFileString(input.target.canonical)
-          return {
-            ...writeResult(input.target, true),
-            diff: createTwoFilesPatch(
-              input.target.resource,
-              input.target.resource,
-              splitBom(new TextDecoder().decode(current)).text,
-              splitBom(final).text,
-            ),
-          }
+          if (current === undefined && !input.format) return writeResult(input.target, false)
+          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined)
         }),
       ),
     )
@@ -150,7 +182,10 @@ const layer = Layer.effect(
               Effect.fail(new TargetExistsError({ path: input.target.canonical })),
             ),
           )
+          if (input.format && typeof input.content === "string")
+            return yield* finishText({ ...input, content: input.content }, "", splitBom(input.content).bom, false)
           return writeResult(input.target, false)
+
         }),
       ),
     )
@@ -165,6 +200,8 @@ const layer = Layer.effect(
           yield* typeof input.content === "string"
             ? fs.writeFileString(input.target.canonical, input.content)
             : fs.writeFile(input.target.canonical, input.content)
+          if (input.format && typeof input.content === "string")
+            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true)
           return writeResult(input.target, true)
         }),
       ),
@@ -212,7 +249,6 @@ export const node = makeLocationNode({ service: Service, layer, deps: [FSUtil.no
 /**
  * Deferred until the corresponding V2 integrations exist.
  */
-// TODO: Add formatter integration after V2 formatter runtime exists.
 // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
 // TODO: Add snapshots / undo after V2 snapshot design exists.
 // TODO: Notify LSP and collect diagnostics after V2 LSP runtime exists.

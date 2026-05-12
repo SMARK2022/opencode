@@ -2,7 +2,10 @@ import fs from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer, Schema } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Config } from "@opencode-ai/core/config"
+import { EditTool } from "@opencode-ai/core/tool/edit"
+import { ApplyPatchTool } from "@opencode-ai/core/tool/apply-patch"
 import { FileMutation } from "@opencode-ai/core/file-mutation"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -60,7 +63,7 @@ const filesystem = Layer.effect(
   }),
 ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
 
-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>) => {
+const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, formatting?: { formatter: Config.Info["formatter"]; tool?: "edit" | "apply_patch" }) => {
   const activeLocation = Layer.succeed(
     Location.Service,
     Location.Service.of(location({ directory: AbsolutePath.make(directory) })),
@@ -75,13 +78,16 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
           ToolRegistry.toolsNode,
           LocationMutation.node,
           FileMutation.node,
-          WriteTool.node,
+          formatting?.tool === "edit" ? EditTool.node : formatting?.tool === "apply_patch" ? ApplyPatchTool.node : WriteTool.node,
         ]),
         [
           [FSUtil.node, filesystem],
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+          ...(formatting ? [
+            [Config.node, Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: Schema.decodeUnknownSync(Config.Info)({ formatter: formatting.formatter }) })]) }))] as const,
+          ] : []),
         ],
       ),
     ),
@@ -114,6 +120,7 @@ describe("WriteTool", () => {
                   target: path.join(yield* Effect.promise(() => fs.realpath(tmp.path)), "src", "new.txt"),
                   resource: "src/new.txt",
                   existed: false,
+                  diff: expect.stringContaining("+created"),
                 },
                 content: [{ type: "text", text: "Created file successfully: src/new.txt" }],
               },
@@ -159,6 +166,89 @@ describe("WriteTool", () => {
     ),
   )
 
+  it.live("formats created and overwritten files using the configured native formatter", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
+        for (const mode of ["off", "disabled", "enabled"] as const) {
+          reset()
+          const resource = `${mode}.fmt`
+          const target = path.join(tmp.path, resource)
+          const counter = path.join(tmp.path, `${mode}-runs.txt`)
+          // 实际执行独立临时文件上的 formatter，不 mock 进程、文件服务、结算或回读。
+          const program = String.raw`const file = process.argv.at(-2); const counter = process.argv.at(-1); const text = await Bun.file(file).text(); await Bun.write(file, text.replace(/const n=(\d+);?/g, "const n = $1;").replace(/\n*$/, "\n")); await Bun.write(counter, (await Bun.file(counter).exists() ? await Bun.file(counter).text() : "") + "1\n")`
+          const formatter: Config.Info["formatter"] = mode === "off" ? false : { fixture: { command: [process.execPath, "-e", program, "$FILE", counter], extensions: [".fmt"], disabled: mode === "disabled" } }
+          yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+            for (const index of [0, 1]) {
+              const settled = yield* settleTool(registry, call({ path: resource, content: "\uFEFFconst n=2" }, `call-format-${mode}-${index}`))
+              const output = Schema.decodeUnknownSync(WriteTool.Output)(settled.output?.structured)
+              const shown = settled.result.type === "text" ? settled.result.value : ""
+              expect(output.existed).toBe(index === 1)
+              expect(output.diff).not.toContain("\uFEFF")
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(mode === "enabled" ? "\uFEFFconst n = 2;\n" : "\uFEFFconst n=2")
+              if (mode === "enabled") {
+                expect(output.formattedContent).toBe("const n = 2;\n")
+                expect(output.formattedDiff).toContain("+const n = 2;")
+                expect(shown).toContain("Formatted changes (auto-format adjusted the file):")
+                expect(shown).toContain("+const n = 2;")
+              } else {
+                expect(output.formattedContent).toBeUndefined()
+                expect(output.formattedDiff).toBeUndefined()
+              }
+            }
+          }), { formatter })
+          if (mode === "enabled") {
+            const identity = { sessionID, ...toolIdentity }
+            const edit = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-edit", name: "edit", input: { path: resource, oldString: "const n = 2;", newString: "const n=3" } } }), { formatter, tool: "edit" })
+            expect(edit.result.type === "text" ? edit.result.value : "").toContain("-const n = 2;\n+const n = 3;")
+            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFconst n = 3;\n")
+            const patch = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-patch", name: "apply_patch", input: { patchText: `*** Begin Patch\n*** Update File: ${resource}\n@@\n-const n = 3;\n+const n=4\n*** End Patch` } } }), { formatter, tool: "apply_patch" })
+            expect(patch.result.type === "text" ? patch.result.value : "").toContain("-const n = 3;\n+const n = 4;")
+            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFconst n = 4;\n")
+          }
+          const ran = yield* Effect.promise(() => Bun.file(counter).exists())
+          expect(ran ? (yield* Effect.promise(() => Bun.file(counter).text())).trim().split("\n").length : 0).toBe(mode === "enabled" ? 4 : 0)
+        }
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("cancels a running formatter, restores BOM and releases the same target lock", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
+        reset()
+        const resource = "cancel.fmt"
+        const target = path.join(tmp.path, resource)
+        const ready = path.join(tmp.path, "formatter-ready")
+        // 子进程只操作本用例文件；自然退出标记令旧的不可取消实现稳定失败并自行收尾。
+        const program = String.raw`const file = process.argv.at(-2); const ready = process.argv.at(-1); await Bun.write(file, "formatted before cancel\n"); setTimeout(async () => { await Bun.write(ready + ".natural", "done"); process.exit(0) }, 10000); await Bun.write(ready, "ready")`
+        const formatter: Config.Info["formatter"] = { fixture: { command: [process.execPath, "-e", program, "$FILE", ready], extensions: [".fmt"] } }
+        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+          const files = yield* FileMutation.Service
+          const running = yield* settleTool(registry, call({ path: resource, content: "\uFEFFbefore" }, "call-cancel-format")).pipe(Effect.forkChild)
+          yield* Effect.promise(async () => {
+            const deadline = Date.now() + 5000
+            while (!(await Bun.file(ready).exists())) {
+              if (Date.now() > deadline) throw new Error("Formatter did not publish readiness")
+              await Bun.sleep(10)
+            }
+          })
+          yield* Fiber.interrupt(running)
+          const exit = yield* Fiber.await(running)
+          expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+          expect(yield* Effect.promise(() => Bun.file(`${ready}.natural`).exists())).toBe(false)
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFformatted before cancel\n")
+          // 同一个 FileMutation 实例再次写入，证明不是换一个 mutex 绕过泄漏的锁。
+          yield* files.writeTextPreservingBom({ target: { canonical: yield* Effect.promise(() => fs.realpath(target)), resource }, content: "after cancellation" })
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFafter cancellation")
+        }), { formatter })
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("preserves exactly one BOM when overwriting existing files", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -180,6 +270,19 @@ describe("WriteTool", () => {
 
                 expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe("\uFEFFafter")
                 expect(yield* Effect.promise(() => fs.readFile(deduplicated, "utf8"))).toBe("\uFEFFafter")
+                // 本补丁只归一 Write 展示；实际请求仍可把 CRLF/CR 覆写为 LF。
+                for (const ending of ["\n", "\r\n", "\r"]) {
+                  yield* Effect.promise(() => fs.writeFile(preserved, `\uFEFFone${ending}two${ending}`))
+                  const settled = yield* settleTool(registry, call({ path: "preserved.txt", content: "one\ntwo\n" }, `call-eol-${ending.charCodeAt(0)}-${ending.length}`))
+                  const output = Schema.decodeUnknownSync(WriteTool.Output)(settled.output?.structured)
+                  expect(output.diff).toContain("Index:")
+                  expect(output.diff).not.toContain("-one")
+                  expect(output.diff).not.toContain("+one")
+                  expect(output.diff).not.toContain("-two")
+                  expect(output.diff).not.toContain("+two")
+                  expect(output.diff).not.toContain("\uFEFF")
+                  expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe("\uFEFFone\ntwo\n")
+                }
               }),
             ),
           ),
@@ -299,7 +402,6 @@ test("keeps the locked write schema, semantics docstring, and deferred UX TODOs 
   )
   for (const todo of [
     "Revisit whether model-facing mutation schemas should prefer absolute `filePath` naming for trained-in compatibility after evaluating model behavior.",
-    "Add formatter integration after V2 formatter runtime exists.",
     "Publish watcher/file-edit events after V2 watcher integration exists.",
     "Add snapshots / undo after design exists.",
     "Add LSP notification and diagnostics after V2 LSP runtime exists.",

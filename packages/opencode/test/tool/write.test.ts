@@ -279,4 +279,42 @@ describe("tool.write", () => {
       }),
     )
   })
+  describe("line-ending metadata", () => {
+    // #131：同逻辑内容覆写 CRLF 文件时 metadata.diff 不应把行尾当内容变更
+    it.instance("does not show CRLF-only overwrites as content changes", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "crlf-meta.txt")
+        const logical = "Line 1\nLine 2\n"
+        yield* Effect.promise(() => fs.writeFile(filepath, logical.replaceAll("\n", "\r\n"), "utf-8"))
+        const result = yield* run({ filePath: filepath, content: logical })
+        const diff = result.metadata?.diff ?? ""
+        expect(diff).not.toContain("-Line 1")
+        expect(diff).not.toContain("+Line 1")
+        expect(diff).toContain("Index:")
+        expect(diff).not.toContain("-Line 2")
+        expect(diff).not.toContain("+Line 2")
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical)
+      }),
+    )
+
+    // #131：CR-only 文件同逻辑覆写同样不应出现假内容 diff
+    it.instance("does not show CR-only overwrites as content changes", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "cr-meta.txt")
+        const logical = "Line 1\nLine 2\n"
+        yield* Effect.promise(() => fs.writeFile(filepath, logical.replaceAll("\n", "\r"), "utf-8"))
+        const result = yield* run({ filePath: filepath, content: logical })
+        const diff = result.metadata?.diff ?? ""
+        expect(diff).not.toContain("-Line 1")
+        expect(diff).not.toContain("+Line 1")
+        expect(diff).toContain("Index:")
+        expect(diff).not.toContain("-Line 2")
+        expect(diff).not.toContain("+Line 2")
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical)
+      }),
+    )
+  })
+
 })

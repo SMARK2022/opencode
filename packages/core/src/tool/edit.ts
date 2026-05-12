@@ -18,6 +18,8 @@ import { PermissionV2 } from "../permission"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
+import { Format } from "../format"
+import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "../util/line-ending"
 
 export const name = "edit"
 
@@ -39,11 +41,6 @@ export const Output = Schema.Struct({
 })
 export type Output = typeof Output.Type
 
-const normalizeLineEndings = (text: string) => text.replaceAll("\r\n", "\n")
-const detectLineEnding = (text: string): "\n" | "\r\n" => (text.includes("\r\n") ? "\r\n" : "\n")
-const convertToLineEnding = (text: string, ending: "\n" | "\r\n") =>
-  ending === "\n" ? normalizeLineEndings(text) : normalizeLineEndings(text).replaceAll("\n", "\r\n")
-
 const splitBom = (text: string) =>
   text.startsWith("\uFEFF") ? { bom: true, text: text.slice(1) } : { bom: false, text }
 const joinBom = (text: string, bom: boolean) => (bom ? `\uFEFF${text}` : text)
@@ -63,26 +60,19 @@ const countOccurrences = (content: string, search: string) => {
   return count
 }
 
-const previewLines = (value: string, prefix: "+" | "-") => {
-  const lines = normalizeLineEndings(value).split("\n")
-  const shown = lines.slice(0, 6).map((line) => `${prefix}${line.length > 240 ? `${line.slice(0, 240)}...` : line}`)
-  if (lines.length > shown.length) shown.push(`${prefix}...`)
-  return shown
-}
-
-export const toModelOutput = (output: Output, oldString: string, newString: string) =>
+export const toModelOutput = (output: Output) =>
   [
     `Edited file successfully: ${output.files[0]?.file}`,
     `Replacements: ${output.replacements}`,
+    "Changed:",
     "```diff",
-    ...previewLines(oldString, "-"),
-    ...previewLines(newString, "+"),
+    // 展示真实文件 diff，第七行以后的修改和 formatter 变化同样可见。
+    ...output.files.map((file) => file.patch),
     "```",
   ].join("\n")
 
 /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
 // TODO: Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.
-// TODO: Add formatter integration after V2 formatter runtime exists.
 // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
 // TODO: Add snapshots / undo after design exists.
 // TODO: Add LSP notification and diagnostics after V2 LSP runtime exists.
@@ -94,6 +84,7 @@ const layer = Layer.effectDiscard(
     const files = yield* FileMutation.Service
     const fs = yield* FSUtil.Service
     const permission = yield* PermissionV2.Service
+    const format = yield* Format.Service
 
     yield* tools
       .register({
@@ -103,8 +94,8 @@ const layer = Layer.effectDiscard(
               "Replace exact text in one file. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
             input: Input,
             output: Output,
-            toModelOutput: ({ input, output }) => [
-              { type: "text", text: toModelOutput(output, input.oldString, input.newString) },
+            toModelOutput: ({ output }) => [
+              { type: "text", text: toModelOutput(output) },
             ],
             execute: (input, context) => {
               const unableToEdit = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -160,8 +151,9 @@ const layer = Layer.effectDiscard(
                 )
                 const source = decodeUtf8(yield* unableToEdit(fs.readFile(target.canonical)))
                 const ending = detectLineEnding(source.text)
-                const oldString = convertToLineEnding(input.oldString, ending)
-                const newString = convertToLineEnding(input.newString, ending)
+                // LF 目标也先归一请求，保留原有 CRLF 请求编辑 LF 文件的匹配能力。
+                const oldString = convertToLineEnding(normalizeLineEndings(input.oldString), ending)
+                const newString = convertToLineEnding(normalizeLineEndings(input.newString), ending)
                 const replacements = countOccurrences(source.text, oldString)
                 if (replacements === 0) {
                   return yield* new ToolFailure({
@@ -178,9 +170,13 @@ const layer = Layer.effectDiscard(
 
                 const replaced =
                   input.replaceAll === true
-                    ? source.text.replaceAll(oldString, newString)
-                    : source.text.replace(oldString, newString)
-                const counts = diffLines(source.text, replaced).reduce(
+                    // newString 是字面文本，不能把 $&、$1 等误执行为替换表达式。
+                    ? source.text.replaceAll(oldString, () => newString)
+                    : source.text.replace(oldString, () => newString)
+                const diffOld = normalizeLineEndings(source.text)
+                const diffNew = normalizeLineEndings(replaced)
+                // 统计和展示共用逻辑文本，CR-only 不得被误计成整行替换。
+                const counts = diffLines(diffOld, diffNew).reduce(
                   (result, item) => ({
                     additions: result.additions + (item.added ? (item.count ?? 0) : 0),
                     deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
@@ -193,15 +189,22 @@ const layer = Layer.effectDiscard(
                     target,
                     expected: source.content,
                     content: joinBom(next.text, source.bom || next.bom),
+                    format: format.file,
                   }),
                 )
                 return {
                   files: [
                     {
                       file: result.resource,
-                      patch: createTwoFilesPatch(result.resource, result.resource, source.text, replaced),
+                      patch: result.diff ?? createTwoFilesPatch(result.resource, result.resource, diffOld, diffNew),
                       status: "modified" as const,
-                      ...counts,
+                      ...(result.text === undefined ? counts : diffLines(diffOld, normalizeLineEndings(result.text)).reduce(
+                        (total, change) => ({
+                          additions: total.additions + (change.added ? change.count ?? 0 : 0),
+                          deletions: total.deletions + (change.removed ? change.count ?? 0 : 0),
+                        }),
+                        { additions: 0, deletions: 0 },
+                      )),
                     },
                   ],
                   replacements,
@@ -219,5 +222,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/edit",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
 })

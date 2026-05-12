@@ -29,6 +29,19 @@ describe("Patch", () => {
     const update = Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "\uFEFFold\n")
     expect(update).toEqual({ content: "new\n", bom: true })
     expect(Patch.joinBom(update.content, update.bom)).toBe("\uFEFFnew\n")
+    // 同时验证补丁解析、上下文匹配、BOM 与精确行尾，不能只归一后比较正文。
+    for (const ending of ["\n", "\r\n", "\r"]) {
+      const hunk = Patch.parse(["*** Begin Patch", "*** Update File: update.txt", "@@", " one", "-two", "+changed", " three", "*** End Patch"].join(ending))[0]
+      if (hunk?.type !== "update") throw new Error("Expected update hunk")
+      const derived = Patch.derive(hunk.path, hunk.chunks, `\uFEFF${["one", "two", "three", ""].join(ending)}`)
+      expect(derived).toEqual({ content: ["one", "changed", "three", ""].join(ending), bom: true })
+      expect(Patch.joinBom(derived.content, derived.bom)).toBe(`\uFEFF${["one", "changed", "three", ""].join(ending)}`)
+    }
+    // 文件级检测沿用 CRLF 优先级；混合输入不承诺逐分隔符保留。
+    expect(Patch.derive("mixed.txt", [{ oldLines: ["two"], newLines: ["changed"] }], "one\r\ntwo\rthree\n").content).toBe("one\r\nchanged\r\nthree\r\n")
+    expect(Patch.derive("no-eol.txt", [{ oldLines: ["one"], newLines: ["two"] }], "one").content).toBe("two\n")
+    expect(Patch.parse("*** Begin Patch\r*** Add File: add.txt\r+one\r+two\r*** End Patch")).toEqual([{ type: "add", path: "add.txt", contents: "one\ntwo" }])
+    expect(Patch.derive("empty.txt", [{ oldLines: [], newLines: ["one"] }], "").content).toBe("one\n")
   })
 
   test("matches EOF-anchored chunks from the end", () => {

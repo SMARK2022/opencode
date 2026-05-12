@@ -2,6 +2,8 @@ import { Effect, Schema } from "effect"
 import * as path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import * as Bom from "../util/bom"
+import { convertToLineEnding, detectLineEnding, splitLines } from "../util/line-ending"
+// #131：patch 逻辑行匹配，写回保留原行尾
 
 export const PatchSchema = Schema.Struct({
   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
@@ -184,7 +186,7 @@ function stripHeredoc(input: string): string {
 
 export function parsePatch(patchText: string): { hunks: Hunk[] } {
   const cleaned = stripHeredoc(patchText.trim())
-  const lines = cleaned.split("\n")
+  const lines = splitLines(cleaned)
   const hunks: Hunk[] = []
   let i = 0
 
@@ -311,7 +313,8 @@ export function deriveNewContentsFromChunks(
 ): ApplyPatchFileUpdate {
   const originalContent = Bom.split(originalText)
 
-  let originalLines = originalContent.text.split("\n")
+  // #131：按逻辑行分割（含 CR-only）
+  let originalLines = splitLines(originalContent.text)
 
   // Drop trailing empty element for consistent line counting
   if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
@@ -326,7 +329,8 @@ export function deriveNewContentsFromChunks(
     newLines.push("")
   }
 
-  const next = Bom.split(newLines.join("\n"))
+  // #131：匹配用逻辑行，写回保留原文件行尾
+  const next = Bom.split(convertToLineEnding(newLines.join("\n"), detectLineEnding(originalContent.text)))
   const newContent = next.text
 
   // Generate unified diff
@@ -484,8 +488,9 @@ function seekSequence(lines: string[], pattern: string[], startIndex: number, eo
 }
 
 function generateUnifiedDiff(oldContent: string, newContent: string): string {
-  const oldLines = oldContent.split("\n")
-  const newLines = newContent.split("\n")
+  // #131：diff 行数组用逻辑行，避免 CRLF 噪声
+  const oldLines = splitLines(oldContent)
+  const newLines = splitLines(newContent)
 
   // Simple diff generation - in a real implementation you'd use a proper diff algorithm
   let diff = "@@ -1 +1 @@\n"

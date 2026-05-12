@@ -14,6 +14,8 @@ import { InstanceState } from "@/effect/instance-state"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
+import { normalizeLineEndings } from "@/util/line-ending"
+// #131：write 元数据 diff 归一行尾
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 
@@ -50,7 +52,10 @@ export const WriteTool = Tool.define(
           const contentOld = source.text
           const contentNew = next.text
 
-          const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, contentNew))
+          const diff = trimDiff(
+            // #131：permission 元数据忽略纯行尾 diff
+            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+          )
           yield* ctx.ask({
             permission: "edit",
             patterns: [path.relative(instance.worktree, filepath)],
@@ -72,7 +77,15 @@ export const WriteTool = Tool.define(
             // 最终内容读取：格式化后重新读取文件，确保 diff 反映实际落盘内容
             const finalSource = yield* Bom.readFile(fs, filepath)
             // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
-            metadataDiff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, finalSource.text))
+            metadataDiff = trimDiff(
+              createTwoFilesPatch(
+                filepath,
+                filepath,
+                // #131：格式化后最终 diff 也归一行尾
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(finalSource.text),
+              ),
+            )
           }
           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
           yield* events.publish(Watcher.Event.Updated, {
