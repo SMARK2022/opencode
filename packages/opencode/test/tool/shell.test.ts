@@ -1358,6 +1358,103 @@ describe("tool.shell windows multi-encoding", () => {
   }
 })
 
+
+// #130：javac CP936 诊断经 shell 字节路径应可读
+describe("tool.shell CP936 diagnostics", () => {
+  it.live(
+    "decodes javac-style CP936 bytes through shell stdout",
+    () =>
+      withShell(
+        { label: "default", shell: Shell.acceptable() },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const bash = yield* initBash()
+              // 当前 Bun 直接写固定 CP936 字节，避免缺少 Python 或 shell 引号转换污染输入。
+              const code = "process.stdout.write(Buffer.from([0x48,0x3a,0x5c,0x46,0x52,0x43,0x68,0x65,0x63,0x6b,0x5c,0x73,0x72,0x63,0x5c,0x76,0x65,0x72,0x69,0x66,0x79,0x63,0x6d,0x64,0x5c,0x56,0x65,0x72,0x69,0x66,0x79,0x43,0x6f,0x6d,0x6d,0x61,0x6e,0x64,0x2e,0x6a,0x61,0x76,0x61,0x3a,0x33,0x3a,0x20,0xbe,0xaf,0xb8,0xe6,0x3a,0x20,0x44,0x4f,0x4d,0xca,0xc7,0xc4,0xda,0xb2,0xbf,0xd7,0xa8,0xd3,0xc3,0x20,0x41,0x50,0x49,0x0a]))"
+              const result = yield* bash.execute(
+                {
+                  command: `${PS.has(sh()) ? "& " : ""}${bin} -e ${evalarg(code)}`,
+                },
+                ctx,
+              )
+              expect(result.metadata.exit).toBe(0)
+              expect(result.output).toContain("警告: DOM是内部专用 API")
+            }),
+          )
+        }),
+      ),
+  )
+})
+
+// #130：保留 PS stderr 原生字节；Progress 不污染纯文本路径
+describe("tool.shell windows PS stderr and progress", () => {
+  if (process.platform !== "win32") return
+
+  for (const item of ps) {
+    it.live(
+      // #130：PS stderr 必须仍是原始代码页字节
+      `preserves native CP936 stderr bytes from PowerShell wrapper [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const tmp = yield* tmpdirScoped()
+            yield* runIn(
+              tmp,
+              Effect.gen(function* () {
+                const bash = yield* initBash()
+                // #130：经 OpenStandardError 写 CP936，验证 3-6>&1 不预解码
+                const result = yield* bash.execute(
+                  {
+                    command: `$bytes = [byte[]](0xBE,0xAF,0xB8,0xE6,0x3A,0x20,0x44,0x4F,0x4D,0xCA,0xC7,0xC4,0xDA,0xB2,0xBF,0xD7,0xA8,0xD3,0xC3,0x20,0x41,0x50,0x49,0x0A); [Console]::OpenStandardError().Write($bytes,0,$bytes.Length)`,
+                  },
+                  ctx,
+                )
+                expect(result.output).toContain("警告: DOM是内部专用 API")
+                expect(result.output).not.toContain("\uFFFD")
+              }),
+            )
+          }),
+        ),
+    )
+  }
+
+  for (const item of ps) {
+    it.live(
+      // #130：Progress 不得泄漏到主输出
+      `keeps PowerShell output as plain text with Progress silenced [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const tmp = yield* tmpdirScoped()
+            yield* runIn(
+              tmp,
+              Effect.gen(function* () {
+                const bash = yield* initBash()
+                // #130：Progress 静默 + Information 纯文本
+                const result = yield* bash.execute(
+                  {
+                    command: `Write-Progress -Activity '部署' -Status '传输中' -PercentComplete 50; Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'`,
+                  },
+                  ctx,
+                )
+                expect(result.output).toContain("1/4 BUILD")
+                expect(result.output).toContain("2/4 EXPORT")
+                expect(result.output).toContain("3/4 TRANSFER")
+                expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
+                expect(result.output).not.toContain("部署")
+                expect(result.output).not.toContain("传输中")
+              }),
+            )
+          }),
+        ),
+    )
+  }
+})
 // #129：PowerShell 输出保持纯文本（Information 流可见、无 CLIXML 噪声）
 describe("tool.shell windows plain text", () => {
   if (process.platform !== "win32") return

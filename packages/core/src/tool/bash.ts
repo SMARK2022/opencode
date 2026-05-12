@@ -18,7 +18,7 @@ import { SystemContext } from "../system-context/index"
 import { SystemContextRegistry } from "../system-context/registry"
 import { Shell } from "../shell"
 import { ToolOutputStore } from "../tool-output-store"
-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
 import { createAutoTextDecoder } from "../text-decoding"
 
 export const name = "bash"
@@ -302,11 +302,12 @@ const layer = Layer.effectDiscard(
               // 正常结束和超时共用正文与压缩；超时不伪造退出码，也不丢弃已观察的ready等普通行。
               const text = parts.join("")
               const output = text || "(no output)"
+              const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
               const truncated = cut || result?.outputTruncated === true
               const outcome = result ? { exit: result.exitCode } : { timeout: true }
               const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
               // 传真实调用 command，不使用描述或重新解析执行命令。
-              const compressed = compressVisibleOutput(output, { enabled }, input.command)
+              const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
               // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
               const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "", config: { enabled } })
               const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })

@@ -135,4 +135,15 @@ describe("text-decoding", () => {
     expect(decoder.encoding()).not.toBe("gb18030")
   })
 
+  // #130：javac 风格 CP936 诊断字节应落 gb18030
+  test("decodes javac-style CP936 diagnostics", () => {
+    const input = new Uint8Array([
+      ...new TextEncoder().encode("H:\\FRCheck\\src\\verifycmd\\VerifyCommand.java:3: "),
+      0xbe, 0xaf, 0xb8, 0xe6, 0x3a, 0x20,
+      0x44, 0x4f, 0x4d, 0xca, 0xc7, 0xc4, 0xda, 0xb2, 0xbf, 0xd7, 0xa8, 0xd3, 0xc3, 0x20,
+      0x41, 0x50, 0x49, 0x0a,
+    ])
+    expect(decodeText(input).text).toContain("警告: DOM是内部专用 API")
+  })
+
 })

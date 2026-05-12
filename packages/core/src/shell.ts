@@ -192,7 +192,8 @@ export function cmd(file: string, command: string, platform: string = process.pl
     "$DebugPreference = 'Continue'",
     "& {",
     command,
-    "} *>&1",
+    // stderr 必须保持原生字节，避免 PowerShell 按控制台编码提前解释 CP936。
+    "} 3>&1 4>&1 5>&1 6>&1",
     // 换行隔开用户尾注释；仅透传实际 native exit，不把 cmdlet 的空值变成退出码。
     "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
   ].join("\n")

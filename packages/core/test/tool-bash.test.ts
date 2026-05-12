@@ -279,7 +279,7 @@ describe("BashTool", () => {
             // 独立字节预期同时约束无profile、UTF-8前导与原命令，不能只检查编码标志。
             if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
               expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
-                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'Continue'", "$DebugPreference = 'Continue'", "& {", "pwd", "} *>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
+                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'Continue'", "$DebugPreference = 'Continue'", "& {", "pwd", "} 3>&1 4>&1 5>&1 6>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
           }),
         )
           .pipe(Effect.andThen(() => Effect.gen(function* () {
@@ -475,6 +475,37 @@ describe("BashTool", () => {
                 expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(raw)
                 expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
               }), LayerNode.compile(AppProcess.node), shell, false, undefined, encoding)
+            }
+            const rawError = Buffer.from([0xbe, 0xaf, 0xb8, 0xe6, 0x3a, 0x20, 0x44, 0x4f, 0x4d, 0xca, 0xc7, 0xc4, 0xda, 0xb2, 0xbf, 0xd7, 0xa8, 0xd3, 0xc3, 0x20, 0x41, 0x50, 0x49, 0x0a])
+            const errorCommand = `$bytes = [byte[]](${Array.from(rawError)}); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)`
+            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+              const settled = yield* settleTool(registry, call({ command: errorCommand, compress_output: false }))
+              const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
+              expect(settled.result.type).toBe("content")
+              expect(text).toContain("警告: DOM是内部专用 API")
+              expect(text).not.toContain("\uFFFD")
+              expect(settled.output?.structured).toMatchObject({ exit: 0, truncated: false, compression: { compressed: false } })
+              const retained = settled.outputPaths?.[0]
+              if (!retained) throw new Error("expected retained CP936 stderr")
+              expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(rawError)
+              expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [errorCommand], save: [errorCommand] })
+            }), LayerNode.compile(AppProcess.node), shell)
+            const rawClixml = Buffer.from('BEFORE\n#< CLIXML\n<Objs>\n<S N="Message">VISIBLE_MESSAGE</S>\n</Objs>\nAFTER\n')
+            const clixmlCommand = `$bytes = [byte[]](${Array.from(rawClixml)}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)`
+            for (const mode of ["enabled", "parameter", "config"] as const) {
+              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+                const settled = yield* settleTool(registry, call({ command: clixmlCommand, compress_output: mode !== "parameter" }))
+                const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
+                expect(settled.result.type).toBe("content")
+                expect(settled.output?.structured).toMatchObject({ exit: 0, truncated: false, compression: { compressed: false } })
+                expect(text).toContain("BEFORE\nVISIBLE_MESSAGE\nAFTER\n")
+                expect(text).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
+                expect(text).not.toContain("high-entropy powershell-clixml")
+                const retained = settled.outputPaths?.[0]
+                if (!retained) throw new Error("expected retained original CLIXML")
+                expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(rawClixml)
+                expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [clixmlCommand], save: [clixmlCommand] })
+              }), LayerNode.compile(AppProcess.node), shell, mode === "config" ? false : undefined, undefined, "auto")
             }
           }
         }),
@@ -859,6 +890,8 @@ describe("BashTool", () => {
           ...Array.from({ length: 100 }, (_, i) => `#${i % 2 ? 3 : 1} 0.1 successful log ${i}: a substantial build operation completed`),
           "#2 0.2 DETAILS2", "#1 DONE", "#2 ERROR: compile failed", "#3 DONE"].join("\n")
         // 命令参数由真实 registry caller 传入；固定输出替身不安装四个外部工具。
+        // PowerShell 先还原 CLIXML，再进入通用压缩；其他 shell 仍保留 wrapped 路径。
+        const plainClixml = process.platform === "win32" && Shell.ps(Shell.acceptable())
         for (const [command, output, marker] of [
           ["npm install", Array.from({ length: 20 }, (_, i) => `WARN peer dep package-${i} ${"detail ".repeat(10)}`).join("\n"), "peer dependency warnings grouped"],
           ["pytest", "--- Captured stdout call ---\n" + Array.from({ length: 80 }, (_, i) => `captured ${i} ${"detail ".repeat(10)}`).join("\n"), "lines of captured output omitted"],
@@ -867,8 +900,8 @@ describe("BashTool", () => {
           ["redaction-only", sensitive, "<REDACTED_API-KEY>"],
           ["terminal-redaction", decoratedSecret, "<REDACTED_API-KEY>"],
           ["crossline-redaction", crossline, "<REDACTED_CREDENTIAL>"],
-          ["clixml-low-savings", ordinaryClixml, ordinaryDecoded.text],
-          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "<high-entropy powershell-clixml>ordinary</high-entropy>"],
+          ["clixml-low-savings", ordinaryClixml, plainClixml ? ordinary : ordinaryDecoded.text],
+          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', plainClixml ? "ordinary" : "<high-entropy powershell-clixml>ordinary</high-entropy>"],
         ]) {
           // 禁用适配器或收益拒绝仍走同一入口，不用私有适配函数作为测试 oracle。
           if (!command.startsWith("clixml-") && command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
@@ -887,7 +920,7 @@ describe("BashTool", () => {
             expect(runs[0]?.command).toBe(command)
             if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
             if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
-            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
+            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: plainClixml ? { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: 8, compressionCompressedBytes: 8, compressionSavedBytes: 0 } : { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
             if (command === "docker build .") {
               // 不用adapter计算预期值，直接指定步骤摘要与失败详情的归属。
               expect(text).toContain("#2 compile: FAILED")
@@ -984,7 +1017,7 @@ describe("BashTool", () => {
           const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
           expect(text).toContain("actual-stdout")
           expect(text).toContain("actual-stderr")
-          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: 1 } })
+          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: plainClixml ? 0 : 1 } })
           const retained = settled.outputPaths?.[0]
           if (!retained) throw new Error("expected retained dual-stream CLIXML")
           const saved = yield* Effect.promise(() => fs.readFile(retained, "utf8"))
