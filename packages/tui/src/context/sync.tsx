@@ -30,6 +30,8 @@ import { useExit } from "./exit"
 import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import path from "path"
+import { SessionPath } from "@opencode-ai/core/session/path"
+// #132：会话 path 规范化
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
 
@@ -148,6 +150,10 @@ export const {
     const sdk = useSDK()
 
     const fullSyncedSessions = new Set<string>()
+    // #132：区分首次 connected 与重连
+    let connectedOnce = false
+    // 同一挂起期间的 force 共用尾随刷新，不把重连次数变成整页请求队列。
+    const queuedSyncs = new Map<string, Promise<void>>()
     const syncingSessions = new Map<string, Promise<void>>()
     type SessionTrace = {
       session?: Session | null
@@ -188,9 +194,7 @@ export const {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
       return {
-        path: path
-          .relative(path.resolve(project.data.instance.path.worktree), project.data.instance.path.directory)
-          .replaceAll("\\", "/"),
+        path: SessionPath.relative(project.data.instance.path.worktree, project.data.instance.path.directory),
       }
     }
 
@@ -238,6 +242,15 @@ export const {
       switch (event.type) {
         case "server.instance.disposed":
           void bootstrap()
+          break
+        case "server.connected":
+          // #132：SSE 无回放；重连后刷新持久化状态
+          if (!connectedOnce) {
+            connectedOnce = true
+            break
+          }
+          fullSyncedSessions.clear()
+          void bootstrap({ fatal: false }).catch(() => undefined)
           break
         case "permission.replied": {
           const requests = store.permission[event.properties.sessionID]
@@ -701,10 +714,21 @@ export const {
           if (last.role === "user") return "working"
           return last.time.completed ? "idle" : "working"
         },
-        async sync(sessionID: string) {
-          if (fullSyncedSessions.has(sessionID)) return
-          const syncing = syncingSessions.get(sessionID)
-          if (syncing) return syncing
+        async sync(sessionID: string, options?: { force?: boolean }): Promise<void> {
+          // #132：force 忽略 fullSynced 缓存
+          if (!options?.force && fullSyncedSessions.has(sessionID)) return
+          if (syncingSessions.has(sessionID)) {
+            if (!options?.force) return syncingSessions.get(sessionID)
+            const queued = queuedSyncs.get(sessionID)
+            if (queued) return queued
+            // 旧任务失败仍要补读；尾随开始后新到的 force 可以再要求新快照。
+            const task = syncingSessions.get(sessionID)!.catch(() => undefined).then(() => {
+              queuedSyncs.delete(sessionID)
+              return result.session.sync(sessionID, options)
+            })
+            queuedSyncs.set(sessionID, task)
+            return task
+          }
           const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
           hydratingSessions.set(sessionID, tracker)
           const task = (async () => {

@@ -40,6 +40,8 @@ import { SessionID, MessageID, PartID } from "./schema"
 
 import type { Provider } from "@/provider/provider"
 import { Global } from "@opencode-ai/core/global"
+import { SessionPath } from "@opencode-ai/core/session/path"
+// #132：Windows 全局 path 规范化
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { NonNegativeInt, optional } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -109,7 +111,8 @@ function getForkedTitle(title: string): string {
 }
 
 function sessionPath(worktree: string, cwd: string) {
-  return path.relative(path.resolve(worktree), cwd).replaceAll("\\", "/")
+  // #132：create/fork 写路径必须走 SessionPath.relative（Win 全局保留盘符）
+  return SessionPath.relative(worktree, cwd)
 }
 
 const Summary = Schema.Struct({
@@ -907,10 +910,15 @@ function listByProject(
   }
   if (input.path !== undefined) {
     if (input.path) {
-      const conds = [
-        eq(SessionTable.path, input.path),
-        like(SessionTable.path, sql.param(`${input.path}/%`, SessionTable.path)),
-      ]
+      // #132：全局会话 path 别名（含历史无盘符行）
+      const conds = SessionPath.aliases({
+        path: input.path,
+        directory: input.directory,
+        global: String(input.projectID) === "global",
+      }).flatMap((item) => [
+        eq(SessionTable.path, item),
+        like(SessionTable.path, sql.param(`${item}/%`, SessionTable.path)),
+      ])
 
       conditions.push(
         input.directory

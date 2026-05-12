@@ -1,4 +1,5 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { InstanceStore } from "@/project/instance-store"
 import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -51,6 +52,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const session = yield* Session.Service
     const shareSvc = yield* SessionShare.Service
     const promptSvc = yield* SessionPrompt.Service
+    const store = yield* InstanceStore.Service
     // 稳定服务在 handler layer 捕获，查询不重新构造数据库层或项目作用域。
     const usageSvc = yield* SessionRequestUsage.Service
     const revertSvc = yield* SessionRevert.Service
@@ -233,7 +235,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* promptSvc.cancel(ctx.params.sessionID)
+      // #132：优先用会话 directory provide；找不到则退回当前实例 cancel
+      // #132：abort 不抛 NotFound 以匹配 HTTP 契约
+      const info = yield* session.get(ctx.params.sessionID).pipe(Effect.option)
+      if (info._tag === "Some") {
+        yield* store.provide({ directory: info.value.directory }, promptSvc.cancel(ctx.params.sessionID))
+      } else {
+        yield* promptSvc.cancel(ctx.params.sessionID)
+      }
       return true
     })
 
