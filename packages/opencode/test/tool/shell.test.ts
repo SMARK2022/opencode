@@ -1269,6 +1269,33 @@ describe("tool.shell abort", () => {
       }),
     )
   }
+
+  for (const item of ps) {
+    test(
+      `keeps PowerShell output as plain text [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const result = await Effect.runPromise(
+              bash.execute(
+                {
+                  command: "Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
+                  description: "Write staged plain text",
+                },
+                ctx,
+              ),
+            )
+            expect(result.output).toContain("1/4 BUILD")
+            expect(result.output).toContain("2/4 EXPORT")
+            expect(result.output).toContain("3/4 TRANSFER")
+            expect(result.output).toContain("4/4 RUN")
+          },
+        })
+      }),
+    )
+  }
 })
 
 describe("tool.shell truncation", () => {

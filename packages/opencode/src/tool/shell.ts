@@ -322,12 +322,24 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
 
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32" && Shell.ps(shell)) {
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
-      cwd,
-      env,
-      stdin: "ignore",
-      detached: false,
-    })
+    return ChildProcess.make(
+      shell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-OutputFormat",
+        "Text",
+        "-EncodedCommand",
+        psEncoded(command),
+      ],
+      {
+        cwd,
+        env,
+        stdin: "ignore",
+        detached: false,
+      },
+    )
   }
 
   return ChildProcess.make(command, [], {
@@ -339,14 +351,22 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
   })
 }
 
-// PowerShell expects -EncodedCommand input as UTF-16LE and this wrapper normalizes its pipe encoding to UTF-8.
+// PowerShell expects -EncodedCommand input as UTF-16LE.
+// The wrapper also forces UTF-8 console encoding and collapses the information stream into stdout so shell output stays plain text.
 function psEncoded(command: string) {
   return Buffer.from(
     [
       "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
       "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
       "$OutputEncoding = [Console]::OutputEncoding",
+      "$ProgressPreference = 'SilentlyContinue'",
+      "$InformationPreference = 'Continue'",
+      "$WarningPreference = 'Continue'",
+      "$VerbosePreference = 'Continue'",
+      "$DebugPreference = 'Continue'",
+      "& {",
       command,
+      "} *>&1",
       "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
     ].join("\n"),
     "utf16le",

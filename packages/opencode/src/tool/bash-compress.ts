@@ -1359,35 +1359,124 @@ export function shouldCompressOutput(text: string) {
   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
 }
 
+const POWER_SHELL_CLIXML_HEADER_RE = /^\s*#<\s*CLIXML(?:\r?\n|$)/i
+const POWER_SHELL_CLIXML_BLOCK_RE = /(?:#<\s*CLIXML(?:\r?\n)?)?<Objs\b[\s\S]*?<\/Objs>/gi
+const POWER_SHELL_CLIXML_TEXT_NODE_RE = /<(S|ToString)\b([^>]*)>([\s\S]*?)<\/\1>/gi
+const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
+  "message",
+  "tostring",
+  "exception",
+  "errordetails",
+  "positionmessage",
+  "fullyqualifiederrorid",
+  "scriptstacktrace",
+  "stacktrace",
+  "line",
+  "statement",
+  "command",
+  "value",
+  "path",
+  "targetobject",
+  "categoryinfo",
+])
+
 /**
  * Detects and decodes PowerShell CLIXML output back to plain text.
- * CLIXML is PowerShell's XML-based error serialization format that wraps
- * terminal-colored text into `<Objs><S S="...">_xHHHH_</S></Objs>`.
+ * CLIXML is PowerShell's XML-based error/info serialization format that usually
+ * starts with `#< CLIXML` and wraps visible text inside `<Objs>...<S ...>...`.
  *
  * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
  * if the input is recognized CLIXML, or null otherwise.
  */
 function transformPowerShellClixml(text: string): string | null {
-  const trimmed = text.trimStart()
-  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
+  let changed = false
+  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
+    const decoded = decodePowerShellClixmlBlock(block)
+    if (!decoded) return block
+    changed = true
+    return decoded
+  })
 
-  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
-  const parts: string[] = []
-  let match: RegExpExecArray | null
-  while ((match = decoded.exec(text)) !== null) {
-    parts.push(clixmlDecodeHexEscapes(match[1]))
-  }
+  return changed ? next : null
+}
+
+function decodePowerShellClixmlBlock(block: string): string | null {
+  if (!isPurePowerShellClixmlBlock(block)) return null
+
+  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
+
+  const parts = extractPowerShellClixmlText(body)
   if (parts.length === 0) return null
 
-  let plain = parts.join("")
+  let plain = parts.join("\n")
   plain = plain.replace(ANSI_GLOBAL_RE, "")
   // Collapse any \r\n → \n left over from the decode
-  plain = plain.replace(/\r\n/g, "\n")
+  plain = plain.replace(/\r\n?/g, "\n")
   plain = plain.trimEnd()
 
   if (!plain) return null
 
   return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+}
+
+// Only decode CLIXML blocks that are structurally pure XML-ish payloads.
+// Mixed blocks with plain stdout inside them are left untouched so we never swallow real command output.
+function isPurePowerShellClixmlBlock(block: string) {
+  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
+  const lines = body.split(/\r?\n/)
+  let sawXml = false
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    if (trimmed.startsWith("<Objs") || trimmed.startsWith("</Objs>")) {
+      sawXml = true
+      continue
+    }
+    if (trimmed.startsWith("<")) {
+      sawXml = true
+      continue
+    }
+    return false
+  }
+
+  return sawXml
+}
+
+function extractPowerShellClixmlText(text: string) {
+  const collect = (fallback: boolean) => {
+    POWER_SHELL_CLIXML_TEXT_NODE_RE.lastIndex = 0
+    const parts: string[] = []
+    let match: RegExpExecArray | null
+
+    while ((match = POWER_SHELL_CLIXML_TEXT_NODE_RE.exec(text)) !== null) {
+      const nodeType = match[1]
+      const attrs = match[2]
+      const raw = match[3]
+      const name = /(?:^|\s)(?:N|S)="([^"]+)"/i.exec(attrs)?.[1]?.toLowerCase()
+      if (nodeType === "S" && !fallback && (!name || !POWER_SHELL_CLIXML_MEANINGFUL_NAMES.has(name))) continue
+
+      const decoded = clixmlDecodeHexEscapes(decodeXmlEntities(raw)).trimEnd()
+      if (decoded.trim().length === 0 || parts.at(-1) === decoded) continue
+      parts.push(decoded)
+    }
+
+    return parts
+  }
+
+  const parts = collect(false)
+  if (parts.length > 0) return parts
+  return collect(true)
+}
+
+function decodeXmlEntities(value: string) {
+  return value.replace(/&(lt|gt|amp|quot|apos);/g, (_, entity) => {
+    if (entity === "lt") return "<"
+    if (entity === "gt") return ">"
+    if (entity === "amp") return "&"
+    if (entity === "quot") return '"'
+    return "'"
+  })
 }
 
 /** Decodes PowerShell _xHHHH_ hex escape sequences in CLIXML text nodes. */
@@ -1901,6 +1990,22 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
   parts.push(renderDiagnosticContexts(uniqueContexts, config))
 
   return parts.join("\n\n")
+}
+
+/**
+ * Normalize PowerShell CLIXML back to plain text while preserving surrounding stdout.
+ * Pure CLIXML blocks are decoded; mixed blocks are left untouched to avoid losing real output.
+ */
+export function normalizePowerShellOutput(text: string) {
+  let changed = false
+  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
+    const decoded = decodePowerShellClixmlBlock(block)
+    if (!decoded) return block
+    changed = true
+    return decoded
+  })
+
+  return changed ? next : text
 }
 
 /**
