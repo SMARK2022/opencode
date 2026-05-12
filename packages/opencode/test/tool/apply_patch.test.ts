@@ -225,6 +225,89 @@ describe("tool.apply_patch freeform", () => {
     })
   })
 
+  test("does not show CRLF-only update fallout as content changes", async () => {
+    await using fixture = await tmpdir()
+    const { ctx, calls } = makeCtx()
+
+    await WithInstance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const target = path.join(fixture.path, "crlf.txt")
+        await fs.writeFile(target, "one\r\ntwo\r\nthree\r\n", "utf-8")
+
+        const patchText = "*** Begin Patch\n*** Update File: crlf.txt\n@@\n-two\n+deux\n*** End Patch"
+
+        await execute({ patchText }, ctx)
+
+        expect(calls.length).toBe(1)
+        const shown = calls[0].metadata.files[0]?.patch ?? ""
+        const file = calls[0].metadata.files[0]
+        expect(shown).toContain("-two")
+        expect(shown).toContain("+deux")
+        expect(shown).not.toContain("-one")
+        expect(shown).not.toContain("+one")
+        expect(shown).not.toContain("-three")
+        expect(shown).not.toContain("+three")
+        expect(file?.additions).toBe(1)
+        expect(file?.deletions).toBe(1)
+        expect(await fs.readFile(target, "utf-8")).toBe("one\r\ndeux\r\nthree\r\n")
+      },
+    })
+  })
+
+  test("applies patches to CR-only files without showing line-ending fallout", async () => {
+    await using fixture = await tmpdir()
+    const { ctx, calls } = makeCtx()
+
+    await WithInstance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const target = path.join(fixture.path, "cr.txt")
+        await fs.writeFile(target, "one\rtwo\rthree\r", "utf-8")
+
+        const patchText = "*** Begin Patch\n*** Update File: cr.txt\n@@\n-two\n+deux\n*** End Patch"
+
+        await execute({ patchText }, ctx)
+
+        const shown = calls[0].metadata.files[0]?.patch ?? ""
+        expect(shown).toContain("-two")
+        expect(shown).toContain("+deux")
+        expect(shown).not.toContain("-one")
+        expect(shown).not.toContain("+one")
+        expect(shown).not.toContain("-three")
+        expect(shown).not.toContain("+three")
+        expect(calls[0].metadata.files[0]?.additions).toBe(1)
+        expect(calls[0].metadata.files[0]?.deletions).toBe(1)
+        expect(await fs.readFile(target, "utf-8")).toBe("one\rdeux\rthree\r")
+      },
+    })
+  })
+
+  test("preserves BOM and CRLF endings when applying patches", async () => {
+    await using fixture = await tmpdir()
+    const { ctx, calls } = makeCtx()
+
+    await WithInstance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const bom = String.fromCharCode(0xfeff)
+        const target = path.join(fixture.path, "bom-crlf.cs")
+        await fs.writeFile(target, `${bom}using System;\r\nclass Test {}\r\n`, "utf-8")
+
+        const patchText = "*** Begin Patch\n*** Update File: bom-crlf.cs\n@@\n-using System;\n+using Up;\n*** End Patch"
+
+        await execute({ patchText }, ctx)
+
+        const content = await fs.readFile(target, "utf-8")
+        expect(content.charCodeAt(0)).toBe(0xfeff)
+        expect(content.slice(1)).toBe("using Up;\r\nclass Test {}\r\n")
+        expect(calls[0].metadata.files[0]?.patch).toContain("-using System;")
+        expect(calls[0].metadata.files[0]?.patch).toContain("+using Up;")
+        expect(calls[0].metadata.files[0]?.patch).not.toContain(bom)
+      },
+    })
+  })
+
   test("inserts lines with insert-only hunk", async () => {
     await using fixture = await tmpdir()
     const { ctx } = makeCtx()

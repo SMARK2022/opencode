@@ -14,6 +14,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
+import { normalizeLineEndings } from "@/util/line-ending"
 
 const MAX_PROJECT_DIAGNOSTICS_FILES = 5
 
@@ -50,7 +51,9 @@ export const WriteTool = Tool.define(
           const contentOld = source.text
           const contentNew = next.text
 
-          const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, contentNew))
+          const diff = trimDiff(
+            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+          )
           yield* ctx.ask({
             permission: "edit",
             patterns: [path.relative(instance.worktree, filepath)],
@@ -69,7 +72,14 @@ export const WriteTool = Tool.define(
           let metadataDiff: string | undefined
           if (exists) {
             const finalSource = yield* Bom.readFile(fs, filepath)
-            metadataDiff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, finalSource.text))
+            metadataDiff = trimDiff(
+              createTwoFilesPatch(
+                filepath,
+                filepath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(finalSource.text),
+              ),
+            )
           }
           yield* bus.publish(File.Event.Edited, { file: filepath })
           yield* bus.publish(FileWatcher.Event.Updated, {

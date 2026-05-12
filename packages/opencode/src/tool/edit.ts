@@ -18,19 +18,7 @@ import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Bom from "@/util/bom"
-
-function normalizeLineEndings(text: string): string {
-  return text.replaceAll("\r\n", "\n")
-}
-
-function detectLineEnding(text: string): "\n" | "\r\n" {
-  return text.includes("\r\n") ? "\r\n" : "\n"
-}
-
-function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
-  if (ending === "\n") return text
-  return text.replaceAll("\n", "\r\n")
-}
+import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
 
 const locks = new Map<string, Semaphore.Semaphore>()
 
@@ -94,7 +82,9 @@ export const EditTool = Tool.define(
                 const desiredBom = source.bom || next.bom
                 contentOld = source.text
                 contentNew = next.text
-                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+                diff = trimDiff(
+                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+                )
                 yield* ctx.ask({
                   permission: "edit",
                   patterns: [path.relative(instance.worktree, filePath)],
@@ -168,9 +158,11 @@ export const EditTool = Tool.define(
             }).pipe(Effect.orDie),
           )
 
+          const diffOld = normalizeLineEndings(contentOld)
+          const diffNew = normalizeLineEndings(contentNew)
           let additions = 0
           let deletions = 0
-          for (const change of diffLines(contentOld, contentNew)) {
+          for (const change of diffLines(diffOld, diffNew)) {
             if (change.added) additions += change.count || 0
             if (change.removed) deletions += change.count || 0
           }

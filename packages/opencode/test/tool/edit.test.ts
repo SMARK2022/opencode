@@ -128,6 +128,67 @@ describe("tool.edit", () => {
       })
     })
 
+    test("does not show CRLF-only oldString-empty overwrites as content changes", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "existing-crlf.txt")
+      const content = "Line 1\nLine 2\n"
+      await fs.writeFile(filepath, content.replaceAll("\n", "\r\n"), "utf-8")
+
+      await WithInstance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const edit = await resolve()
+          const result = await Effect.runPromise(
+            edit.execute(
+              {
+                filePath: filepath,
+                oldString: "",
+                newString: content,
+              },
+              ctx,
+            ),
+          )
+
+          expect(result.metadata.diff).toContain("Index:")
+          expect(result.metadata.diff).not.toContain("-Line 1")
+          expect(result.metadata.diff).not.toContain("+Line 1")
+          expect(result.metadata.filediff.additions).toBe(0)
+          expect(result.metadata.filediff.deletions).toBe(0)
+          expect(await fs.readFile(filepath, "utf-8")).toBe(content)
+        },
+      })
+    })
+
+    test("does not show CR-only oldString-empty overwrites as content changes", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "existing-cr.txt")
+      const content = "Line 1\nLine 2\n"
+      await fs.writeFile(filepath, content.replaceAll("\n", "\r"), "utf-8")
+
+      await WithInstance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const edit = await resolve()
+          const result = await Effect.runPromise(
+            edit.execute(
+              {
+                filePath: filepath,
+                oldString: "",
+                newString: content,
+              },
+              ctx,
+            ),
+          )
+
+          expect(result.metadata.diff).toContain("Index:")
+          expect(result.metadata.diff).not.toContain("-Line 1")
+          expect(result.metadata.diff).not.toContain("+Line 1")
+          expect(result.metadata.filediff.additions).toBe(0)
+          expect(result.metadata.filediff.deletions).toBe(0)
+        },
+      })
+    })
+
     test("creates new file with nested directories", async () => {
       await using tmp = await tmpdir()
       const filepath = path.join(tmp.path, "nested", "dir", "file.txt")

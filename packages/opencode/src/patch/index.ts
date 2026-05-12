@@ -4,6 +4,7 @@ import * as fs from "fs/promises"
 import { readFileSync } from "fs"
 import * as Log from "@opencode-ai/core/util/log"
 import * as Bom from "../util/bom"
+import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
 
 const log = Log.create({ service: "patch" })
 
@@ -189,7 +190,7 @@ function stripHeredoc(input: string): string {
 
 export function parsePatch(patchText: string): { hunks: Hunk[] } {
   const cleaned = stripHeredoc(patchText.trim())
-  const lines = cleaned.split("\n")
+  const lines = splitLines(cleaned)
   const hunks: Hunk[] = []
   let i = 0
 
@@ -318,7 +319,7 @@ export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFile
     throw new Error(`Failed to read file ${filePath}: ${error}`, { cause: error })
   }
 
-  let originalLines = originalContent.text.split("\n")
+  let originalLines = splitLines(originalContent.text)
 
   // Drop trailing empty element for consistent line counting
   if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
@@ -333,7 +334,8 @@ export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFile
     newLines.push("")
   }
 
-  const next = Bom.split(newLines.join("\n"))
+  // Patch matching works on logical lines; preserve the file's original line ending when writing back.
+  const next = Bom.split(convertToLineEnding(newLines.join("\n"), detectLineEnding(originalContent.text)))
   const newContent = next.text
 
   // Generate unified diff
@@ -491,8 +493,8 @@ function seekSequence(lines: string[], pattern: string[], startIndex: number, eo
 }
 
 function generateUnifiedDiff(oldContent: string, newContent: string): string {
-  const oldLines = oldContent.split("\n")
-  const newLines = newContent.split("\n")
+  const oldLines = splitLines(oldContent)
+  const newLines = splitLines(newContent)
 
   // Simple diff generation - in a real implementation you'd use a proper diff algorithm
   let diff = "@@ -1 +1 @@\n"

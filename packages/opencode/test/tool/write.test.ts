@@ -168,6 +168,43 @@ describe("tool.write", () => {
         expect(result.metadata).toHaveProperty("exists", true)
       }),
     )
+
+    it.instance("does not show CRLF-only overwrites as content changes", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "crlf-existing.txt")
+        const content = "Line 1\nLine 2\n"
+        yield* Effect.promise(() => fs.writeFile(filepath, content.replaceAll("\n", "\r\n"), "utf-8"))
+
+        const result = yield* run({ filePath: filepath, content })
+        const diff = result.metadata.diff ?? ""
+
+        expect(diff).toContain("Index:")
+        expect(diff).not.toContain("-Line 1")
+        expect(diff).not.toContain("+Line 1")
+        expect(diff).not.toContain("-Line 2")
+        expect(diff).not.toContain("+Line 2")
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content)
+      }),
+    )
+
+    it.instance("does not show CR-only overwrites as content changes", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "cr-existing.txt")
+        const content = "Line 1\nLine 2\n"
+        yield* Effect.promise(() => fs.writeFile(filepath, content.replaceAll("\n", "\r"), "utf-8"))
+
+        const result = yield* run({ filePath: filepath, content })
+        const diff = result.metadata.diff ?? ""
+
+        expect(diff).toContain("Index:")
+        expect(diff).not.toContain("-Line 1")
+        expect(diff).not.toContain("+Line 1")
+        expect(diff).not.toContain("-Line 2")
+        expect(diff).not.toContain("+Line 2")
+      }),
+    )
   })
 
   describe("file permissions", () => {

@@ -14,6 +14,7 @@ import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
 import { Format } from "../format"
 import * as Bom from "@/util/bom"
+import { normalizeLineEndings } from "@/util/line-ending"
 
 export const Parameters = Schema.Struct({
   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
@@ -79,11 +80,13 @@ export const ApplyPatchTool = Tool.define(
             const newContent =
               hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
             const next = Bom.split(newContent)
-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, next.text))
+            const diffOld = normalizeLineEndings(oldContent)
+            const diffNew = normalizeLineEndings(next.text)
+            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
 
             let additions = 0
             let deletions = 0
-            for (const change of diffLines(oldContent, next.text)) {
+            for (const change of diffLines(diffOld, diffNew)) {
               if (change.added) additions += change.count || 0
               if (change.removed) deletions += change.count || 0
             }
@@ -126,11 +129,13 @@ export const ApplyPatchTool = Tool.define(
               return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
             }
 
-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, newContent))
+            const diffOld = normalizeLineEndings(oldContent)
+            const diffNew = normalizeLineEndings(newContent)
+            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
 
             let additions = 0
             let deletions = 0
-            for (const change of diffLines(oldContent, newContent)) {
+            for (const change of diffLines(diffOld, diffNew)) {
               if (change.added) additions += change.count || 0
               if (change.removed) deletions += change.count || 0
             }
@@ -165,9 +170,13 @@ export const ApplyPatchTool = Tool.define(
               ),
             )
             const contentToDelete = source.text
-            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, contentToDelete, ""))
+            const diffOld = normalizeLineEndings(contentToDelete)
+            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
 
-            const deletions = contentToDelete.split("\n").length
+            let deletions = 0
+            for (const change of diffLines(diffOld, "")) {
+              if (change.removed) deletions += change.count || 0
+            }
 
             fileChanges.push({
               filePath,
