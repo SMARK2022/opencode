@@ -20,6 +20,25 @@ function windowsAbsolute(directory: string) {
   return /^[A-Za-z]:\//.test(result) ? result : undefined
 }
 
+// #143：Windows 盘符根可写成 F: 或 F:/
+function isDriveQualified(value: string) {
+  return /^[A-Za-z]:(?:\/|$)/.test(value)
+}
+
+// #143：path 祖先链，用于会话列表匹配父目录命名空间
+export function ancestors(value: string, options?: { root?: boolean }) {
+  const normalized = value.replace(/\/+$/, "")
+  if (!normalized) return [""]
+  const prefixes = normalized.split("/").flatMap((_, index, parts) => {
+    const prefix = parts.slice(0, index + 1).join("/")
+    // #143：Windows 驱动器根同时匹配 F: 与 F:/
+    if (/^[A-Za-z]:$/.test(prefix)) return [prefix, `${prefix}/`]
+    return [prefix]
+  })
+  // #143：root 选项注入空串祖先，匹配仓库根会话
+  return [...new Set([...(options?.root && !isDriveQualified(normalized) ? [""] : []), ...prefixes])]
+}
+
 export function aliases(input: { path: string; directory?: string; global?: boolean }) {
   // #132：历史全局 path 可能无盘符；查询时同时匹配
   const absolute = input.global && input.directory ? windowsAbsolute(input.directory) : undefined

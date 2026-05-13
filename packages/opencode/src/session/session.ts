@@ -1,3 +1,4 @@
+import { SessionListing } from "@opencode-ai/core/session/listing"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
@@ -493,6 +494,8 @@ const layer: Layer.Layer<
       return yield* listByProject(db, {
         projectID: ctx.project.id,
         experimentalWorkspaces: flags.experimentalWorkspaces,
+        // #143：worktree 供 directoryMatchesPath
+        worktree: ctx.worktree,
         ...input,
       })
     })
@@ -901,35 +904,20 @@ function listByProject(
   input: ListInput & {
     projectID: ProjectV2.ID
     experimentalWorkspaces: boolean
+    worktree: string
   },
 ) {
-  const conditions = [eq(SessionTable.project_id, input.projectID)]
+  const conditions: ReturnType<typeof eq>[] = []
 
   if (input.workspaceID) {
     conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
   }
   if (input.path !== undefined) {
-    if (input.path) {
-      // #132：全局会话 path 别名（含历史无盘符行）
-      const conds = SessionPath.aliases({
-        path: input.path,
-        directory: input.directory,
-        global: String(input.projectID) === "global",
-      }).flatMap((item) => [
-        eq(SessionTable.path, item),
-        like(SessionTable.path, sql.param(`${item}/%`, SessionTable.path)),
-      ])
-
-      conditions.push(
-        input.directory
-          ? or(...conds, and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))!)!
-          : or(...conds)!,
-      )
-    }
-  } else if (input.scope !== "project") {
-    if (input.directory) {
-      conditions.push(eq(SessionTable.directory, input.directory))
-    }
+    // 已定义的空根也使用共享相关查询，不能被真值判断吞掉。
+    conditions.push(SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory }))
+  } else {
+    conditions.push(eq(SessionTable.project_id, input.projectID))
+    if (input.scope !== "project" && input.directory) conditions.push(eq(SessionTable.directory, input.directory))
   }
   if (input.roots) {
     conditions.push(isNull(SessionTable.parent_id))

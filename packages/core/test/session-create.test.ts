@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import path from "path"
-import { Effect, Layer, Stream } from "effect"
+import { DateTime, Effect, Layer, Stream } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
@@ -13,7 +13,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
+import { SessionPath } from "@opencode-ai/core/session/path"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Prompt } from "@opencode-ai/core/session/prompt"
@@ -48,6 +49,58 @@ const location = Location.Ref.make({ directory: AbsolutePath.make("/project") })
 const id = SessionV2.ID.create()
 
 describe("SessionV2.create", () => {
+  it.effect("lists related project subpaths without widening exact directories", () => Effect.gen(function* () {
+    const session = yield* SessionV2.Service
+    const db = (yield* Database.Service).db
+    const projectID = ProjectV2.ID.make("1".repeat(40))
+    const otherID = ProjectV2.ID.make("2".repeat(40))
+    const workspaceID = WorkspaceV2.ID.make("wrk_related")
+    const otherWorkspace = WorkspaceV2.ID.make("wrk_other")
+    const outer = path.resolve("/scope")
+    const repo = path.join(outer, "repo")
+    const child = path.join(repo, "packages", "a")
+    const foreign = path.resolve("/unrelated")
+    yield* db.insert(ProjectTable).values([
+      { id: projectID, worktree: AbsolutePath.make(repo), sandboxes: [] },
+      { id: otherID, worktree: AbsolutePath.make(foreign), sandboxes: [] },
+      { id: ProjectV2.ID.global, worktree: AbsolutePath.make(path.parse(repo).root), sandboxes: [] },
+    ]).onConflictDoNothing().run().pipe(Effect.orDie)
+    const rows = [
+      { title: "root", project_id: projectID, directory: repo, path: "" },
+      { title: "parent", project_id: projectID, directory: path.join(repo, "packages"), path: "packages" },
+      { title: "current", project_id: projectID, directory: child, path: "packages/a" },
+      { title: "deeper", project_id: projectID, directory: path.join(child, "src"), path: "packages/a/src" },
+      { title: "sibling", project_id: projectID, directory: path.join(repo, "packages", "b"), path: "packages/b" },
+      { title: "global-parent", project_id: ProjectV2.ID.global, directory: outer, path: SessionPath.relative("/", outer) },
+      { title: "legacy", project_id: projectID, directory: child, path: null },
+      { title: "cross-owner-parent", project_id: otherID, directory: path.join(repo, "packages"), path: null },
+      { title: "global-alias", project_id: ProjectV2.ID.global, directory: foreign, path: SessionPath.relative("/", outer).replace(/^[A-Za-z]:\//, "") },
+      { title: "unrelated", project_id: otherID, directory: foreign, path: "unrelated" },
+      { title: "other-workspace", project_id: projectID, directory: child, path: "packages/a" },
+    ]
+    // 同一创建时间强制验证 ID 破同分和双向 cursor；数据只进入隔离测试数据库。
+    yield* db.insert(SessionTable).values(rows.map((row, index) => ({ ...row,
+      id: SessionV2.ID.make(`ses_related_${String(index).padStart(2, "0")}`), slug: row.title, version: "test",
+      workspace_id: index === rows.length - 1 ? otherWorkspace : workspaceID, time_created: 1000, time_updated: 1000,
+    }))).run().pipe(Effect.orDie)
+    const query = { project: projectID, subpath: RelativePath.make("packages/a"), workspaceID, order: "asc" as const }
+    const all = yield* session.list(query)
+    expect(all.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "global-parent", "legacy", "cross-owner-parent", "global-alias"])
+    expect((yield* session.list({ ...query, search: "current" })).map(item => item.title)).toEqual(["current"])
+    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
+    const wholeProject = yield* session.list({ project: projectID, order: "asc" })
+    expect(wholeProject.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "sibling", "legacy", "other-workspace"])
+    expect((yield* session.list({ ...query, subpath: RelativePath.make("") })).map(item => item.title)).toContain("sibling")
+    const first = yield* session.list({ ...query, limit: 2 })
+    const edge = first.at(-1)
+    if (!edge) return yield* Effect.die("Missing first related page")
+    const next = yield* session.list({ ...query, limit: 2, anchor: { id: edge.id, time: DateTime.toEpochMillis(edge.time.created), direction: "next" } })
+    expect(next.map(item => item.id)).toEqual(all.slice(2, 4).map(item => item.id))
+    const back = next[0]
+    if (!back) return yield* Effect.die("Missing next related page")
+    expect((yield* session.list({ ...query, limit: 2, anchor: { id: back.id, time: DateTime.toEpochMillis(back.time.created), direction: "previous" } })).map(item => item.id)).toEqual(first.map(item => item.id))
+  }))
+
   it.effect("creates a fresh projected session when the ID is omitted", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service

@@ -1,5 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
+import { SessionPath } from "@opencode-ai/core/session/path"
+import path from "path"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { tmpdir } from "../../../fixture/fixture"
 import { json, mount, wait } from "./sync-fixture"
@@ -324,6 +326,15 @@ test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deleti
   const foreign = { ...added, id: "ses_live_foreign", projectID: "proj_other" }
   // 旧 pathless 行依靠请求目录匹配，不能仅靠相对 path 判定遗漏这类合法成员。
   const pathless = { ...added, id: "ses_live_pathless", path: undefined, directory: "/tmp/opencode/packages/tui" }
+  // #143：旧 HTTP 中已存在且被事件触碰的祖先/global 行，与新补入行共用成员判定。
+  const relatives = [
+    { ...current, id: "ses_live_root", path: "", directory: path.resolve("/tmp/opencode") },
+    { ...current, id: "ses_live_ancestor", path: "packages", directory: path.resolve("/tmp/opencode/packages") },
+    { ...current, id: "ses_live_global", projectID: "global", path: SessionPath.relative("/", "/tmp/opencode"), directory: path.resolve("/tmp/opencode") },
+    { ...current, id: "ses_live_global_alias", projectID: "global", path: SessionPath.relative("/", "/tmp/opencode").replace(/^[A-Za-z]:\//, ""), directory: path.resolve("/tmp/unrelated") },
+    { ...current, id: "ses_live_directory_relative", projectID: "proj_other", path: undefined, directory: path.resolve("/tmp/opencode/packages") },
+  ].map((info) => ({ ...info, time: { created: Date.now(), updated: Date.now() } }))
+  const sibling = { ...added, id: "ses_live_sibling", path: "packages/tui-other", directory: path.resolve("/tmp/unrelated") }
   let resolveList!: (response: Response) => void
   const response = new Promise<Response>((resolve) => { resolveList = resolve })
   let delayed = false
@@ -331,7 +342,7 @@ test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deleti
   const { app, emit, sync, kv } = await mount((url) => {
     if (url.pathname !== "/session") return undefined
     // 初次 mount 正常完成；仅把被测 refresh/bootstrap 的列表 HTTP 延迟。
-    if (!delayed) return json([old, deleted, excluded])
+    if (!delayed) return json([old, deleted, excluded, ...relatives.map((info) => ({ ...info, tokens: old.tokens }))])
     requested = true
     expect(url.searchParams.get("scope")).toBe(mode === "directory" ? null : "project")
     expect(url.searchParams.get("path")).toBe(mode === "directory" ? "packages/tui" : null)
@@ -344,7 +355,7 @@ test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deleti
     await wait(() => requested)
     emit(global({ id: `evt_${mode}_usage`, type: "session.updated", properties: { sessionID, info: current } }))
     emit(global({ id: `evt_${mode}_deleted`, type: "session.deleted", properties: { sessionID: deleted.id, info: deleted } }))
-    for (const info of [added, outside, foreign, pathless])
+    for (const info of [added, outside, foreign, pathless, ...relatives, sibling])
       emit(global({ id: `evt_${mode}_${info.id}`, type: "session.updated", properties: { sessionID: info.id, info } }))
     // 移出子树的 placement delta 改变成员资格；project scope 仍应保留同项目行。
     emit(global({ id: `evt_${mode}_move_out`, type: "session.next.moved", properties: {
@@ -355,7 +366,7 @@ test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deleti
       sync.session.get(outside.id)?.path === "packages/other" && !!sync.session.get(foreign.id))
     // 接收时切换偏好不改变已发出请求的筛选；否则迟到结果会按另一个查询解释。
     kv.set("session_directory_filter_enabled", mode !== "directory")
-    resolveList(json([old, deleted, marker]))
+    resolveList(json([old, deleted, marker, ...relatives.map((info) => ({ ...info, tokens: old.tokens })), sibling]))
     await request
     // 非 continue 的 bootstrap 返回早于非阻塞列表，marker 证明列表已实际接收。
     await wait(() => !!sync.session.get(marker.id))
@@ -367,9 +378,12 @@ test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deleti
     expect(sync.session.get(added.id)?.tokens).toEqual(current.tokens)
     expect(sync.session.get(added.id)?.cost).toBe(1)
     expect(sync.session.get(pathless.id)?.tokens).toEqual(current.tokens)
-    // 全局事件不会替列表做 project/path 筛选，跨项目和移出的行必须在接收处排除。
+    // #143：项目模式保留兄弟目录，目录模式排除无关分支；全局事件本身不是成员证明。
     expect(sync.session.get(foreign.id)).toBeUndefined()
     expect(!!sync.session.get(outside.id)).toBe(mode !== "directory")
+    for (const info of relatives)
+      expect(sync.session.get(info.id)?.tokens).toEqual(mode === "directory" || info.projectID === old.projectID ? current.tokens : undefined)
+    expect(sync.session.get(sibling.id)?.tokens).toEqual(mode === "directory" ? undefined : current.tokens)
     delayed = false
     kv.set("session_directory_filter_enabled", false)
     emit(global({ id: `evt_${mode}_after`, type: "session.updated", properties: {
