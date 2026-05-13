@@ -318,6 +318,27 @@ const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
     })
   })
 
+const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "tool",
+      callID: crypto.randomUUID(),
+      tool: "bash",
+      state: {
+        status: "completed",
+        input: { command: "printf tail" },
+        output: "tail output",
+        title: "done",
+        metadata: {},
+        time: { start: Date.now(), end: Date.now() },
+      },
+    })
+  })
+
 const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const config = yield* Config.Service
   const prompt = yield* SessionPrompt.Service
@@ -587,6 +608,46 @@ it.live("loop continues when finish is stop but assistant has tool parts", () =>
     }),
     { git: true, config: providerCfg },
   ),
+)
+
+it.live("manual compaction stops after summarizing retained tool tail", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Manual compact",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* seed(chat.id, { finish: "stop" })
+      const keep = yield* seed(chat.id, { finish: "stop" })
+      yield* addCompletedTool(chat.id, keep.assistant.id)
+      yield* SessionCompaction.Service.use((compact) =>
+        compact.create({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          auto: false,
+        }),
+      )
+      yield* llm.text("summary")
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
+
+      expect(yield* llm.calls).toBe(1)
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.summary).toBe(true)
+      // The retained tail is still visible after the summary for future prompts,
+      // but this manual compaction loop must not treat that old build turn as a
+      // fresh request and make a second provider call for a build continuation.
+      expect(filtered.map((msg) => msg.info.id)).toContain(keep.user.id)
+      expect(filtered.map((msg) => msg.info.id)).toContain(keep.assistant.id)
+    }),
+    { git: true, config: (url) => ({ ...providerCfg(url), compaction: { tail_turns: 1 } }) },
+  ),
+  30_000,
 )
 
 it.live("failed subtask preserves metadata on error tool state", () =>

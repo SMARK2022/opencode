@@ -1560,6 +1560,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               overflow: task.overflow,
             })
             if (result === "stop") break
+            // Manual compaction is a terminal maintenance action: the user asked only
+            // to rewrite history into a summary.  After compaction, filterCompacted()
+            // intentionally appends the retained tail after the summary so the next
+            // model request can still see recent context.  If we immediately loop
+            // again for a manual compaction, that retained tail can look like the
+            // newest build turn and resume old tool-call work without a user prompt.
+            // Auto-compaction keeps looping because it may have created an explicit
+            // synthetic follow-up message to continue the interrupted request.
+            if (!task.auto) break
             continue
           }
 

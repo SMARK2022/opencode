@@ -1588,6 +1588,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     if (expanded() || !overflow()) return renderedContent()
     return [...lines().slice(0, PREVIEW), "…"].join("\n")
   })
+  const completedKey = createMemo(() => `${ctx.width}\u0000${preview()}`)
   return (
     <Show when={content() && ctx.showThinking()}>
       <box
@@ -1612,15 +1613,34 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
           </text>
         </box>
         <box>
-          <code
-            filetype="markdown"
-            drawUnstyledText={streaming()}
-            streaming={streaming()}
-            syntaxStyle={subtleSyntax()}
-            content={preview()}
-            conceal={ctx.conceal()}
-            fg={theme.textMuted}
-          />
+          <Switch>
+            <Match when={streaming()}>
+              <code
+                filetype="markdown"
+                drawUnstyledText={false}
+                streaming={true}
+                syntaxStyle={subtleSyntax()}
+                content={preview()}
+                conceal={ctx.conceal()}
+                fg={theme.textMuted}
+              />
+            </Match>
+            <Match when={!streaming()}>
+              <Show keyed when={completedKey()}>
+                {(_key) => (
+                  <code
+                    filetype="markdown"
+                    drawUnstyledText={false}
+                    streaming={false}
+                    syntaxStyle={subtleSyntax()}
+                    content={preview()}
+                    conceal={ctx.conceal()}
+                    fg={theme.textMuted}
+                  />
+                )}
+              </Show>
+            </Match>
+          </Switch>
         </box>
         <Show when={overflow()}>
           <box>
@@ -1636,27 +1656,58 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   const ctx = use()
   const { theme, syntax } = useTheme()
   const streaming = createMemo(() => !props.message.time.completed)
+  const content = createMemo(() => props.part.text.trim())
+  const completedKey = createMemo(() => `${ctx.width}\u0000${content()}`)
   return (
-    <Show when={props.part.text.trim()}>
+    <Show when={content()}>
       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
         <Switch>
           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
-            <markdown
-              syntaxStyle={syntax()}
-              streaming={streaming()}
-              content={props.part.text.trim()}
-              conceal={ctx.conceal()}
-              fg={theme.markdownText}
-              bg={theme.background}
-            />
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                // MarkdownRenderable keeps ordinary paragraphs in an internal CodeRenderable.
+                // That child is configured as streaming + styled-only so incremental content
+                // changes can leave its text buffer height stuck on an older, shorter value.
+                // Remounting completed markdown per content+width makes Yoga measure from the
+                // current text after reconnect refreshes and sidebar/fullscreen reflows.
+                <markdown
+                  syntaxStyle={syntax()}
+                  streaming={false}
+                  content={content()}
+                  conceal={ctx.conceal()}
+                  fg={theme.markdownText}
+                  bg={theme.background}
+                />
+              )}
+            </Show>
           </Match>
-          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN || streaming()}>
+          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                // Keep the non-experimental completed path on CodeRenderable, but remount it
+                // under the same content+width key so resize/sidebar reflow cannot reuse stale
+                // text-buffer measurements from a shorter DB-refresh snapshot.
+                <code
+                  filetype="markdown"
+                  drawUnstyledText={false}
+                  streaming={false}
+                  syntaxStyle={syntax()}
+                  content={content()}
+                  conceal={ctx.conceal()}
+                  fg={theme.text}
+                />
+              )}
+            </Show>
+          </Match>
+          <Match when={streaming()}>
             <code
               filetype="markdown"
-              drawUnstyledText={streaming()}
-              streaming={streaming()}
+              // Keep streaming output styled-only. With unstyled fallback enabled,
+              // each delta flashes raw markdown before async highlighting conceals it.
+              drawUnstyledText={false}
+              streaming={true}
               syntaxStyle={syntax()}
-              content={props.part.text.trim()}
+              content={content()}
               conceal={ctx.conceal()}
               fg={theme.text}
             />

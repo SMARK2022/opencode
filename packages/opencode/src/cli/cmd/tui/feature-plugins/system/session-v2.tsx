@@ -6,6 +6,7 @@ import { useTheme } from "@tui/context/theme"
 import { useLocal } from "@tui/context/local"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { TextAttributes, type BoxRenderable, type SyntaxStyle } from "@opentui/core"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Locale } from "@/util/locale"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import path from "path"
@@ -91,6 +92,7 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                       last={lastAssistant()?.id === message.id}
                       syntax={syntax()}
                       subtleSyntax={subtleSyntax()}
+                      width={dimensions().width}
                       start={lastUserCreated(index())}
                     />
                   </Match>
@@ -288,6 +290,7 @@ function AssistantMessage(props: {
   last: boolean
   syntax: SyntaxStyle
   subtleSyntax: SyntaxStyle
+  width: number
   start?: number
 }) {
   const { theme } = useTheme()
@@ -311,6 +314,7 @@ function AssistantMessage(props: {
                 part={part as SessionMessageAssistantText}
                 syntax={props.syntax}
                 streaming={!props.message.time.completed}
+                width={props.width}
               />
             </Match>
             <Match when={part.type === "reasoning"}>
@@ -318,6 +322,7 @@ function AssistantMessage(props: {
                 part={part as SessionMessageAssistantReasoning}
                 subtleSyntax={props.subtleSyntax}
                 streaming={!props.message.time.completed}
+                width={props.width}
               />
             </Match>
             <Match when={part.type === "tool"}>
@@ -360,20 +365,60 @@ function AssistantMessage(props: {
   )
 }
 
-function AssistantText(props: { part: SessionMessageAssistantText; syntax: SyntaxStyle; streaming: boolean }) {
+function AssistantText(props: {
+  part: SessionMessageAssistantText
+  syntax: SyntaxStyle
+  streaming: boolean
+  width: number
+}) {
   const { theme } = useTheme()
+  const content = createMemo(() => props.part.text.trim())
+  const completedKey = createMemo(() => `${props.width}\u0000${content()}`)
   return (
-    <Show when={props.part.text.trim()}>
+    <Show when={content()}>
       <box paddingLeft={3} marginTop={1} flexShrink={0} id="text">
-        <code
-          filetype="markdown"
-          drawUnstyledText={props.streaming}
-          streaming={props.streaming}
-          syntaxStyle={props.syntax}
-          content={props.part.text.trim()}
-          conceal={true}
-          fg={theme.text}
-        />
+        <Switch>
+          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !props.streaming}>
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                <markdown
+                  syntaxStyle={props.syntax}
+                  streaming={false}
+                  content={content()}
+                  conceal={true}
+                  fg={theme.markdownText}
+                  bg={theme.background}
+                />
+              )}
+            </Show>
+          </Match>
+          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !props.streaming}>
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                <code
+                  filetype="markdown"
+                  drawUnstyledText={false}
+                  streaming={false}
+                  syntaxStyle={props.syntax}
+                  content={content()}
+                  conceal={true}
+                  fg={theme.text}
+                />
+              )}
+            </Show>
+          </Match>
+          <Match when={props.streaming}>
+            <code
+              filetype="markdown"
+              drawUnstyledText={false}
+              streaming={true}
+              syntaxStyle={props.syntax}
+              content={content()}
+              conceal={true}
+              fg={theme.text}
+            />
+          </Match>
+        </Switch>
       </box>
     </Show>
   )
@@ -383,9 +428,20 @@ function AssistantReasoning(props: {
   part: SessionMessageAssistantReasoning
   subtleSyntax: SyntaxStyle
   streaming: boolean
+  width: number
 }) {
   const { theme } = useTheme()
+  const renderer = useRenderer()
+  const [expanded, setExpanded] = createSignal(false)
   const content = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
+  const lines = createMemo(() => content().split("\n"))
+  const PREVIEW = 5
+  const overflow = createMemo(() => lines().length > PREVIEW)
+  const preview = createMemo(() => {
+    if (expanded() || !overflow()) return content()
+    return [...lines().slice(0, PREVIEW), "…"].join("\n")
+  })
+  const completedKey = createMemo(() => `${props.width}\u0000${preview()}`)
   return (
     <Show when={content()}>
       <box
@@ -396,16 +452,49 @@ function AssistantReasoning(props: {
         customBorderChars={SplitBorder.customBorderChars}
         borderColor={theme.backgroundElement}
         flexShrink={0}
+        onMouseUp={() => {
+          if (renderer.getSelection()?.getSelectedText()) return
+          setExpanded((prev) => !prev)
+        }}
       >
-        <code
-          filetype="markdown"
-          drawUnstyledText={props.streaming}
-          streaming={props.streaming}
-          syntaxStyle={props.subtleSyntax}
-          content={"_Thinking:_ " + content()}
-          conceal={true}
-          fg={theme.textMuted}
-        />
+        <box>
+          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>
+            Thinking ({content().length.toLocaleString()} chars):
+          </text>
+        </box>
+        <Switch>
+          <Match when={props.streaming}>
+            <code
+              filetype="markdown"
+              drawUnstyledText={false}
+              streaming={true}
+              syntaxStyle={props.subtleSyntax}
+              content={preview()}
+              conceal={true}
+              fg={theme.textMuted}
+            />
+          </Match>
+          <Match when={!props.streaming}>
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                <code
+                  filetype="markdown"
+                  drawUnstyledText={false}
+                  streaming={false}
+                  syntaxStyle={props.subtleSyntax}
+                  content={preview()}
+                  conceal={true}
+                  fg={theme.textMuted}
+                />
+              )}
+            </Show>
+          </Match>
+        </Switch>
+        <Show when={overflow()}>
+          <box>
+            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
+          </box>
+        </Show>
       </box>
     </Show>
   )
