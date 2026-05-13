@@ -4,6 +4,7 @@ import { afterEach, describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
 import path from "path"
+import { readOutline } from "../../src/tool/read-outline"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -351,7 +352,7 @@ describe("tool.read truncation", () => {
       const first = yield* exec(dir, request)
       const visible = history(first)
       // 同会话已有完整页面可预热命中，第一次历史调用也无需进程级初始化。
-      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
+      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toContain('status="stub_same_range_visible"')
       // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
       yield* put(target, "v2\ntail")
       const b = { ...ctx, sessionID: SessionID.make("ses_b") }
@@ -364,7 +365,7 @@ describe("tool.read truncation", () => {
       expect(reread.output).toContain("1: v2")
       expect(reread.output).not.toContain("1: v1")
       // B 的本会话可见页面证明当前版本；A 的旧页面不能借用这个证明。
-      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toBe(FILE_UNCHANGED_STUB)
+      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toContain('status="stub_same_range_visible"')
       // 外会话即使包含当前版本，也不构成本会话的可见证明。
       expect((yield* exec(dir, request, { ...ctx, messages: history(second, b.sessionID) })).output).toContain("v2")
       const current = history(second)
@@ -374,15 +375,22 @@ describe("tool.read truncation", () => {
       part.state.time.compacted = 0
       expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
       delete part.state.time.compacted
+      const read = part.state.metadata.read as NonNullable<typeof second.metadata.read>
       part.state.output = FILE_UNCHANGED_STUB
+      read.stub = true
       expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
       part.state.output = second.output
-      // 范围变化必须返回正文；权限也必须先于成功的 stub 判定执行。
-      part.state.input.limit = 2
+      read.stub = false
+      // 非覆盖范围必须返回正文；输入和元数据同时模拟另一真实范围。
+      part.state.input.offset = 2
+      read.start = 2
+      read.end = 2
       expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
-      part.state.input.limit = 1
+      part.state.input.offset = 1
+      read.start = 1
+      read.end = 1
       // 恢复范围确实命中，避免拒绝断言仅因测试历史失配而偶然成立。
-      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toBe(FILE_UNCHANGED_STUB)
+      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain('status="stub_same_range_visible"')
       const denied = yield* fail(dir, request, {
         ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
       })
@@ -390,29 +398,34 @@ describe("tool.read truncation", () => {
       // 完整长行可证明同版本，2000 字符之后的变化也必须返回新正文。
       yield* put(target, "x".repeat(3000))
       const whole = yield* exec(dir, request)
-      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toBe(FILE_UNCHANGED_STUB)
+      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain('status="stub_same_range_visible"')
       yield* put(target, "x".repeat(3000) + "changed")
-      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain("changed")
+      const changed = yield* exec(dir, request, { ...ctx, messages: history(whole) })
+      expect(changed.metadata.read).toMatchObject({ size: 3007, returned: 1, stub: false })
+      expect(changed.output).toContain("<content>")
+      expect(changed.output).not.toContain("<stub")
+      expect(changed.output).toContain("line truncated to 2000 chars")
+      expect((yield* exec(dir, request, { ...ctx, messages: history(changed) })).output).toContain('status="stub_same_range_visible"')
       // 字节预算省略的正文仍不构成完整版本证明。
       yield* put(target, "x".repeat(24 * 1024 + 1))
       const partial = yield* exec(dir, request)
       expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
-        .not.toBe(FILE_UNCHANGED_STUB)
+        .not.toContain('<stub status=')
     }),
   )
 
   it.instance("truncates large file by bytes and sets truncated metadata", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
-      const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
-      const target = 60 * 1024
-      const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
-      yield* put(path.join(test.directory, "large.json"), content)
 
-      const result = yield* run({ filePath: path.join(test.directory, "large.json"), limit: 2000 })
+      const content = Array.from({ length: 100 }, (_, i) => `${i}: ${"x".repeat(1024)}`).join("\n")
+      yield* put(path.join(test.directory, "large.txt"), content)
+      const result = yield* run({ filePath: path.join(test.directory, "large.txt") })
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Output capped at")
-      expect(result.output).toContain("Use offset=")
+      // #142：正文被 24 KiB 截断，但有界尾部扫描足以精确计完原始 100 行样例。
+      expect(result.metadata.read).toMatchObject({ total: 100, totalExact: true })
+      expect(result.output).toContain('total="100"')
+      expect(result.output).toContain('reason="byte_limit"')
     }),
   )
 
@@ -420,7 +433,9 @@ describe("tool.read truncation", () => {
     Effect.gen(function* () {
       const test = yield* TestInstance
       const filepath = path.join(test.directory, "huge.txt")
-      const content = `${"x".repeat(80)}\n`.repeat(50_000)
+      // #142：长行迫使 MAX_BYTES 先于默认行限触发 ReadStop
+      const content = `${"x".repeat(4000)}
+`.repeat(200)
       yield* put(filepath, content)
 
       const fs = yield* FSUtil.Service
@@ -443,7 +458,11 @@ describe("tool.read truncation", () => {
       )
 
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Output capped at")
+      // #142：长行文件触发 byte_limit 并 ReadStop 停流
+      expect(result.output).toContain('reason="byte_limit"')
+      expect(result.output).toContain('total_exact="false"')
+      expect(result.metadata.read?.totalExact).toBe(false)
+      expect(result.metadata.read?.total).toBeLessThan(200)
       expect(counter.bytes).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
     }),
   )
@@ -456,8 +475,9 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "many-lines.txt"), limit: 10 })
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Showing lines 1-10 of 100")
-      expect(result.output).toContain("Use offset=11")
+      // #142：行截断用 range + more line_limit
+      expect(result.output).toContain('<range start="1" end="10" total="100" returned="10" />')
+      expect(result.output).toContain('<more offset="11" reason="line_limit" />')
       expect(result.output).toContain("line0")
       expect(result.output).toContain("line9")
       expect(result.output).not.toContain("line10")
@@ -471,7 +491,9 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "small.txt") })
       expect(result.metadata.truncated).toBe(false)
-      expect(result.output).toContain("End of file")
+      // #142：完整读取有 range，无 more
+      expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
+      expect(result.output).not.toContain("<more")
       expect(result.metadata.display).toMatchObject({
         type: "file",
         path: path.join(test.directory, "small.txt"),
@@ -520,7 +542,9 @@ describe("tool.read truncation", () => {
 
       const result = yield* exec(dir, { filePath: path.join(dir, "empty.txt") })
       expect(result.metadata.truncated).toBe(false)
-      expect(result.output).toContain("End of file - total 0 lines")
+      // #142：空文件 range returned=0
+      expect(result.output).toContain('<range start="1" end="0" total="0" returned="0" />')
+      expect(result.output).not.toContain("<more")
     }),
   )
 
@@ -559,15 +583,15 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  it.live("keeps long lines whole within the byte budget", () =>
+  it.live("bounds displayed long lines within the byte budget", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const long = "x".repeat(3000)
       yield* put(path.join(dir, "long-line.txt"), long)
 
       const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
-      expect(result.output).toContain(`1: ${long}`)
-      expect(result.output).not.toContain("line truncated to 2000")
+      expect(result.output).toContain(`1: ${long.slice(0, 2000)}`)
+      expect(result.output).toContain("line truncated to 2000")
       expect(result.metadata.truncated).toBe(false)
     }),
   )
@@ -740,3 +764,402 @@ describe("tool.read binary detection", () => {
     }),
   )
 })
+
+
+
+describe("tool.read structured output", () => {
+  // #142：正常读取输出 file/range 结构
+  it.instance("returns structured file metadata and range for normal reads", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* put(path.join(test.directory, "structured.txt"), "alpha\nbeta\n")
+      const result = yield* run({ filePath: path.join(test.directory, "structured.txt") })
+      expect(result.output).toContain("<type>file</type>")
+      expect(result.output).toContain('<file size="')
+      expect(result.output).toContain('<range start="1"')
+      expect(result.output).toContain("<content>")
+      expect(result.output).toContain("1: alpha")
+      expect(result.output).not.toContain("<stub")
+      // #142：metadata.read 供后续 stub 比对
+      expect(result.metadata.read).toMatchObject({
+        type: "file",
+        start: 1,
+        stub: false,
+      })
+    }),
+  )
+
+  // #142：XML 敏感内容在 #142 阶段转义（#145 再改为原文）
+  it.instance("escapes XML-sensitive file content in structured output", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* put(path.join(test.directory, "xml-sensitive.txt"), '<tag attr="x">&</tag>\n')
+      const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
+      expect(result.output).toContain('1: &lt;tag attr="x"&gt;&amp;&lt;/tag&gt;')
+      expect(result.output).not.toContain("1: <tag")
+    }),
+  )
+})
+
+describe("tool.read outline", () => {
+  // #142：长源文件头部读取附带 outline
+  it.instance("includes outline for large source files at offset 1", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "big.ts")
+      const body = Array.from({ length: 700 }, (_, i) => {
+        if (i === 9) return "export function alpha() {}"
+        if (i === 119) return "export class Beta {}"
+        return `// line ${i + 1} ${"x".repeat(2048)}`
+      }).join("\n")
+      yield* put(file, body + "\n")
+      const head = yield* run({ filePath: file, offset: 1, limit: 20 })
+      // #142：offset=1 的长源文件必须带 outline
+      expect(head.output).toContain("<outline")
+      expect(head.output).toContain("function alpha")
+      expect(head.output).toContain("class Beta")
+      expect(head.metadata.read?.totalExact).toBe(false)
+      expect(head.metadata.read?.total).toBeLessThan(600)
+      expect(head.output).toContain('total_exact="false"')
+      expect(head.output).toContain('reason="byte_limit"')
+      const bodyRead = yield* run({ filePath: file, offset: 50, limit: 10 })
+      // #142：非头部读取不重复贴 outline
+      expect(bodyRead.output).not.toContain("<outline")
+    }),
+  )
+})
+
+describe("tool.read visible context stubs", () => {
+  // #142：同区间二次读取必须 structured stub（硬断言）；合并 ctx 保留 ask
+  it.instance("stubs when the same range is already visible", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "nested", "same-range.txt")
+      yield* put(file, ["one", "two", "three"].join("\n") + "\n")
+      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
+      expect(first.output).toContain("<content>")
+      expect(first.metadata.read?.stub).toBe(false)
+      expect(first.metadata.loaded).toEqual([])
+      yield* put(path.join(test.directory, "nested", "AGENTS.md"), "new directory instructions")
+      const second = yield* run(
+        { filePath: file, offset: 1, limit: 2 },
+        {
+          ...ctx,
+          messages: [
+            {
+              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "read",
+                  callID: "c1",
+                  state: {
+                    status: "completed",
+                    time: { start: 1, end: Date.now() + 1000 },
+                    input: { filePath: file, offset: 1, limit: 2 },
+                    output: first.output,
+                    title: "t",
+                    metadata: first.metadata,
+                  },
+                },
+              ],
+            } as any,
+          ],
+        },
+      )
+      expect(second.output).toContain('status="stub_same_range_visible"')
+      expect(second.output).not.toContain("<content>")
+      expect(second.metadata.read?.stub).toBe(true)
+      expect(second.output).toContain("<system-reminder>")
+      expect(second.output).toContain("new directory instructions")
+      expect(second.metadata.loaded).toEqual([path.join(test.directory, "nested", "AGENTS.md")])
+    }),
+  )
+
+  // #142：被更大可见区间覆盖时 covered stub
+  it.instance("stubs when range is covered by a larger visible range", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "cover.txt")
+      const body = Array.from({ length: 50 }, (_, i) => `line${i}`).join("\n")
+      yield* put(file, body + "\n")
+      const wide = yield* run({ filePath: file, offset: 1, limit: 40 })
+      const narrow = yield* run(
+        { filePath: file, offset: 5, limit: 5 },
+        {
+          ...ctx,
+          messages: [
+            {
+              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "read",
+                  callID: "c1",
+                  state: {
+                    status: "completed",
+                    time: { start: 1, end: Date.now() + 1000 },
+                    input: { filePath: file, offset: 1, limit: 40 },
+                    output: wide.output,
+                    title: "t",
+                    metadata: wide.metadata,
+                  },
+                },
+              ],
+            } as any,
+          ],
+        },
+      )
+      expect(narrow.output).toContain("stub_covered_range_visible")
+      expect(narrow.output).not.toContain("<content>")
+    }),
+  )
+
+  // #142：已 compact 的历史读不得参与 stub 覆盖
+  it.instance("does not stub compacted previous reads", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "compacted.txt")
+      yield* put(file, ["a", "b", "c"].join("\n") + "\n")
+      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
+      expect(first.metadata.read?.stub).toBe(false)
+      const second = yield* run(
+        { filePath: file, offset: 1, limit: 2 },
+        {
+          ...ctx,
+          messages: [
+            {
+              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "read",
+                  callID: "c1",
+                  state: {
+                    status: "completed",
+                    time: { start: 1, end: Date.now() + 1000, compacted: Date.now() },
+                    input: { filePath: file, offset: 1, limit: 2 },
+                    output: first.output,
+                    title: "t",
+                    metadata: first.metadata,
+                  },
+                },
+              ],
+            } as any,
+          ],
+        },
+      )
+      // #142：compacted 历史被 collectVisibleReads 跳过，必须完整 content
+      expect(second.output).toContain("<content>")
+      expect(second.output).not.toContain('status="stub_')
+      expect(second.metadata.read?.stub).toBe(false)
+    }),
+  )
+
+  // #142：size/mtime 变化后不得沿用旧可见区间 stub
+  it.instance("does not stub when the file version changed", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "versioned.txt")
+      yield* put(file, ["one", "two", "three"].join("\n") + "\n")
+      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
+      const staleMeta = {
+        ...first.metadata,
+        read: {
+          ...first.metadata.read!,
+          size: (first.metadata.read?.size ?? 1) + 999,
+          modifiedMs: (first.metadata.read?.modifiedMs ?? 1) - 10_000,
+        },
+      }
+      const second = yield* run(
+        { filePath: file, offset: 1, limit: 2 },
+        {
+          ...ctx,
+          messages: [
+            {
+              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "read",
+                  callID: "c1",
+                  state: {
+                    status: "completed",
+                    time: { start: 1, end: Date.now() + 1000 },
+                    input: { filePath: file, offset: 1, limit: 2 },
+                    output: first.output,
+                    title: "t",
+                    metadata: staleMeta,
+                  },
+                },
+              ],
+            } as any,
+          ],
+        },
+      )
+      expect(second.output).toContain("<content>")
+      expect(second.output).not.toContain('status="stub_')
+      expect(second.metadata.read?.stub).toBe(false)
+    }),
+  )
+
+  // #142：显著重叠时返回全文并附 short overlap note
+  it.instance("returns full content with a short note for significant overlap", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "overlap.txt")
+      const body = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n") + "\n"
+      yield* put(file, body)
+      const first = yield* run({ filePath: file, offset: 1, limit: 40 })
+      expect(first.metadata.read?.stub).toBe(false)
+      const second = yield* run(
+        { filePath: file, offset: 21, limit: 40 },
+        {
+          ...ctx,
+          messages: [
+            {
+              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "read",
+                  callID: "c1",
+                  state: {
+                    status: "completed",
+                    time: { start: 1, end: Date.now() + 1000 },
+                    input: { filePath: file, offset: 1, limit: 20 },
+                    output: first.output,
+                    title: "t",
+                    metadata: first.metadata,
+                  },
+                },
+              ],
+            } as any,
+          ],
+        },
+      )
+      // #142：部分重叠不 stub，应有全文 + overlap note
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain('<note type="overlap"')
+      expect(second.output).not.toContain('status="stub_')
+      expect(second.metadata.read?.stub).toBe(false)
+    }),
+  )
+
+  // #142：已是 stub 的可见读不得作为后续覆盖来源
+  it.instance("does not use a visible stub as coverage for later reads", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "stub-not-cover.txt")
+      yield* put(file, ["a", "b", "c", "d"].join("\n") + "\n")
+      const first = yield* run({ filePath: file, offset: 1, limit: 3 })
+      // craft a stub metadata as if previous was stubbed
+      const stubMeta = {
+        ...first.metadata,
+        read: {
+          ...first.metadata.read!,
+          stub: true,
+          status: "stub_same_range_visible",
+        },
+      }
+      const second = yield* run(
+        { filePath: file, offset: 1, limit: 2 },
+        {
+          ...ctx,
+          messages: [
+            {
+              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "read",
+                  callID: "c1",
+                  state: {
+                    status: "completed",
+                    time: { start: 1, end: Date.now() + 1000 },
+                    input: { filePath: file, offset: 1, limit: 3 },
+                    output: 'FILE_UNCHANGED_STUB',
+                    title: "t",
+                    metadata: stubMeta,
+                  },
+                },
+              ],
+            } as any,
+          ],
+        },
+      )
+      expect(second.output).toContain("<content>")
+      expect(second.output).not.toContain('status="stub_')
+      expect(second.metadata.read?.stub).toBe(false)
+    }),
+  )
+
+
+    // #142：多语言声明应抽出至少一条 outline label
+  it.instance("extracts conservative labels for common language declarations", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const cases = [
+        ["sample.py", "def py_func():\nclass PyClass:\n"],
+        ["sample.go", "type Server struct {}\nfunc (s *Server) Serve() {}\n"],
+        ["sample.rs", "pub struct State {}\npub async fn run() {}\nimpl State {\n"],
+        ["sample.java", "public record User(String name) {}\npublic void run() {\n"],
+        ["sample.cs", "public class Worker {}\npublic async Task RunAsync() {\n"],
+        ["sample.kt", "data class User(val name: String)\nfun run() {}\n"],
+        ["sample.swift", "struct User {}\nfunc run() {\n"],
+        ["sample.rb", "class Worker\ndef perform\n"],
+        ["sample.php", "class Worker {}\nfunction perform() {}\n"],
+        ["sample.cpp", "struct Worker {};\nint run() {\n"],
+      ] as const
+      for (const [filename, header] of cases) {
+        const filePath = path.join(test.directory, filename)
+        const body = header + Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`).join("\n")
+        yield* put(filePath, body)
+        // #142：直接测 outline 抽取，避免整文件 read 干扰
+        const outline = yield* Effect.promise(() => readOutline(filePath, 650, 1))
+        expect(outline?.items.length).toBeGreaterThan(0)
+      }
+    }),
+  )
+
+  // #142：单条 outline 截断 60 字且总预算不变
+  it.instance("limits outline item length and total size", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filePath = path.join(test.directory, "long-outline.rs")
+      const source = [
+        "impl VeryLongGenericTypeNameWithManySegmentsAndTraitsAndBoundsThatShouldBeTrimmed where T: Clone {",
+        ...Array.from({ length: 650 }, (_, i) => `pub fn function_${i}_with_a_very_long_suffix_that_should_not_bloat_the_outline() {}`),
+      ].join("\n")
+      yield* put(filePath, source)
+      const outline = yield* Effect.promise(() => readOutline(filePath, 651, 1))
+      expect(outline).toBeDefined()
+      expect(outline!.items.length).toBeLessThanOrEqual(32)
+      expect(outline!.items.join("\n").length).toBeLessThanOrEqual(640)
+      expect(outline!.items.every((item) => item.length <= 60)).toBe(true)
+      expect(outline!.items.some((item) => item.endsWith("..."))).toBe(true)
+      const pending = yield* Effect.promise(() => readOutline(filePath, 1, 1, false))
+      expect(pending).toEqual(outline)
+      yield* put(filePath, source.split("\n").slice(0, 100).join("\n"))
+      expect(yield* Effect.promise(() => readOutline(filePath, 1, 1, false))).toBeUndefined()
+    }),
+  )
+
+// #142：outline 预算上限（硬断言必须出现 outline）
+  it.instance("outline size stays within budget", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "many-decls.ts")
+      const lines = Array.from({ length: 800 }, (_, i) => `export function f${i}() { return ${i} }`)
+      yield* put(file, lines.join("\n") + "\n")
+      const head = yield* run({ filePath: file, offset: 1, limit: 5 })
+      expect(head.output).toContain("<outline")
+      const m = head.output.match(/<outline[^>]*>([\s\S]*?)<\/outline>/)
+      expect(m).toBeTruthy()
+      const items = m![1].trim().split("\n").filter(Boolean)
+      expect(items.length).toBeLessThanOrEqual(32)
+      expect(items.join("\n").length).toBeLessThanOrEqual(640)
+    }),
+  )
+})
+

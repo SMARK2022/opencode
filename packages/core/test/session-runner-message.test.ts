@@ -8,6 +8,7 @@ import { AgentAttachment, FileAttachment } from "@opencode-ai/core/session/promp
 import { toLLMMessages } from "@opencode-ai/core/session/runner/to-llm-message"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { DateTime } from "effect"
+import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
 
 const created = DateTime.makeUnsafe(0)
 const id = (value: string) => SessionMessage.ID.make(`msg_${value}`)
@@ -15,7 +16,8 @@ const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.
 
 describe("toLLMMessages", () => {
   test("deduplicates complete Read versions only within the supplied visible history", () => {
-    const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1" }
+    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
+    const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1", read: metadata }
     const read = (value: string, structured: Record<string, unknown> = output,
       input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
       content: SessionMessage.ToolStateCompleted["content"] = []) => SessionMessage.Assistant.make({
@@ -30,44 +32,50 @@ describe("toLLMMessages", () => {
     const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
       .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
     const first = read("first")
-    const second = read("second", output, { path: "note.txt", offset: 1, limit: 400 })
+    const second = read("second", output, { path: "./note.txt", offset: 1, limit: 200 })
     // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
     expect(results(first, second)[0]).toEqual({ type: "json", value: output })
     expect(results(first, second)[1]).toMatchObject({ type: "text" })
-    expect(JSON.stringify(results(first, second)[1])).toContain("File unchanged since last read")
+    expect(JSON.stringify(results(first, second)[1])).toContain("stub_same_range_visible")
     expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
     // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
-    expect(results(first, read("v2", { ...output, content: "v2" }))[1]).toMatchObject({ type: "json" })
-    expect(results(first, read("range", output, { path: "note.txt", limit: 1 }))[1]).toMatchObject({ type: "json" })
-    expect(results(first, read("path", output, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
+    expect(results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1]).toMatchObject({ type: "json" })
+    expect(results(first, read("range", { ...output, read: { ...metadata, end: 2, returned: 2 } }))[1]).toMatchObject({ type: "json" })
+    expect(results(first, read("path", { ...output, read: { ...metadata, canonicalPath: "/other.txt" } }, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
     // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
     expect(results(second)).toEqual([{ type: "json", value: output }])
     const checkpoint = SessionMessage.Compaction.make({
       id: id("checkpoint"), type: "compaction", reason: "auto", summary: "summary", recent: "recent", time: { created },
     })
     expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
-    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2 }
+    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2, read: metadata }
     const range = { path: "note.txt", offset: 1, limit: 1 }
     // 文件有后续页不等于本次请求被截断；相同完整页保留首份并只压缩重复模型结果。
     expect(JSON.stringify(results(read("page1", page, range), read("page2", page, range))[1]))
-      .toContain("File unchanged since last read")
+      .toContain("stub_same_range_visible")
     // 版本与请求范围仍独立参与证明，不能用相同前缀冒充新版或更大页面。
-    expect(results(read("page3", page, range), read("page4", { ...page, content: "changed" }, range))[1])
-      .toMatchObject({ type: "json", value: { ...page, content: "changed" } })
-    expect(results(read("page5", page, range), read("page6", page, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
+    const changed = { ...page, content: "changed", read: { ...metadata, size: 7, modifiedMs: 2 } }
+    expect(results(read("page3", page, range), read("page4", changed, range))[1]).toEqual({ type: "json", value: changed })
+    expect(results(read("page5", page, range), read("page6", { ...page, read: { ...metadata, end: 2, returned: 2 } }, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
     // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
     expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
-    // 默认400与显式400是同一完整页；显式2000仍请求不同范围，不能被前页证明替代。
-    const defaultPage = { ...page, content: Array.from({ length: 400 }, () => "line").join("\n"), next: 401 }
-    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 400 }))[1]))
-      .toContain("File unchanged since last read")
-    expect(results(read("default3", defaultPage), read("default4", defaultPage, { path: "note.txt", limit: 2000 }))[1])
-      .toEqual({ type: "json", value: defaultPage })
-
-    // 不足请求范围的页面、行内截断与媒体仍不具备完整正文证明。
+    const defaultPage = { ...page, content: Array.from({ length: 200 }, () => "line").join("\n"), next: 201,
+      read: { ...metadata, size: 5000, end: 200, total: 1000, returned: 200 } }
+    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 200 }))[1])).toContain("stub_same_range_visible")
+    const wider = { ...defaultPage, truncated: false, next: undefined, content: "line\n".repeat(999) + "line", read: { ...defaultPage.read, end: 1000, returned: 1000 } }
+    expect(results(read("default3", defaultPage), read("default4", wider, { path: "note.txt", limit: 2000 }))[1]).toEqual({ type: "json", value: wider })
+    // 按实际区间判断覆盖，不能把请求 limit 当作已经交付的正文；小交集不额外提示。
+    const covering = { ...defaultPage, content: "line\n".repeat(99) + "line", read: { ...defaultPage.read, end: 100, returned: 100 } }
+    const covered = { ...page, content: "line\n".repeat(10) + "line", offset: 10, next: 21, read: { ...defaultPage.read, start: 10, end: 20, returned: 11 } }
+    expect(JSON.stringify(results(read("wide", covering), read("covered", covered))[1])).toContain("stub_covered_range_visible")
+    const overlap = { ...defaultPage, content: "line\n".repeat(99) + "line", offset: 151, next: 251, read: { ...defaultPage.read, start: 151, end: 250, returned: 100 } }
+    expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
+    // 缺少稳定版本、只有 stub 或未交付正文的结果仍不能证明覆盖。
     for (const partial of [
-      { type: "text-page", content: "prefix", offset: 1, truncated: true, next: 2 },
-      { type: "text-page", content: "prefix... (line truncated to 2000 chars)", offset: 1, truncated: false },
+      { ...page, read: undefined },
+      { ...page, read: { ...metadata, modifiedMs: undefined } },
+      { ...page, read: { ...metadata, returned: 0 } },
+      { ...page, read: { ...metadata, stub: true } },
       { ...output, encoding: "base64", mime: "image/png" },
     ]) expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
     // structured 仍完整不代表模型看到了全文：generic 限幅后的 content 不能预热去重。
@@ -75,10 +83,13 @@ describe("toLLMMessages", () => {
     expect(results(read("b1", output, undefined, bounded), read("b2", output, undefined, bounded))[1])
       .toEqual({ type: "text", value: bounded[0].text })
     // 完整安全提醒投影可以去重；提醒变化本身也会改变相等性证明。
-    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: JSON.stringify(output) }]
+    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: ReadPresentation.renderNativeRead(output) }]
     expect(JSON.stringify(results(read("r1", output, undefined, visible), read("r2", output, undefined, visible))[1]))
-      .toContain("File unchanged since last read")
-    expect(results(read("r3", output, undefined, visible), read("r4", output))[1]).toMatchObject({ type: "json" })
+      .toContain("stub_same_range_visible")
+    expect(JSON.stringify(results(read("r3", output), read("r4", output, undefined, visible))[1])).toContain("reminder")
+    const pruned = read("pruned")
+    const prunedContent = pruned.content.map(tool => tool.type === "tool" ? { ...tool, time: { ...tool.time, pruned: DateTime.makeUnsafe(0) } } : tool)
+    expect(results({ ...pruned, content: prunedContent }, second)[1]).toEqual({ type: "json", value: output })
   })
 
   test("omits empty assistant turns", () => {

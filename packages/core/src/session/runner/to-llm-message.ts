@@ -7,7 +7,7 @@ import {
   type Model,
   type ProviderMetadata,
 } from "@opencode-ai/llm"
-import { ReadToolFileSystem } from "../../tool/read-filesystem"
+import { ReadPresentation } from "../../tool/read-presentation"
 import { SessionMessage } from "../message"
 import type { FileAttachment } from "../prompt"
 
@@ -170,40 +170,39 @@ ${message.recent}
 /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
 export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
   // 证明仅存在于本次选出的历史；下一 Session/compaction 投影重新开始，不持久缓存。
-  const reads = new Set<string>()
+  const reads: ReadPresentation.ReadRangeMeta[] = []
   return messages.flatMap((message) => {
-    if (message.type === "compaction") reads.clear()
+    if (message.type === "compaction") reads.length = 0
     if (message.type !== "assistant") return toLLMMessage(message, model)
     const content = message.content.map((item): SessionMessage.AssistantContent => {
       // provider 托管、被裁剪或带媒体的结果不具备本地完整文本 Read 的证明。
       if (item.type !== "tool" || item.name !== "read" || item.provider?.executed === true ||
           item.state.status !== "completed" || item.time.pruned !== undefined) return item
       const output = item.state.structured
-      if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
-          (output.encoding !== "utf8" && output.type !== "text-page")) return item
-      // 下一页到达请求末界说明本页完整；字节提前截断与长行裁剪仍不能作为版本证明。
-      // 请求范围与实际reader共用默认常量，降默认页长后仍识别同一完整页面。
-      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES)
-      if (output.type === "text-page" &&
-          ((output.next === undefined ? output.truncated !== false : output.next !== pageEnd) ||
-          output.content.includes("... (line truncated to 2000 chars)"))) return item
+      // 旧记录缺少版本/范围时保留正文；不能以请求路径或相同前缀臆造证明。
+      if (typeof output.content !== "string" || !ReadPresentation.isReadRangeMeta(output.read) ||
+          (output.encoding !== "utf8" && output.type !== "text-page") || output.read.stub ||
+          (output.read.returned === 0 && output.read.size > 0)) return item
       if (item.state.outputPaths?.length || item.state.attachments?.length ||
           item.state.content.some((part) => part.type !== "text")) return item
-      // generic 限幅后的模型正文可能少于 structured；只接受实际可见的完整编码结果。
+      const page = { ...output, content: output.content, read: output.read }
+      const body = ReadPresentation.renderNativeRead(page)
+      // 与真实 leaf 共用呈现，generic 限幅后的短正文不能预热覆盖证明。
       if (item.state.content.length > 0 && !item.state.content.some((part) =>
-          part.type === "text" && part.text === JSON.stringify(output))) return item
-      // 默认化同一路径/范围，并比较新鲜 durable 结果及提醒；call ID 不代表版本。
-      const key = JSON.stringify([item.state.input.path, item.state.input.offset ?? 1,
-        item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES, output, item.state.content])
-      if (!reads.has(key)) {
-        reads.add(key)
-        return item
-      }
-      // 只复制模型投影，保留首个完整结果与所有原始持久化内容、工具调用和权限事实。
-      return { ...item, state: { ...item.state, content: [{
-        type: "text",
-        text: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.",
-      }] } }
+          part.type === "text" && part.text === body)) return item
+      const stub = ReadPresentation.findReadStub(reads, page.read)
+      const overlap = ReadPresentation.findOverlapNote(reads, page.read)
+      if (!stub) reads.push(page.read)
+      if (!stub && !overlap) return item
+      const text = stub ? ReadPresentation.renderReadStub({ ...page.read, ...stub }) : ReadPresentation.renderNativeRead(page, overlap)
+      // 只替换当前模型正文；新规则和安全提醒保留，持久消息完全不改。
+      const replacement = { type: "text" as const, text }
+      return { ...item, state: { ...item.state,
+        structured: stub ? { ...output, read: { ...page.read, returned: 0, stub: true, stubStatus: stub.status,
+          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined } } : output,
+        content: item.state.content.length === 0 ? [replacement] : item.state.content.map(part =>
+          part.type === "text" && part.text === body ? replacement : part),
+      } }
     })
     return toLLMMessage({ ...message, content }, model)
   })
