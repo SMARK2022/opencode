@@ -20,7 +20,7 @@ This VS Code extension provides an HTTP bridge server that connects the OpenCode
 | `name` | `opencode-ide-bridge` |
 | `displayName` | `OpenCode IDE Bridge` |
 | `publisher` | `SMARK2022` |
-| `version` | `1.14.40` |
+| `version` | `1.14.41` |
 | `engines.vscode` | `^1.94.0` |
 | `main` | `./dist/extension.js` |
 | `license` | `MIT` |
@@ -72,7 +72,7 @@ npx @vscode/vsce ls
 
 ```powershell
 $env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix"
+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.41.vsix"
 ```
 
 The output file is written under `sdks/vscode/dist/` together with the compiled extension bundle.
@@ -86,7 +86,7 @@ bun run vsix
 ## VSIX Artifact Structure
 
 ```
-dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix
+dist/SMARK2022.opencode-ide-bridge-1.14.41.vsix
 ├─ [Content_Types].xml
 ├─ extension.vsixmanifest
 └─ extension/
@@ -112,7 +112,7 @@ dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix
 ### Local VSIX Install
 
 ```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.40.vsix --force
+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.41.vsix --force
 ```
 
 ### From VS Code UI
@@ -154,7 +154,7 @@ npx @vscode/vsce publish
 
 ```powershell
 npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
-npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.14.40.vsix -p <OPENVSX_TOKEN>
+npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.14.41.vsix -p <OPENVSX_TOKEN>
 ```
 
 ## CLI Integration
