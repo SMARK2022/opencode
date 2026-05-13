@@ -63,6 +63,7 @@ import * as DateTime from "effect/DateTime"
 import { eq } from "@/storage/db"
 import * as Database from "@/storage/db"
 import { SessionTable } from "./session.sql"
+import { Token } from "@/util/token"
 
 
 // @ts-ignore
@@ -80,6 +81,46 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 const log = Log.create({ service: "session.prompt" })
 const elog = EffectLogger.create({ service: "session.prompt" })
+const INPUT_CHARS_HISTORY_LIMIT = 100_000
+const MIN_CHARS_PER_TOKEN = 3
+const MAX_CHARS_PER_TOKEN = 4
+
+function clampCharsPerToken(value: number) {
+  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
+}
+
+function charsPerToken(messages: MessageV2.WithParts[]) {
+  // Estimate against the current session's real provider accounting instead of a
+  // fixed global ratio.  The samples come from prior daemon-built request bodies
+  // (inputChars) paired with provider-confirmed input/cache tokens.  Clamp the
+  // ratio to a conservative natural-language/code range so one provider anomaly
+  // or cache-reporting quirk cannot make future preflight checks wildly optimistic
+  // or pessimistic.
+  let historyInputTokens = 0
+  let historyInputChars = 0
+  for (let i = messages.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
+    const msg = messages[i]
+    if (msg.info.role !== "assistant") continue
+    for (let j = msg.parts.length - 1; j >= 0; j--) {
+      const part = msg.parts[j]
+      if (part.type !== "step-finish") continue
+      const chars = part.inputChars
+      if (!chars || chars < 100) continue
+      const tokens = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
+      if (tokens <= 0) continue
+      historyInputChars += Math.max(0, chars - (part.inputBreakdown?.messages.attachments ?? 0))
+      historyInputTokens += tokens
+    }
+  }
+
+  if (historyInputTokens <= 0 || historyInputChars <= 500) return undefined
+  return clampCharsPerToken(historyInputChars / historyInputTokens)
+}
+
+function estimateInputTokens(text: string, messages: MessageV2.WithParts[]) {
+  const ratio = charsPerToken(messages)
+  return ratio ? Math.round(text.length / ratio) : Token.estimate(text)
+}
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
@@ -1576,20 +1617,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
-          ) {
-            yield* compaction.create({
-              sessionID,
-              agent: lastUser.agent,
-              model: lastUser.model,
-              auto: true,
-            })
-            continue
-          }
-
           const agent = yield* agents.get(lastUser.agent)
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -1703,7 +1730,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 return `Tool: ${name}\n${item.description ?? ""}\n${JSON.stringify(item.inputSchema)}`
               })
               .join("\n")
-            const inputChars = [systemText, messagesText, toolsText].join("\n").length
+            const inputText = [systemText, messagesText, toolsText].join("\n")
+            const inputChars = inputText.length
             // 从原始 parts 计算 messages 子组件字符数，供 TUI /context 面板直接使用
             let msgUserChars = 0
             let msgAssistantChars = 0
@@ -1758,29 +1786,26 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 total: messagesText.length,
               },
             }
-            // 从本 session 历史 step-finish 的 inputChars / inputTokens 推算真实 chars-per-token 比值，
-            // 使用 *输入* 侧数据（而非输出侧），因为输入含 JSON/schema/code，密度与自然语言输出截然不同。
-            let historyInputTokens = 0
-            let historyInputChars = 0
-            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 100000; i--) {
-              const m = msgs[i]
-              if (m.info.role !== "assistant") continue
-              for (let j = m.parts.length - 1; j >= 0; j--) {
-                const p = m.parts[j]
-                if (p.type !== "step-finish") continue
-                const chars = (p as any).inputChars as number | undefined
-                if (!chars || chars < 100) continue
-                const tokens = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
-                if (tokens <= 0) continue
-                const bd = (p as any).inputBreakdown
-                historyInputChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-                historyInputTokens += tokens
-              }
+            const estimatedInput = estimateInputTokens(inputText, msgs)
+            // Preflight compaction must judge the request we are about to send,
+            // not the last finished assistant's historical usage.  After compaction,
+            // retained tail messages can carry huge pre-compaction token counts even
+            // though the freshly assembled prompt is small; checking estimatedInput
+            // here prevents that stale usage from creating back-to-back auto compacts.
+            if (
+              yield* compaction.isOverflow({
+                tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                model,
+              })
+            ) {
+              yield* compaction.create({
+                sessionID,
+                agent: lastUser.agent,
+                model: lastUser.model,
+                auto: true,
+              })
+              return "continue" as const
             }
-            const charsPerToken = historyInputTokens > 0 && historyInputChars > 500
-              ? historyInputChars / historyInputTokens
-              : 4
-            const estimatedInput = Math.round(inputChars / charsPerToken)
             handle.message.tokens.input = estimatedInput
             // Persist the pending input snapshot on the assistant message so the TUI can
             // render context usage immediately, before the provider emits the first chunk

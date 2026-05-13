@@ -303,6 +303,21 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
   return { user: msg, assistant }
 })
 
+const addStepFinish = (sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "step-finish",
+      reason: "stop",
+      cost: 0,
+      tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      inputChars,
+    })
+  })
+
 const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -644,6 +659,50 @@ it.live("manual compaction stops after summarizing retained tool tail", () =>
       // fresh request and make a second provider call for a build continuation.
       expect(filtered.map((msg) => msg.info.id)).toContain(keep.user.id)
       expect(filtered.map((msg) => msg.info.id)).toContain(keep.assistant.id)
+    }),
+    { git: true, config: (url) => ({ ...providerCfg(url), compaction: { tail_turns: 1 } }) },
+  ),
+  30_000,
+)
+
+it.live("auto compaction resumes without compacting retained old tail usage again", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Auto compact",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* seed(chat.id, { finish: "stop" })
+      const old = yield* seed(chat.id, { finish: "tool-calls" })
+      old.assistant.tokens = { input: 300_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+      yield* sessions.updateMessage(old.assistant)
+      yield* addCompletedTool(chat.id, old.assistant.id)
+      yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
+      yield* SessionCompaction.Service.use((compact) =>
+        compact.create({
+          sessionID: chat.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        }),
+      )
+      yield* llm.text("summary")
+      yield* llm.text("resumed")
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      const all = yield* sessions.messages({ sessionID: chat.id })
+      const compactions = all.flatMap((msg) => msg.parts).filter((part) => part.type === "compaction")
+
+      expect(yield* llm.calls).toBe(2)
+      expect(compactions).toHaveLength(1)
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") {
+        expect(result.info.agent).toBe("build")
+        expect(result.parts.some((part) => part.type === "text" && part.text === "resumed")).toBe(true)
+      }
     }),
     { git: true, config: (url) => ({ ...providerCfg(url), compaction: { tail_turns: 1 } }) },
   ),
