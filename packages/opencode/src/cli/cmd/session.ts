@@ -2,7 +2,9 @@ import type { Argv } from "yargs"
 import { Effect } from "effect"
 import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
+import { SessionPath } from "@opencode-ai/core/session/path"
 import { Session } from "@/session/session"
+import * as InstanceState from "@/effect/instance-state"
 import { SessionID } from "../../session/schema"
 import { UI } from "../ui"
 import { Locale } from "@/util/locale"
@@ -124,7 +126,16 @@ export const SessionListCommand = effectCmd({
         default: "table",
       }),
   handler: Effect.fn("Cli.session.list")(function* (args) {
-    const sessions = yield* Session.Service.use((svc) => svc.list({ roots: true, limit: args.maxCount }))
+    // #143：列表按实例目录相对 path 过滤，含父路径会话
+    const instance = yield* InstanceState.context
+    const sessions = yield* Session.Service.use((svc) =>
+      svc.list({
+        roots: true,
+        limit: args.maxCount,
+        directory: instance.directory,
+        path: SessionPath.relative(instance.worktree, instance.directory),
+      }),
+    )
 
     if (sessions.length === 0) return
 

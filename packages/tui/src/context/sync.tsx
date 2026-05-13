@@ -188,10 +188,12 @@ export const {
       hydratingSessions.get(sessionID)?.parts.add(partID)
     }
 
-    function sessionListQuery(): { scope?: "project"; path?: string } {
+    function sessionListQuery(): { directory?: string; scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
+      // #143：同时传 directory 供 path 为空的历史会话 fallback
       return {
+        directory: project.data.instance.path.directory,
         path: SessionPath.relative(project.data.instance.path.worktree, project.data.instance.path.directory),
       }
     }
@@ -202,12 +204,41 @@ export const {
       const query = { start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() }
       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
       const projectID = project.project()
-      const directory = project.instance.directory()
-      // 对齐 listByProject：空 path 是整个项目，非空 path 含子目录及同目录的旧 pathless 行。
-      const matches = (info: Session) =>
-        info.projectID === projectID &&
-        (!query.path || info.path === query.path || info.path?.startsWith(`${query.path}/`) ||
-          (info.path === undefined && info.directory === directory))
+      const directory = query.directory
+      const worktree = project.data.instance.path.worktree
+      // #143：接收合并也遵循服务端的祖先、子孙、global 与 directory OR，包含已定义的空 path。
+      const matches = (info: Session) => {
+        if (query.path === undefined) return info.projectID === projectID
+        const nullPath = info.path === undefined && directory !== undefined && info.directory === directory
+        const projectPath = SessionPath.aliases({
+          path: query.path,
+          directory,
+          global: projectID === "global",
+        }).some((item) => {
+          const prefix = item.replace(/\/+$/, "")
+          return info.path !== undefined && (SessionPath.ancestors(item, { root: true }).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
+        })
+        if (info.projectID === projectID && (projectPath || nullPath)) return true
+        if (!directory) return false
+        const left = SessionPath.relative(worktree, directory)
+        const right = query.path.replaceAll("\\", "/")
+        if (process.platform === "win32" ? left.toLowerCase() !== right.toLowerCase() : left !== right) return false
+        // #143：仅 directory/path 同源时启用跨项目分支；不把所有触碰行盲目并入列表。
+        const globalPath = SessionPath.aliases({
+          path: SessionPath.relative("/", directory),
+          directory,
+          global: true,
+        }).some((item) => {
+          const prefix = item.replace(/\/+$/, "")
+          return info.path !== undefined && (SessionPath.ancestors(item).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
+        })
+        if (info.projectID === "global" && (globalPath || nullPath)) return true
+        const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
+        const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
+        const comparable = info.directory.replaceAll("\\", "/")
+        const current = process.platform === "win32" ? comparable.toLowerCase() : comparable
+        return SessionPath.ancestors(value).includes(current) || current.startsWith(value ? `${value}/` : "")
+      }
       return sdk.client.session
         .list(query)
         .then((x) => {

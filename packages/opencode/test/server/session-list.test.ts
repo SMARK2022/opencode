@@ -1,4 +1,5 @@
-import { afterEach, describe, expect } from "bun:test"
+import { SessionPath } from "@opencode-ai/core/session/path"
+import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -140,7 +141,7 @@ describe("session.list", () => {
   )
 
   it.instance(
-    "filters by path and ignores directory when path is provided",
+    "filters by path relatives and ignores directory when path is provided",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -168,7 +169,8 @@ describe("session.list", () => {
             path: "packages/opencode/src",
           }),
         )).map((session) => session.id)
-        expect(pathIDs).not.toContain(parent.id)
+        // #143：祖先 parent 命中；current/deeper 命中；兄弟排除
+        expect(pathIDs).toContain(parent.id)
         expect(pathIDs).toContain(current.id)
         expect(pathIDs).toContain(deeper.id)
         expect(pathIDs).not.toContain(sibling.id)
@@ -299,4 +301,82 @@ describe("session.list", () => {
       }),
     { git: true },
   )
+
+  // #143：子目录 path 过滤应包含 worktree 祖先会话（root/parent）
+  it.instance(
+    "includes ancestor sessions along path filter from a git child directory",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* Effect.promise(() =>
+          mkdir(path.join(test.directory, "packages", "opencode", "src"), { recursive: true }),
+        )
+        const root = yield* withSession({ title: "repo-root" }).pipe(provideInstance(test.directory))
+        const parent = yield* withSession({ title: "pkg-parent" }).pipe(
+          provideInstance(path.join(test.directory, "packages", "opencode")),
+        )
+        const child = yield* withSession({ title: "child-src" }).pipe(
+          provideInstance(path.join(test.directory, "packages", "opencode", "src")),
+        )
+        const ids = (yield* SessionNs.Service.use((session) =>
+          session.list({
+            directory: path.join(test.directory, "packages", "opencode", "src"),
+            path: SessionPath.relative(test.directory, path.join(test.directory, "packages", "opencode", "src")),
+          }),
+        )).map((s) => s.id)
+        // #143：空串 root + 父 path + 当前 path 均应命中
+        expect(ids).toContain(root.id)
+        expect(ids).toContain(parent.id)
+        expect(ids).toContain(child.id)
+      }),
+    { git: true },
+  )
+
+  // #143：git 子项目列表必须 OR 进 global 项目父会话
+  it.instance(
+    "includes global parent sessions from a git child project",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const repo = path.join(test.directory, "repo")
+        const child = path.join(repo, "packages", "opencode")
+        yield* Effect.promise(async () => {
+          await mkdir(child, { recursive: true })
+          const { $ } = await import("bun")
+          await $`git init`.cwd(repo).quiet()
+          await $`git config core.fsmonitor false`.cwd(repo).quiet()
+          await $`git config commit.gpgsign false`.cwd(repo).quiet()
+          await $`git config user.email "test@opencode.test"`.cwd(repo).quiet()
+          await $`git config user.name "Test"`.cwd(repo).quiet()
+          await $`git commit --allow-empty -m "root commit"`.cwd(repo).quiet()
+        })
+        // #143：无 git 的 outer 会话 project_id=global
+        const parent = yield* withSession({ title: "global-parent" }).pipe(provideInstance(test.directory))
+        const current = yield* withSession({ title: "git-current" }).pipe(provideInstance(child))
+        // #143：在 git 子目录上下文 list，才能触发 global OR 臂
+        const ids = (
+          yield* SessionNs.Service.use((session) =>
+            session.list({
+              directory: child,
+              path: SessionPath.relative(repo, child),
+              roots: true,
+            }),
+          ).pipe(provideInstance(child))
+        ).map((s) => s.id)
+        expect(ids).toContain(parent.id)
+        expect(ids).toContain(current.id)
+      }),
+    { git: false },
+  )
+})
+
+// #143：ancestors 覆盖 Unix 与 Windows 盘符根
+test("builds path ancestors", () => {
+  expect(SessionPath.ancestors("packages/opencode/src", { root: true })).toEqual([
+    "",
+    "packages",
+    "packages/opencode",
+    "packages/opencode/src",
+  ])
+  expect(SessionPath.ancestors("F:/A/B/C")).toEqual(["F:", "F:/", "F:/A", "F:/A/B", "F:/A/B/C"])
 })

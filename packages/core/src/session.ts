@@ -39,6 +39,7 @@ import { Revert } from "@opencode-ai/schema/revert"
 import { FSUtil } from "./fs-util"
 import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
 import type { PermissionV2 } from "./permission"
+import { SessionListing } from "./session/listing"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -282,7 +283,16 @@ const layer = Layer.effect(
         const conditions: SQL[] = []
         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
-        if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
+        if ("project" in input) {
+          if (input.subpath === undefined) conditions.push(eq(SessionTable.project_id, input.project))
+          if (input.subpath !== undefined) {
+            const project = yield* db.select({ worktree: ProjectTable.worktree }).from(ProjectTable)
+              .where(eq(ProjectTable.id, input.project)).get().pipe(Effect.orDie)
+            if (!project) return []
+            // 已公开的 subpath 进入真实查询；空根与普通 project 仍是不同的筛选意图。
+            conditions.push(SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath) }))
+          }
+        }
         // #121：V2 list 与 opencode 共用 searchCondition
         if (input.search) {
           const condition = searchCondition(input.search)
