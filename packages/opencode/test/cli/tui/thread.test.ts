@@ -7,6 +7,7 @@ import { UI } from "../../../src/cli/ui"
 import * as Win32 from "../../../src/cli/cmd/tui/win32"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as ThreadModule from "../../../src/cli/cmd/tui/thread"
+import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
 import { Flock } from "@opencode-ai/core/util/flock"
 
 const stop = new Error("stop")
@@ -14,6 +15,7 @@ const seen = {
   tui: [] as string[],
   tuiUrls: [] as string[],
 }
+type ThreadArgs = Parameters<NonNullable<typeof ThreadModule.TuiThreadCommand.handler>>[0]
 
 function setup() {
   // Intentionally avoid mock.module() here: Bun keeps module overrides in cache
@@ -33,13 +35,14 @@ function setup() {
 
 describe("tui thread", () => {
   afterEach(() => {
+    ThreadModule._setSpawn(undefined)
     mock.restore()
     ServerLockModule._setLockPath(undefined)
   })
 
-  async function call(project?: string) {
+  async function call(project?: string, overrides?: Partial<ThreadArgs>) {
     const { TuiThreadCommand } = await import("../../../src/cli/cmd/tui/thread")
-    const args: Parameters<NonNullable<typeof TuiThreadCommand.handler>>[0] = {
+    const args: ThreadArgs = {
       _: [],
       $0: "opencode",
       project,
@@ -55,6 +58,7 @@ describe("tui thread", () => {
       "mdns-domain": "opencode.local",
       mdnsDomain: "opencode.local",
       cors: [],
+      ...overrides,
     }
     return TuiThreadCommand.handler(args)
   }
@@ -92,7 +96,7 @@ describe("tui thread", () => {
       startedAt: new Date().toISOString(),
     }
 
-    async function callWithDaemonSpy(existingUrl: string | null) {
+    async function callWithDaemonSpy(existingUrl: string | null, overrides?: Partial<ThreadArgs>) {
       setup()
       await using tmp = await tmpdir()
       ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
@@ -103,7 +107,7 @@ describe("tui thread", () => {
       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
 
       let daemonSpawnCount = 0
-      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
+      ThreadModule._setSpawn(() => {
         daemonSpawnCount++
         return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
       })
@@ -133,7 +137,7 @@ describe("tui thread", () => {
 
       const cwd = process.cwd()
       try {
-        await expect(call()).rejects.toBe(stop)
+        await expect(call(undefined, overrides)).rejects.toBe(stop)
         return { daemonSpawnCount, tuiUrls: [...seen.tuiUrls] }
       } finally {
         process.chdir(cwd)
@@ -148,9 +152,216 @@ describe("tui thread", () => {
       expect(tuiUrls[0]).toBe("http://127.0.0.1:9999")
     })
 
+    test("reuses existing server while keeping loopback out of proxy env", async () => {
+      const prevNoProxy = process.env.NO_PROXY
+      const prevNoProxyLower = process.env.no_proxy
+      process.env.NO_PROXY = "example.com"
+      delete process.env.no_proxy
+
+      try {
+        const { daemonSpawnCount } = await callWithDaemonSpy("http://127.0.0.1:9999")
+        const noProxy = process.env.NO_PROXY ?? ""
+        const noProxyLower = process.env["no_proxy"] ?? ""
+        expect(daemonSpawnCount).toBe(0)
+        expect(noProxy).toContain("127.0.0.1")
+        expect(noProxyLower).toBe(noProxy)
+      } finally {
+        if (prevNoProxy === undefined) delete process.env.NO_PROXY
+        else process.env.NO_PROXY = prevNoProxy
+        if (prevNoProxyLower === undefined) delete process.env["no_proxy"]
+        else process.env["no_proxy"] = prevNoProxyLower
+      }
+    })
+
+    test("external request reuses healthy loopback daemon when lock has no external URL", async () => {
+      const { daemonSpawnCount, tuiUrls } = await callWithDaemonSpy("http://127.0.0.1:9999", { port: 8080 })
+      expect(daemonSpawnCount).toBe(0)
+      expect(tuiUrls[0]).toBe("http://127.0.0.1:9999")
+    })
+
     test("no existing server: daemon is spawned", async () => {
       const { daemonSpawnCount } = await callWithDaemonSpy(null)
       expect(daemonSpawnCount).toBe(1)
+    })
+
+    test("spawned daemon is detached on Unix and not detached on Windows", async () => {
+      setup()
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+
+      let spawnOptions: Parameters<typeof Bun.spawn>[1] | undefined
+      ThreadModule._setSpawn((_cmd, opts) => {
+        spawnOptions = opts
+        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+      })
+
+      let readCount = 0
+      spyOn(ServerLockModule, "read").mockImplementation(async () => {
+        readCount++
+        if (readCount <= 2) return undefined
+        return fakeLock
+      })
+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
+
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toBe(stop)
+        expect(spawnOptions?.detached).toBe(process.platform !== "win32")
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
+    test("thread installs and releases the Windows Ctrl+C guard around TUI lifetime", async () => {
+      let released = false
+      const order: string[] = []
+      setup()
+      mock.restore()
+      spyOn(App, "tui").mockImplementation(async () => {
+        order.push("tui")
+        throw stop
+      })
+      spyOn(UI, "error").mockImplementation(() => {})
+      spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {
+        order.push("disable")
+      })
+      const guard = spyOn(Win32, "win32InstallCtrlCGuard").mockReturnValue(() => {
+        order.push("release")
+        released = true
+      })
+
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+      spyOn(ServerLockModule, "read").mockResolvedValue({
+        pid: process.pid,
+        port: 9999,
+        token: "test-token",
+        dbPath: "/tmp/test.db",
+        channel: "local" as const,
+        startedAt: new Date().toISOString(),
+      })
+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+      ThreadModule._setSpawn(() => {
+        order.push("spawn")
+        return { pid: 99999, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+      })
+
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toBe(stop)
+        expect(guard).toHaveBeenCalledTimes(1)
+        expect(released).toBe(true)
+        expect(order).toEqual(["disable", "tui", "release"])
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
+    test("Windows Ctrl+C guard is active before any daemon spawn attempt", async () => {
+      const order: string[] = []
+      setup()
+      mock.restore()
+      spyOn(App, "tui").mockImplementation(async () => {
+        order.push("tui")
+        throw stop
+      })
+      spyOn(UI, "error").mockImplementation(() => {})
+      spyOn(Win32, "win32InstallCtrlCGuard").mockImplementation(() => {
+        order.push("guard")
+        return () => order.push("release")
+      })
+      spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {
+        order.push("disable")
+      })
+
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+      let readCount = 0
+      spyOn(ServerLockModule, "read").mockImplementation(async () => {
+        readCount++
+        if (readCount <= 2) return undefined
+        return fakeLock
+      })
+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
+      ThreadModule._setSpawn(() => {
+        order.push("spawn")
+        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+      })
+
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toBe(stop)
+        expect(order).toEqual(["guard", "disable", "spawn", "tui", "release"])
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
+    test("concurrent daemon recovery elects a single replacement worker", async () => {
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+
+      let spawned = false
+      let spawnCount = 0
+      const fakeLock = {
+        pid: FAKE_DAEMON_PID,
+        port: 9999,
+        token: "test-token",
+        dbPath: "/tmp/test.db",
+        channel: "local" as const,
+        startedAt: new Date().toISOString(),
+      }
+
+      DaemonModule._setSpawn(() => {
+        spawnCount++
+        spawned = true
+        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+      })
+      spyOn(ServerLockModule, "read").mockImplementation(async () => (spawned ? fakeLock : undefined))
+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
+
+      const args: ThreadArgs = {
+        _: [],
+        $0: "opencode",
+        project: undefined,
+        prompt: "hi",
+        model: undefined,
+        agent: undefined,
+        session: undefined,
+        continue: false,
+        fork: false,
+        port: 0,
+        hostname: "127.0.0.1",
+        mdns: false,
+        "mdns-domain": "opencode.local",
+        mdnsDomain: "opencode.local",
+        cors: [],
+      }
+
+      const [first, second] = await Promise.all([DaemonModule.ensure(args), DaemonModule.ensure(args)])
+      expect(first).toBe("http://127.0.0.1:9999")
+      expect(second).toBe("http://127.0.0.1:9999")
+      expect(spawnCount).toBe(1)
     })
 
     test("accepts lock from real daemon when spawned pid is only a Windows launcher", async () => {
@@ -166,7 +377,7 @@ describe("tui thread", () => {
       const launcherPid = 99998
       const realDaemonPid = 99999
       let daemonSpawnCount = 0
-      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
+      ThreadModule._setSpawn(() => {
         daemonSpawnCount++
         return { pid: launcherPid, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
       })
@@ -231,7 +442,7 @@ describe("tui thread", () => {
       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
 
       let daemonSpawnCount = 0
-      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
+      ThreadModule._setSpawn(() => {
         daemonSpawnCount++
         return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
       })
@@ -277,7 +488,7 @@ describe("tui thread", () => {
       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
 
       let daemonSpawnCount = 0
-      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
+      ThreadModule._setSpawn(() => {
         daemonSpawnCount++
         return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
       })

@@ -102,6 +102,7 @@ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { GO_UPSELL_MESSAGE } from "@/session/retry-constants"
 import { getRevertDiffFiles } from "../../util/revert-diff"
+import { ConnectionError } from "../../util/connection-error"
 
 addDefaultParsers(parsers.parsers)
 
@@ -267,6 +268,10 @@ export function Session() {
         variant: "error",
         duration: 5000,
       })
+      // A dead shared daemon is recoverable: SDKProvider will elect/spawn a new
+      // worker, then server.connected below force-refreshes this same session.
+      // Only real session errors should navigate away from the user's context.
+      if (ConnectionError.isConnectionError(error)) return
       navigate({ type: "home" })
     })
   })

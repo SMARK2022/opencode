@@ -601,6 +601,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
       const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
+      const taskAgent = yield* agents.get(task.agent)
+      if (!taskAgent) {
+        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
+        yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+        throw error
+      }
       const assistantMessage: MessageV2.Assistant = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "assistant",
@@ -640,25 +648,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         subagent_type: task.agent,
         command: task.command,
       }
-      yield* plugin.trigger(
-        "tool.execute.before",
-        { tool: TaskTool.id, sessionID, callID: part.id },
-        { args: taskArgs },
-      )
-
-      const taskAgent = yield* agents.get(task.agent)
-      if (!taskAgent) {
-        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
-        yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
-        throw error
-      }
-
       let error: Error | undefined
       const taskAbort = new AbortController()
-      const result = yield* taskTool
-        .execute(taskArgs, {
+      const result = yield* Effect.gen(function* () {
+        // The Task tool part is already visible as running.  Protect every
+        // following step, including plugin hooks, so setup failures terminalize
+        // the visible part instead of leaving a permanent running tool.
+        yield* plugin.trigger(
+          "tool.execute.before",
+          { tool: TaskTool.id, sessionID, callID: part.id },
+          { args: taskArgs },
+        )
+        return yield* taskTool.execute(taskArgs, {
           agent: task.agent,
           messageID: assistantMessage.id,
           sessionID,
@@ -683,6 +684,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               })
               .pipe(Effect.orDie),
         })
+      })
         .pipe(
           Effect.catchCause((cause) => {
             const defect = Cause.squash(cause)
@@ -719,12 +721,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         messageID: assistantMessage.id,
       }))
 
-      yield* plugin.trigger(
-        "tool.execute.after",
-        { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
-        result,
-      )
-
       assistantMessage.finish = "tool-calls"
       assistantMessage.time.completed = Date.now()
       yield* sessions.updateMessage(assistantMessage)
@@ -759,6 +755,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           },
         } satisfies MessageV2.ToolPart)
       }
+
+      // Post hooks are best-effort side effects.  A plugin failure here must not
+      // roll back the terminal message/tool state we just persisted.
+      yield* plugin
+        .trigger("tool.execute.after", { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs }, result)
+        .pipe(Effect.catchCause((cause) => elog.error("tool.execute.after failed", { cause })))
 
       if (!task.command) return
 
@@ -938,15 +940,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && !Cause.hasDies(exit.cause)) {
             aborted = true
           }
+          yield* finish
           const requestUsageShellComplete = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
           if (requestUsageShellComplete)
-            yield* requestUsageShellComplete.complete({
-              sessionID: input.sessionID,
-              requestID: userMsg.id,
-              status: aborted ? "aborted" : "completed",
-              timeCompleted: Date.now(),
-            })
-          yield* finish
+            yield* requestUsageShellComplete
+              .complete({
+                sessionID: input.sessionID,
+                requestID: userMsg.id,
+                status: aborted ? "aborted" : "completed",
+                timeCompleted: Date.now(),
+              })
+              .pipe(Effect.catchCause((cause) => elog.error("request usage shell complete failed", { cause })))
 
           if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
             return yield* Effect.failCause(exit.cause)

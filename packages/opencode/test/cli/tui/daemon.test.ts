@@ -7,8 +7,8 @@
  * Bun.spawn([opencode.exe, "worker.ts"]) ran the TUI CLI instead of the
  * daemon, causing a 30-second timeout.
  *
- * Isolation: OPENCODE_LOCK_PATH is set to a temp directory so the test never
- * touches the real XDG state directory.
+ * Isolation: OPENCODE_LOCK_PATH plus XDG_* and OPENCODE_DB are set to a temp
+ * directory so tests never touch a developer's live daemon lock or database.
  */
 import { afterEach, describe, expect, test } from "bun:test"
 import path from "path"
@@ -20,6 +20,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", im
 
 const DAEMON_START_TIMEOUT_MS = 15_000
 const POLL_INTERVAL_MS = 100
+const SIGNAL_TEST_TIMEOUT_MS = 10_000
 
 afterEach(() => {
   ServerLockModule._setLockPath(undefined)
@@ -31,11 +32,18 @@ afterEach(() => {
  * live lock contents.
  */
 async function spawnDaemon(lockPath: string) {
+  const root = path.dirname(lockPath)
   const proc = Bun.spawn([process.execPath, WORKER_TS], {
     env: {
       ...process.env,
       OPENCODE_PROCESS_ROLE: "worker",
       OPENCODE_LOCK_PATH: lockPath,
+      OPENCODE_DB: path.join(root, "opencode.db"),
+      OPENCODE_TEST_HOME: path.join(root, "home"),
+      XDG_DATA_HOME: path.join(root, "share"),
+      XDG_CACHE_HOME: path.join(root, "cache"),
+      XDG_CONFIG_HOME: path.join(root, "config"),
+      XDG_STATE_HOME: path.join(root, "state"),
     },
     stdin: "ignore",
     stdout: "ignore",
@@ -59,6 +67,26 @@ async function spawnDaemon(lockPath: string) {
 
   proc.kill()
   throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
+}
+
+async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
+  if (!stream) throw new Error("missing stdout stream")
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let text = ""
+  const deadline = Date.now() + 5_000
+  try {
+    while (Date.now() < deadline) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+      const line = text.split(/\r?\n/)[0]
+      if (line) return line
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  throw new Error("timed out waiting for child pid")
 }
 
 describe("daemon lifecycle", () => {
@@ -152,6 +180,12 @@ describe("daemon lifecycle", () => {
           ...process.env,
           OPENCODE_PROCESS_ROLE: "worker",
           OPENCODE_LOCK_PATH: lockPath,
+          OPENCODE_DB: path.join(tmp.path, "opencode.db"),
+          OPENCODE_TEST_HOME: path.join(tmp.path, "home"),
+          XDG_DATA_HOME: path.join(tmp.path, "share"),
+          XDG_CACHE_HOME: path.join(tmp.path, "cache"),
+          XDG_CONFIG_HOME: path.join(tmp.path, "config"),
+          XDG_STATE_HOME: path.join(tmp.path, "state"),
         },
         stdin: "ignore",
         stdout: "ignore",
@@ -179,5 +213,48 @@ describe("daemon lifecycle", () => {
       expect(lock).toBeDefined()
     },
     DAEMON_START_TIMEOUT_MS + 5_000,
+  )
+
+  test(
+    "Unix detached child survives SIGINT sent to the launcher process group",
+    async () => {
+      if (process.platform === "win32") return
+
+      const childCode = `process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000)`
+      const parentCode = `
+        const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(childCode)}], {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          detached: true,
+        })
+        child.unref()
+        console.log(child.pid)
+        setInterval(() => {}, 1000)
+      `
+      const parent = Bun.spawn([process.execPath, "-e", parentCode], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "inherit",
+        detached: true,
+      })
+      const childPid = Number(await readFirstLine(parent.stdout))
+
+      try {
+        expect(ServerLockModule.alive(childPid)).toBe(true)
+        process.kill(-parent.pid, "SIGINT")
+        await Promise.race([parent.exited, Bun.sleep(2_000)])
+        expect(ServerLockModule.alive(childPid)).toBe(true)
+      } finally {
+        try {
+          process.kill(childPid, "SIGTERM")
+        } catch {}
+        try {
+          parent.kill("SIGTERM")
+        } catch {}
+        await parent.exited.catch(() => undefined)
+      }
+    },
+    SIGNAL_TEST_TIMEOUT_MS,
   )
 })

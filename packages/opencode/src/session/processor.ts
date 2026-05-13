@@ -191,7 +191,14 @@ export const layer: Layer.Layer<
         },
       ) {
         const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return
+        if (!match) return
+        if (match.part.state.status !== "running") {
+          // Another cleanup path may already have terminalized the persisted
+          // part.  Still settle the in-memory deferred so the LLM loop cannot
+          // wait forever on a tool call whose DB state is already final.
+          yield* settleToolCall(toolCallID)
+          return
+        }
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -209,7 +216,11 @@ export const layer: Layer.Layer<
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
         const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return false
+        if (!match) return false
+        if (match.part.state.status !== "running") {
+          yield* settleToolCall(toolCallID)
+          return false
+        }
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -632,7 +643,7 @@ export const layer: Layer.Layer<
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
-        if (ctx.snapshot) {
+        if (ctx.snapshot && !aborted) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
             yield* session.updatePart({
@@ -644,8 +655,11 @@ export const layer: Layer.Layer<
               files: patch.files,
             })
           }
-          ctx.snapshot = undefined
         }
+        // On interrupt, terminal assistant/tool state is the important cleanup
+        // boundary.  Snapshot patching can involve slow git subprocess teardown,
+        // so skip it for aborted turns rather than delaying cancellation.
+        ctx.snapshot = undefined
 
         if (ctx.currentText) {
           const end = Date.now()

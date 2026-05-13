@@ -1,80 +1,26 @@
 import { cmd } from "@/cli/cmd/cmd"
 import { tui } from "./app"
-import { Rpc } from "@/util/rpc"
 import path from "path"
-import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
-import * as Log from "@opencode-ai/core/util/log"
 import { errorMessage } from "@/util/error"
-import { withNetworkOptions, resolveNetworkOptionsNoConfig } from "@/cli/network"
+import { withNetworkOptions } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
-import type { GlobalEvent } from "@opencode-ai/sdk/v2"
-import type { EventSource } from "./context/sdk"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { writeHeapSnapshot } from "v8"
 import { TuiConfig } from "./config/tui"
-import {
-  OPENCODE_PROCESS_ROLE,
-  OPENCODE_RUN_ID,
-  ensureRunID,
-  sanitizedProcessEnv,
-} from "@opencode-ai/core/util/opencode-process"
 import { validateSession } from "./validate-session"
-import { ServerLock } from "@/cli/cmd/tui/server-lock"
-import { Flock } from "@opencode-ai/core/util/flock"
-import { Global } from "@opencode-ai/core/global"
-import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import { Daemon } from "./daemon"
 
-declare global {
-  const OPENCODE_WORKER_PATH: string
-}
-
-export const DAEMON_START_TIMEOUT_MS = 60_000
-export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
-const SERVER_ELECTION_STALE_MS = 5_000
-const SERVER_POLL_INTERVAL_MS = 200
-
-// Exposed for testing only – do not call outside this module.
-export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) =>
-  Bun.spawn(cmd, opts)
-
-async function target() {
-  if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
-  const dist = new URL("./cli/cmd/tui/worker.js", import.meta.url)
-  if (await Filesystem.exists(fileURLToPath(dist))) return fileURLToPath(dist)
-  return fileURLToPath(new URL("./worker.ts", import.meta.url))
-}
+export const DAEMON_START_TIMEOUT_MS = Daemon.DAEMON_START_TIMEOUT_MS
+export const SERVER_ELECTION_TIMEOUT_MS = Daemon.SERVER_ELECTION_TIMEOUT_MS
+export const _spawn = Daemon._spawn
+export const _setSpawn = Daemon._setSpawn
 
 async function input(value?: string) {
   const piped = process.stdin.isTTY ? undefined : await Bun.stdin.text()
   if (!value) return piped
   if (!piped) return value
   return piped + "\n" + value
-}
-
-function applyProxyEnv(env: Record<string, string>) {
-  // Merge loopback addresses into NO_PROXY so the daemon never proxies its own server.
-  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
-  const no = NetworkProxy.noProxyString(parts)
-  env.NO_PROXY = no
-  env.no_proxy = no
-
-  if (process.platform === "win32" || process.platform === "darwin") {
-    // The daemon installs a global fetch wrapper that resolves system proxy
-    // dynamically per request. Strip inherited shell proxy env so Bun doesn't
-    // freeze routing to stale variables captured before the proxy app started.
-    for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
-      delete env[key]
-    return
-  }
-
-  // Linux: normalize proxy env — ensure both casings, HTTPS falls back to HTTP.
-  const http = env.HTTP_PROXY ?? env.http_proxy
-  const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
-  const all = env.ALL_PROXY ?? env.all_proxy
-  if (http) { env.HTTP_PROXY = http; env.http_proxy = http }
-  if (https) { env.HTTPS_PROXY = https; env.https_proxy = https }
-  if (all) { env.ALL_PROXY = all; env.all_proxy = all }
 }
 
 export function resolveThreadDirectory(project?: string, envPWD = process.env.PWD, cwd = process.cwd()) {
@@ -123,8 +69,6 @@ export const TuiThreadCommand = cmd({
     // Keep ENABLE_PROCESSED_INPUT cleared even if other code flips it.
     // (Important when running under `bun run` wrappers on Windows.)
     const unguard = win32InstallCtrlCGuard()
-    let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
-    let fwdReload: (() => void) | undefined
     try {
       // Must be the very first thing — disables CTRL_C_EVENT before any Worker
       // spawn or async work so the OS cannot kill the process group.
@@ -146,123 +90,10 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
-      const env = sanitizedProcessEnv({
-        [OPENCODE_PROCESS_ROLE]: "worker",
-        [OPENCODE_RUN_ID]: ensureRunID(),
-      })
-      applyProxyEnv(env)
-      process.env.NO_PROXY = env.NO_PROXY
-      process.env.no_proxy = env.no_proxy
 
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()
-
-      // ── Server discovery ──────────────────────────────────────────────────
-      // Fast path: no election lock needed when a server is clearly alive.
-      const quickCheck = await ServerLock.read()
-      const quickAlive =
-        quickCheck && ServerLock.alive(quickCheck.pid) && (await ServerLock.ping(quickCheck.port))
-      let existingUrl: string | null = quickAlive ? `http://127.0.0.1:${quickCheck!.port}` : null
-
-      if (!existingUrl) {
-        // Acquire an election lock so that concurrent TUI startups do not all
-        // spawn a daemon at the same time (e.g. opening 4 tabs simultaneously).
-        electionLease = await Flock.acquire("opencode.server", {
-          dir: path.join(Global.Path.state, "locks"),
-          timeoutMs: SERVER_ELECTION_TIMEOUT_MS,
-          staleMs: SERVER_ELECTION_STALE_MS,
-        })
-        // Re-check under lock: another process may have won the race between
-        // the fast-check and the lock acquisition.
-        const lock = await ServerLock.read()
-        existingUrl =
-          lock && ServerLock.alive(lock.pid) && (await ServerLock.ping(lock.port))
-            ? `http://127.0.0.1:${lock.port}`
-            : null
-        if (!existingUrl && lock) await ServerLock.clear()
-
-        if (existingUrl) {
-          // Slave path found under lock: release lease immediately.
-          await electionLease.release()
-          electionLease = undefined
-        } else {
-          // ── Spawn the daemon ──────────────────────────────────────────────
-          const network = resolveNetworkOptionsNoConfig(args)
-          const external =
-            process.argv.includes("--port") ||
-            process.argv.includes("--hostname") ||
-            process.argv.includes("--mdns") ||
-            network.mdns ||
-            network.port !== 0 ||
-            network.hostname !== "127.0.0.1"
-
-          const daemonFile = await target()
-          const printLogs = process.argv.includes("--print-logs")
-          const proc = _spawn(
-            [process.execPath, daemonFile],
-            {
-              env: {
-                ...env,
-                ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
-                ...(external
-                  ? {
-                      OPENCODE_EXTERNAL_PORT: String(network.port),
-                      OPENCODE_EXTERNAL_HOSTNAME: network.hostname,
-                      OPENCODE_EXTERNAL_MDNS: network.mdns ? "1" : "",
-                    }
-                  : {}),
-              },
-              stdin: "ignore",
-              stdout: printLogs ? "inherit" : "ignore",
-              stderr: printLogs ? "inherit" : "ignore",
-            },
-          )
-          proc.unref()
-
-          // The daemon cannot possibly be ready within 1 s — skip the first
-          // poll iterations to avoid pointless lock reads.
-          await Bun.sleep(1000)
-
-          // Wait for the daemon to write the lock and for its server to respond.
-          // The daemon pre-warms external plugins before writing the lock, which
-          // can take up to ~30 s on the first run. Give it 60 s to be safe.
-          // Do not require the lock PID to equal Bun.spawn()'s PID: on Windows,
-          // process.execPath can be a shim/launcher that starts the real daemon
-          // process, and the real process is what writes the lock.
-          const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-          while (Date.now() < deadline) {
-            const daemonLock = await ServerLock.read()
-            if (daemonLock && ServerLock.alive(daemonLock.pid)) {
-              if (external) {
-                if (daemonLock.externalUrl) {
-                  existingUrl = daemonLock.externalUrl
-                  break
-                }
-              } else if (await ServerLock.ping(daemonLock.port)) {
-                existingUrl = `http://127.0.0.1:${daemonLock.port}`
-                break
-              }
-            }
-            await Bun.sleep(SERVER_POLL_INTERVAL_MS)
-          }
-
-          // Release election lease: daemon is live (or we are about to error).
-          await electionLease.release()
-          electionLease = undefined
-
-          if (!existingUrl) {
-            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-            proc.kill()
-            return
-          }
-
-          // Forward SIGUSR2 (config reload) to the daemon (Unix only).
-          if (process.platform !== "win32") {
-            fwdReload = () => { try { proc.kill("SIGUSR2") } catch {} }
-            process.on("SIGUSR2", fwdReload)
-          }
-        }
-      }
+      const existingUrl = await Daemon.ensure(args)
 
       // ── Common path: validate session then start TUI ──────────────────────
       try {
@@ -277,37 +108,24 @@ export const TuiThreadCommand = cmd({
         return
       }
 
-      // Release election lease if still held from the slave path.
-      if (electionLease) {
-        await electionLease.release()
-        electionLease = undefined
-      }
-
-      try {
-        await tui({
-          url: existingUrl!,
-          async onSnapshot() {
-            return [writeHeapSnapshot("tui.heapsnapshot")]
-          },
-          config,
-          directory: cwd,
-          args: {
-            continue: args.continue,
-            sessionID: args.session,
-            agent: args.agent,
-            model: args.model,
-            prompt,
-            fork: args.fork,
-          },
-        })
-      } finally {
-        if (fwdReload) {
-          process.off("SIGUSR2", fwdReload)
-          fwdReload = undefined
-        }
-      }
+      await tui({
+        url: existingUrl,
+        async onSnapshot() {
+          return [writeHeapSnapshot("tui.heapsnapshot")]
+        },
+        config,
+        directory: cwd,
+        reconnect: () => Daemon.ensure(args),
+        args: {
+          continue: args.continue,
+          sessionID: args.session,
+          agent: args.agent,
+          model: args.model,
+          prompt,
+          fork: args.fork,
+        },
+      })
     } finally {
-      await electionLease?.release().catch(() => undefined)
       unguard?.()
     }
     process.exit(0)
