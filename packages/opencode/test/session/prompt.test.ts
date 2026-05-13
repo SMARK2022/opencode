@@ -1185,6 +1185,153 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
   }),
 )
 
+// #139：真实 Promise hook 拒绝不能阻断已完成 command 的总结续跑。
+it.instance("subtask after hook defects preserve terminal state and command continuation", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const registry = yield* ToolRegistry.Service
+    const plugin = yield* Plugin.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const task = (yield* registry.named()).task
+    const execute = task.execute
+    task.execute = () =>
+      Effect.succeed({
+        title: "subtask",
+        metadata: { parentSessionId: chat.id, sessionId: SessionID.make("ses_after_hook"), model: ref },
+        output: "subtask done",
+      })
+    yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = execute)))
+    const calls: string[] = []
+    const hook = {
+      "tool.execute.after": async (input: { tool: string; sessionID: string }) => {
+        if (input.tool !== "task" || input.sessionID !== chat.id) return
+        calls.push(input.tool)
+        throw new Error("after hook defect")
+      },
+    }
+    const hooks = yield* plugin.list()
+    hooks.push(hook)
+    yield* Effect.addFinalizer(() => Effect.sync(() => void hooks.splice(hooks.indexOf(hook), 1)))
+    yield* llm.text("continued")
+    const msg = yield* user(chat.id, "hello")
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: msg.id,
+      sessionID: chat.id,
+      type: "subtask",
+      prompt: "inspect the cache key path",
+      description: "inspect bug",
+      agent: "general",
+      model: ref,
+      command: "inspect",
+    })
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    expect(calls).toEqual(["task"])
+    expect(yield* llm.calls).toBe(1)
+    expect(result.parts.some((part) => part.type === "text" && part.text === "continued")).toBe(true)
+    const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+    const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+    expect(taskMsg?.info.role).toBe("assistant")
+    if (!taskMsg || taskMsg.info.role !== "assistant") throw new Error("missing subtask assistant")
+    expect(taskMsg.info.finish).toBe("tool-calls")
+    expect(taskMsg.info.time.completed).toBeNumber()
+    expect(completedTool(taskMsg.parts)?.state.output).toBe("subtask done")
+    expect(
+      msgs.some((item) =>
+        item.parts.some(
+          (part) =>
+            part.type === "text" &&
+            part.synthetic &&
+            part.text === "Summarize the task tool output above and continue with your task.",
+        ),
+      ),
+    ).toBe(true)
+  }),
+)
+
+// #139：等待 after hook 时取消仍中断续跑，已提交终态保持完成。
+it.instance(
+  "cancel during subtask after hook preserves terminal state without command continuation",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const status = yield* SessionStatus.Service
+      const registry = yield* ToolRegistry.Service
+      const plugin = yield* Plugin.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      const task = (yield* registry.named()).task
+      const execute = task.execute
+      task.execute = () =>
+        Effect.succeed({
+          title: "subtask",
+          metadata: { parentSessionId: chat.id, sessionId: SessionID.make("ses_after_hook"), model: ref },
+          output: "subtask done",
+        })
+      yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = execute)))
+      const ready = defer<void>()
+      const stopped = defer<void>()
+      const hook = {
+        "tool.execute.after": async (input: { tool: string; sessionID: string }) => {
+          if (input.tool !== "task" || input.sessionID !== chat.id) return
+          ready.resolve()
+          await stopped.promise
+        },
+      }
+      const hooks = yield* plugin.list()
+      hooks.push(hook)
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          stopped.resolve()
+          hooks.splice(hooks.indexOf(hook), 1)
+        }),
+      )
+      yield* llm.text("unexpected continuation")
+      const msg = yield* user(chat.id, "hello")
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: msg.id,
+        sessionID: chat.id,
+        type: "subtask",
+        prompt: "inspect the cache key path",
+        description: "inspect bug",
+        agent: "general",
+        model: ref,
+        command: "inspect",
+      })
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Effect.promise(() => ready.promise), "after hook never started", "10 seconds")
+      yield* prompt.cancel(chat.id)
+      const exit = yield* Fiber.await(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect((yield* status.get(chat.id)).type).toBe("idle")
+      expect(yield* llm.calls).toBe(0)
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+      expect(taskMsg?.info.role).toBe("assistant")
+      if (!taskMsg || taskMsg.info.role !== "assistant") throw new Error("missing subtask assistant")
+      expect(taskMsg.info.finish).toBeDefined()
+      expect(taskMsg.info.time.completed).toBeNumber()
+      expect(completedTool(taskMsg.parts)?.state.output).toBe("subtask done")
+      expect(
+        msgs.some((item) =>
+          item.parts.some(
+            (part) =>
+              part.type === "text" &&
+              part.synthetic &&
+              part.text === "Summarize the task tool output above and continue with your task.",
+          ),
+        ),
+      ).toBe(false)
+    }),
+  15_000,
+)
+
 it.instance("failed subtask preserves metadata on error tool state", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

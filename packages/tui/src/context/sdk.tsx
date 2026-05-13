@@ -3,6 +3,7 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { createSimpleContext } from "./helper"
 import { batch, onCleanup, onMount } from "solid-js"
+import { ConnectionError } from "../util/connection-error"
 
 export type EventSource = {
   subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
@@ -16,13 +17,19 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     fetch?: typeof fetch
     headers?: RequestInit["headers"]
     events?: EventSource
+    // #139：守护进程死后重解析 URL 并重建 client
+    reconnect?: () => Promise<string>
+    // #139：无事件心跳超时，默认 15s（服务端 ~10s 心跳）
+    heartbeatTimeout?: number
   }) => {
     const abort = new AbortController()
     let sse: AbortController | undefined
+    // #139：可变 base URL，重连后指向新端口
+    let url = props.url
 
     function createSDK() {
       return createOpencodeClient({
-        baseUrl: props.url,
+        baseUrl: url,
         signal: abort.signal,
         directory: props.directory,
         fetch: props.fetch,
@@ -50,6 +57,8 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     let last = 0
     const retryDelay = 1000
     const maxRetryDelay = 30000
+    // #139：默认 15s，与 source 服务端 10s 心跳匹配
+    const heartbeatTimeout = props.heartbeatTimeout ?? 15000
 
     const flush = () => {
       if (queue.length === 0) return
@@ -57,7 +66,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       queue = []
       timer = undefined
       last = Date.now()
-      // Batch all event emissions so all store updates result in a single render
       batch(() => {
         for (const event of events) {
           emitter.emit("event", event)
@@ -70,13 +78,21 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       const elapsed = Date.now() - last
 
       if (timer) return
-      // If we just flushed recently (within 16ms), batch this with future events
-      // Otherwise, process immediately to avoid latency
       if (elapsed < 16) {
         timer = setTimeout(flush, 16)
         return
       }
       flush()
+    }
+
+    // #139：daemon 恢复后 rebind URL + 重建 SDK client
+    async function reconnectDaemon() {
+      if (!props.reconnect) return
+      const next = await props.reconnect()
+      if (next === url) return
+      // #139：会话读写与下一次 SSE 都离开死端口
+      url = next
+      sdk = createSDK()
     }
 
     function startSSE() {
@@ -85,31 +101,55 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       sse = ctrl
       ;(async () => {
         let attempt = 0
-        while (true) {
+        while (!abort.signal.aborted && !ctrl.signal.aborted) {
+          if (abort.signal.aborted || ctrl.signal.aborted) break
+          const run = new AbortController()
+          const stop = () => run.abort()
+          abort.signal.addEventListener("abort", stop, { once: true })
+          ctrl.signal.addEventListener("abort", stop, { once: true })
+          let heartbeat: Timer | undefined
+          const resetHeartbeat = () => {
+            if (heartbeat) clearTimeout(heartbeat)
+            // #139：无心跳/事件超时则中止当前 SSE 并重建
+            heartbeat = setTimeout(() => run.abort(), heartbeatTimeout)
+          }
+
+          try {
+            const events = await sdk.global.event({
+              signal: run.signal,
+              sseMaxRetryAttempts: 0,
+            })
+
+            if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+              await sdk.sync.start().catch(() => {})
+            }
+
+            resetHeartbeat()
+            for await (const event of events.stream) {
+              if (run.signal.aborted) break
+              resetHeartbeat()
+              attempt = 0
+              handleEvent(event)
+            }
+          } catch (error) {
+            // #139：连接错误静默；API 调用点仍暴露真实错误
+            if (!run.signal.aborted && !ConnectionError.isConnectionError(error)) {
+              // intentional quiet for recovery loops
+            }
+          } finally {
+            abort.signal.removeEventListener("abort", stop)
+            ctrl.signal.removeEventListener("abort", stop)
+            if (heartbeat) clearTimeout(heartbeat)
+            if (timer) clearTimeout(timer)
+            if (queue.length > 0) flush()
+          }
+
           if (abort.signal.aborted || ctrl.signal.aborted) break
 
-          const events = await sdk.global.event({
-            signal: ctrl.signal,
-            sseMaxRetryAttempts: 0,
-          })
+          // #139：流结束后先 rebind daemon URL
+          await reconnectDaemon().catch(() => undefined)
 
-          if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-            // Start syncing workspaces, it's important to do this after
-            // we've started listening to events
-            await sdk.sync.start().catch(() => {})
-          }
-
-          for await (const event of events.stream) {
-            if (ctrl.signal.aborted) break
-            handleEvent(event)
-          }
-
-          if (timer) clearTimeout(timer)
-          if (queue.length > 0) flush()
           attempt += 1
-          if (abort.signal.aborted || ctrl.signal.aborted) break
-
-          // Exponential backoff
           const backoff = Math.min(retryDelay * 2 ** (attempt - 1), maxRetryDelay)
           await new Promise((resolve) => setTimeout(resolve, backoff))
         }
@@ -122,8 +162,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         onCleanup(unsub)
 
         if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-          // Start syncing workspaces, it's important to do this after
-          // we've started listening to events
           await sdk.sync.start().catch(() => {})
         }
       } else {
@@ -145,7 +183,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       directory: props.directory,
       event: emitter,
       fetch: props.fetch ?? fetch,
-      url: props.url,
+      get url() {
+        return url
+      },
     }
   },
 })
