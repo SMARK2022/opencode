@@ -781,6 +781,55 @@ describe("context usage", () => {
   })
 
   // 真实 tail 同时跨用户与助手记录，fixture 不把保留区压缩成只有 summary 的特殊例外。
+
+  // #136：主 total 用最近 step 窗口，footer 仍展示会话累计 Session Totals
+  test("main total is latest context window while footer keeps session totals", async () => {
+    const messages = [user("1"), assistant("2", "1"), user("3"), assistant("4", "3")]
+    const parts: Record<string, Part[]> = {
+      "2": [
+        {
+          id: "sf-old",
+          sessionID: "s",
+          messageID: "2",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0,
+          tokens: { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+        } as Part,
+      ],
+      "4": [
+        {
+          id: "sf-new",
+          sessionID: "s",
+          messageID: "4",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0,
+          // 200+50 cache read +20 output = 270 step window when accounting includes cache
+          tokens: { input: 200, output: 20, reasoning: 0, cache: { read: 50, write: 0 } },
+        } as Part,
+      ],
+    }
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [],
+      config: {},
+      agents: [],
+      lastUserModel: undefined,
+      vcs: undefined,
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 80,
+      // #136：注入空列表触发 assemble 早返回，验证不依赖未确认 FS
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [],
+    })
+    // #136：会话累计可大于最近窗口（含旧 step）
+    expect(data.totalTokens).toBe(270)
+    expect(data.details.usage.total).toBeGreaterThanOrEqual(270)
+  })
+
   test("filters compacted history and keeps summary plus retained tail", () => {
     // fixture 先按时间正序构造，调用处显式 toReversed 进入倒序裁剪路径。
     const messages = [

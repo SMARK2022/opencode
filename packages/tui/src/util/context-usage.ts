@@ -1129,7 +1129,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const usage = { ...acc.session, total: acc.session.input + acc.session.output + acc.session.reasoning
     + acc.session.cacheRead + acc.session.cacheWrite }
   // 发送中的快照已有分类总量，文件明细等确认后读取；历史无快照仍沿原路径展示。
-  const instructions = input.instructionFiles ?? (prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
+  const instructions = input.instructionFiles ?? (bd && prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
   const messageText = msg.text.join("\n")
   // Read 的指令可能在工具 output 而非 text 部件；只为未在已计数正文内出现的 loaded 路径读盘。
@@ -1141,7 +1141,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   }
 
   // 跳过技能读盘不跳过现有静态工具目录，避免历史工具调用分类塌缩。
-  const skills = input.skills ?? (prepared?.confirmed === false ? [] : await gatherSkills(input))
+  const skills = input.skills ?? (bd && prepared?.confirmed === false ? [] : await gatherSkills(input))
   const skillListing = skillsSection(skillInfo(skills))
   const skillTokens = acc.breakdown?.skills ?? estimate(skillListing, ratio)
   const skillDetails = skills.map((skill) => ({
@@ -1201,11 +1201,14 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   ]
 
   // 返回脱离流式 proxy 的数值与字符串，resize 消费同一轮完成的估算结果。
+  // 首包前没有助手时仍使用服务端准备值；旧历史无统计时保留分类估算。
+  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
   return {
     model: [input.session?.request?.model?.providerID ?? modelInfo.providerID, input.session?.request?.model?.modelID ?? modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
-    totalTokens: used,
+    totalTokens: stepWindowTokens > 0 ? stepWindowTokens : used,
     maxTokens,
-    percentage: maxTokens ? used / maxTokens : 0,
+    // #136：percentage 与 totalTokens 同源窗口，避免主柱与百分比分叉
+    percentage: maxTokens ? (stepWindowTokens > 0 ? stepWindowTokens : used) / maxTokens : 0,
     categories,
     // 未知窗口只选择可渲染的网格分母，maxTokens 与百分比仍保留未知值 0。
     gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
