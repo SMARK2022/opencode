@@ -175,22 +175,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.compact",
         Effect.fn(function* (ctx) {
           yield* session.compact({ sessionID: ctx.params.sessionID }).pipe(
-            Effect.catchTag("Session.NotFoundError", (error) =>
-              Effect.fail(
-                new SessionNotFoundError({
-                  sessionID: error.sessionID,
-                  message: `Session not found: ${error.sessionID}`,
-                }),
-              ),
-            ),
-            Effect.catchTag("Session.OperationUnavailableError", (error) =>
-              Effect.fail(
-                new ServiceUnavailableError({
-                  message: `Session ${error.operation} is not available yet`,
-                  service: `session.${error.operation}`,
-                }),
-              ),
-            ),
+            // 已接通的维护失败返回真实诊断，不能仍报告“尚未实现”。
+            Effect.catch((error) => Effect.fail(
+              error instanceof SessionV2.NotFoundError
+                ? new SessionNotFoundError({ sessionID: error.sessionID, message: `Session not found: ${error.sessionID}` })
+                : new ServiceUnavailableError({ message: error.message, service: "session.compact" }),
+            )),
           )
           return HttpApiSchema.NoContent.make()
         }),

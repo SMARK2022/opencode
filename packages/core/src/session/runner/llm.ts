@@ -2,6 +2,7 @@ import {
   LLM,
   LLMClient,
   LLMError,
+  InvalidProviderOutputReason,
   LLMEvent,
   Message,
   SystemPart,
@@ -539,7 +540,36 @@ const layer = Layer.effect(
     const run = Effect.fn("SessionRunner.run")(function* (input: {
       readonly sessionID: SessionSchema.ID
       readonly force: boolean
+      readonly maintenance?: "compact"
     }) {
+      if (input.maintenance === "compact") {
+        const session = yield* getSession(input.sessionID)
+        if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
+          return yield* Effect.interrupt
+        const agent = yield* agents.select(session.agent)
+        const prepared = yield* prepareTurn(session.id, agent)
+        const initialized = yield* SessionContextEpoch.initialize(db, prepared.context, session.id)
+        const system = initialized ?? (yield* SessionContextEpoch.prepare(db, events, prepared.context, session.id))
+        const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
+        if (entries.length === 0) return
+        const selection = yield* models.resolve(session)
+        const request = LLM.request({
+          model: selection.model,
+          messages: [],
+          http: { headers: {
+            "x-session-affinity": session.id,
+            "X-Session-Id": session.id,
+            ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
+          } },
+        })
+        // 只执行一次共享摘要；不提升 inbox，也不进入普通工具/续跑循环。
+        if (yield* compaction.compact({ sessionID: session.id, entries, model: selection.model, pricing: selection.pricing, variant: session.model?.variant, request })) return
+        return yield* new LLMError({
+          module: "SessionCompaction",
+          method: "compact",
+          reason: new InvalidProviderOutputReason({ message: "Compaction did not produce a usable summary" }),
+        })
+      }
       const hasSteer = yield* SessionInput.hasPending(db, input.sessionID, "steer")
       const hasQueue = hasSteer ? false : yield* SessionInput.hasPending(db, input.sessionID, "queue")
       if (!input.force && !hasSteer && !hasQueue) return

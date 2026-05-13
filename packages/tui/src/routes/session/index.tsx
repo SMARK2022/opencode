@@ -1663,6 +1663,8 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   // Reasoning is finalized when the server sets `time.end` (see processor.ts).
   // Flips independently of the parent message completing.
   const isDone = createMemo(() => props.part.time.end !== undefined)
+  // #137：完成后 remount 推理块，避免高度测量粘滞
+  const completedKey = createMemo(() => `${ctx.width}@${renderedContent()}`)
   const inMinimal = createMemo(() => ctx.thinkingMode() === "hide")
   const duration = createMemo(() => {
     const end = props.part.time.end
@@ -1709,8 +1711,8 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
             {/* 用 content() 而非 summary().body：summary 可能只剩标题体为空 */}
             <code
               filetype="markdown"
-              // #135：流式推理用 unstyled 快路径；完成后可走完整样式
-              drawUnstyledText={!isDone()}
+              // #137：预览流式用 styled streaming
+              drawUnstyledText={false}
               streaming={!isDone()}
               syntaxStyle={syntax()}
               content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
@@ -1726,16 +1728,36 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         </Show>
         <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
           <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
-            <code
-              filetype="markdown"
-              // #135：展开体同样绑定推理完成态
-              drawUnstyledText={!isDone()}
-              streaming={!isDone()}
-              syntaxStyle={syntax()}
-              content={summary().body}
-              conceal={ctx.conceal()}
-              fg={theme.textMuted}
-            />
+            <Switch>
+              <Match when={!isDone()}>
+                <code
+                  filetype="markdown"
+                  // #135/#137：流式推理 styled streaming，避免 unstyled 闪烁
+                  drawUnstyledText={false}
+                  streaming={true}
+                  syntaxStyle={syntax()}
+                  content={summary().body}
+                  conceal={ctx.conceal()}
+                  fg={theme.textMuted}
+                />
+              </Match>
+              {/* #137：推理完成后 keyed remount */}
+              <Match when={isDone()}>
+                <Show keyed when={completedKey()}>
+                  {(_key) => (
+                    <code
+                      filetype="markdown"
+                      drawUnstyledText={false}
+                      streaming={false}
+                      syntaxStyle={syntax()}
+                      content={summary().body}
+                      conceal={ctx.conceal()}
+                      fg={theme.textMuted}
+                    />
+                  )}
+                </Show>
+              </Match>
+            </Switch>
           </box>
         </Show>
       </box>

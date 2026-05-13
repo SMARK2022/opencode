@@ -1257,6 +1257,10 @@ const layer = Layer.effect(
               overflow: task.overflow,
             })
             if (result === "stop") break
+            // #137：手动压缩是终态维护；filterCompacted 保留 tail 后不得继续当新 build 回合
+            // #137：自动压缩可 continue（可能有合成 follow-up 续跑）
+            // #137：!task.auto 时立即 break，防止旧 tool tail 被当新请求
+            if (!task.auto) break
             continue
           }
 

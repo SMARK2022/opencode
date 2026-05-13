@@ -821,7 +821,7 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
-    "returns v2 public unavailable errors for unfinished session mutations",
+    "compacts empty v2 sessions and preserves unavailable wait errors",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -829,12 +829,9 @@ describe("session HttpApi", () => {
         const session = yield* createSession({ title: "v2 unavailable" })
 
         const compact = yield* request(`/api/session/${session.id}/compact`, { method: "POST", headers })
-        expect(compact.status).toBe(503)
-        expect(yield* responseJson(compact)).toEqual({
-          _tag: "ServiceUnavailableError",
-          message: "Session compact is not available yet",
-          service: "session.compact",
-        })
+        // 本项已接通compact，空会话无副作用成功；wait仍检查真实未实现错误。
+        expect(compact.status).toBe(204)
+        expect(yield* compact.text).toBe("")
 
         const wait = yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
         expect(wait.status).toBe(503)

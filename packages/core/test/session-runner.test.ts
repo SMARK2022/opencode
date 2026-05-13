@@ -286,7 +286,7 @@ const execution = Layer.effect(
   Effect.gen(function* () {
     const sessionRunner = yield* SessionRunner.Service
     const coordinator = yield* SessionRunCoordinator.make<SessionV2.ID, SessionRunner.RunError>({
-      drain: (sessionID, force) => sessionRunner.run({ sessionID, force }),
+      drain: (sessionID, force, maintenance) => sessionRunner.run({ sessionID, force, maintenance }),
     })
     return SessionExecution.Service.of({
       active: coordinator.active,
@@ -1639,6 +1639,59 @@ describe("SessionRunnerLLM", () => {
       yield* replaySessionProjection(sessionID)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
       yield* session.resume(sessionID)
+    }),
+  )
+
+  it.live("manual compaction stops after summarizing retained tool tail", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "manual-earlier", ["Earlier answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
+      yield* session.resume(sessionID)
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "manual-tail", name: "echo", input: { text: "tail output" } }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ],
+        fragmentFixture("text", "manual-tail-done", ["Done"]).completeEvents,
+      ]
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep recent tool turn" }), resume: false })
+      yield* session.resume(sessionID)
+      requests.length = 0
+      executions.length = 0
+      const pending = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Later queued request" }), delivery: "queue", resume: false })
+      responses = undefined
+      response = fragmentFixture("text", "manual-summary", ["Summary"]).completeEvents
+      yield* session.compact({ sessionID })
+      expect(requests).toHaveLength(1)
+      expect(requests[0].tools).toEqual([])
+      const context = yield* session.context(sessionID)
+      expect(context).toHaveLength(1)
+      expect(context[0]).toMatchObject({ type: "compaction", summary: "Summary" })
+      if (context[0].type !== "compaction") return yield* Effect.die("Missing manual summary")
+      expect(context[0].recent).toContain("[User]: Keep recent tool turn")
+      expect(context[0].recent).toContain("[Tool result]: tail output")
+      expect(executions).toHaveLength(0)
+      const db = (yield* Database.Service).db
+      expect(yield* db.select({ promoted: SessionInputTable.promoted_seq }).from(SessionInputTable).where(eq(SessionInputTable.id, pending.id)).get().pipe(Effect.orDie)).toEqual({ promoted: null })
+      yield* replaySessionProjection(sessionID)
+      expect(yield* session.context(sessionID)).toEqual(context)
+      const history = yield* session.history({ sessionID, limit: 100 })
+      expect(history.events.filter(event => event.type === SessionEvent.Compaction.Ended.type).map(event => event.data)).toMatchObject([{ reason: "manual", text: "Summary" }])
+      response = fragmentFixture("text", "manual-later", ["Later answer"]).completeEvents
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(2)
+      expect(userTexts(requests[1]).join("\n")).toContain("<summary>\nSummary\n</summary>")
+      expect(executions).toHaveLength(0)
+      requests.length = 0
+      const failure = providerUnavailable()
+      streamFailure = failure
+      expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBe(failure)
+      expect(requests).toHaveLength(1)
+      expect((yield* session.context(sessionID)).some(message => message.type === "compaction" && message.summary === "Summary")).toBe(true)
     }),
   )
 
