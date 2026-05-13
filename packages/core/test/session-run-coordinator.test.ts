@@ -24,6 +24,39 @@ describe("SessionRunCoordinator", () => {
         yield* Deferred.succeed(gate, undefined)
         yield* Effect.all([Fiber.join(first), Fiber.join(second)])
         expect(runs).toBe(1)
+        // 同一维护可 join，普通运行与维护不能互相冒充；只有真实 wake 才驱动后续工作。
+        const started = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const compactStarted = yield* Deferred.make<void>()
+        const compactRelease = yield* Deferred.make<void>()
+        const woken = yield* Deferred.make<void>()
+        const modes: ("compact" | undefined)[] = []
+        const serial = yield* SessionRunCoordinator.make<string, never>({ drain: (_key, _force, maintenance) => Effect.gen(function* () {
+          modes.push(maintenance)
+          if (modes.length === 1) {
+            yield* Deferred.succeed(started, undefined)
+            return yield* Deferred.await(release)
+          }
+          if (maintenance === "compact") {
+            yield* Deferred.succeed(compactStarted, undefined)
+            return yield* Deferred.await(compactRelease)
+          }
+          yield* Deferred.succeed(woken, undefined)
+        }) })
+        const draining = yield* serial.run("session").pipe(Effect.forkChild)
+        yield* Deferred.await(started)
+        const compacting = yield* serial.run("session", "compact").pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        expect(modes).toEqual([undefined])
+        yield* Deferred.succeed(release, undefined)
+        yield* Deferred.await(compactStarted)
+        const joined = yield* serial.run("session", "compact").pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        yield* serial.wake("session")
+        yield* Deferred.succeed(compactRelease, undefined)
+        yield* Effect.all([Fiber.join(draining), Fiber.join(compacting), Fiber.join(joined)])
+        yield* Deferred.await(woken)
+        expect(modes).toEqual([undefined, "compact", undefined])
       }),
     ),
   )

@@ -7,7 +7,7 @@ export interface Coordinator<Key, E> {
   /** Snapshots keys with an execution owned by this coordinator. */
   readonly active: Effect.Effect<ReadonlySet<Key>>
   /** Starts execution while idle or joins the active execution. */
-  readonly run: (key: Key) => Effect.Effect<void, E>
+  readonly run: (key: Key, maintenance?: "compact") => Effect.Effect<void, E>
   /** Registers one coalesced follow-up after newly recorded work. */
   readonly wake: (key: Key) => Effect.Effect<void>
   /** Stops active execution and waits for its cleanup. */
@@ -16,20 +16,22 @@ export interface Coordinator<Key, E> {
 
 type Entry<E> = {
   readonly done: Deferred.Deferred<void, E>
+  readonly maintenance?: "compact"
   owner?: Fiber.Fiber<void, never>
   pendingWake: boolean
   stopping: boolean
 }
 
 export const make = <Key, E>(options: {
-  readonly drain: (key: Key, force: boolean) => Effect.Effect<void, E>
+  readonly drain: (key: Key, force: boolean, maintenance?: "compact") => Effect.Effect<void, E>
 }): Effect.Effect<Coordinator<Key, E>, never, Scope.Scope> =>
   Effect.gen(function* () {
     const active = new Map<Key, Entry<E>>()
     const fork = yield* FiberSet.makeRuntime<never, void, never>()
 
-    const makeEntry = (): Entry<E> => ({
+    const makeEntry = (maintenance?: "compact"): Entry<E> => ({
       done: Deferred.makeUnsafe<void, E>(),
+      maintenance,
       pendingWake: false,
       stopping: false,
     })
@@ -38,7 +40,7 @@ export const make = <Key, E>(options: {
       const ready = Deferred.makeUnsafe<void>()
       const owner = fork(
         (successor ? Effect.yieldNow : Deferred.await(ready)).pipe(
-          Effect.andThen(Effect.suspend(() => options.drain(key, force))),
+          Effect.andThen(Effect.suspend(() => options.drain(key, force, entry.maintenance))),
           Effect.onExit((exit) => Effect.sync(() => settle(key, entry, exit))),
           Effect.exit,
           Effect.asVoid,
@@ -49,7 +51,8 @@ export const make = <Key, E>(options: {
     }
 
     const settle = (key: Key, entry: Entry<E>, exit: Exit.Exit<void, E>) => {
-      if (Exit.isSuccess(exit) && !entry.stopping && entry.pendingWake) {
+      // 维护结束只允许真实新 wake 启动普通 drain，不能再次执行摘要或恢复旧工作。
+      if (Exit.isSuccess(exit) && !entry.stopping && entry.pendingWake && entry.maintenance === undefined) {
         entry.pendingWake = false
         start(key, entry, false, true)
         return
@@ -64,15 +67,18 @@ export const make = <Key, E>(options: {
       Deferred.doneUnsafe(entry.done, exit)
     }
 
-    const run = (key: Key): Effect.Effect<void, E> =>
+    const run = (key: Key, maintenance?: "compact"): Effect.Effect<void, E> =>
       Effect.uninterruptibleMask((restore) => {
         const entry = active.get(key)
         if (entry !== undefined) {
-          if (entry.stopping) return restore(Deferred.await(entry.done).pipe(Effect.andThen(run(key))))
+          if (entry.stopping) return restore(Deferred.await(entry.done).pipe(Effect.andThen(run(key, maintenance))))
+          // 异类请求等待当前所有权释放；其结果不充当本次维护的结果。
+          if (entry.maintenance !== maintenance)
+            return restore(Deferred.await(entry.done).pipe(Effect.exit, Effect.andThen(run(key, maintenance))))
           return restore(Deferred.await(entry.done))
         }
 
-        const next = makeEntry()
+        const next = makeEntry(maintenance)
         active.set(key, next)
         start(key, next, true)
         return restore(Deferred.await(next.done))

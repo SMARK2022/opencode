@@ -162,6 +162,7 @@ const settings = (documents: readonly Config.Entry[]) => {
 const select = (
   entries: readonly Entry[],
   tokens: number,
+  manual = false,
 ): { readonly head: string; readonly recent: string } | undefined => {
   const conversation = entries
     .filter((entry) => entry.message.type !== "compaction")
@@ -172,6 +173,8 @@ const select = (
   let split = conversation.length
   for (let index = conversation.length - 1; index >= 0; index--) {
     const next = total + Token.estimate(conversation[index])
+    // 短会话也能手动摘要，但仍保留其余完整近期消息，而不是丢掉工具 tail。
+    if (manual && index === 0) break
     if (next > tokens) break
     total = next
     split = index
@@ -201,11 +204,11 @@ export const buildPrompt = (input: { readonly previousSummary?: string; readonly
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
-  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input) {
+  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input, reason: "auto" | "manual" = "auto") {
     const context = input.model.route.defaults.limits?.context
-    if (context === undefined || context <= 0) return false
+    if (reason === "auto" && (context === undefined || context <= 0)) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    const selected = select(input.entries, config.tokens)
+    const selected = select(input.entries, config.tokens, reason === "manual")
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
     if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
     const summaryPrompt = buildPrompt({
@@ -214,7 +217,7 @@ export const make = (dependencies: Dependencies) => {
     })
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
     // 摘要也发送到同一模型，独立 input 上限不能只约束普通 turn 而放过摘要请求。
-    if (Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
+    if (context !== undefined && context > 0 && Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
     const messageID = SessionMessage.ID.create()
     const startedEventID = EventV2.ID.create()
     const terminalEventID = EventV2.ID.create()
@@ -240,7 +243,7 @@ export const make = (dependencies: Dependencies) => {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
-      reason: "auto",
+      reason,
       // Started 冻结真实调用的 variant；未选择时仍省略，不在 finish 时查询会话或猜默认值。
       model: { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
         ...(input.variant === undefined ? {} : { variant: input.variant }) },
@@ -269,7 +272,8 @@ export const make = (dependencies: Dependencies) => {
           return Effect.void
         }),
         Effect.as(true),
-        Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
+        // 显式维护必须向调用者保留提供者失败，不能用 false 伪装成功。
+        Effect.catchTag("LLM.Error", (error) => reason === "manual" ? Effect.fail(error) : Effect.succeed(false)),
       )
     const summary = chunks.join("")
     if (!summarized || failed || !summary.trim()) {
@@ -280,7 +284,7 @@ export const make = (dependencies: Dependencies) => {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
-      reason: "auto",
+      reason,
       text: summary,
       recent: selected.recent,
       usage,
@@ -309,6 +313,7 @@ export const make = (dependencies: Dependencies) => {
   })
   return {
     compactIfNeeded,
+    compact: (input: Input) => compactAfterOverflow(input, "manual"),
     compactAfterOverflow,
   }
 }

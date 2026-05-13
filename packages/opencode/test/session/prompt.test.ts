@@ -424,6 +424,28 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
   return { user: msg, assistant }
 })
 
+const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    // #137：构造已完成 tool 尾，验证手动压缩后 loop 不再二次 build
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "tool",
+      callID: crypto.randomUUID(),
+      tool: "bash",
+      state: {
+        status: "completed",
+        input: { command: "printf tail" },
+        output: "tail output",
+        title: "done",
+        metadata: {},
+        time: { start: Date.now(), end: Date.now() },
+      },
+    })
+  })
+
 const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -876,6 +898,49 @@ it.instance("loop stops provider overflow instead of auto-compacting when disabl
       expect(result.info.finish).toBe("error")
     }
     expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(false)
+  }),
+)
+
+// #137：手动压缩后只应有一次摘要 LLM 调用，不得把 retained tool tail 当新 build
+it.instance("manual compaction stops after summarizing retained tool tail", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      compaction: { tail_turns: 1 },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    // #137：显式 auto:false 走手动压缩终态分支
+    const compact = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "Manual compact",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+
+    yield* seed(chat.id, { finish: "stop" })
+    const keep = yield* seed(chat.id, { finish: "stop" })
+    yield* addCompletedTool(chat.id, keep.assistant.id)
+    yield* compact.create({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      auto: false,
+    })
+    // #137：仅排队一次摘要响应，用于断言 hits===1
+    yield* llm.text("summary")
+
+    // #137：loop 应在摘要后 break，不得再发起 build 调用
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
+
+    // #137：核心断言——手动压缩后 provider 只调用一次
+    expect(yield* llm.hits).toHaveLength(1)
+    expect(result.info.role).toBe("assistant")
+    // #137：返回摘要 assistant，而非新 build 回合
+    if (result.info.role === "assistant") expect(result.info.summary).toBe(true)
+    // #137：retained tail 仍可见，但不得二次 provider 调用
+    expect(filtered.map((msg) => msg.info.id)).toContain(keep.user.id)
+    expect(filtered.map((msg) => msg.info.id)).toContain(keep.assistant.id)
   }),
 )
 

@@ -169,7 +169,7 @@ export interface Interface {
     skill: string
     resume?: boolean
   }) => Effect.Effect<void, OperationUnavailableError>
-  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
+  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
   readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
@@ -431,7 +431,8 @@ const layer = Layer.effect(
       }),
       compact: Effect.fn("V2Session.compact")(function* (input) {
         yield* result.get(input.sessionID)
-        return yield* new OperationUnavailableError({ operation: "compact" })
+        // 维护意图经过同一进程级所有权和 Location 路由，不能直接启动第二个 runner。
+        yield* execution.resume(input.sessionID, "compact")
       }),
       wait: Effect.fn("V2Session.wait")(function* (sessionID) {
         yield* result.get(sessionID)
