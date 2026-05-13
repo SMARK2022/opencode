@@ -16,6 +16,8 @@ import { Tools } from "./tools"
 
 export const name = "grep"
 
+const RESULT_LIMIT = 64
+
 export const Input = Schema.Struct({
   pattern: FileSystem.GrepInput.fields.pattern.annotate({
     description: "Regex pattern to search for in file contents",
@@ -27,18 +29,23 @@ export const Input = Schema.Struct({
     description: 'File glob to include in the search (for example, "*.js" or "*.{ts,tsx}")',
   }),
   limit: FileSystem.GrepInput.fields.limit.annotate({
-    description: "Maximum matches to return",
+    description: `Maximum matches to return (default ${RESULT_LIMIT})`,
   }),
 })
 
-export const Output = Schema.Array(FileSystem.Match)
+export const Output = Schema.Struct({
+  items: Schema.Array(FileSystem.Match),
+  partial: Schema.Boolean,
+  truncated: Schema.Boolean,
+})
 type ModelOutput = typeof Output.Encoded
 
 /** Format raw search matches into the familiar concise model output. */
 export const toModelOutput = (output: ModelOutput) => {
-  const lines = output.length === 0 ? ["No files found"] : [`Found ${output.length} matches`]
+  // 截断来自真实 producer 状态，不能仅因条数恰好等于预算就猜测有更多结果。
+  const lines = output.items.length === 0 ? ["No files found"] : [`Found ${output.items.length}${output.truncated ? "+" : ""} matches${output.truncated ? ` (showing first ${output.items.length})` : ""}`]
   let current = ""
-  for (const match of output) {
+  for (const match of output.items) {
     if (current !== match.entry.path) {
       if (current) lines.push("")
       current = match.entry.path
@@ -46,6 +53,8 @@ export const toModelOutput = (output: ModelOutput) => {
     }
     lines.push(`  Line ${match.line}: ${match.text}`)
   }
+  if (output.truncated) lines.push("", `(Results truncated: showing first ${output.items.length} matches. Consider using a more specific path or pattern.)`)
+  if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
   return lines.join("\n")
 }
 
@@ -69,10 +78,10 @@ const layer = Layer.effectDiscard(
             {
               type: "text",
               text: toModelOutput(
-                output.map((match) => ({
+                { ...output, items: output.items.map((match) => ({
                   ...match,
                   entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
-                })),
+                })) },
               ),
             },
           ],
@@ -95,16 +104,18 @@ const layer = Layer.effectDiscard(
               const target = path.resolve(location.directory, input.path ?? ".")
               const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
               return yield* ripgrep
-                .grep({
+                .search({
                   cwd: info?.type === "Directory" ? target : path.dirname(target),
                   pattern: input.pattern,
                   file: info?.type === "File" ? path.basename(target) : undefined,
                   include: input.include,
-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                  // 默认预算进入流式收集之前；显式正数 limit 不被默认值夹紧。
+                  limit: input.limit ?? RESULT_LIMIT,
                 })
                 .pipe(
-                  Effect.map((result) =>
-                    result.map((match) =>
+                  Effect.map((result) => ({
+                    ...result,
+                    items: result.items.map((match) =>
                       FileSystem.Match.make({
                         ...match,
                         entry: FileSystem.Entry.make({
@@ -121,9 +132,15 @@ const layer = Layer.effectDiscard(
                         }),
                       }),
                     ),
-                  ),
+                  })),
                 )
-            }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to grep for ${input.pattern}` }))),
+            }).pipe(Effect.mapError((cause) => new ToolFailure({
+              message: cause instanceof Ripgrep.SearchTooBroadError
+                ? `${cause.message}\nUse a narrower path or include pattern before searching file contents.`
+                : cause instanceof Ripgrep.InvalidPatternError || cause instanceof Ripgrep.Error
+                  ? cause.message
+                  : `Unable to grep for ${input.pattern}`,
+            }))),
         }),
       })
       .pipe(Effect.orDie)

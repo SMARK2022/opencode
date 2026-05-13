@@ -7,6 +7,8 @@ import { makeGlobalNode } from "./effect/app-node"
 import { AppProcess, collectStream, waitForAbort } from "./process"
 import { NonNegativeInt, PositiveInt, RelativePath } from "./schema"
 import { RipgrepBinary } from "./ripgrep/binary"
+import { FSUtil } from "./fs-util"
+import path from "path"
 
 /**
  * Small core-owned ripgrep execution adapter. It deliberately exposes raw
@@ -18,6 +20,11 @@ import { RipgrepBinary } from "./ripgrep/binary"
 const ERROR_BYTES = 8 * 1024
 const MAX_RECORD_BYTES = 64 * 1024
 const MAX_SUBMATCHES = 100
+// #138：候选文件上限
+export const MAX_SEARCH_FILES = 5_000
+// #138：默认匹配结果上限
+export const MAX_SEARCH_RESULTS = 1_000
+
 
 const RawMatch = Schema.Struct({
   type: Schema.Literal("match"),
@@ -48,6 +55,12 @@ export class InvalidPatternError extends Schema.TaggedErrorClass<InvalidPatternE
   message: Schema.String,
 }) {}
 
+// #138：候选文件过多
+export class SearchTooBroadError extends Schema.TaggedErrorClass<SearchTooBroadError>()("Ripgrep.SearchTooBroadError", {
+  message: Schema.String,
+  maxFiles: PositiveInt,
+}) {}
+
 export interface FindInput {
   readonly cwd: string
   readonly pattern: string
@@ -73,13 +86,22 @@ export interface GrepInput {
   readonly file?: string
   readonly include?: string
   readonly limit: number
+  // #138：false 关闭候选上限
+  readonly maxFiles?: number | false
   readonly signal?: AbortSignal
+}
+
+export interface SearchResult {
+  readonly items: readonly Match[]
+  readonly truncated: boolean
+  readonly partial: boolean
 }
 
 export interface Interface {
   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
   readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
-  readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError>
+  readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
+  readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Ripgrep") {}
@@ -94,6 +116,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const process = yield* AppProcess.Service
     const binary = yield* RipgrepBinary.Service
+    const fs = yield* FSUtil.Service
 
     const run = <A>(input: {
       readonly cwd: string
@@ -128,13 +151,19 @@ const layer = Layer.effect(
             Effect.map((chunk) => [...chunk]),
           )
           const truncated = rows.length > input.limit
-          if (truncated) return { items: rows.slice(0, input.limit), truncated, partial: false }
+          if (truncated) {
+            // #138：达到结果上限后主动 kill，避免超大仓库继续全量扫描
+            yield* handle.kill().pipe(Effect.ignore)
+            return { items: rows.slice(0, input.limit), truncated, partial: false }
+          }
 
           const code = yield* handle.exitCode
           const stderr = yield* Fiber.join(stderrFiber)
           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
           }
+          // 原 source 对无匹配且带诊断的 exit2 判为失败，不能伪装成 partial 空结果。
+          if (code === 2 && rows.length === 0 && stderr.trim()) return yield* failure(stderr.trim())
           if (code !== 0 && code !== 1 && code !== 2) {
             return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
           }
@@ -151,7 +180,7 @@ const layer = Layer.effect(
       )
     }
 
-    return Service.of({
+    const service: Interface = {
       glob: (input) =>
         run<string>({
           cwd: input.cwd,
@@ -215,9 +244,51 @@ const layer = Layer.effect(
           Effect.map((result) => result.items),
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
-      grep: (input) =>
-        run<RawMatchData>({
+      // 既有 V1/HTTP 调用保留数组契约，原生工具消费同一次搜索的完整状态。
+      grep: (input) => service.search(input).pipe(Effect.map((result) => result.items)),
+      search: (input) =>
+        Effect.gen(function* () {
+          // #138：先限制候选文件数
+          const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
+          if (maxFiles !== undefined) {
+            // 单文件豁免不能扩大为目录豁免；显式目录沿用相同候选预算。
+            const directory = input.file === undefined || (yield* fs.stat(path.resolve(input.cwd, input.file)).pipe(
+              Effect.map((info) => info.type === "Directory"),
+              Effect.mapError((cause) => failure("Unable to inspect search target", cause)),
+            ))
+            if (directory) {
+              // #138：--files 预扫候选，超过 maxFiles 则拒绝
+              const candidates = yield* run<string>({
+                cwd: input.cwd,
+                limit: maxFiles + 1,
+                signal: input.signal,
+                args: [
+                  "--no-config",
+                  "--files",
+                  "--hidden",
+                  ...(input.include ? [`--glob=${input.include}`] : []),
+                  "--glob=!**/.git/**",
+                  input.file ?? ".",
+                ],
+                parse: (line) => Effect.succeed(line),
+              }).pipe(
+                Effect.map((r) => r.items),
+                Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
+              )
+              // #138：候选过多：抛 SearchTooBroadError 迫使收窄 scope
+              if (candidates.length > maxFiles) {
+                return yield* new SearchTooBroadError({
+                  message: `Search scope is too broad: more than ${maxFiles} candidate files.`,
+                  maxFiles,
+                })
+              }
+            }
+          }
+          // #138：结果条数默认 MAX_SEARCH_RESULTS
+          const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
+          return yield* run<RawMatchData>({
           ...input,
+          limit,
           args: [
             "--no-config",
             "--json",
@@ -251,8 +322,9 @@ const layer = Layer.effect(
               }),
             ),
         }).pipe(
-          Effect.map((result) =>
-            result.items.map((match) => {
+          Effect.map((result) => ({
+            ...result,
+            items: result.items.map((match) => {
               const relative = match.path.text
                 .replace(/^(?:\.[\\/])+/u, "")
                 .replace(/^[\\/]+/u, "")
@@ -275,10 +347,12 @@ const layer = Layer.effect(
                 })),
               })
             }),
-          ),
-        ),
-    })
+          })),
+          )
+        }),
+    }
+    return Service.of(service)
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node, FSUtil.node] })
