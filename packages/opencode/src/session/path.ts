@@ -23,6 +23,25 @@ function windowsAbsolute(directory: string) {
   return /^[A-Za-z]:\//.test(result) ? result : undefined
 }
 
+function isDriveQualified(value: string) {
+  return /^[A-Za-z]:(?:\/|$)/.test(value)
+}
+
+export function ancestors(value: string, options?: { root?: boolean }) {
+  const normalized = value.replace(/\/+$/, "")
+  if (!normalized) return [""]
+
+  const prefixes = normalized.split("/").flatMap((_, index, parts) => {
+    const prefix = parts.slice(0, index + 1).join("/")
+    // Windows drive roots may exist in old data as either `F:` or `F:/`.
+    // Match both while still treating `F:/A` as the child namespace.
+    if (/^[A-Za-z]:$/.test(prefix)) return [prefix, `${prefix}/`]
+    return [prefix]
+  })
+
+  return [...new Set([...(options?.root && !isDriveQualified(normalized) ? [""] : []), ...prefixes])]
+}
+
 export function aliases(input: { path: string; directory?: string; global?: boolean }) {
   // Historical Windows global sessions used both `F:/...` and drive-relative
   // `...` forms depending on the daemon current drive. Query both spellings so

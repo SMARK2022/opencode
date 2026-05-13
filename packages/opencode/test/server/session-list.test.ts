@@ -12,6 +12,7 @@ import { Database } from "@/storage/db"
 import { SessionTable } from "@/session/session.sql"
 import { eq } from "drizzle-orm"
 import { SessionPath } from "@/session/path"
+import { $ } from "bun"
 
 void Log.init({ print: false })
 const originalWorkspaces = Flag.OPENCODE_EXPERIMENTAL_WORKSPACES
@@ -102,7 +103,7 @@ describe("session.list", () => {
     })
   })
 
-  test("filters by path and ignores directory when path is provided", async () => {
+  test("filters by path relatives and ignores directory when path is provided", async () => {
     Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
     await using tmp = await tmpdir({ git: true })
     await mkdir(path.join(tmp.path, "packages", "opencode", "src", "deep"), { recursive: true })
@@ -111,6 +112,7 @@ describe("session.list", () => {
     await WithInstance.provide({
       directory: tmp.path,
       fn: async () => {
+        const root = await svc.create({ title: "root" })
         const parent = await WithInstance.provide({
           directory: path.join(tmp.path, "packages", "opencode"),
           fn: async () => svc.create({ title: "parent" }),
@@ -134,10 +136,56 @@ describe("session.list", () => {
             path: "packages/opencode/src",
           })
         ).map((s) => s.id)
-        expect(pathIDs).not.toContain(parent.id)
+        expect(pathIDs).toContain(root.id)
+        expect(pathIDs).toContain(parent.id)
         expect(pathIDs).toContain(current.id)
         expect(pathIDs).toContain(deeper.id)
         expect(pathIDs).not.toContain(sibling.id)
+      },
+    })
+  })
+
+  test("builds path ancestors", () => {
+    expect(SessionPath.ancestors("packages/opencode/src", { root: true })).toEqual([
+      "",
+      "packages",
+      "packages/opencode",
+      "packages/opencode/src",
+    ])
+    expect(SessionPath.ancestors("F:/A/B/C")).toEqual(["F:", "F:/", "F:/A", "F:/A/B", "F:/A/B/C"])
+  })
+
+  test("includes global parent sessions from a git child project", async () => {
+    Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
+    await using tmp = await tmpdir()
+    const repo = path.join(tmp.path, "repo")
+    const child = path.join(repo, "packages", "opencode")
+    await mkdir(child, { recursive: true })
+    await $`git init`.cwd(repo).quiet()
+    await $`git config core.fsmonitor false`.cwd(repo).quiet()
+    await $`git config commit.gpgsign false`.cwd(repo).quiet()
+    await $`git config user.email "test@opencode.test"`.cwd(repo).quiet()
+    await $`git config user.name "Test"`.cwd(repo).quiet()
+    await $`git commit --allow-empty -m "root commit"`.cwd(repo).quiet()
+
+    const parent = await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => svc.create({ title: "global-parent" }),
+    })
+    await WithInstance.provide({
+      directory: child,
+      fn: async () => {
+        const current = await svc.create({ title: "git-current" })
+        const ids = (
+          await svc.list({
+            directory: child,
+            path: SessionPath.relative(repo, child),
+            roots: true,
+          })
+        ).map((s) => s.id)
+
+        expect(ids).toContain(parent.id)
+        expect(ids).toContain(current.id)
       },
     })
   })

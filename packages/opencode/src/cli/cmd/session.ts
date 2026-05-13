@@ -17,6 +17,8 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { Database, eq, sql } from "@/storage"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
 import { formatNumber } from "./stats"
+import { Instance } from "@/project/instance"
+import { SessionPath } from "@/session/path"
 
 const MICROS = 1_000_000
 
@@ -95,7 +97,14 @@ export const SessionListCommand = effectCmd({
         default: false,
       }),
   handler: Effect.fn("Cli.session.list")(function* (args) {
-    const sessions = yield* Session.Service.use((svc) => svc.list({ roots: true, limit: args.maxCount }))
+    const sessions = yield* Session.Service.use((svc) =>
+      svc.list({
+        directory: Instance.directory,
+        path: SessionPath.relative(Instance.worktree, Instance.directory),
+        roots: true,
+        limit: args.maxCount,
+      }),
+    )
 
     if (sessions.length === 0) return
 

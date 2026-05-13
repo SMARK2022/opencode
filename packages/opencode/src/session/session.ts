@@ -18,6 +18,7 @@ import { like } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
+import { sql } from "drizzle-orm"
 import { SyncEvent } from "../sync"
 import type { SQL } from "drizzle-orm"
 import { PartTable, SessionTable } from "./session.sql"
@@ -132,6 +133,38 @@ function getForkedTitle(title: string): string {
 
 function sessionPath(worktree: string, cwd: string) {
   return SessionPath.relative(worktree, cwd)
+}
+
+function relatedPathConditions(input: { path: string; directory?: string; global?: boolean; root?: boolean }) {
+  return SessionPath.aliases(input).flatMap((item) => {
+    const prefix = item.replace(/\/+$/, "")
+    return [
+      ...SessionPath.ancestors(item, { root: input.root }).map((ancestor) => eq(SessionTable.path, ancestor)),
+      like(SessionTable.path, prefix ? `${prefix}/%` : "%"),
+    ]
+  })
+}
+
+function relatedDirectoryConditions(directory: string) {
+  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
+  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
+  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
+  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
+  return [
+    ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
+    like(comparable, value ? `${value}/%` : "%"),
+  ]
+}
+
+function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
+  if (!input.directory) return false
+  const project = Database.use((db) =>
+    db.select({ worktree: ProjectTable.worktree }).from(ProjectTable).where(eq(ProjectTable.id, input.projectID)).get(),
+  )
+  if (!project) return false
+  const left = SessionPath.relative(project.worktree, input.directory)
+  const right = input.path.replaceAll("\\", "/")
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
 const Summary = Schema.Struct({
@@ -811,29 +844,52 @@ function* listByProject(
     projectID: ProjectID
   },
 ) {
-  const conditions = [eq(SessionTable.project_id, input.projectID)]
+  const conditions: SQL[] = []
 
   if (input.workspaceID) {
     conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
   }
   if (input.path !== undefined) {
-    if (input.path) {
-      const conds = SessionPath.aliases({
+    const projectPath = or(
+      ...relatedPathConditions({
         path: input.path,
         directory: input.directory,
         global: input.projectID === ProjectID.global,
-      }).flatMap((item) => [eq(SessionTable.path, item), like(SessionTable.path, `${item}/%`)])
+        root: true,
+      }),
+    )!
+    const useDirectoryFallback = directoryMatchesPath({
+      directory: input.directory,
+      path: input.path,
+      projectID: input.projectID,
+    })
+    const globalPath = useDirectoryFallback && input.directory
+      ? or(
+          ...relatedPathConditions({
+            path: SessionPath.relative("/", input.directory),
+            directory: input.directory,
+            global: true,
+          }),
+        )
+      : undefined
+    const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
 
-      conditions.push(
-        input.directory
-          ? or(...conds, and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))!)!
-          : or(...conds)!,
-      )
-    }
+    conditions.push(
+      or(
+        and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
+        ...(globalPath && input.projectID !== ProjectID.global
+          ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
+          : []),
+        ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
+      )!,
+    )
   } else if (input.scope !== "project" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+    conditions.push(eq(SessionTable.project_id, input.projectID))
     if (input.directory) {
       conditions.push(eq(SessionTable.directory, input.directory))
     }
+  } else {
+    conditions.push(eq(SessionTable.project_id, input.projectID))
   }
   if (input.roots) {
     conditions.push(isNull(SessionTable.parent_id))
