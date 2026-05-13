@@ -145,7 +145,7 @@ describe("tool.grep", () => {
       const grep = yield* info.init()
       const result = yield* grep.execute({ pattern: "needle", path: test.directory, include: "*.txt" }, ctx)
 
-      expect(result.output).toContain("(Results truncated. Consider using a more specific path or pattern.)")
+      expect(result.output).toContain("(Results truncated: showing first 64 matches. Consider using a more specific path or pattern.)")
       expect(result.output).not.toMatch(/showing \d+ of \d+ matches/)
     }),
   )
@@ -155,8 +155,18 @@ describe("tool.grep", () => {
       const test = yield* TestInstance
       const file = path.join(test.directory, "test.txt")
       yield* Effect.promise(() => Bun.write(file, "line1\nline2\nline3"))
-      const info = yield* GrepTool
+      yield* Effect.promise(() => Bun.write(path.join(test.directory, "other.txt"), "line2 sibling"))
+      const ripgrep = yield* Ripgrep.Service
+      // #138：两个文件配合真实 grep 的 maxFiles=1 覆盖目录门限。
+      const info = yield* GrepTool.pipe(
+        Effect.provideService(Ripgrep.Service, {
+          ...ripgrep,
+          grep: (input) => ripgrep.grep({ ...input, maxFiles: 1 }),
+        }),
+      )
       const grep = yield* info.init()
+      const broad = yield* grep.execute({ pattern: "line2", path: test.directory, include: "*.txt" }, ctx)
+      expect(broad.output).toContain("more than 1 candidate files")
       const result = yield* grep.execute(
         {
           pattern: "line2",
@@ -165,8 +175,11 @@ describe("tool.grep", () => {
         ctx,
       )
       expect(result.metadata.matches).toBe(1)
+      expect(result.metadata.truncated).toBe(false)
       expect(result.output).toContain(file)
       expect(result.output).toContain("Line 2: line2")
+      expect(result.output).not.toContain("other.txt")
+      expect(result.output).not.toContain("sibling")
     }),
   )
 
@@ -220,4 +233,27 @@ describe("tool.grep", () => {
       expect(requests.find((req) => req.permission === "external_directory")).toBeUndefined()
     }),
   )
+  // #138：有界输出截断
+  // #138：工具层 64 条上限
+  it.instance("caps broad match output", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const content = Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n")
+      yield* Effect.promise(() => Bun.write(path.join(test.directory, "test.txt"), content))
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+        },
+        ctx,
+      )
+      expect(result.metadata.matches).toBe(64)
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain("Found 64+")
+      expect(result.output).toContain("Results truncated")
+    }),
+  )
+
 })
