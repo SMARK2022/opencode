@@ -763,6 +763,8 @@ const layer = Layer.effect(
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
+        // 仅本次准备请求触发的内部转移，不能吞掉真实失败或用户中断。
+        const preflightCompaction = Symbol("preflight-compaction")
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
@@ -785,13 +787,26 @@ const layer = Layer.effect(
                   input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
               })
               // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
+              const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
+              // 限制异常历史密度对预检的影响；无样本时现有估算器仍给出 /4。
+              const charsPerToken = Math.min(4, Math.max(3, estimate.charsPerToken ?? 4))
               ctx.assistantMessage.inputEstimate = {
-                ...Token.estimateRequest(body, samples, streamInput.inputSections ?? []),
+                ...estimate,
+                input: Math.round(estimate.bodyChars / charsPerToken),
+                charsPerToken,
                 contextLimit: ctx.model.limit.context,
                 // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
                 afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,
               }
               // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
+              // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。
+              if (!ctx.assistantMessage.summary && isOverflow({
+                cfg: yield* config.get(), model: ctx.model,
+                tokens: { input: ctx.assistantMessage.inputEstimate.input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              })) {
+                ctx.needsCompaction = true
+                return yield* Effect.die(preflightCompaction)
+              }
               yield* publishAssistant(ctx.assistantMessage, events)
             }) })
 
@@ -801,6 +816,10 @@ const layer = Layer.effect(
               Stream.runDrain,
             )
           }).pipe(
+            // 转入已有 compact 结果，保留 cleanup 且不发布虚构的 provider 错误。
+            Effect.catchCauseIf(
+              (cause) => Cause.squash(cause) === preflightCompaction, () => Effect.void,
+            ),
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
                 aborted = true

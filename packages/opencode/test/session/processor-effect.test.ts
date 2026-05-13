@@ -379,13 +379,14 @@ it.live("session.processor effect tests stop after token overflow requests compa
         const database = yield* Database.Service
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.text("after", { usage: { input: 100, output: 0 } })
+        // 估算允许发出请求，随后由provider确认的超限用量触发压缩，区分prepared预检分支。
+        yield* llm.text("after", { usage: { input: 30_000, output: 0 } })
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "compact")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const base = yield* provider.getModel(ref.providerID, ref.modelID)
-        const mdl = { ...base, limit: { context: 20, output: 10 } }
+        const mdl = { ...base, limit: { context: 20_000, output: 10 } }
         const handle = yield* processors.create({
           assistantMessage: msg,
           sessionID: chat.id,
@@ -422,8 +423,8 @@ it.live("session.processor effect tests stop after token overflow requests compa
         expect(prepared?.confirmed).toBe(true)
         expect(prepared?.charsPerToken).toBe(4)
         expect(prepared?.inputBreakdown).toEqual(finish?.inputBreakdown)
-        // 800字符的真实系统片段提高准备估算，但provider只确认100输入，公开账本必须服从后者。
-        expect((yield* session.get(chat.id)).request?.input).toBe(100)
+        // 800字符指令仍归属原桶，公开账本使用provider确认的30000输入而非prepared估算。
+        expect((yield* session.get(chat.id)).request?.input).toBe(30_000)
         expect(yield* llm.calls).toBe(1)
       }),
     { config: (url) => providerCfg(url) },
