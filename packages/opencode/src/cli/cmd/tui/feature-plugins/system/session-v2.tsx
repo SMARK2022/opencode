@@ -44,6 +44,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
   const messages = createMemo(() => sync.data.messages[props.sessionID] ?? [])
   const renderedMessages = createMemo(() => messages().toReversed())
   const lastAssistant = createMemo(() => renderedMessages().findLast((message) => message.type === "assistant"))
+  const streamingActive = createMemo(() =>
+    messages().some((message) => message.type === "assistant" && !message.time.completed),
+  )
   const lastUserCreated = (index: number) =>
     renderedMessages()
       .slice(0, index)
@@ -65,6 +68,7 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
           <scrollbox
+            viewportCulling={!streamingActive()}
             viewportOptions={{ paddingRight: 0 }}
             verticalScrollbarOptions={{ visible: false }}
             stickyScroll={true}
@@ -303,10 +307,18 @@ function AssistantMessage(props: {
         {(part) => (
           <Switch>
             <Match when={part.type === "text"}>
-              <AssistantText part={part as SessionMessageAssistantText} syntax={props.syntax} />
+              <AssistantText
+                part={part as SessionMessageAssistantText}
+                syntax={props.syntax}
+                streaming={!props.message.time.completed}
+              />
             </Match>
             <Match when={part.type === "reasoning"}>
-              <AssistantReasoning part={part as SessionMessageAssistantReasoning} subtleSyntax={props.subtleSyntax} />
+              <AssistantReasoning
+                part={part as SessionMessageAssistantReasoning}
+                subtleSyntax={props.subtleSyntax}
+                streaming={!props.message.time.completed}
+              />
             </Match>
             <Match when={part.type === "tool"}>
               <AssistantTool part={part as SessionMessageAssistantTool} />
@@ -348,15 +360,15 @@ function AssistantMessage(props: {
   )
 }
 
-function AssistantText(props: { part: SessionMessageAssistantText; syntax: SyntaxStyle }) {
+function AssistantText(props: { part: SessionMessageAssistantText; syntax: SyntaxStyle; streaming: boolean }) {
   const { theme } = useTheme()
   return (
     <Show when={props.part.text.trim()}>
       <box paddingLeft={3} marginTop={1} flexShrink={0} id="text">
         <code
           filetype="markdown"
-          drawUnstyledText={false}
-          streaming={true}
+          drawUnstyledText={props.streaming}
+          streaming={props.streaming}
           syntaxStyle={props.syntax}
           content={props.part.text.trim()}
           conceal={true}
@@ -367,7 +379,11 @@ function AssistantText(props: { part: SessionMessageAssistantText; syntax: Synta
   )
 }
 
-function AssistantReasoning(props: { part: SessionMessageAssistantReasoning; subtleSyntax: SyntaxStyle }) {
+function AssistantReasoning(props: {
+  part: SessionMessageAssistantReasoning
+  subtleSyntax: SyntaxStyle
+  streaming: boolean
+}) {
   const { theme } = useTheme()
   const content = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
   return (
@@ -383,8 +399,8 @@ function AssistantReasoning(props: { part: SessionMessageAssistantReasoning; sub
       >
         <code
           filetype="markdown"
-          drawUnstyledText={false}
-          streaming={true}
+          drawUnstyledText={props.streaming}
+          streaming={props.streaming}
           syntaxStyle={props.subtleSyntax}
           content={"_Thinking:_ " + content()}
           conceal={true}

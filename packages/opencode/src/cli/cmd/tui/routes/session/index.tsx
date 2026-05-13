@@ -166,6 +166,7 @@ export function Session() {
     if (!status || status.type === "idle") return undefined
     return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
   })
+  const streamingActive = createMemo(() => messages().some((x) => x.role === "assistant" && !x.time.completed))
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
@@ -1140,6 +1141,7 @@ export function Session() {
           <Show when={session()}>
             <scrollbox
               ref={(r) => (scroll = r)}
+              viewportCulling={!streamingActive()}
               viewportOptions={{
                 paddingRight: showScrollbar() ? 1 : 0,
               }}
@@ -1178,7 +1180,7 @@ export function Session() {
                           }
                         }
 
-  return (
+                        return (
                           <box
                             onMouseOver={() => setHover(true)}
                             onMouseOut={() => setHover(false)}
@@ -1378,6 +1380,7 @@ function UserMessage(props: {
           borderColor={color()}
           customBorderChars={SplitBorder.customBorderChars}
           marginTop={props.index === 0 ? 0 : 1}
+          flexShrink={0}
         >
           <box
             onMouseOver={() => {
@@ -1397,7 +1400,7 @@ function UserMessage(props: {
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>
-          {(file, index) => {
+                  {(file, index) => {
                     const bg = createMemo(() => {
                       if (file.mime.startsWith("image/")) return theme.accent
                       if (file.mime === "application/pdf") return theme.primary
@@ -1489,6 +1492,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={theme.backgroundElement}
       marginTop={1}
+      flexShrink={0}
     >
       <For each={props.parts}>
         {(part, index) => {
@@ -1568,6 +1572,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   const ctx = use()
   const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
+  const streaming = createMemo(() => !props.message.time.completed)
   const content = createMemo(() => {
     // Filter out redacted reasoning chunks from OpenRouter
     // OpenRouter sends encrypted reasoning data that appears as [REDACTED]
@@ -1593,6 +1598,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         border={["left"]}
         customBorderChars={SplitBorder.customBorderChars}
         borderColor={theme.backgroundElement}
+        flexShrink={0}
         onMouseUp={() => {
           if (renderer.getSelection()?.getSelectedText()) return
           setExpanded((prev) => !prev)
@@ -1601,13 +1607,15 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
         {/* Wrap elements in separate boxes to isolate rendering bounds during fast streaming, preventing overlap */}
         <box>
           {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
-          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
+          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>
+            Thinking ({renderedContent().length.toLocaleString()} chars):
+          </text>
         </box>
         <box>
           <code
             filetype="markdown"
-            drawUnstyledText={false}
-            streaming={true}
+            drawUnstyledText={streaming()}
+            streaming={streaming()}
             syntaxStyle={subtleSyntax()}
             content={preview()}
             conceal={ctx.conceal()}
@@ -1627,25 +1635,26 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  const streaming = createMemo(() => !props.message.time.completed)
   return (
     <Show when={props.part.text.trim()}>
       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
         <Switch>
-          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
             <markdown
               syntaxStyle={syntax()}
-              streaming={true}
+              streaming={streaming()}
               content={props.part.text.trim()}
               conceal={ctx.conceal()}
               fg={theme.markdownText}
               bg={theme.background}
             />
           </Match>
-          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN || streaming()}>
             <code
               filetype="markdown"
-              drawUnstyledText={false}
-              streaming={true}
+              drawUnstyledText={streaming()}
+              streaming={streaming()}
               syntaxStyle={syntax()}
               content={props.part.text.trim()}
               conceal={ctx.conceal()}
@@ -2056,7 +2065,8 @@ function Write(props: ToolProps<typeof WriteTool>) {
   const diffStats = createMemo(() => {
     const d = diff()
     if (!d) return { added: 0, removed: 0, total: 0 }
-    let added = 0, removed = 0
+    let added = 0,
+      removed = 0
     for (const line of d.split("\n")) {
       if (line.startsWith("+") && !line.startsWith("+++")) added++
       if (line.startsWith("-") && !line.startsWith("---")) removed++
@@ -2068,7 +2078,11 @@ function Write(props: ToolProps<typeof WriteTool>) {
     <Switch>
       <Match when={isOverwrite()}>
         <BlockTool
-          title={"← Write " + normalizePath(props.input.filePath!) + (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")}
+          title={
+            "← Write " +
+            normalizePath(props.input.filePath!) +
+            (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")
+          }
           part={props.part}
           maxLines={10}
           threshold={20}
@@ -2103,7 +2117,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
       </Match>
       <Match when={props.metadata.diagnostics !== undefined}>
         <BlockTool
-          title={"# Wrote " + normalizePath(props.input.filePath!)} 
+          title={"# Wrote " + normalizePath(props.input.filePath!)}
           part={props.part}
           maxLines={10}
           threshold={20}
@@ -2287,10 +2301,11 @@ function Edit(props: ToolProps<typeof EditTool>) {
 
   const ft = createMemo(() => filetype(props.input.filePath))
   const diffContent = createMemo(() => props.metadata.diff || "")
-  
+
   const stats = createMemo(() => {
     const lines = diffContent().split("\n")
-    let added = 0, removed = 0
+    let added = 0,
+      removed = 0
     for (const line of lines) {
       if (line.startsWith("+") && !line.startsWith("+++")) added++
       if (line.startsWith("-") && !line.startsWith("---")) removed++
@@ -2302,7 +2317,11 @@ function Edit(props: ToolProps<typeof EditTool>) {
     <Switch>
       <Match when={props.metadata.diff !== undefined}>
         <BlockTool
-          title={"← Edit " + normalizePath(props.input.filePath!) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
+          title={
+            "← Edit " +
+            normalizePath(props.input.filePath!) +
+            (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")
+          }
           part={props.part}
           maxLines={10}
           threshold={20}
@@ -2367,7 +2386,8 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
     if (file.type === "delete" || !file.patch) return baseTitle
 
     const lines = file.patch.split("\n")
-    let added = 0, removed = 0
+    let added = 0,
+      removed = 0
     for (const line of lines) {
       if (line.startsWith("+") && !line.startsWith("+++")) added++
       if (line.startsWith("-") && !line.startsWith("---")) removed++
@@ -2384,7 +2404,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
           {(file) => {
             return (
               <BlockTool
-                title={title(file)} 
+                title={title(file)}
                 part={props.part}
                 maxLines={10}
                 threshold={20}
