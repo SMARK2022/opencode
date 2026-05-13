@@ -12,12 +12,15 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
+import { readOutline, type Outline } from "./read-outline"
 
-const DEFAULT_READ_LIMIT = 400
+const DEFAULT_READ_LIMIT = 200
 const MAX_BYTES = 24 * 1024
-const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
 const MAX_CONTENT_TOKENS = 16000
+const MAX_LINE_LENGTH = 2000
+const OVERLAP_MIN_LINES = 20
+const OVERLAP_MIN_RATIO = 0.3
 
 // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
 const BLOCKED_DEVICE_PATHS = new Set([
@@ -59,17 +62,30 @@ const TOKEN_BYTE_RATIOS: Record<string, number> = {
   default: 0.25,
 }
 
-// 文件去重缓存 - per-session，key = filepath::offset::limit
-type ReadCacheEntry = {
-  content: string
-  timestamp: number
-}
-const readFileState = new Map<string, ReadCacheEntry>()
-let cacheSeeded = false
+type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
 
-// Stub 文案
-export const FILE_UNCHANGED_STUB =
-  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
+type ReadMetadata = {
+  path: string
+  canonicalPath: string
+  type: "file"
+  size: number
+  modified: string
+  modifiedMs: number
+  start: number
+  end: number
+  total: number
+  returned: number
+  stub: boolean
+  stubStatus?: ReadStubStatus
+  coveredBy?: string
+}
+
+type ReadToolMetadata = {
+  preview: string
+  truncated: boolean
+  loaded: string[]
+  read?: ReadMetadata
+}
 
 // 恶意代码提醒
 const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
@@ -97,35 +113,199 @@ function estimateTokensForContent(content: string, ext: string): number {
   return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
 }
 
-// 检查当前上下文中是否有该文件的未被压缩的读取结果（同范围）
-function findUnexpandedFileInContext(
-  messages: MessageV2.WithParts[],
-  filepath: string,
-  offset: number,
-  limit: number | undefined,
-): boolean {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
+function readToolMetadata(input: ReadToolMetadata) {
+  // Keep every return branch on one metadata shape so Tool.define can infer
+  // `read` as optional metadata instead of treating media/directory branches
+  // as a different tool result type.
+  return input
+}
+
+function escapeXmlText(input: string) {
+  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+}
+
+function escapeXmlAttr(input: string) {
+  return escapeXmlText(input).replaceAll('"', "&quot;").replaceAll("'", "&apos;")
+}
+
+function formatModified(ms: number) {
+  const date = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`
+}
+
+function fileSize(stat: { size: unknown }) {
+  return typeof stat.size === "bigint" ? Number(stat.size) : Number(stat.size)
+}
+
+function resolveReadPath(input: string, directory: string) {
+  if (process.platform !== "win32") return path.isAbsolute(input) ? input : path.resolve(directory, input)
+
+  const normalized = AppFileSystem.normalizePath(input)
+  if (/^[A-Za-z]:[\\/]/.test(input)) return normalized
+
+  // Windows treats "\foo" and "/foo" as rooted on the current process drive.
+  // For tool calls they are almost always alternate spellings of an instance
+  // path, so anchor them to the active project drive before stat/permission.
+  if (/^[\\/](?![\\/])/.test(input)) {
+    const parsed = path.win32.parse(directory)
+    return AppFileSystem.normalizePath(path.win32.join(parsed.root, input.slice(1)))
+  }
+
+  return AppFileSystem.normalizePath(path.resolve(directory, input))
+}
+
+function canonicalReadPath(filepath: string) {
+  const normalized = AppFileSystem.normalizePath(filepath).replaceAll("\\", "/")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function modifiedMs(stat: { mtime: Option.Option<Date> }) {
+  return Math.floor(
+    stat.mtime.pipe(
+      Option.map((time) => time.getTime()),
+      Option.getOrElse(() => 0),
+    ),
+  )
+}
+
+function isReadMetadata(input: unknown): input is ReadMetadata {
+  if (!input || typeof input !== "object") return false
+  const item = input as Record<string, unknown>
+  return (
+    item.type === "file" &&
+    typeof item.path === "string" &&
+    typeof item.canonicalPath === "string" &&
+    typeof item.size === "number" &&
+    typeof item.modified === "string" &&
+    typeof item.modifiedMs === "number" &&
+    typeof item.start === "number" &&
+    typeof item.end === "number" &&
+    typeof item.total === "number" &&
+    typeof item.returned === "number" &&
+    typeof item.stub === "boolean"
+  )
+}
+
+function collectVisibleReads(messages: MessageV2.WithParts[], canonicalPath: string) {
+  const reads: ReadMetadata[] = []
+  for (const msg of messages) {
     if (msg.info.role !== "assistant") continue
     for (const part of msg.parts) {
       if (part.type !== "tool") continue
       if (part.tool !== "read") continue
       if (part.state.status !== "completed") continue
-      const input = part.state.input as { filePath?: string; offset?: number; limit?: number }
-      if (input.filePath !== filepath) continue
-      if ((input.offset ?? 1) !== offset) continue
-      if ((input.limit ?? DEFAULT_READ_LIMIT) !== (limit ?? DEFAULT_READ_LIMIT)) continue
       if (part.state.time.compacted) continue
-      // 跳过 stub 结果 — stub 本身不携带实际内容，不能作为去重的依据
-      if (part.state.output === FILE_UNCHANGED_STUB) continue
-      return true
+
+      // Use metadata rather than parsing XML so the visible-context decision
+      // stays stable even if the human-facing formatting changes later.
+      const meta = part.state.metadata?.read
+      if (!isReadMetadata(meta)) continue
+      if (meta.stub) continue
+      if (meta.canonicalPath !== canonicalPath) continue
+      reads.push(meta)
     }
   }
-  return false
+  return reads
 }
 
-function cacheKey(filepath: string, offset: number, limit: number | undefined) {
-  return `${filepath}::${offset}::${limit ?? DEFAULT_READ_LIMIT}`
+function findReadStub(visibleReads: ReadMetadata[], current: ReadMetadata) {
+  // Only suppress output when a non-stub read for the same file version is
+  // still visible in the active context. Compacted history and modified files
+  // fall through to a normal read.
+  const sameVersion = visibleReads.filter((read) => read.size === current.size && read.modifiedMs === current.modifiedMs)
+  const sameRange = sameVersion.find((read) => read.start === current.start && read.end === current.end)
+  if (sameRange) return { status: "stub_same_range_visible" as const }
+
+  const covering = sameVersion.find((read) => read.start <= current.start && read.end >= current.end)
+  if (covering) {
+    return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
+  }
+  return undefined
+}
+
+function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
+  let best: { start: number; end: number; lines: number } | undefined
+  for (const read of visibleReads) {
+    if (read.size !== current.size || read.modifiedMs !== current.modifiedMs) continue
+    const start = Math.max(read.start, current.start)
+    const end = Math.min(read.end, current.end)
+    if (start > end) continue
+    const lines = end - start + 1
+    if (!best || lines > best.lines) best = { start, end, lines }
+  }
+
+  if (!best) return undefined
+  const requested = Math.max(1, current.end - current.start + 1)
+  if (best.lines < OVERLAP_MIN_LINES) return undefined
+  if (best.lines / requested < OVERLAP_MIN_RATIO) return undefined
+  return `${best.start}-${best.end}`
+}
+
+function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
+  return file.raw
+    .map((line, i) => {
+      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${escapeXmlText(line)}`
+      return `${i + file.offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
+    })
+    .join("\n")
+}
+
+function renderReadOutput(input: {
+  path: string
+  size: number
+  modified: string
+  start: number
+  end: number
+  total: number
+  returned: number
+  outline?: Outline
+  overlap?: string
+  content: string
+  more?: { offset: number; reason: "line_limit" | "byte_limit" }
+}) {
+  const output = [
+    `<path>${escapeXmlText(input.path)}</path>`,
+    `<type>file</type>`,
+    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
+    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="${input.returned}" />`,
+  ]
+
+  if (input.outline?.items.length) {
+    output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
+    output.push(input.outline.items.map(escapeXmlText).join("\n"))
+    output.push("</outline>")
+  }
+
+  if (input.overlap) output.push(`<note type="overlap" ranges="${input.overlap}" />`)
+  output.push("<content>", input.content, "</content>")
+  if (input.more) output.push(`<more offset="${input.more.offset}" reason="${input.more.reason}" />`)
+  return output.join("\n")
+}
+
+function renderReadStub(input: {
+  path: string
+  size: number
+  modified: string
+  start: number
+  end: number
+  total: number
+  status: ReadStubStatus
+  coveredBy?: string
+}) {
+  return [
+    `<path>${escapeXmlText(input.path)}</path>`,
+    `<type>file</type>`,
+    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
+    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="0" />`,
+    `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${input.coveredBy}"` : ""}>`,
+    input.status === "stub_same_range_visible"
+      ? "Requested range is already visible in the current context."
+      : "Requested range is already covered by a visible read result.",
+    "</stub>",
+  ].join("\n")
 }
 
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
@@ -141,7 +321,7 @@ export const Parameters = Schema.Struct({
     description: "The line number to start reading from (1-indexed)",
   }),
   limit: Schema.optional(NonNegativeInt).annotate({
-    description: "The maximum number of lines to read (defaults to 400)",
+    description: "The maximum number of lines to read (defaults to 200)",
   }),
 })
 
@@ -265,13 +445,7 @@ export const ReadTool = Tool.define(
       ctx: Tool.Context,
     ) {
       const instance = yield* InstanceState.context
-      let filepath = params.filePath
-      if (!path.isAbsolute(filepath)) {
-        filepath = path.resolve(instance.directory, filepath)
-      }
-      if (process.platform === "win32") {
-        filepath = AppFileSystem.normalizePath(filepath)
-      }
+      const filepath = resolveReadPath(params.filePath, instance.directory)
 
       // 设备文件保护 - 阻止可能导致进程挂起的设备文件
       if (isBlockedDevicePath(filepath)) {
@@ -303,60 +477,6 @@ export const ReadTool = Tool.define(
 
       if (!stat) return yield* miss(filepath)
 
-      // 首次读取时从会话历史中预热缓存 — 扫描已有的非 stub、未压缩的读取记录
-      if (!cacheSeeded) {
-        for (let i = ctx.messages.length - 1; i >= 0; i--) {
-          const msg = ctx.messages[i]
-          if (msg.info.role !== "assistant") continue
-          for (const part of msg.parts) {
-            if (part.type !== "tool") continue
-            if (part.tool !== "read") continue
-            if (part.state.status !== "completed") continue
-            if (part.state.time.compacted) continue
-            if (part.state.output === FILE_UNCHANGED_STUB) continue
-
-            const seedInput = part.state.input as { filePath?: string; offset?: number; limit?: number }
-            if (!seedInput.filePath) continue
-
-            const seedKey = cacheKey(seedInput.filePath, seedInput.offset ?? 1, seedInput.limit)
-            if (readFileState.has(seedKey)) continue
-
-            const seedStat = yield* fs.stat(seedInput.filePath).pipe(
-              Effect.catch(() => Effect.succeed(undefined)),
-            )
-            if (!seedStat || seedStat.type !== "File") continue
-
-            const seedMtime = Math.floor(Number(seedStat.mtime))
-            // 仅当文件在读取后未被修改时才加入缓存（mtime ≤ 读取时间表示无后续修改）
-            if (seedMtime <= part.state.time.end) {
-              readFileState.set(seedKey, {
-                content: part.state.output,
-                timestamp: seedMtime,
-              })
-            }
-          }
-        }
-        cacheSeeded = true
-      }
-
-      // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
-      const requestOffset = params.offset ?? 1
-      const requestLimit = params.limit
-      const existingState = readFileState.get(cacheKey(filepath, requestOffset, requestLimit))
-      if (existingState) {
-        const mtimeMs = Math.floor(Number(stat.mtime))
-        if (mtimeMs === existingState.timestamp) {
-          const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath, requestOffset, requestLimit)
-          if (hasUnexpandedContent) {
-            return {
-              title,
-              output: FILE_UNCHANGED_STUB,
-              metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] },
-            }
-          }
-        }
-      }
-
       if (stat.type === "Directory") {
         const items = yield* list(filepath)
         const limit = params.limit ?? DEFAULT_READ_LIMIT
@@ -368,25 +488,29 @@ export const ReadTool = Tool.define(
         return {
           title,
           output: [
-            `<path>${filepath}</path>`,
+            `<path>${escapeXmlText(filepath)}</path>`,
             `<type>directory</type>`,
-            `<entries>`,
-            sliced.join("\n"),
-            truncated
-              ? `\n(Showing ${sliced.length} of ${items.length} entries. Use 'offset' parameter to read beyond entry ${offset + sliced.length})`
-              : `\n(${items.length} entries)`,
-            `</entries>`,
-          ].join("\n"),
-          metadata: {
+            `<directory entries="${items.length}" />`,
+            `<content>`,
+            sliced.map(escapeXmlText).join("\n"),
+            `</content>`,
+            truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
+          ]
+            .filter((line): line is string => Boolean(line))
+            .join("\n"),
+          metadata: readToolMetadata({
             preview: sliced.slice(0, 20).join("\n"),
             truncated,
             loaded: [] as string[],
-          },
+          }),
         }
       }
 
       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
-      const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
+      const size = fileSize(stat)
+      const versionMs = modifiedMs(stat)
+      const modified = formatModified(versionMs)
+      const sample = yield* readSample(filepath, size, SAMPLE_BYTES)
 
       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
       const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
@@ -401,11 +525,11 @@ export const ReadTool = Tool.define(
           return {
             title,
             output: msg,
-            metadata: {
+            metadata: readToolMetadata({
               preview: msg,
               truncated: false,
               loaded: loaded.map((item) => item.filepath),
-            },
+            }),
             attachments: [
               {
                 type: "file" as const,
@@ -421,11 +545,11 @@ export const ReadTool = Tool.define(
         return {
           title,
           output: msg,
-          metadata: {
+          metadata: readToolMetadata({
             preview: msg,
             truncated: false,
             loaded: loaded.map((item) => item.filepath),
-          },
+          }),
           attachments: [
             {
               type: "file" as const,
@@ -449,6 +573,48 @@ export const ReadTool = Tool.define(
         )
       }
 
+      const start = file.offset
+      const end = file.raw.length === 0 ? file.offset - 1 : file.offset + file.raw.length - 1
+      const canonicalPath = canonicalReadPath(filepath)
+      const current: ReadMetadata = {
+        path: filepath,
+        canonicalPath,
+        type: "file",
+        size,
+        modified,
+        modifiedMs: versionMs,
+        start,
+        end,
+        total: file.count,
+        returned: file.raw.length,
+        stub: false,
+      }
+      const visibleReads = collectVisibleReads(ctx.messages, canonicalPath)
+      const stub = findReadStub(visibleReads, current)
+      if (stub) {
+        const read = { ...current, returned: 0, stub: true, stubStatus: stub.status, coveredBy: stub.coveredBy }
+        const output = renderReadStub({
+          path: filepath,
+          size,
+          modified,
+          start,
+          end,
+          total: file.count,
+          status: stub.status,
+          coveredBy: stub.coveredBy,
+        })
+        return {
+          title,
+          output,
+          metadata: readToolMetadata({
+            preview: output,
+            truncated: false,
+            loaded: [] as string[],
+            read,
+          }),
+        }
+      }
+
       // Token 预算验证 - 根据文件类型估算 token 数
       const content = file.raw.join("\n")
       const ext = path.extname(filepath).toLowerCase().slice(1)
@@ -464,46 +630,43 @@ export const ReadTool = Tool.define(
         )
       }
 
-      // 写入去重缓存
-      readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
-        content,
-        timestamp: Math.floor(Number(stat.mtime)),
-      })
-
-      let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
-      output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
-
-      const last = file.offset + file.raw.length - 1
-      const next = last + 1
       const truncated = file.more || file.cut
-      if (file.cut) {
-        output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
-      } else if (file.more) {
-        output += `\n\n(Showing lines ${file.offset}-${last} of ${file.count}. Use offset=${next} to continue.)`
-      } else {
-        output += `\n\n(End of file - total ${file.count} lines)`
-      }
-      output += "\n</content>"
+      const output = renderReadOutput({
+        path: filepath,
+        size,
+        modified,
+        start,
+        end,
+        total: file.count,
+        returned: file.raw.length,
+        outline: yield* Effect.promise(() => readOutline(filepath, file.count, file.offset)),
+        overlap: findOverlapNote(visibleReads, current),
+        content: renderContentLines(file),
+        more: truncated ? { offset: end + 1, reason: file.cut ? "byte_limit" : "line_limit" } : undefined,
+      })
 
       yield* warm(filepath)
 
+      let finalOutput = output
+
       if (loaded.length > 0) {
-        output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+        finalOutput += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
       }
 
       // 恶意代码安全提醒 - 仅对高风险扩展名注入
       if (shouldInjectCyberReminder(ext)) {
-        output += CYBER_REMINDER
+        finalOutput += CYBER_REMINDER
       }
 
       return {
         title,
-        output,
-        metadata: {
+        output: finalOutput,
+        metadata: readToolMetadata({
           preview: file.raw.slice(0, 20).join("\n"),
           truncated,
           loaded: loaded.map((item) => item.filepath),
-        },
+          read: current,
+        }),
       }
     })
 
@@ -541,12 +704,17 @@ async function lines(filepath: string, opts: { limit: number; offset: number }) 
         continue
       }
 
+      if (cut) {
+        more = true
+        continue
+      }
+
       const line = text
       const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
       if (bytes + size > MAX_BYTES) {
         cut = true
         more = true
-        break
+        continue
       }
 
       raw.push(line)
