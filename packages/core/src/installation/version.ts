@@ -1,4 +1,6 @@
-// #133：版本号以 packages/opencode/package.json 的 1.19.8-smark 为准（文档/VSIX 同步）
+// #141：发布协同升号沿 tip 1.19.x-smark，禁止回写 1.14
+// #141：InstallationVersion 编译期注入，与 packages/opencode version 对齐
+// #133：版本号以 packages/opencode/package.json 的 1.19.9-smark 为准（文档/VSIX 同步）
 // #133：禁止回写 original 1.14.x 以免与 tip baseline 冲突
 // #133：scripts.vsix 产物文件名必须与 version 同号
 // #133：InstallationVersion 读编译期 OPENCODE_VERSION，注释记录期望发布号
