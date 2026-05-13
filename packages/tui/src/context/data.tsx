@@ -123,12 +123,18 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
 
     function handleEvent(event: V2Event) {
       switch (event.type) {
-        case "catalog.updated":
+        case "catalog.updated": {
+          // 广播只更新已加载的目录，不能为无人消费的模型表触发首次读取。
+          const location = store.location[locationKey(event.location ?? defaultLocation())]
           void Promise.all([
-            result.location.model.refresh(event.location),
-            result.location.provider.refresh(event.location),
-          ])
+            location?.model && result.location.model.refresh(event.location),
+            location?.provider && result.location.provider.refresh(event.location),
+          ]).catch((error: unknown) => {
+            if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
+            console.error("Failed to refresh location catalog", error)
+          })
           break
+        }
         case "session.next.agent.switched":
           message.update(event.data.sessionID, (draft) => {
             message.prepend(draft, {
@@ -390,15 +396,24 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "reference.updated":
-          void result.location.reference.refresh()
+          if (store.location[locationKey(defaultLocation())]?.reference)
+            void result.location.reference.refresh().catch((error: unknown) => {
+              if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
+              console.error("Failed to refresh references", error)
+            })
           break
-        case "integration.updated":
+        case "integration.updated": {
+          const location = store.location[locationKey(event.location ?? defaultLocation())]
           void Promise.all([
-            result.location.integration.refresh(event.location),
-            result.location.model.refresh(event.location),
-            result.location.provider.refresh(event.location),
-          ])
+            location?.integration && result.location.integration.refresh(event.location),
+            location?.model && result.location.model.refresh(event.location),
+            location?.provider && result.location.provider.refresh(event.location),
+          ]).catch((error: unknown) => {
+            if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
+            console.error("Failed to refresh integrations", error)
+          })
           break
+        }
       }
     }
 
@@ -479,7 +494,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(ref?: LocationRef) {
             const result = await sdk.client.v2.agent.list({ location: locationQuery(ref) }, { throwOnError: true })
             const key = locationKey(result.data.location)
-            setStore("location", key, "agent", result.data.data)
+            // 响应直接建立并合并所需桶，不依赖定位预取的完成顺序。
+            setStore("location", key, { agent: result.data.data })
           },
         },
         command: {
@@ -489,7 +505,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(ref?: LocationRef) {
             const result = await sdk.client.v2.command.list({ location: locationQuery(ref) }, { throwOnError: true })
             const key = locationKey(result.data.location)
-            setStore("location", key, "command", result.data.data)
+            setStore("location", key, { command: result.data.data })
           },
         },
         integration: {
@@ -502,7 +518,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
               { throwOnError: true },
             )
             const key = locationKey(result.data.location)
-            setStore("location", key, "integration", result.data.data)
+            setStore("location", key, { integration: result.data.data })
           },
         },
         model: {
@@ -512,7 +528,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(ref?: LocationRef) {
             const result = await sdk.client.v2.model.list({ location: locationQuery(ref) }, { throwOnError: true })
             const key = locationKey(result.data.location)
-            setStore("location", key, "model", result.data.data)
+            setStore("location", key, { model: result.data.data })
           },
         },
         provider: {
@@ -522,7 +538,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(ref?: LocationRef) {
             const result = await sdk.client.v2.provider.list({ location: locationQuery(ref) }, { throwOnError: true })
             const key = locationKey(result.data.location)
-            setStore("location", key, "provider", result.data.data)
+            setStore("location", key, { provider: result.data.data })
           },
         },
         reference: {
@@ -532,7 +548,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(ref?: LocationRef) {
             const result = await sdk.client.v2.reference.list({ location: locationQuery(ref) }, { throwOnError: true })
             const key = locationKey(result.data.location)
-            setStore("location", key, "reference", result.data.data)
+            if (!ref) setDefaultLocation({ directory: result.data.location.directory, workspaceID: result.data.location.workspaceID })
+            setStore("location", key, { reference: result.data.data })
           },
         },
         skill: {
@@ -542,27 +559,12 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(ref?: LocationRef) {
             const result = await sdk.client.v2.skill.list({ location: locationQuery(ref) }, { throwOnError: true })
             const key = locationKey(result.data.location)
-            setStore("location", key, "skill", result.data.data)
+            setStore("location", key, { skill: result.data.data })
           },
         },
       },
     }
 
-    onMount(() => {
-      void Promise.allSettled([
-        result.location.refresh(),
-        result.location.agent.refresh(),
-        result.location.integration.refresh(),
-        result.location.model.refresh(),
-        result.location.provider.refresh(),
-        result.location.reference.refresh(),
-        result.location.command.refresh(),
-        result.location.skill.refresh(),
-      ]).then((settled) => {
-        for (const failure of settled.filter((item) => item.status === "rejected"))
-          console.error("Failed to refresh default location data", failure.reason)
-      })
-    })
 
     return result
   },

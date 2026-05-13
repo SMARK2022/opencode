@@ -218,7 +218,12 @@ const layer = Layer.effect(
         },
       ) {
         const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return
+        if (!match) return
+        // #139：DB 已终态时仍 settle deferred，避免 LLM 死等
+        if (match.part.state.status !== "running") {
+          yield* settleToolCall(toolCallID)
+          return
+        }
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -236,7 +241,12 @@ const layer = Layer.effect(
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
         const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return false
+        if (!match) return false
+        // #139：非 running 也 settle，防止卡死
+        if (match.part.state.status !== "running") {
+          yield* settleToolCall(toolCallID)
+          return false
+        }
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -564,7 +574,9 @@ const layer = Layer.effect(
             // 先保存 step part，再在消息 commit 中读取确认 parts，仍按同一 parentID 聚合。
             // 多工具续轮不能以当前助手 ID 新建另一轮用户请求。
             yield* publishAssistant(ctx.assistantMessage, events)
-            if (ctx.snapshot) {
+            if (ctx.snapshot && !aborted) {
+          // #139：中断时跳过慢 git snapshot，优先完成终端态清理
+          // #139：aborted 后 snapshot 非关键路径
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
                 yield* session.updatePart({
@@ -647,7 +659,8 @@ const layer = Layer.effect(
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
-        if (ctx.snapshot) {
+        // #139：中断时跳过慢 git snapshot，优先完成终端态清理
+        if (ctx.snapshot && !aborted) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
             yield* session.updatePart({
@@ -659,8 +672,9 @@ const layer = Layer.effect(
               files: patch.files,
             })
           }
-          ctx.snapshot = undefined
         }
+        // #139：aborted 也必须清空 snapshot 句柄，避免后续误用
+        ctx.snapshot = undefined
 
         if (ctx.currentText) {
           const end = Date.now()
@@ -815,6 +829,7 @@ const layer = Layer.effect(
               }),
             ),
             Effect.catch(halt),
+            // #139：ensuring cleanup 必须尊重 aborted，跳过慢 snapshot
             Effect.ensuring(cleanup()),
           )
 

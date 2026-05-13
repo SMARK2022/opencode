@@ -148,6 +148,10 @@ export type TuiInput = {
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
   events?: EventSource
+  // #139：运行时 daemon 恢复回调，返回新 base URL
+  reconnect?: () => Promise<string>
+  // #139：可测心跳超时
+  heartbeatTimeout?: number
   pluginHost: TuiPluginHost
   updater?: UpdateSource
 }
@@ -301,6 +305,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                           fetch={input.fetch}
                                           headers={input.headers}
                                           events={input.events}
+                                          reconnect={input.reconnect}
+                                          heartbeatTimeout={input.heartbeatTimeout}
                                         >
                                           <PermissionProvider>
                                             <ProjectProvider>

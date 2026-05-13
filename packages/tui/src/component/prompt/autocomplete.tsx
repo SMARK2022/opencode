@@ -277,6 +277,14 @@ export function Autocomplete(props: {
     }
   }
 
+  // 引用仅在打开 @ 补全时读取，不挤占会话启动、发送和撤回的请求通道。
+  createEffect(() => {
+    if (store.visible !== "@") return
+    void data.location.reference.refresh().catch((error: unknown) => {
+      if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
+      console.error("Failed to refresh references", error)
+    })
+  })
   const references = createMemo(() => data.location.reference.list() ?? [])
 
   const referenceMatch = createMemo(() => {

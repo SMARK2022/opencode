@@ -244,6 +244,8 @@ export async function discoverOrSpawnDaemon(
         applyProxyEnv(env)
         // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
         const proc = deps.spawn([process.execPath, daemonFile], {
+        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon
+        detached: process.platform !== "win32",
           env: {
             ...env,
             OPENCODE_PROCESS_ROLE: "worker",
@@ -515,6 +517,28 @@ export const TuiThreadCommand = cmd({
             directory: cwd,
             headers,
             updater,
+            // #139：SSE/API 失败时重新 discoverOrSpawn，重绑定 live URL
+            reconnect: async () => {
+              const discovered = await discoverOrSpawnDaemon(args)
+              existingUrl = discovered.url
+              // #139：每次 respawn 必须重绑 SIGUSR2 转发到新 daemon PID
+              if (process.platform !== "win32") {
+                if (fwdReload) {
+                  process.off("SIGUSR2", fwdReload)
+                  fwdReload = undefined
+                }
+                if (discovered.fwdPid !== undefined) {
+                  const pid = discovered.fwdPid
+                  fwdReload = () => {
+                    try {
+                      process.kill(pid, "SIGUSR2")
+                    } catch {}
+                  }
+                  process.on("SIGUSR2", fwdReload)
+                }
+              }
+              return discovered.url
+            },
             args: {
               continue: args.continue,
               sessionID: args.session,

@@ -662,6 +662,7 @@ export const {
           })
         })
         .catch(async (e) => {
+          if (sdk.signal.aborted && e instanceof Error && e.name === "AbortError") return
           console.error("tui bootstrap failed", {
             error: e instanceof Error ? e.message : String(e),
             name: e instanceof Error ? e.name : undefined,
@@ -715,6 +716,8 @@ export const {
           return last.time.completed ? "idle" : "working"
         },
         async sync(sessionID: string, options?: { force?: boolean }): Promise<void> {
+          // 已退出的拥有者不能让排队强刷继续发起新的 HTTP 请求。
+          if (sdk.signal.aborted) return
           // #132：force 忽略 fullSynced 缓存
           if (!options?.force && fullSyncedSessions.has(sessionID)) return
           if (syncingSessions.has(sessionID)) {
@@ -799,6 +802,10 @@ export const {
           })().finally(() => {
             syncingSessions.delete(sessionID)
             hydratingSessions.delete(sessionID)
+          }).catch((error: unknown) => {
+            // 只结算本界面退出产生的取消，正常运行中的请求失败仍然拒绝。
+            if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
+            throw error
           })
           syncingSessions.set(sessionID, task)
           return task

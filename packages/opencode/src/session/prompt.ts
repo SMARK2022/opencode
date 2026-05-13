@@ -322,6 +322,15 @@ const layer = Layer.effect(
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
       const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
+      // #139：agent 校验在创建 running part 之前，避免未知 agent 留下粘滞 running 工具
+      const taskAgent = yield* agents.get(task.agent)
+      if (!taskAgent) {
+        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
+        yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+        throw error
+      }
       const assistantMessage: SessionV1.Assistant = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "assistant",
@@ -361,25 +370,17 @@ const layer = Layer.effect(
         subagent_type: task.agent,
         command: task.command,
       }
-      yield* plugin.trigger(
-        "tool.execute.before",
-        { tool: TaskTool.id, sessionID, callID: part.id },
-        { args: taskArgs },
-      )
-
-      const taskAgent = yield* agents.get(task.agent)
-      if (!taskAgent) {
-        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
-        yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
-        throw error
-      }
 
       let error: Error | undefined
       const taskAbort = new AbortController()
-      const result = yield* taskTool
-        .execute(taskArgs, {
+      // #139：running 后 before+execute 统一保护，setup 失败也终端化可见 tool part
+      const result = yield* Effect.gen(function* () {
+        yield* plugin.trigger(
+          "tool.execute.before",
+          { tool: TaskTool.id, sessionID, callID: part.id },
+          { args: taskArgs },
+        )
+        return yield* taskTool.execute(taskArgs, {
           agent: task.agent,
           messageID: assistantMessage.id,
           sessionID,
@@ -404,10 +405,12 @@ const layer = Layer.effect(
               })
               .pipe(Effect.orDie),
         })
+      })
         .pipe(
           Effect.catchCause((cause) => {
             const defect = Cause.squash(cause)
             error = defect instanceof Error ? defect : new Error(String(defect))
+            // #139：setup/execute 失败路径写入 error，供后续 terminalize
             return Effect.logError("subtask execution failed", {
               error,
               agent: task.agent,
@@ -443,12 +446,6 @@ const layer = Layer.effect(
         messageID: assistantMessage.id,
       }))
 
-      yield* plugin.trigger(
-        "tool.execute.after",
-        { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
-        result,
-      )
-
       assistantMessage.finish = "tool-calls"
       assistantMessage.time.completed = Date.now()
       yield* sessions.updateMessage(assistantMessage)
@@ -483,6 +480,16 @@ const layer = Layer.effect(
           },
         } satisfies SessionV1.ToolPart)
       }
+
+      // #139：终态提交后记录并吞掉 after 缺陷，中断仍原样传播。
+      yield* plugin
+        .trigger("tool.execute.after", { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs }, result)
+        .pipe(
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterrupts(cause)) return Effect.failCause(cause)
+            return Effect.logError("tool.execute.after failed", { cause })
+          }),
+        )
 
       if (!task.command) return
 

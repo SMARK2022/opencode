@@ -36,6 +36,7 @@ import {
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
+import { ConnectionError } from "../../util/connection-error"
 import type {
   AssistantMessage,
   Part,
@@ -365,6 +366,8 @@ export function Session() {
         variant: "error",
         duration: 5000,
       })
+      // #139：可恢复连接错误留在会话；server.connected 会强制刷新
+      if (ConnectionError.isConnectionError(error)) return
       navigate({ type: "home" })
     })
   })
