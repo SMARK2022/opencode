@@ -7,10 +7,13 @@ import { FileSystem } from "../filesystem"
 import { FSUtil } from "../fs-util"
 import { makeLocationNode } from "../effect/app-node"
 import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
+import { ReadPresentation } from "./read-presentation"
+import { readOutline } from "./read-outline"
 
 // 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
 // 短文件是否分页与目录缺省页复用这个常量，400 行不能只作用于大文件分支。
-export const DEFAULT_READ_LINES = 400
+export const DEFAULT_READ_LINES = 200
+const MAX_SCAN_BYTES = 256 * 1024
 export const MAX_READ_LINES = 2_000
 // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
 export const MAX_READ_BYTES = 24 * 1024
@@ -77,7 +80,15 @@ export const PageInput = Schema.Struct({
 })
 export type PageInput = typeof PageInput.Type
 
+const readFields = {
+  read: Schema.optional(ReadPresentation.ReadRangeMeta),
+  outline: Schema.optional(ReadPresentation.OutlineOutput),
+}
+export const Content = Schema.Struct({ ...FileSystem.Content.fields, ...readFields })
+export type Content = typeof Content.Type
+
 export class TextPage extends Schema.Class<TextPage>("ReadTool.TextPage")({
+  ...readFields,
   type: Schema.Literal("text-page"),
   content: Schema.String,
   mime: Schema.String,
@@ -88,6 +99,7 @@ export class TextPage extends Schema.Class<TextPage>("ReadTool.TextPage")({
 
 export class ListPage extends Schema.Class<ListPage>("ReadTool.ListPage")({
   entries: Schema.Array(FileSystem.Entry),
+  total: Schema.optional(Schema.Number),
   truncated: Schema.Boolean,
   next: PositiveInt.pipe(Schema.optional),
 }) {}
@@ -98,7 +110,7 @@ export interface Interface {
     path: AbsolutePath,
     resource: string,
     page?: PageInput,
-  ) => Effect.Effect<FileSystem.Content | TextPage, ReadError>
+  ) => Effect.Effect<Content | TextPage, ReadError>
   readonly list: (path: AbsolutePath, page?: PageInput) => Effect.Effect<ListPage, FSUtil.Error>
 }
 
@@ -246,6 +258,42 @@ export const read = Effect.fn("ReadTool.read")(function* (
       }
       if (startsWith(first, [0x25, 0x50, 0x44, 0x46]) || extensions.has(path.extname(resource).toLowerCase()))
         return yield* Effect.fail(new BinaryFileError({ resource }))
+      let scanned = 0
+      let totalLines = 0
+      let lastByte: number | undefined
+      // 额外计数只看行界字节，页外的坏 UTF-8 或 NUL 不得推翻已成功读取的页。
+      const count = (chunk: Uint8Array) => {
+        scanned += chunk.length
+        totalLines += chunk.reduce((sum, byte) => sum + Number(byte === 10), 0)
+        lastByte = chunk.at(-1)
+      }
+      count(first)
+      const finish = Effect.fnUntraced(function* (offset: number, returned: number, cut: boolean, eof: boolean) {
+        const total = totalLines + Number(scanned > 0 && lastByte !== 10)
+        const exact = eof || scanned === Number(info.size)
+        const outline = yield* Effect.promise(() => readOutline(real, total, offset, exact))
+        const after = yield* file.stat
+        const modified = Option.getOrUndefined(info.mtime)?.getTime()
+        const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
+        return {
+          read: {
+            path: real,
+            canonicalPath: ReadPresentation.canonicalReadPath(real),
+            type: "file" as const,
+            size: Number(info.size),
+            modified: modified === undefined ? "unknown" : ReadPresentation.formatModified(modified),
+            ...(stable ? { modifiedMs: Math.floor(modified) } : {}),
+            start: offset,
+            end: Math.max(offset - 1, offset + returned - 1),
+            total,
+            totalExact: exact && stable,
+            returned,
+            stub: false,
+            cut,
+          },
+          ...(outline === undefined ? {} : { outline }),
+        }
+      })
       // 小于字节预算也可能超过默认行数；只扫描已读取的字节，不预先解码页外的无效 UTF-8。
       const firstLines = first.reduce((count, byte) => count + Number(byte === 10), 0) + Number(first.length > 0 && first.at(-1) !== 10)
       const paged =
@@ -261,6 +309,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
         while (true) {
           const chunk = yield* file.readAlloc(64 * 1024)
           if (Option.isNone(chunk)) break
+          count(chunk.value)
           text.push(yield* decodeChunk(resource, decoder, chunk.value))
         }
         text.push(yield* decodeUtf8(resource, decoder))
@@ -270,6 +319,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
           content: text.join(""),
           encoding: "utf8" as const,
           mime: FSUtil.mimeType(real),
+          ...(yield* finish(1, totalLines + Number(scanned > 0 && lastByte !== 10), false, true)),
         }
       }
       const offset = page.offset ?? 1
@@ -281,6 +331,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
       let line = 1
       let bytes = 0
       let next: number | undefined
+      let consumed = 0
       const append = (input: string) => {
         if (line < offset) {
           line++
@@ -327,6 +378,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
           const newline = chunk.indexOf(10, start)
           const end = newline === -1 ? chunk.length : newline + 1
           const segment = chunk.subarray(start, end)
+          consumed += segment.length
           if (binary(resource, segment)) return yield* Effect.fail(new BinaryFileError({ resource }))
           if (!consume(yield* decodeUtf8(resource, decoder, segment))) return false
           start = end
@@ -337,6 +389,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
       while (!done) {
         const chunk = yield* file.readAlloc(64 * 1024)
         if (Option.isNone(chunk)) break
+        count(chunk.value)
         done = !(yield* consumeChunk(chunk.value))
       }
       if (!done) {
@@ -345,6 +398,18 @@ export const read = Effect.fn("ReadTool.read")(function* (
         if (pending) append(pending.endsWith("\r") ? pending.slice(0, -1) : pending)
       }
       if (lines.length === 0 && offset !== 1) return yield* Effect.fail(new OffsetOutOfRangeError({ offset }))
+      // 正文停止后最多再计数固定字节预算；总行数不足 EOF 时明确作为下界。
+      const scanEnd = consumed + MAX_SCAN_BYTES
+      let eof = !done
+      while (!eof && scanned < Number(info.size) && scanned < scanEnd) {
+        const chunk = yield* file.readAlloc(Math.min(64 * 1024, scanEnd - scanned))
+        if (Option.isNone(chunk)) {
+          eof = true
+          break
+        }
+        count(chunk.value)
+      }
+      const metadata = yield* finish(offset, lines.length, next !== undefined && lines.length < limit, eof)
       return new TextPage({
         type: "text-page",
         content: lines.join("\n"),
@@ -352,6 +417,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
         offset,
         truncated: next !== undefined,
         ...(next === undefined ? {} : { next }),
+        ...metadata,
       })
     }),
   )
@@ -385,7 +451,7 @@ export const list = Effect.fn("ReadTool.list")(function* (fs: FSUtil.Interface, 
     .sort((a, b) => (a.type === b.type ? a.path.localeCompare(b.path) : a.type === "directory" ? -1 : 1))
   const selected = visible.slice(offset - 1, offset - 1 + limit)
   const truncated = offset - 1 + selected.length < visible.length
-  return new ListPage({ entries: selected, truncated, ...(truncated ? { next: offset + selected.length } : {}) })
+  return new ListPage({ entries: selected, total: visible.length, truncated, ...(truncated ? { next: offset + selected.length } : {}) })
 })
 
 const layer = Layer.effect(

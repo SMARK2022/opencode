@@ -266,7 +266,7 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
       "type": "string",
     },
     "limit": {
-      "description": "The maximum number of lines to read (defaults to 2000)",
+      "description": "The maximum number of lines to read (defaults to 200)",
       "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer",

@@ -17,6 +17,7 @@ import { ReadToolFileSystem } from "./read-filesystem"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
+import { ReadPresentation } from "./read-presentation"
 
 export const name = "read"
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
@@ -31,12 +32,12 @@ const LocationInput = Schema.Struct({
   }),
   limit: ReadToolFileSystem.PageInput.fields.limit.annotate({
     // 广告与文件系统实际默认同步，maximum 仍沿 PageInput 的 2000 校验。
-    description: "The maximum number of directory entries or text lines to read (defaults to 400, maximum 2000)",
+    description: "The maximum number of directory entries or text lines to read (defaults to 200, maximum 2000)",
   }),
 })
 const Input = LocationInput
 const Output = Schema.Union([
-  Schema.Struct({ ...FileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
+  Schema.Struct({ ...ReadToolFileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
   Schema.Struct({ ...ReadToolFileSystem.TextPage.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
   ReadToolFileSystem.ListPage,
 ])
@@ -54,7 +55,7 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.make({
           description:
-            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.",
+            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 24 KiB per read; displayed lines are limited to 2000 characters.\nLine accounting scans at most 256 KiB beyond the returned page. If `<range total_exact=\"false\">` appears, `total` is a lower bound; otherwise it is exact.\nIf a result returns `<stub status=\"...\">`, use the already visible content in the current context instead of reading the same range again.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed.",
           input: Input,
           output: Output,
           toModelOutput: ({ input, output }) => {
@@ -63,6 +64,11 @@ const layer = Layer.effectDiscard(
             // 仅成功的源码文本触发提醒；目录与原生图片沿用既有投影。
             if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
               if (!("content" in output)) return []
+              if (ReadPresentation.isReadRangeMeta(output.read)) return [
+                ...(HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1)) ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
+                { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
+                ...reminders,
+              ]
               const risky = HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1))
               if (!risky && reminders.length === 0)
                 return []
@@ -115,7 +121,7 @@ const layer = Layer.effectDiscard(
                 limit: input.limit,
               })
               const instructions = yield* nearby(absolute, context.sessionID)
-              const attach = (value: FileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
+              const attach = (value: ReadToolFileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
               // 附加规则只在成功读取后产生；原生图片与分页仍走原有结果类型及统一限幅。
               if (
                 "encoding" in content &&

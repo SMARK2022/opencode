@@ -5,13 +5,16 @@ import * as Tool from "./tool"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { LSP } from "@/lsp/lsp"
 import DESCRIPTION from "./read.txt"
+import { readOutline, type Outline } from "./read-outline"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 
 // 只降低缺省页大小，显式 limit 与既有安全、附件分支不随默认值收紧。
-const DEFAULT_READ_LIMIT = 400
+// #142：默认 200 行，配合 range/outline 做定点读取
+// #142：默认 200 行与 source 对齐
+const DEFAULT_READ_LIMIT = 200
 // 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
 const MAX_BYTES = 24 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
@@ -19,6 +22,9 @@ const SAMPLE_BYTES = 4096
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 
 const MAX_CONTENT_TOKENS = 16000
+// #142：正文限幅后只追加有界计数，避免为 total 扫描整个超大文件
+const MAX_SCAN_BYTES = 256 * 1024
+
 
 // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
 const BLOCKED_DEVICE_PATHS = new Set([
@@ -126,13 +132,49 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
 // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
 // Schema output is identical (`type: "number"`), so the LLM view is
 // unchanged; purely CLI-facing uses must now send numbers rather than strings.
+
+import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub } from "@opencode-ai/core/tool/read-presentation"
+
+// V1 保留自己的消息适配，范围证明和模型呈现与原生读取共用。
+function readToolMetadata(input: Metadata) {
+  return input
+}
+
+function fileSizeOf(stat: { size: unknown }) {
+  return Number(stat.size)
+}
+
+function modifiedMsOf(stat: { mtime: Option.Option<Date> }) {
+  return Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
+}
+
+// 可见性仍取自本次会话实际历史，不能以路径缓存代替正文证明。
+function collectVisibleReads(messages: Array<{ info: { role: string }; parts: any[] }>, canonicalPath: string) {
+  const reads: ReadRangeMeta[] = []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.info.role !== "assistant") continue
+    for (const part of msg.parts) {
+      if (part.type !== "tool" || part.tool !== "read") continue
+      if (part.state.status !== "completed" || part.state.time.compacted !== undefined) continue
+      const meta = (part.state.metadata as { read?: unknown } | undefined)?.read
+      if (!isReadRangeMeta(meta) || meta.stub) continue
+      if (meta.returned === 0 && meta.size > 0) continue
+      if (meta.canonicalPath !== canonicalPath) continue
+      reads.push(meta)
+    }
+  }
+  return reads
+}
+
+
 export const Parameters = Schema.Struct({
   filePath: Schema.String.annotate({ description: "The absolute path to the file or directory to read" }),
   offset: Schema.optional(NonNegativeInt).annotate({
     description: "The line number to start reading from (1-indexed)",
   }),
   limit: Schema.optional(NonNegativeInt).annotate({
-    description: "The maximum number of lines to read (defaults to 400)",
+    description: "The maximum number of lines to read (defaults to 200)",
   }),
 })
 
@@ -152,6 +194,7 @@ type Display =
       lineStart: number
       lineEnd: number
       totalLines: number
+      totalLinesExact: boolean
       truncated: boolean
     }
 
@@ -159,6 +202,9 @@ type Metadata = {
   preview: string
   truncated: boolean
   loaded: string[]
+  // #142：可选区间元数据，供 stub/重叠
+  // #142：可选 read 元数据
+  read?: ReadRangeMeta
   display?: Display
 }
 
@@ -238,13 +284,10 @@ export const ReadTool = Tool.define<
     const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
       const start = opts.offset - 1
       const raw: string[] = []
-      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false, scanBytes: 0 }
 
-      // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
-      // ends without flushing, decodeText drops the final unterminated line. We also
-      // avoid Stream.runForEachWhile (it currently swallows the final unterminated
-      // line of the upstream splitLines pipeline) and use a tagged error to stop the
-      // upstream file stream as soon as the byte cap is reached.
+      // #142：保留手动解码及末尾未换行的处理；正文限幅后最多再计数 256 KiB。
+      // #142：未到 EOF 就停流时，count 只是下界，不能冒充精确总行数。
       const decoder = new TextDecoder("utf-8")
       yield* fs.stream(filepath).pipe(
         Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
@@ -255,21 +298,18 @@ export const ReadTool = Tool.define<
             flags.count += 1
             if (flags.count <= start) return
 
-            if (raw.length >= opts.limit) {
-              flags.more = true
-              return
-            }
-
             const line = text // 保留完整行，由总字节预算决定当前页是否接纳。
             const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-            if (flags.bytes + size <= MAX_BYTES) {
+            if (!flags.cut && raw.length < opts.limit && flags.bytes + size <= MAX_BYTES) {
               raw.push(line)
               flags.bytes += size
               return
             }
 
-            flags.cut = true
+            flags.cut = flags.cut || raw.length < opts.limit
             flags.more = true
+            flags.scanBytes += size
+            if (flags.scanBytes <= MAX_SCAN_BYTES) return
             flags.done = true
             return yield* new ReadStop()
           }),
@@ -277,7 +317,7 @@ export const ReadTool = Tool.define<
         Effect.catchTag("ReadStop", () => Effect.void),
       )
 
-      return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
+      return { raw, count: flags.count, totalExact: !flags.done, cut: flags.cut, more: flags.more, offset: opts.offset }
     })
 
     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
@@ -377,20 +417,25 @@ export const ReadTool = Tool.define<
         const start = offset - 1
         const sliced = items.slice(start, start + limit)
         const truncated = start + sliced.length < items.length
+        // #142：目录条目原文输出，结构标签保持稳定
+        const output = [
+          `<path>${escapeXmlText(filepath)}</path>`,
+          `<type>directory</type>`,
+          `<directory entries="${items.length}" />`,
+          `<content>`,
+          // #142：目录条目也 escape，结构一致
+          sliced.map(escapeXmlText).join("\n"),
+          `</content>`,
+          // #142：目录超限用 entry_limit
+          truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n")
 
         return {
           title,
-          output: [
-            `<path>${filepath}</path>`,
-            `<type>directory</type>`,
-            `<entries>`,
-            sliced.join("\n"),
-            truncated
-              ? `\n(Showing ${sliced.length} of ${items.length} entries. Use 'offset' parameter to read beyond entry ${offset + sliced.length})`
-              : `\n(${items.length} entries)`,
-            `</entries>`,
-          ].join("\n"),
-          metadata: {
+          output,
+          metadata: readToolMetadata({
             preview: sliced.slice(0, 20).join("\n"),
             truncated,
             loaded: [] as string[],
@@ -402,7 +447,7 @@ export const ReadTool = Tool.define<
               totalEntries: items.length,
               truncated,
             },
-          },
+          }),
         }
       }
 
@@ -477,20 +522,99 @@ export const ReadTool = Tool.define<
         )
       }
 
-      let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
-      output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
-
-      const last = file.offset + file.raw.length - 1
-      const next = last + 1
-      const truncated = file.more || file.cut
-      if (file.cut) {
-        output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
-      } else if (file.more) {
-        output += `\n\n(Showing lines ${file.offset}-${last} of ${file.count}. Use offset=${next} to continue.)`
-      } else {
-        output += `\n\n(End of file - total ${file.count} lines)`
+      // #142：构造当前读区间元数据供 stub/overlap
+      // #142：当前文件 size
+const size = fileSizeOf(stat)
+      // #142：当前 mtime
+const mtimeMs = modifiedMsOf(stat)
+      // #142：展示用 modified
+const modified = formatModified(mtimeMs)
+      // #142：区间起点
+const start = file.offset
+      // #142：空区间 end 规则
+const end = file.raw.length === 0 ? Math.max(0, file.offset - 1) : file.offset + file.raw.length - 1
+      // #142：实际返回行数
+const returned = file.raw.length
+      // #142：truncated 元数据
+const truncated = file.more || file.cut
+      // #142：构造当前 read 元数据
+const current: ReadRangeMeta = {
+        path: filepath,
+        canonicalPath: canonicalReadPath(filepath),
+        type: "file",
+        size,
+        modified,
+        modifiedMs: mtimeMs,
+        start,
+        end,
+        total: file.count,
+        totalExact: file.totalExact,
+        returned,
+        stub: false,
       }
-      output += "\n</content>"
+      // #142：可见上下文驱动 stub，优先于 mtime 缓存
+      // #142：加载可见 reads
+const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath)
+      // #142：stub 判定
+const stub = findReadStub(visibleReads, current)
+      if (stub) {
+        // #142：可见范围 stub，避免重复灌入相同内容
+        const read = {
+          ...current,
+          returned: 0,
+          stub: true as const,
+          stubStatus: stub.status,
+          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
+        }
+        let output = renderReadStub({
+          path: filepath,
+          size,
+          modified,
+          start,
+          end,
+          total: file.count,
+          totalExact: file.totalExact,
+          status: stub.status,
+          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
+        })
+        // #142：stub 只省略已见正文；新解析的目录规则必须实际交付后才能记入 loaded。
+        if (loaded.length > 0) {
+          output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+        }
+        return {
+          title,
+          output,
+          metadata: readToolMetadata({
+            preview: output,
+            truncated: false,
+            loaded: loaded.map((item) => item.filepath),
+            read,
+          }),
+        }
+      }
+
+      // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
+      // #142：异步 outline
+const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset, file.totalExact))
+      // #142：部分重叠仍返回内容，但附 note
+      // #142：overlap 判定
+const overlap = findOverlapNote(visibleReads, current)
+      // #142：渲染主输出
+let output = renderReadOutput({
+        path: filepath,
+        size,
+        modified,
+        start,
+        end,
+        total: file.count,
+        totalExact: file.totalExact,
+        returned,
+        raw: file.raw,
+        cut: file.cut,
+        more: file.more,
+        outline,
+        overlap,
+      })
 
       yield* warm(filepath)
 
@@ -503,36 +627,26 @@ export const ReadTool = Tool.define<
         output += CYBER_REMINDER
       }
 
-      if (
-        // 当前页读取与权限检查已完成；未截掉页内正文时分页仍可去重。
-        !file.cut &&
-        // 每次用本会话可见历史证明范围与版本，恢复会话无需预热或借用外会话缓存。
-        findUnexpandedFileInContext(ctx, params, output)
-      ) {
-        return {
-          title,
-          output: FILE_UNCHANGED_STUB,
-          metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
-        }
-      }
 
       return {
         title,
         output,
-        metadata: {
+        metadata: readToolMetadata({
           preview: file.raw.slice(0, 20).join("\n"),
           truncated,
           loaded: loaded.map((item) => item.filepath),
+          read: current,
           display: {
             type: "file" as const,
             path: filepath,
             text: file.raw.join("\n"),
             lineStart: file.offset,
-            lineEnd: last,
+            lineEnd: end,
             totalLines: file.count,
+            totalLinesExact: file.totalExact,
             truncated,
           },
-        },
+        }),
       }
     })
 

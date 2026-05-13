@@ -23,13 +23,16 @@ describe("ReadToolFileSystem", () => {
       // 正文小于字节预算却超默认页，专门覆盖完整短文件捷径绕过行数的缺口。
       yield* fixtureData.files.writeFileString(file, Array.from({ length: 1601 }, () => "x").join("\n"))
       const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
-      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 401 })
-      expect(first.content.split("\n")).toHaveLength(400)
+      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 201 })
+      expect(first.content.split("\n")).toHaveLength(200)
+      expect("read" in first ? first.read : undefined).toMatchObject({ start: 1, end: 200, returned: 200, total: 1601, totalExact: true, size: 3201, stub: false })
+      expect("read" in first ? first.read?.modifiedMs : undefined).toBeNumber()
+      // 默认和显式上限分别验证，不能用扩大后续请求来绕过新的 200 行分页。
       // 每个中间页都用默认值锁定连续 next，不能把末页改为显式大页绕过新默认。
-      yield* Effect.forEach([401, 801, 1201], (offset) => Effect.gen(function* () {
+      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201, 1401], (offset) => Effect.gen(function* () {
         const page = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset })
-        expect(page.content.split("\n")).toHaveLength(400)
-        expect(page).toMatchObject({ truncated: true, next: offset + 400 })
+        expect(page.content.split("\n")).toHaveLength(200)
+        expect(page).toMatchObject({ truncated: true, next: offset + 200 })
       }))
       // next 是续页 offset，末页恰好返回余下正文且不制造另一页。
       const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset: 1601 })
@@ -62,20 +65,20 @@ describe("ReadToolFileSystem", () => {
       yield* Effect.forEach(Array.from({ length: 1501 }, (_, index) => String(index).padStart(4, "0")),
         (name) => fixtureData.files.writeFileString(path.join(directory, name), ""), { concurrency: 16, discard: true })
       const entries = yield* ReadToolFileSystem.list(fixtureData.fs, directory)
-      expect(entries.entries).toHaveLength(400)
-      expect(entries).toMatchObject({ truncated: true, next: 401 })
+      expect(entries.entries).toHaveLength(200)
+      expect(entries).toMatchObject({ total: 1501, truncated: true, next: 201 })
       // 目录显式 1500 的接受范围继续与 schema oracle 一致，不能随默认页缩小。
       const requested = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { limit: 1500 })
       expect(requested.entries).toHaveLength(1500)
       expect(requested).toMatchObject({ truncated: true, next: 1501 })
       // 过滤排序后的目录页也逐页推进，不能仅修改首页数量而漏掉中间 entries。
-      yield* Effect.forEach([401, 801], (offset) => Effect.gen(function* () {
+      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201], (offset) => Effect.gen(function* () {
         const page = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset })
-        expect(page.entries).toHaveLength(400)
-        expect(page).toMatchObject({ truncated: true, next: offset + 400 })
+        expect(page.entries).toHaveLength(200)
+        expect(page).toMatchObject({ total: 1501, truncated: true, next: offset + 200 })
       }))
-      const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1201 })
-      expect(remaining.entries).toHaveLength(301)
+      const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1401 })
+      expect(remaining.entries).toHaveLength(101)
       expect(remaining.truncated).toBe(false)
       expect(remaining.next).toBeUndefined()
     }),
