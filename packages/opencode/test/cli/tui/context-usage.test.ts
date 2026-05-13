@@ -327,6 +327,51 @@ describe("context usage", () => {
     expect(contextUsageFooter(data, 100).length).toBe(82)
   })
 
+  test("main total is latest context window while footer keeps session totals", async () => {
+    const messages = [user("1"), assistant("2", "1"), user("3"), assistant("4", "3")]
+    const parts: Record<string, Part[]> = {
+      "2": [
+        {
+          id: "sf-old",
+          sessionID: "s",
+          messageID: "2",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0,
+          tokens: { input: 1_000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+        } as Part,
+      ],
+      "4": [
+        {
+          id: "sf-latest",
+          sessionID: "s",
+          messageID: "4",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0,
+          tokens: { input: 200, output: 20, reasoning: 0, cache: { read: 50, write: 0 } },
+        } as Part,
+      ],
+    }
+
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [],
+    })
+
+    expect(data.totalTokens).toBe(270)
+    expect(data.details.usage.total).toBe(1_370)
+    expect(contextUsageFooter(data, 100)).toContain("Session Totals")
+  })
+
   test("filters compacted history and keeps summary plus retained tail", () => {
     const messages = [
       { info: user("1"), parts: [text("1", "old")] },

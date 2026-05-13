@@ -729,6 +729,25 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
       }))
     }
   }
+  if (!acc.breakdown) {
+    const instructions = await gatherInstructionFiles(input)
+    instructionDetails = instructions.map((item) => ({
+      path: item.path,
+      tokens: estimate(item.content, acc.ratio.input),
+    }))
+    instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+
+    const skills = await gatherSkills(input)
+    skillDetails = skills.map((skill) => ({
+      name: skill.name,
+      path: skill.path,
+      tokens: estimate(`${skill.name}\n${skill.description}`, acc.ratio.input),
+    }))
+    skillTokens = skillDetails.reduce((sum, item) => sum + item.tokens, 0)
+
+    toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, acc.ratio.input)
+    toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+  }
 
   const wind = windowDetails(input, modelInfo.model)
   const used = acc.step.input + acc.step.output
