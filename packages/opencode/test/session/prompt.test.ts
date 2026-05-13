@@ -446,6 +446,22 @@ const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
     })
   })
 
+const addStepFinish = (sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    // #140：写入 step-finish 输入侧样本，供 chars/token 校准
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "step-finish",
+      reason: "stop",
+      cost: 0,
+      tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      inputChars,
+    })
+  })
+
 const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -993,6 +1009,53 @@ noLLMServer.instance.skip(
     }),
   { config: cfg },
 )
+
+// #140：auto compact 后不得因 retained 旧 tail 用量再次压缩
+it.instance("auto compaction resumes without compacting retained old tail usage again", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      compaction: { tail_turns: 1 },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compact = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "Auto compact",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+
+    yield* seed(chat.id, { finish: "stop" })
+    const old = yield* seed(chat.id, { finish: "tool-calls" })
+    // #140：旧 assistant 巨量 tokens 模拟 retained tail
+    old.assistant.tokens = { input: 300_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+    yield* sessions.updateMessage(old.assistant)
+    yield* addCompletedTool(chat.id, old.assistant.id)
+    yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
+    yield* compact.create({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      auto: true,
+    })
+    yield* llm.text("summary")
+    yield* llm.text("resumed")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const all = yield* sessions.messages({ sessionID: chat.id })
+    const compactions = all.flatMap((msg) => msg.parts).filter((part) => part.type === "compaction")
+
+    // #140：摘要 + 恢复共 2 次 LLM；仅 1 个 compaction part
+    expect(yield* llm.hits).toHaveLength(2)
+    expect(compactions).toHaveLength(1)
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") {
+      expect(result.info.agent).toBe("build")
+      expect(result.parts.some((part) => part.type === "text" && part.text === "resumed")).toBe(true)
+    }
+  }),
+)
+
 
 it.instance("static loop returns assistant text through local provider", () =>
   Effect.gen(function* () {
