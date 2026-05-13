@@ -97,6 +97,78 @@ describe("file.ripgrep", () => {
     expect(result.items[0]?.lines.text).toContain("needle")
   })
 
+  test("search limit caps total matches", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "one.txt"), "needle\nneedle\nneedle\n")
+        await Bun.write(path.join(dir, "two.txt"), "needle\nneedle\nneedle\n")
+      },
+    })
+
+    const result = await run(Ripgrep.Service.use((rg) => rg.search({ cwd: tmp.path, pattern: "needle", limit: 3 })))
+    expect(result.items).toHaveLength(3)
+    expect(result.truncated).toBe(true)
+  })
+
+  test("search can opt into full small-result collection", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "one.txt"), "needle\nneedle\n")
+        await Bun.write(path.join(dir, "two.txt"), "needle\nneedle\n")
+      },
+    })
+
+    const result = await run(
+      Ripgrep.Service.use((rg) => rg.search({ cwd: tmp.path, pattern: "needle", limit: 10, maxFiles: false })),
+    )
+    expect(result.items).toHaveLength(4)
+    expect(result.truncated).toBe(false)
+  })
+
+  test("search refuses overly broad candidate sets", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "one.txt"), "needle\n")
+        await Bun.write(path.join(dir, "two.txt"), "needle\n")
+      },
+    })
+
+    const exit = await Ripgrep.Service.use((rg) => rg.search({ cwd: tmp.path, pattern: "needle", maxFiles: 1 })).pipe(
+      Effect.provide(Ripgrep.defaultLayer),
+      Effect.runPromiseExit,
+    )
+    expect(exit._tag).toBe("Failure")
+  })
+
+  test("search caps explicit file target sets", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "one.txt"), "needle\n")
+        await Bun.write(path.join(dir, "two.txt"), "needle\n")
+      },
+    })
+
+    const exit = await Ripgrep.Service.use((rg) =>
+      rg.search({ cwd: tmp.path, pattern: "needle", file: ["one.txt", "two.txt"], maxFiles: 1 }),
+    ).pipe(Effect.provide(Ripgrep.defaultLayer), Effect.runPromiseExit)
+    expect(exit._tag).toBe("Failure")
+  })
+
+  test("search caps explicit directory target sets", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await fs.mkdir(path.join(dir, "src"), { recursive: true })
+        await Bun.write(path.join(dir, "src", "one.txt"), "needle\n")
+        await Bun.write(path.join(dir, "src", "two.txt"), "needle\n")
+      },
+    })
+
+    const exit = await Ripgrep.Service.use((rg) =>
+      rg.search({ cwd: tmp.path, pattern: "needle", file: ["src"], maxFiles: 1 }),
+    ).pipe(Effect.provide(Ripgrep.defaultLayer), Effect.runPromiseExit)
+    expect(exit._tag).toBe("Failure")
+  })
+
   test("search supports explicit file targets", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {

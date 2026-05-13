@@ -8,14 +8,18 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Global } from "@opencode-ai/core/global"
+import { NamedError } from "@opencode-ai/core/util/error"
 import * as Log from "@opencode-ai/core/util/log"
 import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
 import { which } from "@/util/which"
 import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, withStatics } from "@/util/schema"
+import z from "zod"
 
 const log = Log.create({ service: "ripgrep" })
 const VERSION = "15.1.0"
+export const MAX_SEARCH_FILES = 5_000
+export const MAX_SEARCH_RESULTS = 1_000
 const PLATFORM = {
   "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
   "arm64-linux": { platform: "aarch64-unknown-linux-gnu", extension: "tar.gz" },
@@ -107,6 +111,7 @@ export type Row = Match["data"]
 export interface SearchResult {
   items: Item[]
   partial: boolean
+  truncated: boolean
 }
 
 export interface FilesInput {
@@ -123,6 +128,7 @@ export interface SearchInput {
   pattern: string
   glob?: string[]
   limit?: number
+  maxFiles?: number | false
   follow?: boolean
   file?: string[]
   signal?: AbortSignal
@@ -141,6 +147,14 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Ripgrep") {}
+
+export const SearchTooBroadError = NamedError.create(
+  "SearchTooBroadError",
+  z.object({
+    maxFiles: z.number(),
+    message: z.string(),
+  }),
+)
 
 function env() {
   const env = sanitizedProcessEnv()
@@ -213,6 +227,9 @@ function searchArgs(input: SearchInput) {
   if (input.glob) {
     for (const glob of input.glob) args.push(`--glob=${glob}`)
   }
+  // ripgrep's --max-count is per file, not global. We still pass it when a
+  // caller supplies a limit because it caps pathological single-file output,
+  // while the stream consumer below enforces the actual global result limit.
   if (input.limit) args.push(`--max-count=${input.limit}`)
   args.push("--", input.pattern, ...(input.file ?? ["."]))
   return args
@@ -378,10 +395,53 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
 
       const search: Interface["search"] = Effect.fn("Ripgrep.search")(function* (input: SearchInput) {
         yield* check(input.cwd)
+        const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
+
+        if (maxFiles !== undefined) {
+          // Positional rg targets may be files or directories. Count files as
+          // one, but enumerate directory targets just like a root search so a
+          // caller cannot bypass the broad-scope guard with file: ["."].
+          let candidateCount = 0
+          if (input.file) {
+            for (const target of input.file) {
+              if (candidateCount > maxFiles) break
+              const full = path.isAbsolute(target) ? target : path.join(input.cwd, target)
+              const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
+              if (info?.type !== "Directory") {
+                candidateCount++
+                continue
+              }
+              candidateCount += yield* files({ cwd: full, glob: input.glob, follow: input.follow, signal: input.signal }).pipe(
+                Stream.take(maxFiles - candidateCount + 1),
+                Stream.runCollect,
+                Effect.map((chunk) => chunk.length),
+              )
+            }
+          } else {
+            candidateCount = yield* files({ cwd: input.cwd, glob: input.glob, follow: input.follow, signal: input.signal }).pipe(
+              // Count only enough candidate files to decide whether a content
+              // scan is safe. This protects low-hit searches, where result
+              // truncation cannot stop rg because no matches arrive early.
+              Stream.take(maxFiles + 1),
+              Stream.runCollect,
+              Effect.map((chunk) => chunk.length),
+            )
+          }
+          if (candidateCount > maxFiles) {
+            return yield* Effect.fail(
+              new SearchTooBroadError({
+                maxFiles,
+                message: `Search scope is too broad: more than ${maxFiles} candidate files.`,
+              }),
+            )
+          }
+        }
 
         const program = Effect.scoped(
           Effect.gen(function* () {
             const handle = yield* spawner.spawn(yield* command(input.cwd, searchArgs(input)))
+            const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
+            let truncated = false
 
             const [items, stderr, code] = yield* Effect.all(
               [
@@ -391,22 +451,40 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
                   Stream.mapEffect(parse),
                   Stream.filter((item): item is Match => item.type === "match"),
                   Stream.map((item) => row(item.data)),
+                  // Tool callers usually need a bounded preview, not a precise
+                  // count. Taking one extra row lets us report truncation and
+                  // then terminate rg instead of continuing an expensive full
+                  // repository scan just to discard the remaining output later.
+                  Stream.take(limit === undefined ? Infinity : limit + 1),
                   Stream.runCollect,
                   Effect.map((chunk) => [...chunk]),
+                  Effect.tap((items) =>
+                    Effect.gen(function* () {
+                      if (limit === undefined || items.length <= limit) return
+                      truncated = true
+                      yield* handle.kill().pipe(Effect.ignore)
+                    }),
+                  ),
+                  Effect.map((items) => (limit === undefined ? items : items.slice(0, limit))),
                 ),
                 Stream.mkString(Stream.decodeText(handle.stderr)),
-                handle.exitCode,
+                // A limit-triggered kill is a successful bounded search, while
+                // user aborts or real process failures should keep surfacing as
+                // errors through the normal exitCode path.
+                handle.exitCode.pipe(Effect.catch((err) => (truncated ? Effect.succeed(0) : Effect.fail(err)))),
               ],
               { concurrency: "unbounded" },
             )
 
-            if (code !== 0 && code !== 1 && code !== 2) {
+            if (!truncated && code !== 0 && code !== 1 && code !== 2) {
               return yield* Effect.fail(error(stderr, code))
             }
+            if (code === 2 && items.length === 0 && stderr.trim()) return yield* Effect.fail(error(stderr, code))
 
             return {
-              items: code === 1 ? [] : items,
-              partial: code === 2,
+              items: code === 1 && !truncated ? [] : items,
+              partial: code === 2 && !truncated,
+              truncated,
             }
           }),
         )

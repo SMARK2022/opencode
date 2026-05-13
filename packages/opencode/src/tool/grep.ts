@@ -3,12 +3,13 @@ import { Schema } from "effect"
 import { Effect, Option } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { Ripgrep } from "../file/ripgrep"
+import { Ripgrep, SearchTooBroadError } from "../file/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
 
 const MAX_LINE_LENGTH = 2000
+const RESULT_LIMIT = 64
 
 export const Parameters = Schema.Struct({
   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
@@ -64,13 +65,37 @@ export const GrepTool = Tool.define(
             kind: info?.type === "Directory" ? "directory" : "file",
           })
 
-          const result = yield* rg.search({
-            cwd,
-            pattern: params.pattern,
-            glob: params.include ? [params.include] : undefined,
-            file,
-            signal: ctx.abort,
-          })
+          const result = yield* rg
+            .search({
+              cwd,
+              pattern: params.pattern,
+              glob: params.include ? [params.include] : undefined,
+              file,
+              limit: RESULT_LIMIT + 1,
+              signal: ctx.abort,
+            })
+            .pipe(
+              Effect.catchIf(
+                SearchTooBroadError.isInstance,
+                (err) =>
+                  Effect.succeed({
+                    items: [],
+                    partial: false,
+                    truncated: false,
+                    tooBroad: err.data.maxFiles,
+                  }),
+              ),
+            )
+          if ("tooBroad" in result) {
+            return {
+              title: params.pattern,
+              metadata: { matches: 0, truncated: false },
+              output: [
+                `Search scope is too broad: more than ${result.tooBroad} candidate files.`,
+                "Use a narrower path or include pattern before searching file contents.",
+              ].join("\n"),
+            }
+          }
           if (result.items.length === 0) return empty
 
           const rows = result.items.map((item) => ({
@@ -105,13 +130,11 @@ export const GrepTool = Tool.define(
 
           matches.sort((a, b) => b.mtime - a.mtime)
 
-          const limit = 100
-          const truncated = matches.length > limit
-          const final = truncated ? matches.slice(0, limit) : matches
+          const truncated = result.truncated || matches.length > RESULT_LIMIT
+          const final = truncated ? matches.slice(0, RESULT_LIMIT) : matches
           if (final.length === 0) return empty
 
-          const total = matches.length
-          const output = [`Found ${total} matches${truncated ? ` (showing first ${limit})` : ""}`]
+          const output = [`Found ${truncated ? `${RESULT_LIMIT}+` : final.length} matches${truncated ? ` (showing first ${RESULT_LIMIT})` : ""}`]
 
           let current = ""
           for (const match of final) {
@@ -128,7 +151,7 @@ export const GrepTool = Tool.define(
           if (truncated) {
             output.push("")
             output.push(
-              `(Results truncated: showing ${limit} of ${total} matches (${total - limit} hidden). Consider using a more specific path or pattern.)`,
+              `(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`,
             )
           }
 
@@ -140,7 +163,7 @@ export const GrepTool = Tool.define(
           return {
             title: params.pattern,
             metadata: {
-              matches: total,
+              matches: final.length,
               truncated,
             },
             output: output.join("\n"),

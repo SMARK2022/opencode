@@ -1,8 +1,9 @@
-- Fast content search tool that works with any codebase size
+- Fast bounded content search tool for targeted codebase queries
 - Searches file contents using regular expressions
 - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
 - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
-- Returns file paths and line numbers with at least one match sorted by modification time
+- Returns matching file paths and line numbers, with results capped for responsiveness
 - Use this tool when you need to find files containing specific patterns
+- For large workspaces, pass path and include to narrow the candidate files before searching contents
 - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
 - For open-ended search, use grep/glob/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
