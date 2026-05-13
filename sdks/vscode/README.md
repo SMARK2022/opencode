@@ -1,6 +1,8 @@
+<!-- #141：本批仅协同升号，禁止回写 1.14.x -->
 # OpenCode IDE Bridge
 
 <!-- #97：品牌升级为 IDE Bridge，与 package displayName 对齐 -->
+<!-- #141：vsix 与 opencode 主版本同号协同升号 -->
 Local HTTP bridge extension for [OpenCode](https://opencode.ai) IDE. Connects the OpenCode CLI daemon to VS Code's notebook, Jupyter kernel, and editor context APIs so the CLI can inspect and drive notebooks without remote LM tool proxies.
 
 Extension ID: `SMARK2022.opencode-ide-bridge`
@@ -90,7 +92,7 @@ bun run vsix
 Install the generated package (path matches `scripts.vsix` output):
 
 ```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.19.8.vsix --force
+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.19.9.vsix --force
 ```
 
 ## Development
