@@ -222,6 +222,8 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+  // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
+  const streamingActive = createMemo(() => messages().some((x: any) => x.role === "assistant" && !x.time?.completed))
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
@@ -1195,6 +1197,8 @@ export function Session() {
             <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
+                // #135：流式时禁用 viewportCulling，避免裁剪抖动
+                viewportCulling={!streamingActive()}
                 viewportOptions={{
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}
@@ -1705,8 +1709,9 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
             {/* 用 content() 而非 summary().body：summary 可能只剩标题体为空 */}
             <code
               filetype="markdown"
-              drawUnstyledText={false}
-              streaming={true}
+              // #135：流式推理用 unstyled 快路径；完成后可走完整样式
+              drawUnstyledText={!isDone()}
+              streaming={!isDone()}
               syntaxStyle={syntax()}
               content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
               conceal={ctx.conceal()}
@@ -1723,8 +1728,9 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
           <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
             <code
               filetype="markdown"
-              drawUnstyledText={false}
-              streaming={true}
+              // #135：展开体同样绑定推理完成态
+              drawUnstyledText={!isDone()}
+              streaming={!isDone()}
               syntaxStyle={syntax()}
               content={summary().body}
               conceal={ctx.conceal()}
@@ -1782,12 +1788,14 @@ function ReasoningHeader(props: {
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  // #135：assistant 未完成则流式渲染
+  const streaming = createMemo(() => !props.message.time?.completed)
   return (
     <Show when={props.part.text.trim()}>
       <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
         <markdown
           syntaxStyle={syntax()}
-          streaming={true}
+          streaming={streaming()}
           internalBlockMode="top-level"
           content={props.part.text.trim()}
           tableOptions={{ style: "grid" }}
