@@ -72,6 +72,21 @@ function defer<T>() {
   return { promise, resolve }
 }
 
+// Task tool cancellation reaches child sessions through an abort listener.
+// Poll until the child session observes the cancellation and transitions idle.
+const waitForIdle = (status: SessionStatus.Interface, sessionID: SessionID, timeoutMs = 2000) =>
+  Effect.gen(function* () {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const s = yield* status.get(sessionID)
+      if (s.type === "idle") return
+      yield* Effect.sleep(20)
+    }
+    // Final check — fail with a clear message if still busy
+    const s = yield* status.get(sessionID)
+    expect(s.type).toBe("idle")
+  })
+
 function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   return Effect.acquireUseRelease(
     Effect.sync(() => {
@@ -846,6 +861,55 @@ it.live(
 )
 
 it.live(
+  "cancel propagates from running task tool to child session",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const status = yield* SessionStatus.Service
+        const chat = yield* sessions.create({
+          title: "Pinned",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* llm.tool("task", {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        })
+        yield* llm.hang
+        yield* user(chat.id, "hello")
+
+        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+
+        const childID = yield* Effect.promise(async () => {
+          const end = Date.now() + 5_000
+          while (Date.now() < end) {
+            const msgs = await Effect.runPromise(MessageV2.filterCompactedEffect(chat.id))
+            const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === "build")
+            const tool = assistant?.parts.find(
+              (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "task",
+            )
+            const sessionID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
+            if (typeof sessionID === "string") return SessionID.make(sessionID)
+            await new Promise((done) => setTimeout(done, 20))
+          }
+          throw new Error("timed out waiting for running task metadata")
+        })
+
+        expect((yield* status.get(childID)).type).toBe("busy")
+
+        yield* prompt.cancel(chat.id)
+        const exit = yield* Fiber.await(fiber)
+        expect(Exit.isSuccess(exit)).toBe(true)
+        yield* waitForIdle(status, childID)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  10_000,
+)
+
+it.live(
   "loop sets status to busy then idle",
   () =>
     provideTmpdirServer(
@@ -1008,7 +1072,8 @@ it.live(
         expect(Exit.isSuccess(exit)).toBe(true)
 
         expect((yield* status.get(chat.id)).type).toBe("idle")
-        expect((yield* status.get(childID)).type).toBe("idle")
+        // Child session cancel propagates asynchronously via fiber interrupt
+        yield* waitForIdle(status, childID)
       }),
       { git: true, config: providerCfg },
     ),

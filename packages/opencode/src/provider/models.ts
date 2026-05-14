@@ -1,14 +1,12 @@
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Installation } from "../installation"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Hash } from "@opencode-ai/core/util/hash"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { withTransientReadRetry } from "@/util/effect-http-client"
 
 const Cost = Schema.Struct({
   input: Schema.Finite,
@@ -97,11 +95,10 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
-export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClient.HttpClient> = Layer.effect(
+export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* AppFileSystem.Service
-    const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
 
     const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
     const filepath = path.join(
@@ -126,6 +123,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClie
           signal: AbortSignal.timeout(10000),
         }),
       )
+      if (!result.ok) return yield* Effect.fail(new Error(`Failed to fetch models.dev: ${result.status}`))
       return yield* Effect.promise(() => result.text())
     })
 
@@ -194,7 +192,6 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClie
 )
 
 export const defaultLayer: Layer.Layer<Service> = layer.pipe(
-  Layer.provide(FetchHttpClient.layer),
   Layer.provide(AppFileSystem.defaultLayer),
 )
 
