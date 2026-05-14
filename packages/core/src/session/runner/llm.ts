@@ -379,7 +379,8 @@ const layer = Layer.effect(
                   agent: agent.id,
                   assistantMessageID,
                   call: event,
-                }),
+                // 与普通工具结果共用 publication 串行器；回调只交接已限幅的取消证据。
+                }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output))),
               ).pipe(
                 Effect.flatMap((settlement) =>
                   publish(

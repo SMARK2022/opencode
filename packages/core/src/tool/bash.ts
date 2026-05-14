@@ -50,6 +50,8 @@ const StructuredOutput = Schema.Struct({
   exit: Schema.Number.pipe(Schema.optional),
   truncated: Schema.Boolean,
   timeout: Schema.Boolean.pipe(Schema.optional),
+  // 取消没有退出码，也不能用 timeout 冒充；durable progress 保留真实终止原因。
+  interrupted: Schema.Boolean.pipe(Schema.optional),
   // 统计属于 typed transcript，不能把内存窗口的收益误称为磁盘全日志的收益。
   compression: Schema.Struct({
     compressed: Schema.Boolean,
@@ -91,6 +93,7 @@ const modelOutput = (output: Output) => {
     ? `\n\nWarnings:\n${output.warnings.map((warning) => `- ${warning}`).join("\n")}`
     : ""
   if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.`
+  if (output.interrupted) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command interrupted before completion.`
   return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.`
 }
 
@@ -169,6 +172,7 @@ const layer = Layer.effectDiscard(
             ...(output.exit === undefined ? {} : { exit: output.exit }),
             ...(output.timeout === undefined ? {} : { timeout: output.timeout }),
             ...(output.compression === undefined ? {} : { compression: output.compression }),
+            ...(output.interrupted === undefined ? {} : { interrupted: output.interrupted }),
             ...(output.durationMs === undefined ? {} : { durationMs: output.durationMs }),
             ...(output.diagnosticErrorLikeLines === undefined ? {} : { diagnosticErrorLikeLines: output.diagnosticErrorLikeLines }),
             ...(output.diagnosticWarningLikeLines === undefined ? {} : { diagnosticWarningLikeLines: output.diagnosticWarningLikeLines }),
@@ -279,23 +283,14 @@ const layer = Layer.effectDiscard(
                 forceKillAfter: Duration.seconds(3),
               })
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
-              // 原文由现有 ToolOutputStore capture 保留，leaf 只产出模型窗口，不发布托管路径或自行做通用截断。
-              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => Effect.gen(function* () {
-              const result = yield* appProcess
-                .run(command, {
-                  combineOutput: true,
-                  timeout: Duration.millis(timeout),
-                  maxOutputBytes: MAX_CAPTURE_BYTES,
-                  // 写盘失败适配既有 AppProcessError 并保留 StorageError cause；解码仍跨字节块续接。
-                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.write(chunk))))),
-                })
-                .pipe(
-                  Effect.catchTag("AppProcessError", (error) =>
-                    isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
-                  ),
-                )
-              observe(decoder.end())
-              diag.end()
+              let ended = false
+              const finish = Effect.fnUntraced(function* (result?: AppProcess.RunResult, interrupted = false) {
+              // 取消也可能发生在正常结果限幅期间；decoder/诊断尾块只能结束一次。
+              if (!ended) {
+                observe(decoder.end())
+                diag.end()
+                ended = true
+              }
               const diagnostic = diag.snapshot()
               const durationMs = (yield* Clock.currentTimeMillis) - started
 
@@ -304,8 +299,8 @@ const layer = Layer.effectDiscard(
               const output = text || "(no output)"
               const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
               const truncated = cut || result?.outputTruncated === true
-              const outcome = result ? { exit: result.exitCode } : { timeout: true }
-              const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
+              const outcome = interrupted ? { interrupted: true } : result ? { exit: result.exitCode } : { timeout: true }
+              const timeoutNotice = result || interrupted ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
               // 传真实调用 command，不使用描述或重新解析执行命令。
               const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
               // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
@@ -334,7 +329,25 @@ const layer = Layer.effectDiscard(
                 ...(warnings.length ? { warnings } : {}),
                 },
               }
-              }))
+              })
+              // 原文仍由同一 capture 保留；取消快照只提供领域内容，托管路径只由 registry 发布。
+              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => appProcess.run(command, {
+                combineOutput: true,
+                timeout: Duration.millis(timeout),
+                maxOutputBytes: MAX_CAPTURE_BYTES,
+                // 单块原文写入与 decoder 观察一起完成，不能在两者之间取消而丢失刚读到的 READY。
+                onOutput: (chunk) => write(chunk).pipe(
+                  Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })),
+                  Effect.andThen(Effect.sync(() => observe(decoder.write(chunk)))),
+                  Effect.uninterruptible,
+                ),
+              }).pipe(
+                Effect.catchTag("AppProcessError", (error) => isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error)),
+                Effect.flatMap((result) => finish(result)),
+              ), () => finish(undefined, true).pipe(Effect.map(({ value }) => ({
+                structured: Schema.encodeSync(StructuredOutput)(value),
+                content: [{ type: "text", text: value.contextOutput }, { type: "text", text: modelOutput(value) }],
+              }))))
               // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
             }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }))),
         }),

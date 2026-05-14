@@ -1,7 +1,7 @@
 export * as ToolRegistry from "./registry"
 
 import { ToolOutput, type ToolCall, type ToolDefinition, type ToolResultValue } from "@opencode-ai/llm"
-import { Context, Effect, Layer, Scope } from "effect"
+import { Cause, Context, Effect, Layer, Scope } from "effect"
 import { AgentV2 } from "../agent"
 import { PermissionV2 } from "../permission"
 import { SessionMessage } from "../session/message"
@@ -29,7 +29,8 @@ export interface Interface {
 
 export interface Materialization {
   readonly definitions: ReadonlyArray<ToolDefinition>
-  readonly settle: (input: ExecuteInput) => Effect.Effect<Settlement, ToolOutputStore.Error>
+  // 内部通知只接收本边界已经限幅的取消快照，不暴露 leaf 路径回调或第二个 executor。
+  readonly settle: (input: ExecuteInput, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) => Effect.Effect<Settlement, ToolOutputStore.Error>
 }
 
 export interface Settlement {
@@ -48,7 +49,7 @@ const registryLayer = Layer.effect(
     type Registration = { readonly identity: object; readonly tool: AnyTool }
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
 
-    const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
+    const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) {
       // 把暂存原文的清理绑定整个 settlement，而不是仅绑定成功返回路径。
       return yield* Effect.gen(function* () {
       const registration =
@@ -82,7 +83,18 @@ const registryLayer = Layer.effect(
       return bounded.outputPaths.length > 0
         ? { result, output: bounded.output, outputPaths: bounded.outputPaths }
         : { result, output: bounded.output }
-      }).pipe(Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })))
+      }).pipe(
+        Effect.onExit((exit) => Effect.gen(function* () {
+          if (exit._tag !== "Failure" || !Cause.hasInterruptsOnly(exit.cause) || !onInterrupted) return
+          const identity = { sessionID: input.sessionID, toolCallID: input.call.id }
+          const output = yield* resources.interrupted(identity)
+          if (!output) return
+          // 同一 bound 移交原文所有权后才能通知；存储/持久化失败不能改写成成功。
+          const bounded = yield* resources.bound({ ...identity, output })
+          yield* onInterrupted(bounded)
+        })),
+        Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })),
+      )
     })
 
     return Service.of({
@@ -118,9 +130,9 @@ const registryLayer = Layer.effect(
           if (whollyDisabled(permission(registration.tool, name), permissions) || !ToolSelection.enabled(name, selection)) registrations.delete(name)
         return {
           definitions: Array.from(registrations, ([name, registration]) => definition(name, registration.tool)),
-          settle: (input) => {
+          settle: (input, onInterrupted) => {
             const registration = registrations.get(input.call.name)
-            if (registration) return settleWith(input, registration.identity)
+            if (registration) return settleWith(input, registration.identity, onInterrupted)
             return Effect.succeed({ result: { type: "error", value: `Unknown tool: ${input.call.name}` } })
           },
         }

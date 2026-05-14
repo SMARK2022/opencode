@@ -28,6 +28,10 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
       "description": "Whether this shell call may compress repetitive output before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
       "type": "boolean",
     },
+    "description": {
+      "description": "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
+      "type": "string",
+    },
     "timeout": {
       "description": "Optional timeout in milliseconds",
       "exclusiveMinimum": 0,
