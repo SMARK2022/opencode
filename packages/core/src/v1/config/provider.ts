@@ -111,6 +111,10 @@ export const Info = Schema.Struct({
       Schema.Struct({
         apiKey: Schema.optional(Schema.String),
         baseURL: Schema.optional(Schema.String),
+        // #147：自定义 provider（如 claudecode）客户端版本覆盖
+        version: Schema.optional(Schema.String).annotate({
+          description: "Provider-specific client version override, used by custom providers like claudecode",
+        }),
         enterpriseUrl: Schema.optional(Schema.String).annotate({
           description: "GitHub Enterprise URL for copilot authentication",
         }),

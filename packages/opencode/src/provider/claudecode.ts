@@ -40,12 +40,13 @@ export function computeFingerprint(messageText: string, version: string): string
 }
 
 // cch 固定为五位零；完整 body hash 不能改写最早的计费 system 前缀。
-export function buildBillingHeaderBlock(fp: string) {
+export function buildBillingHeaderBlock(fp: string, version = VERSION) {
   return {
     type: "text" as const,
     text: [
       `x-anthropic-billing-header:`,
-      ` cc_version=${VERSION}.${fp};`,
+      // #147：billing cc_version 必须与 UA/指纹 version 同源
+      ` cc_version=${version}.${fp};`,
       ` cc_entrypoint=cli;`, // 分号属于计费头格式，不能因展示格式化而删除。
       ` cch=00000;`,
     ].join(""),
@@ -63,7 +64,9 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
 }
 
 // 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
-export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
+export function buildRequestHeaders(opts: { sessionId: string; modelId: string; version?: string }): Record<string, string> {
+  // #147：UA 版本与 billing/指纹共用 override
+  const version = opts.version ?? VERSION
   // 23 恢复 redact beta；不改 15 的 disabled/adaptive 策略，也不恢复已弃用 interleaved。
   const betas = [
     "claude-code-20250219",
@@ -86,14 +89,16 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
     "anthropic-version": "2023-06-01",
     "anthropic-beta": betas.join(","),
     "x-app": "cli",
-    "user-agent": `claude-cli/${VERSION} (external, cli)`,
+    "user-agent": `claude-cli/${version} (external, cli)`,
     "x-claude-code-session-id": opts.sessionId,
   }
 }
 
 // --- Fetch 拦截与重写包装器 ---
-export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
+export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key"; version?: string }) {
   const { session, token, authMode } = opts
+  // #147：身份三元组（指纹/billing/UA）共用 version
+  const version = opts.version ?? VERSION
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString()
@@ -111,10 +116,10 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     const content: unknown = (originalBody.messages ?? []).find((message: { role?: string }) => message.role === "user")?.content
     const firstText: unknown = Array.isArray(content)
       ? content.find((block) => block?.type === "text")?.text : content
-    const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", VERSION)
+    const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", version)
     // 数组的缓存属性和附加字段原样保留，字符串包括空串也转换为 text block。
     const system: unknown = originalBody.system
-    const newSystem: unknown[] = [buildBillingHeaderBlock(fp),
+    const newSystem: unknown[] = [buildBillingHeaderBlock(fp, version),
       ...(Array.isArray(system) ? system : typeof system === "string" ? [{ type: "text", text: system }] : []),
     ]
     // 不恢复 buildSystemBlocks 或两段身份；真正的 agent/project 指令仍来自原始 system。
@@ -185,7 +190,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     const finalBodyStr = JSON.stringify(patchedBody)
 
     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
-    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
+    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId, version })
     const requestHeaders = new Headers(init?.headers)
 
     for (const [key, value] of Object.entries(customHeaders)) {
@@ -216,7 +221,12 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
 // --- Provider 暴露点 ---
 // SDK 的 URL 构造与 fetch 的消息改写属于同一个 provider，不能把 wrapper 全局安装。
-export function createClaudeCodeProvider(token: string, baseUrl: string, authMode: "bearer" | "x-api-key") {
+export function createClaudeCodeProvider(
+  token: string,
+  baseUrl: string,
+  authMode: "bearer" | "x-api-key",
+  opts?: { version?: string },
+) {
   const session = getSession()
   // 根地址统一去除已有 /v1；SDK 的 /v1 和 wrapper 的 /v1/messages 共享此 root，避免重复拼接完整消息路径。
   const root = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
@@ -229,6 +239,8 @@ export function createClaudeCodeProvider(token: string, baseUrl: string, authMod
       session,
       token,
       authMode,
+      // #147：从 provider.options.version 注入客户端版本
+      version: opts?.version,
     }),
     headers: {},
   }

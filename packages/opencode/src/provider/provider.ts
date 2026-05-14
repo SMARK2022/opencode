@@ -250,7 +250,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       return {
         autoload: true,
         options: {
-          ...createClaudeCodeProvider(apiKey, baseURL, authMode),
+          ...createClaudeCodeProvider(apiKey, baseURL, authMode, { version: provider.options?.version }),
         },
         async getModel(sdk: any, modelID: string) {
           return sdk.languageModel(modelID)
@@ -1580,7 +1580,10 @@ const layer = Layer.effect(
         for (const [providerID, provider] of configProviders) {
           // 支持从现有提供者类型继承模型和默认值
           const baseType = provider.extends
-          const existing = baseType ? database[baseType] : database[providerID]
+          // #147：extends claudecode 缺库条目时回退 anthropic 目录
+          const existing = baseType
+            ? database[baseType] ?? (baseType === "claudecode" ? database["anthropic"] : undefined)
+            : database[providerID]
           // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
           const inheritedModels = existing
             ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => {

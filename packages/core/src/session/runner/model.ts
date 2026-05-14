@@ -142,6 +142,7 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
         ...(claudecode ? {
           // 标记来自已验证的 Catalog 继承；保持真实 provider ID，校准与历史匹配不能改成父 ID。
           claudeCode: true,
+          version: model.api.settings?.version,
           betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
           system: body.system,
           metadata: body.metadata,

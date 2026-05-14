@@ -929,7 +929,7 @@ describe("Anthropic Messages route", () => {
     }),
   )
   it.effect("preserves raw ClaudeCode system and fixed zero CCH on the wire", () =>
-    Effect.gen(function* () {
+    Effect.forEach([undefined, "2.1.200"], (version) => Effect.gen(function* () {
       const route = AnthropicMessages.route.with({ provider: "claudecode" })
       // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
       for (const raw of ["原始字符串", [
@@ -941,7 +941,7 @@ describe("Anthropic Messages route", () => {
             system: "Session system", messages: [Message.user([{ type: "text", text: "abcdefghijklmnopqrstuv", cache: new CacheHint({ type: "ephemeral" }) }])],
             // 四工具的优先级在所有 system 之前，history 只能领取 system 之后的剩余预算。
             tools: ["t1", "t2", "t3", "t4"].slice(0, count).map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, cache: new CacheHint({ type: "ephemeral" }) })),
-            providerOptions: { anthropic: { system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
+            providerOptions: { anthropic: { version, system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
             http: { body: { extra: "中文 cch=00000;" } },
           })
           const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input)
@@ -964,15 +964,17 @@ describe("Anthropic Messages route", () => {
           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
           const text = yield* Effect.promise(() => web.text())
           // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
-          const fp = createHash("sha256").update("59cf53e54c78ehu2.1.117").digest("hex").slice(0, 3)
-          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=`
+          const fp = createHash("sha256").update(`59cf53e54c78ehu${version ?? "2.1.117"}`).digest("hex").slice(0, 3)
+          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=${version ?? "2.1.117"}.${fp}; cc_entrypoint=cli; cch=`
           // 断言真实发包前缀固定五位零；raw/cache/metadata 的既有矩阵继续执行。
           expect(text.startsWith(`${prefix}00000;`)).toBe(true)
           expect(text).toContain("中文 cch=00000;")
           expect(text).not.toContain("You are Claude Code")
           expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
+          expect(web.headers.get("user-agent")).toBe(`claude-cli/${version ?? "2.1.117"} (external, cli)`)
+          expect(text).not.toContain('"version":')
         }
       }
-    }),
+    })),
   )
 })

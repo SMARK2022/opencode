@@ -128,19 +128,24 @@ describe("ConfigProviderPlugin.Plugin", () => {
   )
 
   it.effect("preserves configured API keys through availability and native authentication", () =>
-    Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
+    Effect.forEach([undefined, "2.1.200"], (version) => Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
       Effect.gen(function* () {
         const catalog = yield* Catalog.Service
         const integrations = yield* Integration.Service
         // 同时覆盖未决 SDK 与显式 SDK 的继承配置，空连接不能掩盖凭据缺失。
-        const providers = [ProviderV2.ID.anthropic, ProviderV2.ID.make("claudecode"), ProviderV2.ID.make("explicit-anthropic"), ProviderV2.ID.make("explicit-claudecode")]
+        const providers = [
+          ProviderV2.ID.anthropic,
+          ...(cc === undefined ? [] : [ProviderV2.ID.make("claudecode")]),
+          ProviderV2.ID.make("explicit-anthropic"), ProviderV2.ID.make("explicit-claudecode"), ProviderV2.ID.make("cubence"),
+        ]
         const id = ModelV2.ID.make("configured")
         // 与 models.dev 一样保留无连接的 Integration，不能靠无认证记录绕过 available。
         yield* integrations.transform((draft) => {
           for (const provider of providers) draft.update(Integration.ID.make(provider), (value) => { value.name = provider })
         })
         yield* catalog.transform((draft) => {
-          for (const provider of providers) {
+          draft.provider.remove(ProviderV2.ID.make("claudecode"))
+          for (const provider of providers.filter((provider) => provider !== "cubence")) {
             draft.provider.update(provider, (value) => {
               value.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: "https://configured.test/v1", settings: {} }
             })
@@ -152,13 +157,22 @@ describe("ConfigProviderPlugin.Plugin", () => {
           }
         })
         const info = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({
-          provider: Object.fromEntries(providers.map((provider, index) => [provider, {
-            ...(index < 2 ? {} : { extends: providers[index - 2], npm: "@ai-sdk/anthropic" }), options: { apiKey: "configured-key" },
+          provider: Object.fromEntries(providers.map((provider) => [provider, {
+            ...(provider.startsWith("explicit-") ? { extends: provider.slice("explicit-".length), npm: "@ai-sdk/anthropic" } : provider === "cubence" ? { extends: "claudecode" } : {}),
+            options: { apiKey: "configured-key", version },
           }])),
         }))
         yield* addPlugin(Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) }))
+        if (cc === undefined) expect(yield* catalog.provider.get(ProviderV2.ID.make("claudecode"))).toBeUndefined()
         const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
         for (const provider of providers) {
+          const claudecode = ["claudecode", "explicit-claudecode", "cubence"].includes(provider)
+          const inherited = required(yield* catalog.model.get(provider, id))
+          expect(inherited.id).toBe(id)
+          expect(inherited.providerID).toBe(provider)
+          expect(inherited.api).toMatchObject({ id: "claude-sonnet-4-5", type: "aisdk", package: "@ai-sdk/anthropic" })
+          expect(inherited.api.settings?.version).toBe(version)
+          expect(ProviderV2.isClaudeCode(inherited)).toBe(claudecode)
           expect((yield* integrations.get(Integration.ID.make(provider)))?.connections).toEqual([])
           expect((yield* catalog.model.available()).some((model) => model.providerID === provider && model.id === id)).toBe(true)
           const selection = yield* resolver.resolve(SessionSchema.Info.make({
@@ -167,21 +181,29 @@ describe("ConfigProviderPlugin.Plugin", () => {
             time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
           }))
           const selected = selection.model
+          expect(selected.id).toBe(ModelID.make("claude-sonnet-4-5"))
+          expect(selected.provider).toBe(ProviderID.make(provider))
+          expect(selected.route.id).toBe("anthropic-messages")
+          expect(selected.route.defaults.providerOptions?.anthropic?.version).toBe(claudecode ? version : undefined)
           expect(selection.pricing).toEqual([{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }])
-          const input = LLM.request({ model: selected, prompt: "hello", cache: "none", http: { ...selected.route.defaults.http, headers: selected.route.defaults.headers } })
+          const input = LLM.request({ model: selected, prompt: "hello", cache: "none", providerOptions: selected.route.defaults.providerOptions, http: { ...selected.route.defaults.http, headers: selected.route.defaults.headers } })
           const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input).pipe(Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))))
           const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
-          const claudecode = provider === "claudecode" || provider === "explicit-claudecode"
           expect(web.headers.get(claudecode ? "authorization" : "x-api-key")).toBe(claudecode ? `Bearer ${cc ?? "configured-key"}` : "configured-key")
           expect(web.headers.has(claudecode ? "x-api-key" : "authorization")).toBe(false)
           // 检查真正编码的请求，内部可用性信号不能成为发送给模型的密钥正文。
           const body = yield* Effect.promise(() => web.text())
           expect(body).not.toContain("configured-key")
           expect(body).not.toContain("fallback-key")
+          expect(body).not.toContain('"version":')
+          if (claudecode) {
+            expect(body).toContain(`cc_version=${version ?? "2.1.117"}.`)
+            expect(web.headers.get("user-agent")).toBe(`claude-cli/${version ?? "2.1.117"} (external, cli)`)
+          }
         }
       }),
-    )),
+    ))),
   )
 
   it.effect("keeps configured model variant bodies unchanged", () =>
