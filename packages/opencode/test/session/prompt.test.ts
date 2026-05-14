@@ -625,6 +625,77 @@ withMcpInstructions.instance(
   15_000,
 )
 
+
+// #150：running task tool 取消必须传播到子会话 idle（异步 settle）
+// #150：tip harness 必须 user()+prompt.loop，禁止单独 prompt fiber（否则 task 不会 running）
+it.instance(
+  "cancel propagates from running task tool to child session",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const status = yield* SessionStatus.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      // #150：用 task tool 拉起真实子会话，覆盖 cancel 传播入口
+      yield* llm.tool("task", {
+        description: "inspect bug",
+        prompt: "look into the cache key path",
+        subagent_type: "general",
+      })
+      yield* llm.hang
+      yield* user(chat.id, "run a subagent")
+      // #150：fork loop fiber（与 preserves-metadata / slash-cancel 同入口）
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      // #150：等到 task running 且带 child sessionId
+      const childID = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const taskMsg = msgs.find((item) => item.parts.some((part) => part.type === "tool" && part.tool === "task"))
+          const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
+          if (tool?.state.status !== "running") return undefined
+          const sessionID = tool.state.metadata?.sessionId
+          if (typeof sessionID !== "string") return undefined
+          return SessionID.make(sessionID)
+        }),
+        "running task tool never exposed child session id",
+        "10 seconds",
+      )
+      // #150：先等到 child busy，再 cancel，避免未启动竞态
+      yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const s = yield* status.get(childID)
+          return s.type === "busy" ? (true as const) : undefined
+        }),
+        `child ${childID} never became busy`,
+        "5 seconds",
+      )
+
+      yield* prompt.cancel(chat.id)
+      const exit = yield* Fiber.await(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      // #150：父会话 cancel 后必须 idle
+      expect((yield* status.get(chat.id)).type).toBe("idle")
+      // #150：子会话 idle 需 wait/poll，禁止瞬时 get
+      yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const s = yield* status.get(childID)
+          return s.type === "idle" ? (true as const) : undefined
+        }),
+        `child ${childID} never became idle after task cancel`,
+        "5 seconds",
+      )
+    }),
+  { config: cfg },
+  30_000,
+)
+
+
 it.instance("legacy prompt emits message events without session.next events", () =>
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
@@ -1813,9 +1884,17 @@ it.instance(
       expect(Exit.isSuccess(exit)).toBe(true)
 
       expect((yield* status.get(chat.id)).type).toBe("idle")
-      expect((yield* status.get(childID)).type).toBe("idle")
+      // #150：cancel 后 child idle 可能异步 settle，deadline poll 替代瞬时断言
+      yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const s = yield* status.get(childID)
+          return s.type === "idle" ? (true as const) : undefined
+        }),
+        `child ${childID} never became idle after cancel`,
+        "5 seconds",
+      )
     }),
-  10_000,
+  15_000,
 )
 
 it.instance(
@@ -1852,7 +1931,8 @@ it.instance(
       }
     }),
   { git: true },
-  10_000,
+  // Windows Git fixture 和模型准备也计入用例预算，取消断言仍完整保留。
+  30_000,
 )
 
 // Queue semantics
