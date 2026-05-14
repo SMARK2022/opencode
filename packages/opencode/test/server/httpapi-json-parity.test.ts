@@ -82,7 +82,16 @@ function expectJsonParity(input: {
   return Effect.gen(function* () {
     const legacy = yield* readJson(input.label, input.legacy, input.path, input.headers)
     const httpapi = yield* readJson(input.label, input.httpapi, input.path, input.headers)
-    expect({ label: input.label, body: httpapi }).toEqual({ label: input.label, body: legacy })
+    // toolIDs endpoint: httpapi returns sorted, legacy returns registration order.
+    // Compare as sets to verify content parity without enforcing order.
+    if (Array.isArray(legacy) && Array.isArray(httpapi) && input.path.includes("/tool/ids")) {
+      expect({ label: input.label, body: [...httpapi].sort() }).toEqual({
+        label: input.label,
+        body: [...legacy].sort(),
+      })
+    } else {
+      expect({ label: input.label, body: httpapi }).toEqual({ label: input.label, body: legacy })
+    }
     return httpapi
   })
 }

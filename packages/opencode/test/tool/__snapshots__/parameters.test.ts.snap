@@ -24,6 +24,10 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
       "description": "The command to execute",
       "type": "string",
     },
+    "compress_output": {
+      "description": "Whether this shell call may compress repetitive output before returning it. Defaults to the user's shell output compression setting. Set false when exact raw formatting is important.",
+      "type": "boolean",
+    },
     "description": {
       "description": 
 "Clear, concise description of what this command does in 5-10 words. Examples:
@@ -281,7 +285,7 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
       "type": "string",
     },
     "limit": {
-      "description": "The maximum number of lines to read (defaults to 2000)",
+      "description": "The maximum number of lines to read (defaults to 200)",
       "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer",

@@ -111,7 +111,10 @@ describe("cross-spawn spawner", () => {
             ChildProcess.make(process.execPath, ["-e", "process.stdout.write(process.cwd())"], { cwd: tmp.path }),
           ),
         )
-        expect(out).toBe(tmp.path)
+        // On macOS, /var is a symlink to /private/var, so the child process
+        // reports the realpath. Compare resolved paths for cross-platform correctness.
+        const expected = yield* Effect.promise(() => fs.realpath(tmp.path))
+        expect(out).toBe(expected)
       }),
     )
 

@@ -77,6 +77,8 @@ const QueryParameterSchemas = {
   "GET /find/file limit": { type: "integer", minimum: 1, maximum: 200 },
   "GET /session/{sessionID}/diff messageID": { type: "string", pattern: "^msg.*" },
   "GET /session/{sessionID}/message limit": { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  "GET /session/{sessionID}/request_usage before": { type: "number" },
+  "GET /session/{sessionID}/request_usage rootRequestID": { type: "string", pattern: "^msg.*" },
 } satisfies Record<string, OpenApiSchema>
 
 const PathParameterSchemas = {
@@ -532,6 +534,7 @@ function pathParameterSchema(route: string, name: string) {
   if (name === "id" && route.startsWith("POST /experimental/workspace/")) return { type: "string", pattern: "^wrk.*" }
   if (name === "requestID" && route.startsWith("POST /permission/")) return { type: "string", pattern: "^per.*" }
   if (name === "requestID" && route.startsWith("POST /question/")) return { type: "string", pattern: "^que.*" }
+  if (name === "requestID" && route.includes("/request_usage/")) return { type: "string", pattern: "^msg.*" }
   return undefined
 }
 

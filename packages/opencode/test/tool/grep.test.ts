@@ -112,6 +112,7 @@ describe("tool.grep", () => {
   it.instance("caps broad match output", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
+      // Generate more lines than RESULT_LIMIT (64) to trigger truncation
       const content = Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n")
       yield* Effect.promise(() => Bun.write(path.join(test.directory, "test.txt"), content))
       const info = yield* GrepTool
@@ -123,9 +124,9 @@ describe("tool.grep", () => {
         },
         ctx,
       )
-      expect(result.metadata.matches).toBe(100)
+      expect(result.metadata.matches).toBe(64)
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Found 100+ matches")
+      expect(result.output).toContain("Found 64+ matches")
       expect(result.output).toContain("Results truncated")
     }),
   )

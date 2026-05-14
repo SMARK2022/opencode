@@ -190,28 +190,10 @@ export const layer = Layer.effect(
       assistant.time.completed = now
       assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
       yield* sessions.updateMessage(assistant)
-
-      yield* Effect.forEach(
-        match.value.parts,
-        (part) => {
-          if (part.type !== "tool") return Effect.void
-          if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
-          return sessions.updatePart({
-            ...part,
-            state: {
-              status: "error",
-              input: part.state.input,
-              error: "Tool execution aborted",
-              metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
-              time: {
-                start: part.state.status === "running" ? part.state.time.start : now,
-                end: now,
-              },
-            },
-          } satisfies MessageV2.ToolPart).pipe(Effect.asVoid)
-        },
-        { discard: true },
-      )
+      // NOTE: Tool part states are NOT modified here. Each tool has its own
+      // interrupt/cancel handler that finalizes its state (e.g. bash truncates
+      // output and completes, task tool cancels child session). Forcing all
+      // running tools to "error" here would race with those handlers.
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {

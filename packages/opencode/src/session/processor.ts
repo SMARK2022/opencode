@@ -27,6 +27,7 @@ import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
 
 const DOOM_LOOP_THRESHOLD = 3
+const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
 const log = Log.create({ service: "session.processor" })
 
 export type Result = "compact" | "stop" | "continue"
@@ -676,6 +677,18 @@ export const layer: Layer.Layer<
           })
         }
         ctx.reasoningMap = {}
+
+        // On cancel, tool execution may still be unwinding from its AbortSignal.
+        // Give tool-specific abort handlers (notably bash output truncation) a
+        // chance to completeToolCall() before the generic cleanup marks leftovers
+        // as interrupted errors.
+        if (aborted) {
+          yield* Effect.forEach(
+            Object.values(ctx.toolcalls),
+            (call) => Deferred.await(call.done).pipe(Effect.timeout(ABORTED_TOOL_SETTLE_TIMEOUT), Effect.ignore),
+            { concurrency: "unbounded", discard: true },
+          )
+        }
 
         for (const call of Object.values(ctx.toolcalls)) {
           yield* Deferred.succeed(call.done, undefined).pipe(Effect.ignore)
