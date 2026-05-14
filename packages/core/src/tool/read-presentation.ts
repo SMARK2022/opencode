@@ -74,9 +74,9 @@ export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current:
 function renderContentLines(raw: readonly string[], offset: number) {
   return raw
     .map((line, i) => {
-      // #142：结构化包装字段转义；内容行 escape 防破坏 XML 结构（#145 改为原文）
-      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${escapeXmlText(line)}`
-      return `${i + offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
+      // #145：内容行保留原文，仅结构包装字段 escape；与 edit/write 操作对象一致
+      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${line}`
+      return `${i + offset}: ${line.slice(0, MAX_LINE_LENGTH)} (line truncated to ${MAX_LINE_LENGTH} chars)`
     })
     .join("\n")
 }
@@ -105,7 +105,8 @@ export function renderReadOutput(input: {
   // #142：outline 仅插入结构提示区
   if (input.outline?.items.length) {
     output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
-    output.push(input.outline.items.map(escapeXmlText).join("\n"))
+    // #145：outline 条目不转义，保留源码记号
+    output.push(input.outline.items.join("\n"))
     output.push("</outline>")
   }
   if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)

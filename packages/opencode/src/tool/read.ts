@@ -424,7 +424,8 @@ export const ReadTool = Tool.define<
           `<directory entries="${items.length}" />`,
           `<content>`,
           // #142：目录条目也 escape，结构一致
-          sliced.map(escapeXmlText).join("\n"),
+          // #145：目录名不转义，保留 & 等字符
+          sliced.join("\n"),
           `</content>`,
           // #142：目录超限用 entry_limit
           truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
