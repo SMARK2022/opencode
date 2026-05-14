@@ -4,7 +4,7 @@ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 // ============================================================================
 // 常量与基础配置
 // ============================================================================
-export const VERSION = "2.1.117" // 当前最新的 Claude Code 版本号
+export const VERSION = "2.1.117" // 默认 Claude Code 版本号，可通过 provider options.version 覆盖
 const SALT = "59cf53e54c78"
 
 // // CLI 身份声明 Block
@@ -73,12 +73,12 @@ export function computeFingerprint(messageText: string, version: string): string
  * cch 保持 00000，避免完整 body hash 污染最早 system 前缀
  */
 //  * 发包前需要依赖这里的 cch=00000 作为标记，用于后续 xxHash 替换
-export function buildBillingHeaderBlock(fp: string) {
+export function buildBillingHeaderBlock(fp: string, version = VERSION) {
   return {
     type: "text" as const,
     text: [
       `x-anthropic-billing-header:`,
-      ` cc_version=${VERSION}.${fp};`,
+      ` cc_version=${version}.${fp};`,
       ` cc_entrypoint=cli;`,
       ` cch=00000;`,
     ].join(""),
@@ -106,7 +106,8 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
 /**
  * 构建请求头
  */
-export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
+export function buildRequestHeaders(opts: { sessionId: string; modelId: string; version?: string }): Record<string, string> {
+  const version = opts.version ?? VERSION
   const betas = [
     "claude-code-20250219",
     "prompt-caching-scope-2026-01-05",
@@ -128,7 +129,7 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
     "anthropic-version": "2023-06-01",
     "anthropic-beta": betas.join(","),
     "x-app": "cli",
-    "user-agent": `claude-cli/${VERSION} (external, cli)`,
+    "user-agent": `claude-cli/${version} (external, cli)`,
     "x-claude-code-session-id": opts.sessionId,
   }
 }
@@ -262,8 +263,9 @@ export function patchCch(bodyStr: string): string {
 // Fetch 拦截与重写包装器
 // ============================================================================
 
-export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
+export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key"; version?: string }) {
   const { session, token, authMode } = opts
+  const version = opts.version ?? VERSION
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString()
@@ -290,10 +292,10 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       return ""
     })()
 
-    const fp = computeFingerprint(firstUserText, VERSION)
+    const fp = computeFingerprint(firstUserText, version)
 
     // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
-    let newSystem: any[] = [buildBillingHeaderBlock(fp)]
+    let newSystem: any[] = [buildBillingHeaderBlock(fp, version)]
     if (originalBody.system) {
       if (Array.isArray(originalBody.system)) {
         newSystem = newSystem.concat(originalBody.system)
@@ -366,7 +368,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     const finalBodyStr = JSON.stringify(patchedBody)
 
     // 7. 处理请求头与鉴权
-    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
+    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId, version })
     const requestHeaders = new Headers(init?.headers)
 
     // 合并自定义 Headers
@@ -397,7 +399,12 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 // Provider 暴露点
 // ============================================================================
 
-export function createClaudeCodeProvider(token: string, baseUrl: string, authMode: "bearer" | "x-api-key") {
+export function createClaudeCodeProvider(
+  token: string,
+  baseUrl: string,
+  authMode: "bearer" | "x-api-key",
+  opts?: { version?: string },
+) {
   const session = getSession()
 
   return {
@@ -406,6 +413,7 @@ export function createClaudeCodeProvider(token: string, baseUrl: string, authMod
       session,
       token,
       authMode,
+      version: opts?.version,
     }),
     headers: {}, // 交给内部 fetch wrapper 控制，这里不污染
   }

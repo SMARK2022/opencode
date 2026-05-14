@@ -193,7 +193,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       return {
         autoload: true,
         options: {
-          ...createClaudeCodeProvider(apiKey, baseURL, authMode),
+          ...createClaudeCodeProvider(apiKey, baseURL, authMode, { version: provider.options?.version }),
         },
         async getModel(sdk: any, modelID: string) {
           return sdk.languageModel(modelID)
@@ -1223,7 +1223,9 @@ const layer: Layer.Layer<
         for (const [providerID, provider] of configProviders) {
           // Support extends field: inherit from another provider
           const baseType = provider.extends
-          const existing = baseType ? database[baseType] : database[providerID]
+          const existing = baseType
+            ? database[baseType] ?? (baseType === "claudecode" ? database["anthropic"] : undefined)
+            : database[providerID]
           
           // ⭐ Critical fix: Clone and update inherited models' providerID
           const inheritedModels: Record<string, Model> = {}
