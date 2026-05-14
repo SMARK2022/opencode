@@ -19,6 +19,7 @@ import { createStore, produce, unwrap } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
 import { computePromptTraits } from "./traits"
+import { advanceInterruptCount, canInterruptSession, INTERRUPT_CONFIRMATION_MS } from "./interrupt"
 import { assign } from "./part"
 import { usePromptStash } from "./stash"
 import { DialogStash } from "../dialog-stash"
@@ -524,7 +525,7 @@ export function Prompt(props: PromptProps) {
         keybind: "session_interrupt",
         category: "Session",
         hidden: true,
-        enabled: status().type !== "idle",
+        enabled: canInterruptSession(props.sessionID),
         onSelect: (dialog) => {
           if (autocomplete.visible) return
           if (!input.focused) return
@@ -535,17 +536,17 @@ export function Prompt(props: PromptProps) {
           }
           if (!props.sessionID) return
 
-          setStore("interrupt", store.interrupt + 1)
+          const interrupt = advanceInterruptCount(store.interrupt)
+          setStore("interrupt", interrupt.count)
 
           setTimeout(() => {
             setStore("interrupt", 0)
-          }, 5000)
+          }, INTERRUPT_CONFIRMATION_MS)
 
-          if (store.interrupt >= 2) {
+          if (interrupt.abort) {
             void sdk.client.session.abort({
               sessionID: props.sessionID,
             })
-            setStore("interrupt", 0)
           }
           dialog.clear()
         },
