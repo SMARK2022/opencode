@@ -125,6 +125,8 @@
     "electron"
   ],
   "overrides": {
+    "@opentui/core": "catalog:",
+    "@opentui/solid": "catalog:",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
     "poe-oauth": "0.0.6"
