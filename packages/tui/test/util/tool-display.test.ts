@@ -1,5 +1,34 @@
 import { describe, expect, test } from "bun:test"
 import { toolDisplayMetadata, webSearchProviderLabel } from "../../src/util/tool-display"
+import { collapseToolOutput } from "../../src/util/collapse-tool-output"
+
+describe("collapseToolOutput previews", () => {
+  test("bounds a 10K single line by the terminal character budget", () => {
+    const output = "x".repeat(10_000)
+    const maxChars = 10 * Math.max(20, 80 - 6)
+    const preview = collapseToolOutput(output, 10, maxChars)
+    expect(preview.overflow).toBe(true)
+    expect(Array.from(preview.output).length).toBe(maxChars)
+    expect(preview.output).toBe("x".repeat(maxChars - 1) + "…")
+    expect(output.length).toBe(10_000)
+  })
+
+  test("keeps ten source lines and an overflow hint", () => {
+    const output = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n")
+    const preview = collapseToolOutput(output, 10, 1000)
+    expect(preview.output).toBe([...output.split("\n").slice(0, 10), "…"].join("\n"))
+    expect(preview.overflow).toBe(true)
+    expect(collapseToolOutput(output.split("\n").slice(0, 10).join("\n"), 10, 1000).overflow).toBe(false)
+  })
+
+  test("counts Unicode code points without splitting surrogate pairs", () => {
+    const output = String.fromCodePoint(0x1f600).repeat(10_000)
+    const preview = collapseToolOutput(output, 10, 200)
+    expect(Array.from(preview.output).length).toBe(200)
+    expect(preview.output.endsWith("…")).toBe(true)
+    expect(Array.from(preview.output).slice(0, -1).every((item) => item === String.fromCodePoint(0x1f600))).toBe(true)
+  })
+})
 
 describe("webSearchProviderLabel", () => {
   test("labels known providers", () => {

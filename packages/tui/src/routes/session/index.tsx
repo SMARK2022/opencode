@@ -1203,6 +1203,11 @@ export function Session() {
                 // #135：流式时禁用 viewportCulling，避免裁剪抖动
                 viewportCulling={!streamingActive()}
                 viewportOptions={{
+                  // #144：滚动条占位，避免消息贴到 scrollbar 轨道
+                  paddingRight: showScrollbar() ? 1 : 0,
+                }}
+                // #144：contentOptions 再留一列，viewport padding 不足以避开 overlay 字形
+                contentOptions={{
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}
                 verticalScrollbarOptions={{
@@ -1925,6 +1930,13 @@ type ToolProps = {
   output?: string
   part: ToolPart
 }
+// #144：折叠预览沿用现有行数与字符预算，避免长单行绕过限幅
+
+function previewText(input: string, maxLines: number, maxChars: number) {
+  // #144：复用 Unicode 安全的 collapseToolOutput，宽度变化仍驱动原预算。
+  return collapseToolOutput(input, maxLines, maxChars).output
+}
+
 function GenericTool(props: ToolProps) {
   const { theme } = useTheme()
   const ctx = use()
@@ -1952,9 +1964,13 @@ function GenericTool(props: ToolProps) {
         title={`# ${props.tool} ${input(props.input)}`}
         part={props.part}
         onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+        // #144：通用工具折叠预览
+        preview={
+          collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
+        }
       >
         <box gap={1}>
-          <text fg={theme.text}>{limited()}</text>
+          <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
           <Show when={collapsed().overflow}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
@@ -2132,6 +2148,8 @@ function BlockTool(props: {
   spinner?: boolean
   contextView?: boolean
   contextLabel?: string
+  // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
+  preview?: JSX.Element
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -2185,7 +2203,11 @@ function BlockTool(props: {
           </Show>
         )}
       </Show>
-      <box marginTop={1}>{props.children}</box>
+      {/* 预览是否存在由原有外层展开状态决定，容器不维护第二套折叠状态。 */}
+      <box marginTop={1}>{props.preview ?? props.children}</box>
+      <Show when={props.preview}>
+        <text fg={theme.textMuted}>Click to expand</text>
+      </Show>
       <Show when={error()}>
         <box marginTop={1}>
         <text fg={theme.error}>{error()}</text>
@@ -2256,6 +2278,13 @@ function Shell(props: ToolProps) {
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
+          // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
+          preview={
+            shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
+              // #144：Shell 预览带命令前缀
+              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(limited(), 10, maxChars())}`}</text>
+            ) : undefined
+          }
         >
           <box gap={1}>
             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
@@ -2336,6 +2365,8 @@ function Write(props: ToolProps) {
     <Switch>
       <Match when={isOverwrite()}>
         <BlockTool
+          // #144：Write diff 折叠预览
+          preview={diffOverflow() && !expanded() ? <text fg={theme.text}>{previewText(diff() ?? "", 10, maxChars())}</text> : undefined}
           title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
           part={props.part}
           onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
@@ -2375,6 +2406,8 @@ function Write(props: ToolProps) {
           title={"# Wrote " + pathFormatter.format(filepath())}
           part={props.part}
           onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
+          // #144：Write 内容折叠预览
+          preview={writeCanCollapse() && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined}
         >
           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
             <code
@@ -2686,6 +2719,8 @@ function Edit(props: ToolProps) {
     <Switch>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
         <BlockTool
+          // #144：Edit diff 折叠预览
+          preview={overflow() && !expanded() ? <text fg={theme.text}>{previewText(diffContent(), 10, 10 * Math.max(20, ctx.width - 6))}</text> : undefined}
           // 保留路径格式化与 unknown 解码，只给真实变更附加统计后缀。
           title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
@@ -2778,6 +2813,8 @@ function ApplyPatch(props: ToolProps) {
 
             return (
             <BlockTool
+              // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
+              preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <text fg={theme.text}>{previewText(file.patch || "", 10, 10 * Math.max(20, ctx.width - 6))}</text> : undefined}
               title={title(file)}
               part={props.part}
               onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
