@@ -1150,6 +1150,13 @@ export function Session() {
               viewportOptions={{
                 paddingRight: showScrollbar() ? 1 : 0,
               }}
+              contentOptions={{
+                // Reserve one content column before the overlaid scrollbar track.
+                // The viewport padding alone clips at the viewport edge, while
+                // content padding keeps message cells from rendering underneath
+                // the custom scrollbar glyphs.
+                paddingRight: showScrollbar() ? 1 : 0,
+              }}
               verticalScrollbarOptions={{
                 paddingLeft: 0,
                 visible: showScrollbar(),
@@ -1496,8 +1503,17 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       border={["left"]}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={theme.backgroundElement}
-      marginTop={1}
       flexShrink={0}
+      renderAfter={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+        const x = Math.max(0, this.screenX)
+        const y = Math.max(0, this.screenY)
+        if (x >= buffer.width || y >= buffer.height) return
+
+        // Child parts already own their first-row margin. Treat that row as the
+        // inter-message spacer and hide the assistant border there, so the
+        // border starts at the first real part without threading spacing state.
+        buffer.fillRect(x, y, 1, 1, theme.background)
+      }}
     >
       <For each={props.parts}>
         {(part, index) => {
@@ -1817,6 +1833,13 @@ type ToolProps<T> = {
   output?: string
   part: ToolPart
 }
+
+function previewText(input: string, maxLines: number) {
+  const lines = input.split("\n")
+  if (lines.length <= maxLines) return input
+  return [...lines.slice(0, maxLines), "…"].join("\n")
+}
+
 function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
   const ctx = use()
@@ -1837,6 +1860,7 @@ function GenericTool(props: ToolProps<any>) {
         maxLines={10}
         threshold={20}
         totalLines={output().split("\n").length}
+        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
       >
         <text fg={theme.text}>{output()}</text>
       </BlockTool>
@@ -1950,6 +1974,7 @@ function BlockTool(props: {
   maxLines?: number
   threshold?: number
   totalLines?: number
+  preview?: JSX.Element
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -1970,6 +1995,8 @@ function BlockTool(props: {
     }
   })
   const [expanded, setExpanded] = createSignal(false)
+  const collapsed = createMemo(() => canCollapse() && !expanded())
+
   return (
     <box
       border={["left"]}
@@ -2008,10 +2035,12 @@ function BlockTool(props: {
       </Show>
       <box
         marginTop={1}
-        maxHeight={canCollapse() && !expanded() ? previewLines() : undefined}
-        overflow={canCollapse() && !expanded() ? "hidden" : undefined}
+        maxHeight={collapsed() && !props.preview ? previewLines() : undefined}
+        overflow={collapsed() && !props.preview ? "hidden" : undefined}
       >
-        {props.children}
+        <Show when={!collapsed() || !props.preview} fallback={props.preview}>
+          {props.children}
+        </Show>
       </box>
       <Show when={canCollapse()}>
         <box marginTop={1}>
@@ -2081,6 +2110,14 @@ function Shell(props: ToolProps<typeof ShellTool>) {
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
+          preview={
+            <box gap={1}>
+              <text fg={theme.text}>$ {props.input.command}</text>
+              <Show when={output()}>
+                <text fg={theme.text}>{previewText(output(), 10)}</text>
+              </Show>
+            </box>
+          }
         >
           <box gap={1}>
             <text fg={theme.text}>$ {props.input.command}</text>
@@ -2143,6 +2180,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
           maxLines={10}
           threshold={20}
           totalLines={diffStats().total}
+          preview={<text fg={theme.text}>{previewText(diff()!, 10)}</text>}
         >
           <box gap={1} flexDirection="column">
             <box paddingLeft={1}>
@@ -2178,6 +2216,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
           maxLines={10}
           threshold={20}
           totalLines={code().split("\n").length}
+          preview={<text fg={theme.text}>{previewText(code(), 10)}</text>}
         >
           <box gap={1} flexDirection="column">
             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
@@ -2382,6 +2421,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
           maxLines={10}
           threshold={20}
           totalLines={stats().total}
+          preview={<text fg={theme.text}>{previewText(diffContent(), 10)}</text>}
         >
           <box gap={1} flexDirection="column">
             <box paddingLeft={1}>
@@ -2465,6 +2505,18 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                 maxLines={10}
                 threshold={20}
                 totalLines={(file.patch ?? "").split("\n").length}
+                preview={
+                  <Show
+                    when={file.type !== "delete"}
+                    fallback={
+                      <text fg={theme.diffRemoved} paddingLeft={1}>
+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                      </text>
+                    }
+                  >
+                    <text fg={theme.text}>{previewText(file.patch || "", 10)}</text>
+                  </Show>
+                }
               >
                 <box gap={1} flexDirection="column">
                   <Show
