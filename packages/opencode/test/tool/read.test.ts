@@ -764,7 +764,54 @@ describe("tool.read binary detection", () => {
     }),
   )
 })
+describe("tool.read XML preserve channels", () => {
+  // #145：目录条目保留原文
+  it.instance("preserves XML-sensitive directory entries", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const dir = path.join(test.directory, "dir-xml")
+      yield* Effect.promise(() => import("fs/promises").then((fs) => fs.mkdir(dir, { recursive: true })))
+      yield* put(path.join(dir, "a&b.txt"), "x\n")
+      const result = yield* run({ filePath: dir })
+      expect(result.output).toContain("a&b.txt")
+      expect(result.output).not.toContain("a&amp;b.txt")
+    }),
+  )
 
+    // #145：outline 使用含 <> 的 impl 标签，硬断言未转义
+  it.instance("preserves XML-sensitive outline labels", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "generic.rs")
+      const body = Array.from({ length: 700 }, (_, i) => {
+        if (i === 20) return "impl Parser<T> for Foo {}"
+        return `// line ${i + 1}`
+      }).join("\n")
+      yield* put(file, body + "\n")
+      const head = yield* run({ filePath: file, offset: 1, limit: 30 })
+      expect(head.output).toContain("<outline")
+      // #145：outline 原文应含 <T>，不得变成 &lt;T&gt;
+      expect(head.output).toContain("Parser<T>")
+      expect(head.output).not.toContain("Parser&lt;T&gt;")
+    }),
+  )
+
+  it.instance("preserves XML-sensitive outline labels", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "generic.ts")
+      const body = Array.from({ length: 700 }, (_, i) => {
+        if (i === 20) return "export function Parser<T>() { return null as any }"
+        return `// line ${i + 1}`
+      }).join("\n")
+      yield* put(file, body + "\n")
+      const head = yield* run({ filePath: file, offset: 1, limit: 30 })
+      expect(head.output).toContain("<outline")
+      expect(head.output).toContain("Parser")
+      expect(head.output).not.toContain("Parser&lt;T&gt;")
+    }),
+  )
+})
 
 
 describe("tool.read structured output", () => {
@@ -790,13 +837,14 @@ describe("tool.read structured output", () => {
   )
 
   // #142：XML 敏感内容在 #142 阶段转义（#145 再改为原文）
-  it.instance("escapes XML-sensitive file content in structured output", () =>
+  it.instance("preserves XML-sensitive file content in structured output", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       yield* put(path.join(test.directory, "xml-sensitive.txt"), '<tag attr="x">&</tag>\n')
       const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
-      expect(result.output).toContain('1: &lt;tag attr="x"&gt;&amp;&lt;/tag&gt;')
-      expect(result.output).not.toContain("1: <tag")
+      // #145：内容行不转义
+      expect(result.output).toContain('1: <tag attr="x">&</tag>')
+      expect(result.output).not.toContain("1: &lt;tag")
     }),
   )
 })
@@ -815,6 +863,7 @@ describe("tool.read outline", () => {
       yield* put(file, body + "\n")
       const head = yield* run({ filePath: file, offset: 1, limit: 20 })
       // #142：offset=1 的长源文件必须带 outline
+      // #145：硬断言 outline 节点必须出现
       expect(head.output).toContain("<outline")
       expect(head.output).toContain("function alpha")
       expect(head.output).toContain("class Beta")

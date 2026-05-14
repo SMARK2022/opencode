@@ -265,6 +265,26 @@ describe("ReadTool", () => {
       expect(body).toContain('reason="byte_limit"')
       expect((yield* sourceRead(50)).output?.structured).not.toHaveProperty("outline")
       // 原生 schema 和 registry 后的真实结果必须保留证据，不能只测试纯 helper。
+      const rawRead = (file: string) => settleTool(registry, { sessionID, ...toolIdentity,
+        call: { type: "tool-call", id: "raw-channel", name: "read", input: { path: file } } })
+      const xmlFile = path.join(nested, "raw.txt")
+      yield* fs.writeFileString(xmlFile, '<tag attr="x">&</tag>\n')
+      const rawFile = yield* rawRead(xmlFile)
+      const fileText = rawFile.result.type === "text" ? rawFile.result.value : ""
+      expect(fileText).toContain('1: <tag attr="x">&</tag>')
+      expect(fileText).not.toContain("&lt;tag")
+      const rawDirectory = path.join(nested, "raw-directory")
+      yield* fs.makeDirectory(rawDirectory)
+      yield* fs.writeFileString(path.join(rawDirectory, "a&b.txt"), "content")
+      const directoryResult = yield* rawRead(rawDirectory)
+      expect(directoryResult.result).toMatchObject({ type: "json", value: { entries: [{ path: "a&b.txt" }], total: 1, truncated: false } })
+      const rustFile = path.join(nested, "generic.rs")
+      yield* fs.writeFileString(rustFile, ["impl<T> Parser<T> where T: Clone {", ...Array.from({ length: 650 }, () => "// filler")].join("\n"))
+      const rustResult = yield* rawRead(rustFile)
+      const rustText = rustResult.result.type === "text" ? rustResult.result.value : ""
+      expect(rustText).toContain("1 impl Parser<T>")
+      expect(rustText).not.toContain("Parser&lt;T&gt;")
+      // 三通道经过实际 reader、schema 和统一结算，不能只用纯渲染器自证原文。
       const before = lookups
       allow = false
       expect((yield* read()).result.type).toBe("error")
