@@ -506,7 +506,11 @@ const lowerMessages = Effect.fn("AnthropicMessages.lowerMessages")(function* (
   return messages
 })
 
-const anthropicOptions = (request: LLMRequest) => request.providerOptions?.anthropic
+const anthropicOptions = (request: LLMRequest) => {
+  const options = request.providerOptions?.anthropic
+  // #147：版本只用于指纹、计费与 UA，缺省保持源版本。
+  return Object.assign({}, options, { version: typeof options?.version === "string" ? options.version : "2.1.117" })
+}
 const isClaudeCode = (request: LLMRequest) => request.model.provider === "claudecode" || anthropicOptions(request)?.claudeCode === true
 
 const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
@@ -607,12 +611,13 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
   const outputConfig = anthropicOptions(request)?.output_config
   // 指纹只服务于专用计费块；普通 Anthropic 不采样消息，也不执行无消费者的 SHA。
   const billing = claudecode ? (() => {
+    const version = anthropicOptions(request).version
     // 首 user 的首 text 采样与源 helper 一致，短消息缺失位置补字符零。
     const firstUserText = messages.find((message) => message.role === "user")?.content.find((block) => block.type === "text")?.text ?? ""
     const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
-    const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
+    const fp = createHash("sha256").update(`59cf53e54c78${chars}${version}`, "utf8").digest("hex").slice(0, 3)
     // 三位版本后缀和五位占位保持源 wire 契约，不添加身份或缓存断点。
-    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;` }]
+    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=${version}.${fp}; cc_entrypoint=cli; cch=00000;` }]
   })() : []
   return {
     // 只恢复 billing，20 撤销的两段身份没有任何新消费者。
@@ -951,7 +956,7 @@ export const route = Route.make({
           ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
         ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(","),
         "x-app": "cli",
-        "user-agent": "claude-cli/2.1.117 (external, cli)",
+        "user-agent": `claude-cli/${anthropicOptions(request).version} (external, cli)`,
         // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。
         "x-claude-code-session-id": claudeCodeSession.sessionId,
       } : {}),

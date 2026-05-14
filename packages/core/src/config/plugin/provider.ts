@@ -98,7 +98,9 @@ export const Plugin = define({
             const overrides = [...(configured.get(id) ?? []), item]
             configured.set(id, overrides)
             const baseType = overrides.findLast((layer) => layer.extends !== undefined)?.extends
-            const base = baseType === undefined ? undefined : catalog.provider.get(baseType)
+            // #147：缺少 claudecode 目录时继承 Anthropic 模型，派生身份仍由原配置决定。
+            const base = baseType === undefined ? undefined :
+              catalog.provider.get(baseType) ?? (baseType === "claudecode" ? catalog.provider.get(ProviderV2.ID.anthropic) : undefined)
             // 删除派生记录前复制基础以支持 self extends；Draft.get 不投影，空 native 占位接纳基础 API，request 保持模型原值。
             const copy = base && baseType !== undefined ? { provider: structuredClone(base.provider), models: [...base.models.values()].map((model) => ({
               ...structuredClone(model), api: structuredClone(model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 ? { ...base.provider.api, id: model.api.id } : model.api),

@@ -66,13 +66,15 @@ describe("ConfigProviderOptionsV1", () => {
         headers: { "x-test": "1" },
         body: { beta: true },
         generateId: "custom",
+        version: "2.1.200",
       }),
     ).toEqual({
       url: "https://anthropic.example",
       headers: { "x-api-key": "secret", Authorization: "Bearer token", "x-test": "1" },
       body: { beta: true },
-      settings: { generateId: "custom" },
+      settings: { generateId: "custom", version: "2.1.200" },
     })
+    expect(lowerer.provider({}).settings).not.toHaveProperty("version")
     expect(
       lowerer.request({
         effort: "high",
