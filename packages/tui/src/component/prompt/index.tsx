@@ -59,6 +59,7 @@ import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
+import { advanceInterruptCount, canInterruptSession, INTERRUPT_CONFIRMATION_MS } from "./interrupt"
 import { useLocation } from "../../context/location"
 
 registerOpencodeSpinner()
@@ -464,7 +465,8 @@ export function Prompt(props: PromptProps) {
         name: "session.interrupt",
         category: "Session",
         hidden: true,
-        enabled: status().type !== "idle",
+        // #151：sessionID 在场即可中断，不依赖可能过期的 busy status
+        enabled: canInterruptSession(props.sessionID),
         run: () => {
           if (auto()?.visible) return
           if (!input.focused) return
@@ -475,17 +477,18 @@ export function Prompt(props: PromptProps) {
           }
           if (!props.sessionID) return
 
-          setStore("interrupt", store.interrupt + 1)
+          // #151：advance 后 count 封顶 1；abort 后不立即清零，窗口内可重复 abort
+          const interrupt = advanceInterruptCount(store.interrupt)
+          setStore("interrupt", interrupt.count)
 
           setTimeout(() => {
             setStore("interrupt", 0)
-          }, 5000)
+          }, INTERRUPT_CONFIRMATION_MS)
 
-          if (store.interrupt >= 2) {
+          if (interrupt.abort) {
             void sdk.client.session.abort({
               sessionID: props.sessionID,
             })
-            setStore("interrupt", 0)
           }
           dialog.clear()
         },
