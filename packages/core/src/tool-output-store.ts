@@ -1,7 +1,7 @@
 export * as ToolOutputStore from "./tool-output-store"
 
 import path from "path"
-import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
+import { Cause, Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { Config } from "./config"
 import { FSUtil } from "./fs-util"
 import { Global } from "./global"
@@ -48,7 +48,10 @@ export interface Interface {
   readonly capture: <A, E>(
     input: Pick<BoundInput, "sessionID" | "toolCallID">,
     body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
+    onInterrupted?: () => Effect.Effect<ToolOutput>,
   ) => Effect.Effect<A, E | Error>
+  // 取消快照只供同一次 registry settlement 消费，不是另一个模型投影入口。
+  readonly interrupted: (input: Pick<BoundInput, "sessionID" | "toolCallID">) => Effect.Effect<ToolOutput | undefined>
   readonly discard: (input: Pick<BoundInput, "sessionID" | "toolCallID">) => Effect.Effect<void>
   readonly cleanup: () => Effect.Effect<void>
 }
@@ -124,7 +127,7 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const config = yield* Effect.serviceOption(Config.Service)
     // 暂存引用只属于本次 settlement，成功、失败与中断都由 registry 收尾。
-    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error> }>()
+    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
     // Session 与 call 联合定位，避免不同 Session 的同名 call 串用原文。
     const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) => JSON.stringify([input.sessionID, input.toolCallID])
     const directory = path.join(global.data, MANAGED_DIRECTORY)
@@ -157,21 +160,24 @@ const layer = Layer.effect(
     const capture = <A, E>(
       input: Pick<BoundInput, "sessionID" | "toolCallID">,
       body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
+      onInterrupted?: () => Effect.Effect<ToolOutput>,
     ) => Effect.gen(function* () {
       // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
       const chunks: Uint8Array[] = []
       let bytes = 0
-      const captured = { path: "", retain: false, flush: (): Effect.Effect<string, Error> => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
-        // 只屏蔽排他创建与路径登记；wx 失败没有所有权，不能删除碰撞文件。
+      const captured = { path: "", retain: false, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
+        // 排他创建、窗口追加与登记连续完成；wx 失败没有所有权，不能删除碰撞文件。
         if (!captured.path) captured.path = yield* write("")
-        // 路径已归本次 capture 所有，append 恢复可中断并保留失败 cause，ensuring 才能按所有权清理。
-        yield* restore(Effect.forEach(chunks, (chunk) => fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause }))), { discard: true }))
-        // 后续 flush 不能重放已写前缀，失败时直接终止本次 capture。
+        // 窗口最多 MAX_BYTES；一次追加和消费登记不可分割，取消后不能重放已写前缀。
+        if (chunks.length) yield* fs.writeFile(captured.path, Buffer.concat(chunks), { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
+        // 只有追加成功才清空窗口；写盘失败仍由原有 typed error 和所有权清理处理。
         chunks.length = 0
         bytes = 0
         return captured.path
       })) }
       let completed = false
+      const key = captureKey(input)
+      captures.set(key, captured)
       return yield* Effect.gen(function* () {
         const result = yield* body((chunk) => Effect.gen(function* () {
           if (!chunk.byteLength) return
@@ -191,10 +197,26 @@ const layer = Layer.effect(
         // 压缩或诊断损失要求原文时必须成功落盘；失败不能伪装成普通内存路径。
         if (result.retain) yield* captured.flush()
         // 未落盘窗口留到 bound 决定最终投影是否超限，退出状态也可能触发保留。
-        captures.set(captureKey(input), captured)
         completed = true
         return result.value
-      }).pipe(Effect.ensuring(Effect.suspend(() => completed || !captured.path ? Effect.void : fs.remove(captured.path).pipe(Effect.orDie))))
+      }).pipe(
+        Effect.onExit((exit) => Effect.sync(() => {
+          // 仅纯取消保留暂存；失败/defect 仍清理，registry 随后负责发布或丢弃。
+          if (exit._tag === "Failure" && Cause.hasInterruptsOnly(exit.cause) && onInterrupted) completed = true
+        })),
+        Effect.ensuring(Effect.suspend(() => {
+          if (completed) return Effect.void
+          captures.delete(key)
+          return captured.path ? fs.remove(captured.path).pipe(Effect.orDie) : Effect.void
+        })),
+      )
+    })
+    const interrupted = Effect.fn("ToolOutputStore.interrupted")(function* (input: Pick<BoundInput, "sessionID" | "toolCallID">) {
+      const captured = captures.get(captureKey(input))
+      if (!captured?.onInterrupted) return
+      // 中断本身也是呈现变化；即使小输出未超限，也应保留已观察的原文字节。
+      captured.retain = true
+      return yield* captured.onInterrupted()
     })
 
     const bound = Effect.fn("ToolOutputStore.bound")(function* (input: BoundInput) {
@@ -258,7 +280,7 @@ const layer = Layer.effect(
       }
     })
 
-    return Service.of({ limits, bound, capture, discard, cleanup })
+    return Service.of({ limits, bound, capture, interrupted, discard, cleanup })
   }),
 )
 

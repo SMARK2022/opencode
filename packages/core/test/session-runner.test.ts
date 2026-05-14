@@ -80,6 +80,11 @@ import { BackgroundJob } from "@opencode-ai/core/background-job"
 import { Global } from "@opencode-ai/core/global"
 import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 import path from "path"
+import { AppProcess } from "@opencode-ai/core/process"
+import { BashTool } from "@opencode-ai/core/tool/bash"
+import { Tools } from "@opencode-ai/core/tool/tools"
+import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
+import { tmpdir } from "./fixture/tmpdir"
 
 const environment = { ...process.env, OPENCODE_EXPERIMENTAL_PLAN_MODE: "false" }
 const requests: LLMRequest[] = []
@@ -307,6 +312,7 @@ const it = testEffect(
       ApplicationTools.node,
       AgentV2.node,
       ToolRegistry.node,
+      ToolOutputStore.node,
       ToolRegistry.toolsNode,
       echoNode,
       Catalog.node,
@@ -3891,6 +3897,108 @@ describe("SessionRunnerLLM", () => {
       response = []
       yield* session.resume(sessionID)
       expect(requests[0]?.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+    }),
+  )
+
+  it.live("retains interrupted Bash output across settlement and durable replay", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const registry = yield* ToolRegistry.Service
+      const outputStore = yield* ToolOutputStore.Service
+      const contexts = yield* SystemContextRegistry.Service
+      const events = yield* EventV2.Service
+      const db = (yield* Database.Service).db
+      const tmp = yield* Effect.acquireRelease(Effect.promise(() => tmpdir()), (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()))
+      // 小输出和超过采集窗口的输出都经过真实 Bash/decoder/store；仅替换外部进程和 provider。
+      for (const size of [16, BashTool.MAX_CAPTURE_BYTES + 16]) {
+        const id = SessionV2.ID.make(`ses_cancel_bash_${size}`)
+        const callID = `call-cancel-bash-${size}`
+        yield* insertSession(id)
+        const ready = yield* Deferred.make<void>()
+        let processClosed = false
+        const raw = `READY\n${"x".repeat(size)}\nFINAL_RESULT=42\n完成\n`
+        const processLayer = Layer.mock(AppProcess.Service, {
+          run: (_command, options) => Effect.gen(function* () {
+            if (!options?.onOutput) return yield* Effect.die("Bash must observe the process stream")
+            const bytes = Buffer.from(raw)
+            // 跨块 Unicode 的尾字节在取消前交齐，恢复原文和直接预览均不得产生替换字符。
+            yield* options.onOutput(bytes.subarray(0, bytes.length - 2))
+            yield* options.onOutput(bytes.subarray(bytes.length - 2))
+            yield* Deferred.succeed(ready, undefined)
+            return yield* Effect.never
+          }).pipe(Effect.ensuring(Effect.sync(() => { processClosed = true }))),
+        })
+        const bash = AppNodeBuilder.build(BashTool.node, [
+          [ToolRegistry.node, Layer.merge(Layer.succeed(ToolRegistry.Service, registry), Layer.succeed(Tools.Service, Tools.Service.of({ register: registry.register })))],
+          [ToolOutputStore.node, Layer.succeed(ToolOutputStore.Service, outputStore)],
+          [Location.node, Location.boundNode({ directory: AbsolutePath.make(tmp.path) })],
+          [SystemContextRegistry.node, Layer.succeed(SystemContextRegistry.Service, contexts)],
+          [Config.node, config],
+          [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: () => Effect.void })],
+          [AppProcess.node, processLayer],
+        ])
+        yield* Effect.gen(function* () {
+          yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Run then interrupt" }), resume: false })
+          responseStream = Stream.concat(Stream.fromIterable([
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.toolCall({ id: callID, name: "bash", input: { command: "echo ready", compress_output: false } }),
+          ]), Stream.never)
+          const release = yield* Deferred.make<void>()
+          const off = yield* events.listen((event) => event.type === SessionEvent.Tool.Progress.type ? Deferred.await(release) : Effect.void)
+          yield* Effect.addFinalizer(() => off.pipe(Effect.andThen(Deferred.succeed(release, undefined)), Effect.asVoid))
+          const run = yield* session.resume(id).pipe(Effect.forkChild)
+          yield* Deferred.await(ready).pipe(Effect.timeout("3 seconds"))
+          // 普通监听器故意阻塞；取消末尾的 durable progress 必须使用退出安全通知。
+          const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, undefined)), Effect.forkChild)
+          yield* session.interrupt(id).pipe(Effect.timeout("1 second"))
+          expect(yield* Deferred.isDone(release)).toBe(false)
+          yield* Fiber.interrupt(rescue)
+          yield* off
+          yield* Deferred.succeed(release, undefined)
+          const exit = yield* Fiber.await(run)
+          expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+          expect(processClosed).toBe(true)
+          const messages = yield* session.context(id)
+          const tool = messages.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")
+          if (tool?.type !== "tool" || tool.state.status !== "error") return yield* Effect.die("Expected an interrupted tool, never Success")
+          expect(tool.state.structured).toMatchObject({ interrupted: true, truncated: size > BashTool.MAX_CAPTURE_BYTES })
+          expect(tool.state.structured).not.toHaveProperty("exit")
+          expect(tool.state.structured).not.toHaveProperty("timeout")
+          const text = tool.state.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+          expect(text).toContain("FINAL_RESULT=42")
+          expect(text).toContain("完成")
+          expect(text).toContain("Command interrupted before completion.")
+          expect(text).not.toContain("�")
+          if (size === 16) expect(text).toContain("READY")
+          expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+          const retained = /captured raw output saved to (.+?) \.\.\./.exec(text)?.[1]
+          if (!retained) return yield* Effect.die("Expected the canonical raw recovery marker")
+          // 进程与 capture 已退出后仍能恢复全部原文，不能只检查一个会被 cleanup 删除的路径。
+          expect(Buffer.from(yield* Effect.promise(() => Bun.file(retained).arrayBuffer()))).toEqual(Buffer.from(raw))
+          const recorded = yield* db.select({ type: EventTable.type }).from(EventTable).where(eq(EventTable.aggregate_id, id)).orderBy(asc(EventTable.seq)).all().pipe(Effect.orDie)
+          const types = recorded.map((row) => row.type)
+          const progress = EventV2.versionedType(SessionEvent.Tool.Progress.type, 1)
+          const failed = EventV2.versionedType(SessionEvent.Tool.Failed.type, 1)
+          expect(types.filter((type) => type === progress)).toHaveLength(1)
+          expect(types.filter((type) => type === failed)).toHaveLength(1)
+          expect(types.indexOf(progress)).toBeLessThan(types.indexOf(failed))
+          expect(types).not.toContain(EventV2.versionedType(SessionEvent.Tool.Success.type, 1))
+          yield* replaySessionProjection(id)
+          expect(yield* session.context(id)).toEqual(messages)
+          expect(Buffer.from(yield* Effect.promise(() => Bun.file(retained).arrayBuffer()))).toEqual(Buffer.from(raw))
+          // 真实下一轮 request 必须同时携带失败状态和保留下来的正文，不用手工拼装 model messages 自证。
+          requests.length = 0
+          responseStream = undefined
+          response = []
+          yield* session.resume(id)
+          const result = requests[0]?.messages.find((message) => message.role === "tool")
+          expect(result).toBeDefined()
+          expect(JSON.stringify(result)).toContain("FINAL_RESULT=42")
+          expect(JSON.stringify(result)).toContain(JSON.stringify(retained).slice(1, -1))
+          expect(JSON.stringify(result)).toContain("Tool execution interrupted")
+        }).pipe(Effect.provide(bash))
+      }
     }),
   )
 

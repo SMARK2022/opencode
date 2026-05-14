@@ -31,6 +31,9 @@ import type { EventV2 } from "@opencode-ai/core/event"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 import { Token } from "@opencode-ai/core/util/token"
 
+// #149：取消时给 bash 等工具完成截断/complete 的宽限
+const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
+
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
 
@@ -659,6 +662,15 @@ const layer = Layer.effect(
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
+        // #149：取消时先等 tool done（超时后仍走通用 interrupted 清理）
+        if (aborted) {
+          yield* Effect.forEach(
+            Object.values(ctx.toolcalls),
+            (call) => Deferred.await(call.done).pipe(Effect.timeout(ABORTED_TOOL_SETTLE_TIMEOUT), Effect.ignore),
+            { concurrency: "unbounded", discard: true },
+          )
+        }
+
         // #139：中断时跳过慢 git snapshot，优先完成终端态清理
         if (ctx.snapshot && !aborted) {
           const patch = yield* snapshot.patch(ctx.snapshot)

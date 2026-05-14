@@ -71,6 +71,9 @@ const QueryParameterSchemas: Record<string, OpenApiSchema> = {
   "GET /api/session start": { type: "number" },
   "GET /api/session roots": QueryBooleanOpenApi,
   "GET /api/session/{sessionID}/message limit": { type: "number" },
+  // #149：request_usage 查询参数 OpenAPI 形态
+  "GET /session/{sessionID}/request_usage before": { type: "number" },
+  "GET /session/{sessionID}/request_usage rootRequestID": { type: "string", pattern: "^msg.*" },
 }
 
 const LegacyComponentDescriptions: Record<string, string> = {
@@ -512,6 +515,12 @@ function flattenOptions(options: OpenApiSchema[] | undefined): OpenApiSchema[] |
 }
 
 function normalizeParameter(param: OpenApiParameter, route: string) {
+  // #149：request_usage path requestID 必须是 msg*（就地写入，调用方不接返回值）
+  if (param.in === "path" && (param as { name?: string }).name === "requestID" && route.includes("/request_usage/")) {
+    param.schema = { type: "string", pattern: "^msg.*" }
+    return
+  }
+
   if (!param.schema || typeof param.schema !== "object") return
   if (param.in === "path") {
     param.schema = stripOptionalNull(param.schema)

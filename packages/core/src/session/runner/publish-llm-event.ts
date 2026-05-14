@@ -244,6 +244,18 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
     return tool ? Effect.succeed(tool.assistantMessageID) : Effect.die(`Unknown tool call: ${callID}`)
   }
 
+  const interruptedOutput = Effect.fn("SessionRunner.interruptedToolOutput")(function* (callID: string, output: ToolOutput) {
+    // 先保存正文，再由既有终态清理发布 Failed；不可用 Success 伪装取消完成。
+    yield* events.publish(SessionEvent.Tool.Progress, {
+      sessionID: input.sessionID,
+      timestamp: yield* timestamp,
+      assistantMessageID: yield* assistantMessageIDForTool(callID),
+      callID,
+      structured: record(output.structured),
+      content: output.content,
+    }, { finalizer: true })
+  })
+
   const publish = Effect.fn("SessionRunner.publishLLMEvent")(function* (
     event: LLMEvent,
     outputPaths: ReadonlyArray<string> = [],
@@ -418,6 +430,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
 
   return {
     publish,
+    interruptedOutput,
     flush,
     failAssistant,
     failUnsettledTools,
