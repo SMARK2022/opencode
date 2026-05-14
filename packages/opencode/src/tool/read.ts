@@ -247,8 +247,10 @@ function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
 function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
   return file.raw
     .map((line, i) => {
-      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${escapeXmlText(line)}`
-      return `${i + file.offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
+      // Keep source text verbatim. Only structural wrapper fields are escaped;
+      // content lines must match what edit/write would operate on.
+      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${line}`
+      return `${i + file.offset}: ${line.slice(0, MAX_LINE_LENGTH)} (line truncated to ${MAX_LINE_LENGTH} chars)`
     })
     .join("\n")
 }
@@ -275,7 +277,7 @@ function renderReadOutput(input: {
 
   if (input.outline?.items.length) {
     output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
-    output.push(input.outline.items.map(escapeXmlText).join("\n"))
+    output.push(input.outline.items.join("\n"))
     output.push("</outline>")
   }
 
@@ -492,7 +494,7 @@ export const ReadTool = Tool.define(
             `<type>directory</type>`,
             `<directory entries="${items.length}" />`,
             `<content>`,
-            sliced.map(escapeXmlText).join("\n"),
+            sliced.join("\n"),
             `</content>`,
             truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
           ]

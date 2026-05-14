@@ -329,14 +329,14 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  it.instance("escapes XML-sensitive file content in structured output", () =>
+  it.instance("preserves XML-sensitive file content in structured output", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       yield* put(path.join(test.directory, "xml-sensitive.txt"), "<tag attr=\"x\">&</tag>")
 
       const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
-      expect(result.output).toContain("1: &lt;tag attr=\"x\"&gt;&amp;&lt;/tag&gt;")
-      expect(result.output).not.toContain("1: <tag")
+      expect(result.output).toContain("1: <tag attr=\"x\">&</tag>")
+      expect(result.output).not.toContain("1: &lt;tag")
     }),
   )
 
@@ -448,6 +448,17 @@ describe("tool.read truncation", () => {
       const result = yield* exec(dir, { filePath: path.join(dir, "dir"), offset: 6, limit: 5 })
       expect(result.metadata.truncated).toBe(false)
       expect(result.output).not.toContain("Showing 5 of 10 entries")
+    }),
+  )
+
+  it.live("preserves XML-sensitive directory entries", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "dir", "a&b.txt"), "content")
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "dir") })
+      expect(result.output).toContain("a&b.txt")
+      expect(result.output).not.toContain("a&amp;b.txt")
     }),
   )
 
@@ -706,6 +717,22 @@ describe("tool.read outline", () => {
 
       const body = yield* exec(dir, { filePath, offset: 100, limit: 20 })
       expect(body.output).not.toContain("<outline")
+    }),
+  )
+
+  it.live("preserves XML-sensitive outline labels", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "large.rs")
+      const source = [
+        "impl<T> Parser<T> where T: Clone {",
+        ...Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`),
+      ].join("\n")
+      yield* put(filePath, source)
+
+      const result = yield* exec(dir, { filePath, limit: 20 })
+      expect(result.output).toContain("1 impl Parser<T>")
+      expect(result.output).not.toContain("Parser&lt;T&gt;")
     }),
   )
 
