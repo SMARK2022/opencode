@@ -1102,6 +1102,7 @@
     "@types/node": "catalog:",
     "bun-types": "1.4.4",
     "open": "11.0.4",
+    "opentui-spinner": "catalog:",
     "poe-oauth": "0.0.6",
   },
   "catalog": {
