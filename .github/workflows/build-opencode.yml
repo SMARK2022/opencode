@@ -1,15 +1,24 @@
-# #104：版本从 packages/opencode/package.json 自动提取；GitHub Release 直传资产
+# #156：SMARK CLI 构建与 GitHub Release 工作流
 name: Build OpenCode CLI
 
+# #156：push dev-smark 与手动 workflow_dispatch
 on:
-  # #104：去掉 version input，避免与 package.json 双源
+  # #156：手动触发不依赖 push，可单独发布紧急修复版
   workflow_dispatch:
-  # push 自动触发：dev-smark + 路径过滤（含 setup-bun 变更）
+    inputs:
+      # #156：inputs.version 非空才覆盖；空串与未传等同，避免 workflow 与包版本双源漂移
+      version:
+        # #156：显式版本允许 v 前缀，脚本内统一去 v 后再拼接 tag
+        description: "Override version, for example 1.14.42-smark. Empty means packages/opencode/package.json version."
+        required: false
+        type: string
   push:
     branches:
       - dev-smark
     paths:
       - ".github/workflows/build-opencode.yml"
+      # #156：保留 tip setup-bun 路径触发，工具链变更必重建
+      - ".github/actions/setup-bun/action.yml"
       - "packages/opencode/**"
       # 原 CLI 产品已拆到这些运行时 owner，独立改动也须触发构建，避免仅旧目录命中而漏包
       - "packages/core/**"
@@ -20,103 +29,209 @@ on:
       - "packages/server/**"
       - "package.json"
       - "bun.lock"
-      # #104：setup-bun 变更必须触发重建，避免工具链静默陈旧
-      - ".github/actions/setup-bun/action.yml"
+      # #156：install 变更触发重建，保证 release 脚本同步
+      - "install"
 
+# #156：顶层 permissions 供 release 写权限
+permissions:
+  # #156：仅申请 contents:write：重试上传不需要 actions 写权限，最小权限原则
+  contents: write
+
+# #156：同 ref+version 串行且不 cancel 半成品 release
+concurrency:
+  group: build-opencode-${{ github.ref }}-${{ github.event.inputs.version || 'package-json' }}
+  # #156：cancel-in-progress: false：被顶替的旧构建仍完成上传，避免 release 资产缺失
+  cancel-in-progress: false
+
+# #156：version→build-*→checksums 流水线
 jobs:
-  # #104：唯一版本源 = packages/opencode/package.json，读失败 fail-closed
   version:
+    # #156：checksums 与 linux 同 runner：下载 artifact 无平台约束，省 macOS 配额
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pkg.outputs.version }}
       tag: ${{ steps.pkg.outputs.tag }}
     steps:
+      # #156：检出触发 ref：version 从 package.json 读默认号，build 用同源码
       - uses: actions/checkout@v4
+
+      # #156：version/tag 作为 job 输出供 build 消费，避免各 job 重复解析造成版本不一致
       - id: pkg
         shell: bash
         run: |
+          # #156：版本读取失败 fail-closed，禁止默认常量
           set -euo pipefail
-          # #104：node 同步读 package.json.version，禁止默认常量回退
-          VERSION="$(node -p "require('./packages/opencode/package.json').version")"
-          # #104：空/undefined 立即失败，避免错误 tag 静默发布
+
+          VERSION="${{ github.event.inputs.version || '' }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(node -p "require('./packages/opencode/package.json').version")"
+          fi
+
+          VERSION="${VERSION#v}"
+
           if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
-            echo "Failed to read packages/opencode/package.json version" >&2
+            echo "Failed to resolve packages/opencode/package.json version" >&2
             exit 1
           fi
-          TAG="v${VERSION}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
 
-  # #104：若不存在对应 tag 的 release 则创建
-  ensure-release:
-    runs-on: ubuntu-latest
-    needs: [version]
-    permissions:
-      contents: write
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+          echo "Resolved tag: v$VERSION"
+
+  # #156：mac 双架构构建与 codesign
+  build-macos:
+    # #156：needs 显式声明：version 失败时 build 不以空版本号产出错误资产
+    needs: version
+    # #156：单 job 双 target：共享 bun 缓存，比 matrix 拆分省一半 setup 时间
+    runs-on: macos-latest
     steps:
-      - name: Ensure GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
-          VERSION: ${{ needs.version.outputs.version }}
+      - uses: actions/checkout@v4
+
+      # #156：composite action 单一来源：本地 workflow 与上游工具链升级自动同步
+      - uses: ./.github/actions/setup-bun
+
+      - name: Build macOS binaries
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists"
-          else
-            # #104：新建 release 锚定当前 SHA
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$TAG" \
-              --notes "OpenCode smark build $VERSION"
-          fi
+          cd packages/opencode
+          # #156：同一 build.ts 产三平台：构建参数差异只在一处维护
+          bun run script/build.ts \
+            --version=${{ needs.version.outputs.version }} \
+            --os=darwin \
+            --skip-embed-web-ui
 
-  # Linux：tar.gz + deb → release
+      - name: Sign and package macOS assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIST="packages/opencode/dist"
+          ASSETS="release-assets"
+          mkdir -p "$ASSETS"
+
+          package_macos_target() {
+            local target="$1"
+            local bin="${DIST}/${target}/bin/opencode"
+            local out="${ASSETS}/${target}.zip"
+
+            if [ ! -f "$bin" ]; then
+              echo "Missing macOS binary: $bin" >&2
+              exit 1
+            fi
+
+            chmod +x "$bin"
+
+            # Ad-hoc signing prevents stale/broken signatures on downloaded CLI binaries.
+            # #156：mac adhoc 签名降低 Gatekeeper 误杀
+            codesign --force --sign - --timestamp=none "$bin"
+            codesign --verify --verbose=4 "$bin"
+
+            rm -f "$out"
+            (
+              cd "${DIST}/${target}/bin"
+              # #156：系统 zip 保证跨 runner 一致：Compress-Archive 在 PS7 下才稳定
+              zip -9 -q "${GITHUB_WORKSPACE}/${out}" opencode
+            )
+
+            echo "Created $out"
+          }
+
+          package_macos_target opencode-darwin-arm64
+          package_macos_target opencode-darwin-x64
+
+          ls -lah "$ASSETS"
+
+      - name: Upload macOS workflow artifacts
+        # #156：构建产物先 artifact，延迟统一上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-macos
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release-assets/opencode-darwin-arm64.zip
+            release-assets/opencode-darwin-x64.zip
+
+  # #156：Linux 需 dpkg-dev 打 deb：runner 预装但 apt 缓存可能失效，先显式安装
   build-linux:
+    needs: version
     runs-on: ubuntu-latest
-    needs: [version, ensure-release]
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-      # setup-bun 从根 packageManager 取 Bun 版本，并保留缓存及 Windows hoisted 安装分支
+
       - uses: ./.github/actions/setup-bun
 
-      # build.ts 会清空 dist，三平台在各自 runner 执行构建，不能共享同一构建目录
-      - name: Build Linux
+      - name: Install Linux packaging tools
+        shell: bash
         run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev
+
+      - name: Build Linux binaries
+        shell: bash
+        run: |
+          set -euo pipefail
           cd packages/opencode
-          # --skip-embed-web-ui 同时排除文件映射与 UI entrypoint，沿用上游 CLI-only 构建入口
-          # #104：--version 仅来自 package.json 解析结果
-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=linux --skip-embed-web-ui
+          bun run script/build.ts \
+            --version=${{ needs.version.outputs.version }} \
+            --os=linux \
+            --skip-embed-web-ui
 
-      - name: Package Linux tar.gz
+      - name: Package Linux assets
+        shell: bash
         run: |
-          VERSION="${{ needs.version.outputs.version }}"
-          cd packages/opencode/dist/opencode-linux-x64/bin
-          # bin 位于 dist/<target>/bin，回退两级才与 upload-artifact 的 dist 路径一致
-          # #103：相对 bin 的 ../../ 落到 dist/
-          tar -czf ../../opencode-linux-x64-${VERSION}.tar.gz opencode
+          set -euo pipefail
 
-      - name: Package Linux .deb
-        # YAML 自动剥离公共缩进，control/EOF 顶格；Description 续行仍多一空格。
-        run: |
           VERSION="${{ needs.version.outputs.version }}"
-          DEB_DIR="/tmp/deb_build"
-          PKG_NAME="opencode_${VERSION}_amd64"
-          BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
-          # 保留源包的 usr/local/bin 安装位置，control 必须放在包根的 DEBIAN 目录
-          mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
-          mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
-          cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
-          # 复制后显式赋予执行位，避免归档或 runner 文件权限影响安装后的 CLI 启动
-          chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
-          # Description 续行保留第十一空格，剥离公共缩进后仍是 Debian 必需的单空格续行
-          # Linux deb 的 amd64 元数据只对应 x64 二进制，不能把 arm64 混入同一包
-          cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
+          DIST="packages/opencode/dist"
+          ASSETS="release-assets"
+          mkdir -p "$ASSETS"
+
+          package_linux_tarball() {
+            local target="$1"
+            local bin="${DIST}/${target}/bin/opencode"
+            local out="${ASSETS}/${target}.tar.gz"
+
+            if [ ! -f "$bin" ]; then
+              echo "Skip missing Linux binary: $bin"
+              return 0
+            fi
+
+            chmod +x "$bin"
+            (
+              cd "${DIST}/${target}/bin"
+              # #156：资产名含 os/arch 是 install 候选探测契约，改名即断 404 回退链
+              tar -czf "${GITHUB_WORKSPACE}/${out}" opencode
+            )
+
+            echo "Created $out"
+          }
+
+          package_linux_tarball opencode-linux-x64
+          package_linux_tarball opencode-linux-arm64
+
+          if [ ! -f "${ASSETS}/opencode-linux-x64.tar.gz" ]; then
+            echo "Required Linux x64 asset was not created" >&2
+            exit 1
+          fi
+
+          # Debian/Ubuntu package for amd64. This intentionally uses /usr/local/bin
+          # to match the current manual binary install convention for this fork.
+          DEB_ROOT="/tmp/opencode-deb"
+          PKG_DIR="${DEB_ROOT}/opencode_${VERSION}_amd64"
+          BINARY="${DIST}/opencode-linux-x64/bin/opencode"
+          DEB_OUT="${ASSETS}/opencode_${VERSION}_amd64.deb"
+
+          rm -rf "$DEB_ROOT"
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/local/bin"
+
+          install -m 0755 "$BINARY" "${PKG_DIR}/usr/local/bin/opencode"
+
+          cat > "${PKG_DIR}/DEBIAN/control" <<EOF
           Package: opencode
           Version: ${VERSION}
           Section: utils
@@ -126,102 +241,210 @@ jobs:
           Description: opencode AI-powered development tool (smark build)
            A standalone AI coding assistant with TUI, version ${VERSION}.
           EOF
-          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
 
-      - name: Upload Linux assets to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # #104：gh release upload 替代 upload-artifact
-          gh release upload "$TAG" \
-            packages/opencode/dist/opencode-linux-x64-*.tar.gz \
-            packages/opencode/dist/opencode_*_amd64.deb \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          # dpkg control files must not contain leading indentation.
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
 
-  # #104：macOS 双架构 tar.gz 直传 release
-  build-macos:
-    runs-on: macos-latest
-    needs: [version, ensure-release]
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-bun
+          # #156：deb 打包；control 禁止 leading indent
+          dpkg-deb --build "$PKG_DIR" "$DEB_OUT"
 
-      - name: Build macOS
-        run: |
-          cd packages/opencode
-          # --os=darwin 选择双架构而非 runner 本机架构，不能替换为 --single
-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=darwin --skip-embed-web-ui
+          ls -lah "$ASSETS"
 
-      - name: Package macOS tar.gz
-        run: |
-          # VERSION shell 变量：统一两架构的命名，避免重复展开 GitHub 表达式
-          VERSION="${{ needs.version.outputs.version }}"
-          # darwin 目标名来自 build.ts，保持原生目录名以匹配两架构打包路径
-          cd packages/opencode/dist/opencode-darwin-arm64/bin
-          tar -czf ../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
-          cd ../../opencode-darwin-x64/bin
-          tar -czf ../../opencode-darwin-x64-${VERSION}.tar.gz opencode
+      - name: Upload Linux workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-linux
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release-assets/opencode-linux-x64.tar.gz
+            release-assets/opencode-linux-arm64.tar.gz
+            release-assets/opencode_*_amd64.deb
 
-      - name: Upload macOS assets to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release upload "$TAG" \
-            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz \
-            packages/opencode/dist/opencode-darwin-x64-*.tar.gz \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
-
-  # Windows x64：#103 arch；#104 裸 exe 上传 release
+  # #156：Windows x64 构建保留 MSVC 工具链
   build-windows:
+    needs: version
+    # #156：保留 node/python：sharp 等 native 模块在 Windows 构建时需 node-gyp 工具链
     runs-on: windows-latest
-    needs: [version, ensure-release]
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-      # setup-bun 已提供 Node 24；Python 必须先就绪，供其安装阶段的 node-gyp 使用
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # MSBuild 先于 setup-bun 的依赖安装，保留 Windows 原生 addon 的编译工具链入口
+
       - uses: microsoft/setup-msbuild@v2
+
       - uses: ./.github/actions/setup-bun
 
-      - name: Build Windows x64
+      - name: Build Windows x64 binary
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           cd packages/opencode
           bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
 
-      - name: Package Windows x64 exe
+      - name: Package Windows assets
         shell: pwsh
         run: |
-          # #104：发布裸 exe（相对 zip）
-          $VERSION = "${{ needs.version.outputs.version }}"
-          Copy-Item "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe" "packages/opencode/dist/opencode-windows-x64-$VERSION.exe" -Force
+          $ErrorActionPreference = "Stop"
 
-      - name: Upload Windows assets to release
-        shell: pwsh
+          $Dist = "packages/opencode/dist"
+          $Source = Join-Path $Dist "opencode-windows-x64/bin/opencode.exe"
+          $Assets = "release-assets"
+          $Stage = Join-Path $env:RUNNER_TEMP "opencode-windows-x64"
+          $ZipOut = Join-Path $Assets "opencode-windows-x64.zip"
+          $ExeOut = Join-Path $Assets "opencode-windows-x64.exe"
+
+          if (!(Test-Path $Source)) {
+            throw "Missing Windows binary: $Source"
+          }
+
+          New-Item -ItemType Directory -Force -Path $Assets | Out-Null
+          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+
+          # #156：裸 exe 与 zip 双资产：install 的 exe 直装分支按候选名探测
+          Copy-Item $Source (Join-Path $Stage "opencode.exe") -Force
+          Copy-Item $Source $ExeOut -Force
+
+          if (Test-Path $ZipOut) {
+            Remove-Item $ZipOut -Force
+          }
+
+          Compress-Archive -Path (Join-Path $Stage "opencode.exe") -DestinationPath $ZipOut -CompressionLevel Optimal
+
+          Get-ChildItem $Assets | Format-Table Name, Length
+
+      - name: Upload Windows workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-windows
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release-assets/opencode-windows-x64.zip
+            release-assets/opencode-windows-x64.exe
+
+  # #156：artifact 聚合 + checksums.txt + install 入 release
+  checksums:
+    needs:
+      - version
+      - build-macos
+      - build-linux
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release workflow artifacts
+        # #156：merge-multiple 平铺目录：免逐平台拼路径，find 可枚举全部资产
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Add install script and generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # fail-closed：仓库缺 install 脚本时中止，不发布残缺资产
+          if [ ! -f install ]; then
+            echo "Missing repository install script at ./install" >&2
+            exit 1
+          fi
+
+          # install 脚本与二进制同批发布：用户 curl 到的脚本与资产版本永远对齐
+          cp install release-assets/install
+          chmod +x release-assets/install
+
+          cd release-assets
+
+          echo "Release assets before checksums:"
+          # #156：find 而非 glob：资产名含 os/arch 组合，新平台资产自动进 checksums
+          find . -maxdepth 1 -type f -printf '%f\n' | sort
+
+          find . -maxdepth 1 -type f ! -name checksums.txt -printf '%f\0' \
+            | sort -z \
+            | xargs -0 sha256sum > checksums.txt
+
+          echo "==== checksums.txt ===="
+          cat checksums.txt
+
+      - name: Create release if missing
+        env:
+          # #156：GITHUB_TOKEN 而非 PAT：同仓库 release 写入已授权且永不过期
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; assets will be replaced in the next step."
+          else
+            # #156：release 创建下沉到 checksums，避免空 release
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes "OpenCode smark build $VERSION"
+          fi
+
+      - name: Upload release assets with retry
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
-          $files = @(Get-ChildItem "packages/opencode/dist/opencode-windows-x64-*.exe" -ErrorAction Stop)
-          if ($files.Count -eq 0) {
-            # #104：无 exe 硬失败，禁止空 release
-            throw "No Windows exe assets found"
+          set -euo pipefail
+
+          # #156：上传重试函数，瞬时 API 失败可恢复
+          upload_with_retry() {
+            local file="$1"
+            # #156：上传重试上限，避免无限挂起
+            local max_attempts=5
+            local attempt=1
+
+            while true; do
+              echo "Uploading ${file} attempt ${attempt}/${max_attempts}"
+
+              # #156：统一上传点：--clobber 幂等，重试不会产生 -1 后缀副本
+              if gh release upload "$TAG" "$file" \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber; then
+                echo "Uploaded ${file}"
+                return 0
+              fi
+
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "Failed to upload ${file} after ${max_attempts} attempts" >&2
+                return 1
+              fi
+
+              # #156：15s×attempt 线性退避：release 上传 429 多为瞬时窗口，指数退避反而拉长失败反馈
+              sleep $(( attempt * 15 ))
+              attempt=$(( attempt + 1 ))
+            done
           }
-          foreach ($file in $files) {
-            gh release upload $env:TAG $file.FullName --repo $env:GITHUB_REPOSITORY --clobber
-          }
+
+          cd release-assets
+
+          mapfile -t files < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+
+          echo "Uploading release assets:"
+          printf '  %s\n' "${files[@]}"
+
+          for file in "${files[@]}"; do
+            upload_with_retry "$file"
+          done
