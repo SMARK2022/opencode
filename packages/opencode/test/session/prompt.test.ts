@@ -676,7 +676,8 @@ it.instance(
         "5 seconds",
       )
 
-      yield* prompt.cancel(chat.id)
+      // 单次 cancel 触发全量清理，验证不依赖多次调用
+    yield* prompt.cancel(chat.id)
       const exit = yield* Fiber.await(fiber)
       expect(Exit.isSuccess(exit)).toBe(true)
       // #150：父会话 cancel 后必须 idle
@@ -1666,6 +1667,64 @@ it.instance(
       expect((yield* status.get(chat.id)).type).toBe("idle")
     }),
   3_000,
+)
+
+it.instance("cancel aborts all visible unfinished assistants", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const first = yield* user(chat.id, "first")
+    const firstAssistant: SessionV1.Assistant = {
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: first.id,
+      sessionID: chat.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+    }
+    // 第一个 assistant 带 text part（可见未完成），第二个为空体（应被 repair 隐藏）
+    yield* sessions.updateMessage(firstAssistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: firstAssistant.id,
+      sessionID: chat.id,
+      type: "text",
+      text: "partial",
+    })
+
+    const second = yield* user(chat.id, "second")
+    // 复用同一 providerID/modelID，排除与取消语义无关的字段差异
+    const secondAssistant: SessionV1.Assistant = {
+      ...firstAssistant,
+      id: MessageID.ascending(),
+      parentID: second.id,
+      time: { created: Date.now() },
+    }
+    yield* sessions.updateMessage(secondAssistant)
+
+    yield* prompt.cancel(chat.id)
+
+    // #153：cancel 覆盖全部未完成 assistant；空体者额外标记 repair 隐藏
+    // stream 为 newest-first，reverse 后与创建顺序一致，便于按下标断言
+    const msgs = (yield* MessageV2.stream(chat.id, { includeHidden: true })).slice().reverse()
+    const aborted = msgs.filter(
+      (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } => msg.info.role === "assistant",
+    )
+    // 长度断言确保 cancel 恰好覆盖两条可见未完成 assistant，无遗漏无重复
+    expect(aborted).toHaveLength(2)
+    expect(aborted[0]?.info.time.completed).toBeDefined()
+    expect(aborted[0]?.info.error?.name).toBe("MessageAbortedError")
+    expect(aborted[1]?.info.time.completed).toBeDefined()
+    expect(aborted[1]?.info.error?.name).toBe("MessageAbortedError")
+    expect(aborted[1]?.info.hidden?.reason).toBe("repair-empty-dangling-assistant")
+  }),
 )
 
 // Cancel semantics

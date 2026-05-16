@@ -1,5 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Effect, Layer, Context, Schema, Option } from "effect"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Snapshot } from "../snapshot"
@@ -9,6 +9,7 @@ import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { SessionRunState } from "./run-state"
 import { SessionSummary } from "./summary"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 
 export const RevertInput = Schema.Struct({
   sessionID: SessionID,
@@ -108,11 +109,28 @@ const layer = Layer.effect(
       const remove = index < 0 ? [] : msgs.slice(index + (session.revert.partID ? 1 : 0))
       for (const msg of remove) {
         // #98：软隐藏而非物理删除，保留 DB 行
-        yield* sessions.updateMessage({
+        // #153：undo 时未完成 assistant 先终态化再 soft-hide
+        const next = {
           ...msg.info,
           // #98：cleanup 写 hidden 而非 MessageRemoved
-          hidden: { time: Date.now(), reason: "undo" },
-        })
+          hidden: { time: Date.now(), reason: "undo" as const },
+        }
+        if (next.role === "assistant" && !next.time.completed) {
+          // #153：补 completed，避免 UI 仍显示 streaming
+          // completed 与 hidden 取同一时间戳，保证按时间排序的稳定性
+          next.time.completed = next.hidden.time
+          // 文案与 cancel 路径区分开，便于日志与事件流溯源撤销来源
+          next.error ??= new SessionV1.AbortedError({ message: "Aborted by undo" }).toObject()
+        }
+        // 复用 updateMessage 的事件路径，订阅方以普通消息更新感知撤销
+        yield* sessions.updateMessage(next)
+        // #153：undo 终态化绕过 processor，补记 usage 让 UI 与 token 统计识别被撤销请求
+        // 有 parentID 才存在关联的请求记录，user 根消息等无需补记
+        if (next.role === "assistant" && next.parentID) {
+          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          // Interface 声明为 Effect<any, any>，收窄以维持 cleanup 的 never 契约
+          if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next }) as Effect.Effect<void>
+        }
       }
       if (session.revert.partID && target) {
         const partID = session.revert.partID

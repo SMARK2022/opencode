@@ -66,6 +66,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const events = yield* EventV2Bridge.Service
     const scope = yield* Scope.Scope
 
+    // #153：session 级操作的 InstanceRef/WorkspaceRef 必须来自持久化 session 目录，
+    // 而非请求级 ambient directory，否则跨目录请求的事件会发布到错误实例。
+    // 泛型透传保持 effect 的 E/R 签名，包装不改变调用方的错误契约
+    const inSessionDirectory = <A, E, R>(sessionID: SessionID, effect: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        // requireSession 在 session 不存在时走 NotFound 契约，包装层不吞错误
+        const info = yield* requireSession(sessionID)
+        return yield* store.provide({ directory: info.directory }, effect)
+      })
+
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
       return yield* session.list({
@@ -251,15 +261,19 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof InitPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* promptSvc
-        .command({
-          sessionID: ctx.params.sessionID,
-          messageID: ctx.payload.messageID,
-          model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
-          command: Command.Default.INIT,
-          arguments: "",
-        })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      // #153：INIT 消息会作为 session 首条记录落库，必须在持久化目录上下文执行
+      yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc
+          .command({
+            sessionID: ctx.params.sessionID,
+            messageID: ctx.payload.messageID,
+            model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
+            command: Command.Default.INIT,
+            arguments: "",
+          })
+          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+      )
       return true
     })
 
@@ -286,21 +300,29 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
-      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
-      const defaultAgent = yield* agentSvc.defaultAgent()
-      const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
+      const info = yield* requireSession(ctx.params.sessionID)
+      // #153：compaction 摘要消息与 revert 清理的落库位置跟随 session 持久化目录
+      yield* inSessionDirectory(
+        ctx.params.sessionID,
+        Effect.gen(function* () {
+          yield* revertSvc.cleanup(info)
+          const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+          const defaultAgent = yield* agentSvc.defaultAgent()
+          // 空会话回退 defaultAgent，保证 compaction 始终有可用 agent
+          const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
 
-      yield* compactSvc.create({
-        sessionID: ctx.params.sessionID,
-        agent: currentAgent,
-        model: {
-          providerID: ctx.payload.providerID,
-          modelID: ctx.payload.modelID,
-        },
-        auto: ctx.payload.auto ?? false,
-      })
-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+          yield* compactSvc.create({
+            sessionID: ctx.params.sessionID,
+            agent: currentAgent,
+            model: {
+              providerID: ctx.payload.providerID,
+              modelID: ctx.payload.modelID,
+            },
+            auto: ctx.payload.auto ?? false,
+          })
+          yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+        }),
+      )
       return true
     })
 
@@ -309,12 +331,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const message = yield* promptSvc
-        .prompt({
-          ...ctx.payload,
-          sessionID: ctx.params.sessionID,
-        })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      // #153：流式返回的 message 必须来自 session 所属实例，防止跨目录读写
+      const message = yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc
+          .prompt({
+            ...ctx.payload,
+            sessionID: ctx.params.sessionID,
+          })
+          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+      )
       return HttpServerResponse.stream(Stream.make(JSON.stringify(message)).pipe(Stream.encodeText), {
         contentType: "application/json",
       })
@@ -325,18 +351,22 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.gen(function* () {
-            yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
-            yield* events.publish(Session.Event.Error, {
-              sessionID: ctx.params.sessionID,
-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-            })
-          }),
+      // #153：后台 fork 的 Error 事件必须发布到 session 所属实例，订阅方才能收到
+      yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+          // catchCause 后统一转 Error 事件，单次失败不影响请求作用域内其他 fiber
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
+              yield* events.publish(Session.Event.Error, {
+                sessionID: ctx.params.sessionID,
+                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+              })
+            }),
+          ),
         ),
-        Effect.forkIn(scope, { startImmediately: true }),
-      )
+      ).pipe(Effect.forkIn(scope, { startImmediately: true }))
       return HttpApiSchema.NoContent.make()
     })
 
@@ -345,9 +375,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof CommandPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* promptSvc
-        .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
+      // #153：命令消息持久化与 agent 解析依赖 session 目录上下文
+      return yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc
+          .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
+          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+      )
     })
 
     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
@@ -355,7 +389,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof ShellPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
+      // #153：shell 的输出落盘与快照写入 session 所在存储根，跨目录会写到错误位置
+      return yield* inSessionDirectory(
+        ctx.params.sessionID,
+        SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })),
+      )
     })
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {

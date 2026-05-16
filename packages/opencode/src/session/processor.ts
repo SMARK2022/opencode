@@ -722,8 +722,10 @@ const layer = Layer.effect(
             state: {
               ...part.state,
               status: "error",
-              error: "Tool execution aborted",
-              metadata: { ...metadata, interrupted: true,
+              // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
+              // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
+              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
+              metadata: { ...metadata, ...(aborted ? { interrupted: true } : {}),
                 ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
               },
               time: { start: "time" in part.state ? part.state.time.start : end, end },

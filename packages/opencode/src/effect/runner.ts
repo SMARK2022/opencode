@@ -170,6 +170,8 @@ export const make = <A, E = never>(
       }),
     ).pipe(Effect.flatten)
 
+  // cancel 语义约定：等待方收到取消信号与 idle 通知的先后由下方顺序决定，
+  // runner.test 的 onIdle 用例锁定该时序，改动需同步测试
   const cancel = SynchronizedRef.modify(ref, (st) => {
     switch (st._tag) {
       case "Idle":
@@ -177,27 +179,29 @@ export const make = <A, E = never>(
       case "Running":
         return [
           Effect.gen(function* () {
-            // 原 work 的退出 owner 提交后才释放结果；先 fail done 会让调用方返回未中止的快照。
+            // #153：先触发 onIdle 再中断，取消路径的 idle 通知不得晚于收尾
+            yield* idleIfCurrent()
             yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.asVoid)
             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
-            yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,
         ] as const
       case "Shell":
         return [
           Effect.gen(function* () {
-            yield* stopShell(st.shell)
+            // #153：idle 通知先于 shell 收尾，stopShell 的退出事件不得抢先到达订阅方
             yield* idleIfCurrent()
+            yield* stopShell(st.shell)
           }),
           { _tag: "Idle" } as const,
         ] as const
       case "ShellThenRun":
         return [
           Effect.gen(function* () {
+            // #153：idle 先于收尾，等待方恢复调度时不依赖 shell 完成事件
+            yield* idleIfCurrent()
             yield* stopShell(st.shell)
             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
-            yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,
         ] as const
