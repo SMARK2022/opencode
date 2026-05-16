@@ -8,6 +8,7 @@ import { Global } from "./global"
 import { makeGlobalNode, makeLocationNode } from "./effect/app-node"
 import { SessionSchema } from "./session/schema"
 import { Identifier } from "./util/identifier"
+import { sanitizeVisibleText } from "./util/terminal-text"
 import type { ToolOutput } from "@opencode-ai/llm"
 
 // 通用投影默认与 V1 对齐，不把它当作 Read 参数 schema 的硬上限。
@@ -223,27 +224,34 @@ const layer = Layer.effect(
       const outputLimits = yield* limits()
       const media = input.output.content.filter((item) => item.type === "file")
       const text = input.output.content.filter((item) => item.type === "text")
-      const contextual =
+      const raw =
         input.output.content.length === 0
           ? yield* Effect.try({
               try: () => JSON.stringify(input.output.structured, null, 2) ?? String(input.output.structured),
               catch: (cause) => new StorageError({ operation: "encode", cause }),
             })
           : text.map((item) => item.text).join("")
+      // 领域structured和媒体不改写，避免formatter真值/文件路径被当作展示metadata消毒。
+      const output = {
+        ...input.output,
+        content: input.output.content.map((item) => item.type === "text" ? { ...item, text: sanitizeVisibleText(item.text) } : item),
+      }
+      const contextual = output.content.length === 0 ? sanitizeVisibleText(raw) : output.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("")
       const captured = captures.get(captureKey(input))
       const fits = lineCount(contextual) <= outputLimits.maxLines && Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
       // 压缩未截断也需要恢复标记；不能只靠 outputPaths 向模型广告原文。
-      if (fits && !captured?.retain)
+      if (fits && !captured?.retain && raw === contextual)
         return {
-          output: input.output,
+          output,
           outputPaths: [],
         }
 
       // 有流式原文时复用同一个托管文件，不能把压缩后的文本另存成所谓完整原文。
-      const outputPath = captured ? yield* captured.flush() : yield* write(contextual)
+      // 展示清理同样可能丢失原始信息，归档仍保存原文/原字节，不能保存清理后的替身。
+      const outputPath = captured ? yield* captured.flush() : yield* write(raw)
       const marker = captured
         ? `... output ${fits ? "presentation changed" : "truncated"}; captured raw output saved to ${outputPath} ...`
-        : `... output truncated; full content saved to ${outputPath} ...`
+        : `... output ${fits ? "presentation changed" : "truncated"}; full content saved to ${outputPath} ...`
       captures.delete(captureKey(input))
       // 通用预算仍只在这里执行；恢复标记本身也占用字节与行数预算。
       const withMarker = `${contextual}\n\n${marker}`
@@ -253,7 +261,7 @@ const layer = Layer.effect(
       return {
         output: {
           structured: input.output.structured,
-          content: preserveParts ? [...input.output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
+          content: preserveParts ? [...output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
             {
               type: "text" as const,
               text: boundedPreview(contextual, marker, outputLimits.maxLines, outputLimits.maxBytes),
