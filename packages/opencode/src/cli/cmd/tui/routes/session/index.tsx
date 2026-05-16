@@ -10,6 +10,7 @@ import {
   onMount,
   Show,
   Switch,
+  onCleanup,
   useContext,
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
@@ -32,6 +33,8 @@ import {
   type OptimizedBuffer,
 } from "@opentui/core"
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
+import { previewDiff } from "@tui/util/preview-diff"
+import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type {
   AssistantMessage,
@@ -164,10 +167,9 @@ export function Session() {
 
   const pending = createMemo(() => {
     const status = sync.data.session_status?.[route.sessionID]
-    if (!status || status.type === "idle") return undefined
-    return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
+    return pendingAssistantID(messages(), status)
   })
-  const streamingActive = createMemo(() => messages().some((x) => x.role === "assistant" && !x.time.completed))
+  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
@@ -299,6 +301,28 @@ export function Session() {
     // session so the UI cannot stay stuck on an old pending state.
     void sync.session.sync(route.sessionID, { force: true })
   })
+
+  createEffect(
+    on(
+      () => {
+        const last = messages().at(-1)
+        return [
+          route.sessionID,
+          sync.data.session_status[route.sessionID]?.type,
+          last?.id,
+          last?.role,
+          last?.role === "assistant" ? last.time.completed : undefined,
+        ] as const
+      },
+      ([sessionID]) => {
+        if (!shouldRefreshStaleBusyStatus(messages(), sync.data.session_status[sessionID])) return
+        const timer = setTimeout(() => {
+          void sync.session.sync(sessionID, { force: true })
+        }, 1_500)
+        onCleanup(() => clearTimeout(timer))
+      },
+    ),
+  )
 
   let seeded = false
   let scroll: ScrollBoxRenderable
@@ -2141,6 +2165,47 @@ function Shell(props: ToolProps<typeof ShellTool>) {
   )
 }
 
+function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
+  const ctx = use()
+  const { theme, syntax } = useTheme()
+
+  return (
+    <box paddingLeft={1}>
+      <diff
+        diff={props.diff}
+        view={props.view}
+        syncScroll={props.syncScroll ?? true}
+        filetype={filetype(props.filePath)}
+        syntaxStyle={syntax()}
+        showLineNumbers={true}
+        width="100%"
+        wrapMode={ctx.diffWrapMode()}
+        fg={theme.text}
+        addedBg={theme.diffAddedBg}
+        removedBg={theme.diffRemovedBg}
+        contextBg={theme.diffContextBg}
+        addedSignColor={theme.diffHighlightAdded}
+        removedSignColor={theme.diffHighlightRemoved}
+        lineNumberFg={theme.diffLineNumber}
+        lineNumberBg={theme.diffContextBg}
+        addedLineNumberBg={theme.diffAddedLineNumberBg}
+        removedLineNumberBg={theme.diffRemovedLineNumberBg}
+      />
+    </box>
+  )
+}
+
+function DiffPreview(props: { diff: string; filePath?: string; view: "split" | "unified"; maxLines: number }) {
+  return (
+    // The collapsed preview mounts a disposable DiffRenderable, so clipping here
+    // enforces the visible preview budget without leaking scroll offsets into
+    // the full diff that gets mounted after expansion.
+    <box maxHeight={props.maxLines} overflow="hidden">
+      <DiffView diff={props.diff} filePath={props.filePath} view={props.view} syncScroll={false} />
+    </box>
+  )
+}
+
 function Write(props: ToolProps<typeof WriteTool>) {
   const ctx = use()
   const { theme, syntax } = useTheme()
@@ -2156,7 +2221,6 @@ function Write(props: ToolProps<typeof WriteTool>) {
     if (diffStyle === "stacked") return "unified"
     return ctx.width > 120 ? "split" : "unified"
   })
-  const ft = createMemo(() => filetype(props.input.filePath))
   const diffStats = createMemo(() => {
     const d = diff()
     if (!d) return { added: 0, removed: 0, total: 0 }
@@ -2182,31 +2246,15 @@ function Write(props: ToolProps<typeof WriteTool>) {
           maxLines={10}
           threshold={20}
           totalLines={diffStats().total}
-          preview={<text fg={theme.text}>{previewText(diff()!, 10)}</text>}
+          preview={
+            // Keep collapsed diffs as real DiffRenderable output. previewDiff
+            // truncates by split-pane row budget and rewrites hunk counts, so the
+            // parser sees a valid short diff instead of raw sliced patch text.
+            <DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
+          }
         >
           <box gap={1} flexDirection="column">
-            <box paddingLeft={1}>
-              <diff
-                diff={diff()!}
-                view={view()}
-                syncScroll={true}
-                filetype={ft()}
-                syntaxStyle={syntax()}
-                showLineNumbers={true}
-                width="100%"
-                wrapMode={ctx.diffWrapMode()}
-                fg={theme.text}
-                addedBg={theme.diffAddedBg}
-                removedBg={theme.diffRemovedBg}
-                contextBg={theme.diffContextBg}
-                addedSignColor={theme.diffHighlightAdded}
-                removedSignColor={theme.diffHighlightRemoved}
-                lineNumberFg={theme.diffLineNumber}
-                lineNumberBg={theme.diffContextBg}
-                addedLineNumberBg={theme.diffAddedLineNumberBg}
-                removedLineNumberBg={theme.diffRemovedLineNumberBg}
-              />
-            </box>
+            <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
           </box>
         </BlockTool>
@@ -2388,7 +2436,6 @@ function Task(props: ToolProps<typeof TaskTool>) {
 
 function Edit(props: ToolProps<typeof EditTool>) {
   const ctx = use()
-  const { theme, syntax } = useTheme()
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2396,7 +2443,6 @@ function Edit(props: ToolProps<typeof EditTool>) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  const ft = createMemo(() => filetype(props.input.filePath))
   const diffContent = createMemo(() => props.metadata.diff || "")
 
   const stats = createMemo(() => {
@@ -2423,31 +2469,16 @@ function Edit(props: ToolProps<typeof EditTool>) {
           maxLines={10}
           threshold={20}
           totalLines={stats().total}
-          preview={<text fg={theme.text}>{previewText(diffContent(), 10)}</text>}
+          preview={
+            // Collapsed preview intentionally mounts a separate short diff. That
+            // avoids the old maxHeight clipping path where the full diff could
+            // receive mouse-wheel events, mutate its internal scrollY, and later
+            // reopen with a stale offset.
+            <DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
+          }
         >
           <box gap={1} flexDirection="column">
-            <box paddingLeft={1}>
-              <diff
-                diff={diffContent()}
-                view={view()}
-                syncScroll={true}
-                filetype={ft()}
-                syntaxStyle={syntax()}
-                showLineNumbers={true}
-                width="100%"
-                wrapMode={ctx.diffWrapMode()}
-                fg={theme.text}
-                addedBg={theme.diffAddedBg}
-                removedBg={theme.diffRemovedBg}
-                contextBg={theme.diffContextBg}
-                addedSignColor={theme.diffHighlightAdded}
-                removedSignColor={theme.diffHighlightRemoved}
-                lineNumberFg={theme.diffLineNumber}
-                lineNumberBg={theme.diffContextBg}
-                addedLineNumberBg={theme.diffAddedLineNumberBg}
-                removedLineNumberBg={theme.diffRemovedLineNumberBg}
-              />
-            </box>
+            <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
           </box>
         </BlockTool>
@@ -2463,7 +2494,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
 
 function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   const ctx = use()
-  const { theme, syntax } = useTheme()
+  const { theme } = useTheme()
 
   const files = createMemo(() => props.metadata.files ?? [])
 
@@ -2516,7 +2547,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                       </text>
                     }
                   >
-                    <text fg={theme.text}>{previewText(file.patch || "", 10)}</text>
+                    <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
                   </Show>
                 }
               >
@@ -2529,28 +2560,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                       </text>
                     }
                   >
-                    <box paddingLeft={1}>
-                      <diff
-                        diff={file.patch || ""}
-                        view={view()}
-                        syncScroll={true}
-                        filetype={filetype(file.filePath)}
-                        syntaxStyle={syntax()}
-                        showLineNumbers={true}
-                        width="100%"
-                        wrapMode={ctx.diffWrapMode()}
-                        fg={theme.text}
-                        addedBg={theme.diffAddedBg}
-                        removedBg={theme.diffRemovedBg}
-                        contextBg={theme.diffContextBg}
-                        addedSignColor={theme.diffHighlightAdded}
-                        removedSignColor={theme.diffHighlightRemoved}
-                        lineNumberFg={theme.diffLineNumber}
-                        lineNumberBg={theme.diffContextBg}
-                        addedLineNumberBg={theme.diffAddedLineNumberBg}
-                        removedLineNumberBg={theme.diffRemovedLineNumberBg}
-                      />
-                    </box>
+                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
                   </Show>
                   <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
                 </box>
