@@ -50,7 +50,7 @@ describe("ToolOutputStore", () => {
   it.live("bounds the provider-facing text channel with one managed file", () =>
     withStore(({ store, fs }) =>
       Effect.gen(function* () {
-        const first = "HEAD-" + "x".repeat(30_000)
+        const first = "HEAD-\u001b[31msafe\u0007end\u001b[0m\r\n" + "x".repeat(30_000)
         const second = "y".repeat(30_000) + "-TAIL"
         const result = yield* store.bound({
           sessionID,
@@ -68,6 +68,9 @@ describe("ToolOutputStore", () => {
         expect(yield* fs.readFileString(result.outputPaths[0])).toBe(first + second)
         if (result.output.content[0]?.type !== "text") throw new Error("expected text preview")
         expect(Buffer.byteLength(result.output.content[0].text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+        expect(result.output.content[0].text).toContain("HEAD-safe\\x07end\n")
+        expect(result.output.content[0].text).not.toContain("\u0007")
+        expect(result.output.content[0].text).not.toContain("\u001b")
       }),
     ),
   )
@@ -123,10 +126,11 @@ describe("ToolOutputStore", () => {
         const result = yield* store.bound({
           sessionID,
           toolCallID: "call-text-and-media",
-          output: { structured: { caption: "pixel" }, content: [{ type: "text", text }, media] },
+          output: { structured: { caption: "pixel", formattedContent: "code\u0007\r\n" }, content: [{ type: "text", text }, media] },
         })
 
-        expect(result.output.structured).toEqual({ caption: "pixel" })
+        // structured承载后续历史回写真值，不能随正文一起改写真实代码。
+        expect(result.output.structured).toEqual({ caption: "pixel", formattedContent: "code\u0007\r\n" })
         expect(result.output.content[1]).toEqual(media)
         expect(yield* fs.readFileString(result.outputPaths[0])).toBe(text)
       }),

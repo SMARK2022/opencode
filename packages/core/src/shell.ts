@@ -318,6 +318,8 @@ export function guidance(file: string, platform: NodeJS.Platform) {
     // PowerShell 跨平台仍使用自身语法，不能根据 OS 把它误判为 Bash。
     ...(ps(file) ? [
       "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
+      // stderr已由同一个进程handle采集，保留源提示原话而非另行合并流。
+      "Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.",
       // 5.1 与 7+ 链式能力不同，分号始终是无条件顺序执行。
       shell === "powershell" ? "Windows PowerShell 5.1: do NOT use && or ||. Use A; if ($?) { B } for success-dependent commands." : "PowerShell 7+: && and || are supported; use ; only for unconditional sequencing.",
     ] : shell === "cmd" ? [

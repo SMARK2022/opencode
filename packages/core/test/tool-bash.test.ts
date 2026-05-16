@@ -168,6 +168,27 @@ const call = (input: typeof BashTool.Input.Type, id = "call-bash") => ({
 const it = testEffect(Layer.empty)
 
 describe("BashTool", () => {
+  it.live("sanitizes visible Bash controls while preserving captured raw bytes", () =>
+    Effect.acquireUseRelease(Effect.promise(() => tmpdir()), (tmp) => {
+      reset()
+      const raw = Buffer.from("safe\u0007end\r\n\u001b[31mred\u001b[0m\n\t\u0085\u007f")
+      result = { ...result, output: raw }
+      return withTool(tmp.path, (registry) => Effect.gen(function* () {
+        const settled = yield* settleTool(registry, call({ command: "echo ready", compress_output: false }))
+        expect(settled.result.type).not.toBe("error")
+        const visible = settled.output?.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? ""
+        // 独立oracle覆盖BEL、ANSI、CRLF、tab及C1/DEL，不从生产sanitizer计算期望。
+        expect(visible).toContain("safe\\x07end\nred\n\t\\x85\\x7f")
+        expect(visible).not.toContain("\u0007")
+        expect(visible).not.toContain("\u001b")
+        expect(visible).not.toContain("\r")
+        const file = settled.outputPaths?.[0]
+        if (!file) return yield* Effect.die("Expected retained raw output")
+        expect(Buffer.from(yield* Effect.promise(() => Bun.file(file).arrayBuffer()))).toEqual(raw)
+      }))
+    }, (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]())),
+  )
+
   it.live("registers and returns structured successful output from the active Location", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -231,6 +252,7 @@ describe("BashTool", () => {
             const initialized = yield* SystemContext.initialize(yield* contexts.load())
             expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
             expect(initialized.baseline).toContain("captured output is decoded as UTF-8")
+            if (Shell.ps(Shell.acceptable())) expect(initialized.baseline).toContain("Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.")
             // 完整政策只统一checkout换行，授权条件仍在真实BashTool的baseline上逐句核对。
             expect(initialized.baseline.replaceAll("\r\n", "\n")).toContain([
               // HEAD 作者与未推送状态是两个独立条件；完整 oracle 不能只留下“需显式请求”的摘要。
@@ -420,12 +442,19 @@ describe("BashTool", () => {
               // fixture 的 Bun 路径在临时 Location 外；完整匹配 advisory，不能省略警告或只检查退出码子串。
               const status = `Warnings:\n- Command argument references external directory ${path.join(path.dirname(process.execPath), "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.\n\nCommand exited with code 7.`
               if (settled.result.type !== "content") throw new Error("expected content")
-              expect(settled.result.value).toHaveLength(2)
+              expect(settled.result.value).toHaveLength(3)
               const first = settled.result.value[0]
               const second = settled.result.value[1]
               if (first?.type !== "text" || second?.type !== "text") throw new Error("expected two text parts")
               const text = first.text
               const actualStatus = second.text
+              // CRLF清理新增原文恢复段；前两段的正文/完整状态契约继续精确验证。
+              const retained = settled.outputPaths?.[0]
+              if (!retained) return yield* Effect.die("Expected retained original PowerShell output")
+              expect(settled.result.value[2]).toEqual({ type: "text", text: `\n\n... output presentation changed; captured raw output saved to ${retained} ...` })
+              const original = yield* Effect.promise(() => fs.readFile(retained, "utf8"))
+              expect(original).toContain("\r\n")
+              expect(text).not.toContain("\r")
               expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
               expect(text).not.toContain("\uFFFD")
               expect(actualStatus).toBe(status)

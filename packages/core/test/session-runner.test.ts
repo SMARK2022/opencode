@@ -3917,7 +3917,7 @@ describe("SessionRunnerLLM", () => {
         yield* insertSession(id)
         const ready = yield* Deferred.make<void>()
         let processClosed = false
-        const raw = `READY\n${"x".repeat(size)}\nFINAL_RESULT=42\n完成\n`
+        const raw = `READY\n${"x".repeat(size)}\nFINAL_RESULT=42\u0007\u001b[31m\n完成\u001b[0m\r\n`
         const processLayer = Layer.mock(AppProcess.Service, {
           run: (_command, options) => Effect.gen(function* () {
             if (!options?.onOutput) return yield* Effect.die("Bash must observe the process stream")
@@ -3967,6 +3967,9 @@ describe("SessionRunnerLLM", () => {
           expect(tool.state.structured).not.toHaveProperty("timeout")
           const text = tool.state.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
           expect(text).toContain("FINAL_RESULT=42")
+          expect(text).toContain("FINAL_RESULT=42\\x07")
+          expect(text).not.toContain("\u0007")
+          expect(text).not.toContain("\u001b")
           expect(text).toContain("完成")
           expect(text).toContain("Command interrupted before completion.")
           expect(text).not.toContain("�")

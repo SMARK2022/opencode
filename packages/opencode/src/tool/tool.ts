@@ -7,6 +7,8 @@ import type { Permission } from "../permission"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+// 两代使用同一可见文本规则；领域数据与原始日志不经此投影清理。
+import { sanitizeVisibleText } from "@opencode-ai/core/util/terminal-text"
 
 interface Metadata {
   [key: string]: any
@@ -96,6 +98,31 @@ export type InferDef<T> =
       ? Def<P, M>
       : never
 
+// #155：metadata 顶层 string 字段逐项清理，未变化的字段保留原引用
+function sanitizeMetadata<M extends Metadata>(metadata: M | undefined) {
+  if (!metadata) return metadata
+  // 仅遍历顶层：嵌套结构由各 tool 自行保证无终端序列，避免递归清理的误伤
+  let changed = false
+  const next: Record<string, unknown> = { ...metadata }
+  for (const [key, value] of Object.entries(metadata)) {
+    if (typeof value !== "string") continue
+    const safe = sanitizeVisibleText(value)
+    if (safe !== value) {
+      changed = true
+      next[key] = safe
+    }
+  }
+  return changed ? (next as M) : metadata
+}
+
+// #155：工具可见输出统一清理入口；streaming metadata 与最终结果共用
+function sanitizeResult<M extends Metadata>(result: ExecuteResult<M>) {
+  const output = sanitizeVisibleText(result.output)
+  const metadata = sanitizeMetadata(result.metadata) ?? result.metadata
+  if (output === result.output && metadata === result.metadata) return result
+  return { ...result, output, metadata }
+}
+
 function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadata>(
   id: string,
   init: Init<Parameters, Result>,
@@ -111,6 +138,16 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
       const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
+        // #155：streaming metadata 先消毒再转发，避免终端转义序列先落 UI
+        const safeCtx: typeof ctx = {
+          ...ctx,
+          metadata: (input: { title?: string; metadata?: Metadata }) =>
+            ctx.metadata({
+              ...input,
+              metadata: sanitizeMetadata(input.metadata) ?? input.metadata,
+            }),
+        }
+        // safeCtx 只替换 metadata 回调；ask/abort 等其余 ctx 能力原样透传
         const attrs = {
           "tool.name": id,
           "session.id": ctx.sessionID,
@@ -127,7 +164,8 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
                 }),
             ),
           )
-          const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
+          // #155：执行后立即 sanitize（truncate 检查之前），保证 output/metadata 全链干净
+          const result = sanitizeResult(yield* execute(decoded as Schema.Schema.Type<Parameters>, safeCtx))
           if (result.metadata.truncated !== undefined) {
             return result
           }
