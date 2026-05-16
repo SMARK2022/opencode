@@ -4,9 +4,39 @@ import type { Permission } from "../permission"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+import stripAnsi from "strip-ansi"
 
 interface Metadata {
   [key: string]: any
+}
+
+function sanitizeVisibleText(text: string) {
+  return stripAnsi(text.replace(/\r\n/g, "\n")).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (char) => {
+    return `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`
+  })
+}
+
+function sanitizeMetadata<M extends Metadata>(metadata: M | undefined) {
+  if (!metadata) return metadata
+  let changed = false
+  const entries = Object.entries(metadata).map(([key, value]) => {
+    if (typeof value !== "string") return [key, value] as const
+    const safe = sanitizeVisibleText(value)
+    if (safe !== value) changed = true
+    return [key, safe] as const
+  })
+  return changed ? ({ ...metadata, ...Object.fromEntries(entries) } as M) : metadata
+}
+
+function sanitizeRequiredMetadata<M extends Metadata>(metadata: M) {
+  return sanitizeMetadata(metadata) ?? metadata
+}
+
+function sanitizeResult<M extends Metadata>(result: ExecuteResult<M>) {
+  const output = sanitizeVisibleText(result.output)
+  const metadata = sanitizeRequiredMetadata(result.metadata)
+  if (output === result.output && metadata === result.metadata) return result
+  return { ...result, output, metadata }
 }
 
 // TODO: remove this hack
@@ -106,7 +136,14 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
                   ),
             ),
           )
-          const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
+          const safeCtx = {
+            ...ctx,
+            metadata(input: { title?: string; metadata?: Metadata }) {
+              const metadata = sanitizeMetadata(input.metadata)
+              return ctx.metadata(metadata === input.metadata ? input : { ...input, metadata })
+            },
+          }
+          const result = sanitizeResult(yield* execute(decoded as Schema.Schema.Type<Parameters>, safeCtx))
           if (result.metadata.truncated !== undefined) {
             return result
           }

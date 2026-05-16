@@ -60,6 +60,7 @@ function powershellNotes(name: string) {
 - Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
 - Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
 - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
+- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
 - Escape special characters with the PowerShell backtick character.`
   }
   if (name === "powershell") {
@@ -69,6 +70,7 @@ function powershellNotes(name: string) {
 - Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
 - Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
 - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
+- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
 - Escape special characters with the PowerShell backtick character.`
   }
   return ""

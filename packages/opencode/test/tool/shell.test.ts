@@ -85,6 +85,11 @@ const fill = (mode: "lines" | "bytes", n: number) => {
   if (PS.has(sh())) return `& ${text}`
   return text
 }
+const bunEval = (code: string) => {
+  const text = `${bin} -e ${evalarg(code)}`
+  if (PS.has(sh())) return `& ${text}`
+  return text
+}
 const glob = (p: string) =>
   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
 
@@ -186,6 +191,37 @@ describe("tool.shell", () => {
       },
     })
   })
+
+  test("escapes terminal control characters in visible output", async () => {
+    await WithInstance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await initShell()
+        const updates: string[] = []
+        const result = await Effect.runPromise(
+          bash.execute(
+            {
+              command: bunEval("process.stdout.write(String.fromCharCode(115,97,102,101,7,101,110,100,10))"),
+              description: "Emit terminal control byte",
+            },
+            {
+              ...ctx,
+              metadata: (input) =>
+                Effect.sync(() => {
+                  if (typeof input.metadata?.output === "string") updates.push(input.metadata.output)
+                }),
+            },
+          ),
+        )
+
+        expect(result.output).toContain("safe\\x07end")
+        expect(result.output).not.toContain("\x07")
+        expect(result.metadata.output).not.toContain("\x07")
+        expect(updates.some((output) => output.includes("safe\\x07end"))).toBe(true)
+        expect(updates.every((output) => !output.includes("\x07"))).toBe(true)
+      },
+    })
+  }, 15_000)
 })
 
 describe("tool.shell permissions", () => {
