@@ -431,7 +431,7 @@ describe("tui thread", () => {
       }
     })
 
-    test("lock exists + pid alive but HTTP ping fails (server crashed): spawns new daemon and clears stale lock", async () => {
+    test("lock exists + pid alive but HTTP ping fails (unresponsive owner): reuses existing URL without spawning", async () => {
       setup()
       await using tmp = await tmpdir()
       ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
@@ -448,19 +448,18 @@ describe("tui thread", () => {
       })
 
       let clearCalled = false
-      let readCount = 0
-      spyOn(ServerLockModule, "read").mockImplementation(async () => {
-        readCount++
-        if (readCount <= 2)
-          return { pid: process.pid, port: 9999, token: "test-token", dbPath: "/tmp/test.db", channel: "local" as const, startedAt: new Date().toISOString() }
-        return fakeLock
+      // pid alive + ping fails = unresponsive owner. ensure() must return
+      // the existing URL without spawning a second daemon.
+      spyOn(ServerLockModule, "read").mockResolvedValue({
+        pid: process.pid,
+        port: 9999,
+        token: "test-token",
+        dbPath: "/tmp/test.db",
+        channel: "local" as const,
+        startedAt: new Date().toISOString(),
       })
       spyOn(ServerLockModule, "alive").mockReturnValue(true)
-      let pingCount = 0
-      spyOn(ServerLockModule, "ping").mockImplementation(async () => {
-        pingCount++
-        return pingCount > 2
-      })
+      spyOn(ServerLockModule, "ping").mockResolvedValue(false)
       spyOn(ServerLockModule, "clear").mockImplementation(async () => {
         clearCalled = true
       })
@@ -468,8 +467,10 @@ describe("tui thread", () => {
       const cwd = process.cwd()
       try {
         await expect(call()).rejects.toBe(stop)
-        expect(daemonSpawnCount).toBe(1)
-        expect(clearCalled).toBe(true)
+        // No daemon spawned — owner is alive, just unresponsive.
+        expect(daemonSpawnCount).toBe(0)
+        expect(clearCalled).toBe(false)
+        expect(seen.tuiUrls[0]).toBe("http://127.0.0.1:9999")
       } finally {
         process.chdir(cwd)
         if (tty) Object.defineProperty(process.stdin, "isTTY", tty)

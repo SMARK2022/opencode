@@ -5,6 +5,7 @@ import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionID } from "./schema"
 import { SessionStatus } from "./status"
+import { SessionActivity } from "./activity"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void>
@@ -89,7 +90,12 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
       work: Effect.Effect<MessageV2.WithParts>,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
+      const tracked = Effect.acquireUseRelease(
+        Effect.sync(() => SessionActivity.begin(`session:${sessionID}`)),
+        () => work,
+        (end) => Effect.sync(end),
+      )
+      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(tracked)
     })
 
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
@@ -98,7 +104,12 @@ export const layer = Layer.effect(
       work: Effect.Effect<MessageV2.WithParts>,
       ready?: Latch.Latch,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).startShell(work, ready)
+      const tracked = Effect.acquireUseRelease(
+        Effect.sync(() => SessionActivity.begin(`shell:${sessionID}`)),
+        () => work,
+        (end) => Effect.sync(end),
+      )
+      return yield* (yield* runner(sessionID, onInterrupt)).startShell(tracked, ready)
     })
 
     return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })

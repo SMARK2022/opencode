@@ -15,6 +15,13 @@ export type ServerLock = {
   externalUrl?: string
 }
 
+export class ExistingLiveServerError extends Error {
+  constructor(public readonly lock: ServerLock) {
+    super(`Existing live opencode daemon is still running: pid=${lock.pid}, port=${lock.port}`)
+    this.name = "ExistingLiveServerError"
+  }
+}
+
 // Overrideable for tests; undefined means use the default path.
 let _lockPath: string | undefined
 export function _setLockPath(p: string | undefined) {
@@ -27,7 +34,15 @@ function getLockPath() {
 
 // Write the lock file atomically (tmp → rename) and return the new token so
 // the caller can later use clearIfOwner() for safe deletion.
+//
+// Guards against overwriting a lock owned by a different live process.
 export async function write(port: number, externalUrl?: string): Promise<string> {
+  const existing = await read()
+
+  if (existing && existing.pid !== process.pid && alive(existing.pid)) {
+    throw new ExistingLiveServerError(existing)
+  }
+
   const token = randomUUID()
   const lock: ServerLock = {
     pid: process.pid,

@@ -700,8 +700,13 @@ export const layer: Layer.Layer<
               }
 
               const step = 100
+              // Large-file threshold: skip JS-side diff for files whose combined
+              // before+after content exceeds this limit.  structuredPatch is O(n²)
+              // and synchronous — a 7 000-line lockfile blocks the event loop for
+              // 60+ seconds, stalling heartbeats and SSE delivery.
+              const patchSizeLimit = 500_000
               const patch = (file: string, before: string, after: string) =>
-                formatPatch(structuredPatch(file, file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }))
+                formatPatch(structuredPatch(file, file, before, after, "", "", { context: 3 }))
 
               for (let i = 0; i < rows.length; i += step) {
                 const run = rows.slice(i, i + step)
@@ -710,9 +715,10 @@ export const layer: Layer.Layer<
                 for (const row of run) {
                   const hit = text?.get(row.file) ?? { before: "", after: "" }
                   const [before, after] = row.binary ? ["", ""] : text ? [hit.before, hit.after] : yield* show(row)
+                  const tooLarge = before.length + after.length > patchSizeLimit
                   result.push({
                     file: row.file,
-                    patch: row.binary ? "" : patch(row.file, before, after),
+                    patch: row.binary || tooLarge ? "" : patch(row.file, before, after),
                     additions: row.additions,
                     deletions: row.deletions,
                     status: row.status,

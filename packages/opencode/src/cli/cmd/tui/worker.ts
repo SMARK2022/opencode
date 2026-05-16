@@ -22,6 +22,7 @@ import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Effect } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+import { SessionActivity } from "@/session/activity"
 
 ensureProcessMetadata("worker")
 NetworkProxy.installGlobalFetch()
@@ -130,25 +131,52 @@ process.prependListener("unhandledRejection", () => void gracefulShutdown())
 process.prependListener("uncaughtException", () => void gracefulShutdown())
 
 // ── Idle timeout ───────────────────────────────────────────────────────────
-// Exit 30 s after the last SSE client disconnects.  The timer only starts
-// after the first connection, so a slow-starting TUI does not race the daemon.
+// Exit 30 s after the last SSE client disconnects AND no session runners are
+// active.  The timer only starts after the first connection, so a slow-starting
+// TUI does not race the daemon.
 const IDLE_TIMEOUT_MS = 30_000
 
 let hadClient = false
+let sseClients = 0
 let idleTimer: ReturnType<typeof setTimeout> | undefined
 
-onSseClientCountChange((count) => {
-  if (count > 0) {
-    hadClient = true
-    if (idleTimer) {
-      clearTimeout(idleTimer)
-      idleTimer = undefined
-    }
+function cancelIdleTimer() {
+  if (!idleTimer) return
+  clearTimeout(idleTimer)
+  idleTimer = undefined
+}
+
+function maybeScheduleIdleShutdown() {
+  if (!hadClient) return
+
+  // Active work prevents idle shutdown.
+  if (sseClients > 0 || SessionActivity.count() > 0) {
+    cancelIdleTimer()
     return
   }
-  if (!hadClient) return // No client has ever connected; don't start the timer.
-  idleTimer = setTimeout(() => void gracefulShutdown(), IDLE_TIMEOUT_MS)
+
+  // Already scheduled — let it fire.
+  if (idleTimer) return
+
+  idleTimer = setTimeout(() => {
+    // Re-check at fire time: a client or runner may have appeared.
+    if (sseClients > 0 || SessionActivity.count() > 0) {
+      cancelIdleTimer()
+      return
+    }
+    void gracefulShutdown()
+  }, IDLE_TIMEOUT_MS)
   idleTimer.unref?.()
+}
+
+onSseClientCountChange((count) => {
+  sseClients = count
+  if (count > 0) hadClient = true
+  maybeScheduleIdleShutdown()
+})
+
+SessionActivity.onChange(() => {
+  maybeScheduleIdleShutdown()
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined

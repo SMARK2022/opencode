@@ -96,11 +96,40 @@ function internalUrl(port: number) {
   return `http://127.0.0.1:${port}`
 }
 
-async function liveUrl(external: boolean) {
-  const lock = await ServerLock.read()
-  if (!lock || !ServerLock.alive(lock.pid) || !(await ServerLock.ping(lock.port))) return
+function lockUrl(lock: ServerLock, external: boolean) {
   if (external && lock.externalUrl) return lock.externalUrl
   return internalUrl(lock.port)
+}
+
+// Determine the URL of an existing daemon owner.
+// Returns:
+//   - { type: "missing" }        → no lock file exists
+//   - { type: "dead", lock }     → pid is dead, lock is stale
+//   - { type: "responsive" | "unresponsive", url, lock }
+//                                → pid is alive; responsive=HTTP ping OK
+//
+// CRITICAL: "unresponsive" means the owner process is alive but its control
+// plane is temporarily blocked (e.g. during a long model call).  We must NOT
+// spawn a second daemon in this state — the single-owner invariant would break.
+//
+// NOTE: Calls ServerLock.read/alive/ping through the namespace so test spies
+// on those exports can intercept the calls.
+async function existingOwnerUrl(external: boolean) {
+  const lock = await ServerLock.read()
+
+  if (!lock)
+    return { type: "missing" as const }
+
+  if (!ServerLock.alive(lock.pid))
+    return { type: "dead" as const, lock }
+
+  // pid alive — whether or not HTTP ping succeeded, the owner still exists.
+  const responsive = await ServerLock.ping(lock.port)
+  return {
+    type: responsive ? "responsive" as const : "unresponsive" as const,
+    url: lockUrl(lock, external),
+    lock,
+  }
 }
 
 function wantsExternal(args: Args) {
@@ -130,8 +159,9 @@ export async function ensure(args: Args) {
   process.env.NO_PROXY = env.NO_PROXY
   process.env.no_proxy = env.no_proxy
 
-  const quick = await liveUrl(external)
-  if (quick) return quick
+  // Fast path: if an owner is alive (responsive OR unresponsive), reuse it.
+  const quick = await existingOwnerUrl(external)
+  if (quick.type === "responsive" || quick.type === "unresponsive") return quick.url
 
   let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
   try {
@@ -144,9 +174,12 @@ export async function ensure(args: Args) {
       staleMs: SERVER_ELECTION_STALE_MS,
     })
 
-    const existing = await liveUrl(external)
-    if (existing) return existing
-    if (await ServerLock.read()) await ServerLock.clear()
+    // Re-check under lock: another TUI may have started a daemon while we waited.
+    const existing = await existingOwnerUrl(external)
+    if (existing.type === "responsive" || existing.type === "unresponsive") return existing.url
+
+    // Only clear the lock if the owner is truly dead.
+    if (existing.type === "dead") await ServerLock.clear()
 
     const printLogs = process.argv.includes("--print-logs")
     const proc = spawnImpl([process.execPath, await target()], {

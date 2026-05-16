@@ -1,6 +1,5 @@
 import { Hono, type Context } from "hono"
 import { describeRoute, resolver, validator } from "hono-openapi"
-import { streamSSE } from "hono/streaming"
 import { Effect, Schema } from "effect"
 import z from "zod"
 import { BusEvent } from "@/bus/bus-event"
@@ -16,6 +15,7 @@ import { lazy } from "../../util/lazy"
 import { Config } from "@/config/config"
 import { errors } from "../error"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "../global-lifecycle"
+import { streamEventSource } from "../event"
 
 const log = Log.create({ service: "server" })
 
@@ -33,11 +33,8 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
   sseClientCount++
   onSseCountChange?.(sseClientCount)
 
-  return streamSSE(c, async (stream) => {
-    const q = new AsyncQueue<string | null>()
-    let done = false
-
-    q.push(
+  return streamEventSource(c, {
+    initial: [
       JSON.stringify({
         payload: {
           id: Bus.createID(),
@@ -45,44 +42,21 @@ async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>
           properties: {},
         },
       }),
-    )
-
-    // Send heartbeat every 10s to prevent stalled proxy streams.
-    const heartbeat = setInterval(() => {
-      q.push(
-        JSON.stringify({
-          payload: {
-            id: Bus.createID(),
-            type: "server.heartbeat",
-            properties: {},
-          },
-        }),
-      )
-    }, 10_000)
-
-    const stop = () => {
-      if (done) return
-      done = true
+    ],
+    heartbeat: () =>
+      JSON.stringify({
+        payload: {
+          id: Bus.createID(),
+          type: "server.heartbeat",
+          properties: {},
+        },
+      }),
+    subscribe,
+    onClose: () => {
       sseClientCount--
       onSseCountChange?.(sseClientCount)
-      clearInterval(heartbeat)
-      unsub()
-      q.push(null)
       log.info("global event disconnected")
-    }
-
-    const unsub = subscribe(q)
-
-    stream.onAbort(stop)
-
-    try {
-      for await (const data of q) {
-        if (data === null) return
-        await stream.writeSSE({ data })
-      }
-    } finally {
-      stop()
-    }
+    },
   })
 }
 
