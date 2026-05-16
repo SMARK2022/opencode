@@ -9,6 +9,7 @@ import { Effect } from "effect"
 import { Session } from "@/session/session"
 
 import { SessionRevert } from "../../src/session/revert"
+import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Snapshot } from "../../src/snapshot"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -19,7 +20,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(
   LayerNode.compile(
-    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node, MessageV2.node]),
+    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node, MessageV2.node, SessionRequestUsage.node]),
   ),
 )
 
@@ -541,6 +542,60 @@ describe("revert + compact workflow", () => {
           const hidden = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
           expect(hidden.info.hidden).toBeDefined()
           expect(hidden.info.hidden!.reason).toBe("undo")
+        }),
+      { git: true },
+    ),
+  )
+
+  it.live(
+    "cleanup terminalizes unfinished assistant messages hidden by undo",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const usage = yield* SessionRequestUsage.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+          const u1 = yield* user(sid)
+          const a1 = yield* assistant(sid, u1.id, dir)
+
+          // #153：验证 undo 终态化同时补记 request-usage 的 aborted 状态
+          // begin 以 user 消息为请求根，与生产 prompt 路径的 requestID 语义一致
+          yield* usage.begin({
+            sessionID: sid,
+            requestID: u1.id,
+            source: "prompt",
+            agent: a1.agent,
+            providerID: a1.providerID,
+            modelID: a1.modelID,
+            timeCreated: u1.time.created,
+          })
+          yield* usage.recordAssistant({ sessionID: sid, requestID: u1.id, assistant: a1 })
+          // 前置断言：补记前请求必须处于 running，排除 begin 缺失导致的假阳性
+          expect((yield* usage.get({ sessionID: sid, requestID: u1.id }))?.status).toBe("running")
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u1.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+          // cleanup 自行读取 revert 状态并终态化 assistant，调用方无需预清理
+          yield* revert.cleanup(yield* session.get(sid))
+
+          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id })
+          const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
+          const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
+
+          expect(stored.info.role).toBe("assistant")
+          if (stored.info.role === "assistant") {
+            expect(stored.info.hidden?.reason).toBe("undo")
+            expect(stored.info.time.completed).toBeDefined()
+            expect(stored.info.error?.name).toBe("MessageAbortedError")
+          }
+          expect(request?.status).toBe("aborted")
+          expect(assistants.find((item) => item.assistantMessageID === a1.id)?.status).toBe("aborted")
         }),
       { git: true },
     ),

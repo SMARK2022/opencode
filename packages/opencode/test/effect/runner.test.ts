@@ -464,6 +464,35 @@ describe("Runner", () => {
   )
 
   it.live(
+    "onIdle fires before interrupted run finalizers finish",
+    Effect.gen(function* () {
+      const s = yield* Scope.Scope
+      const idle = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      // 直接构造 Runner，绕过业务 Layer 以锁定 idle 通知的纯时序行为
+      const runner = Runner.make<string>(s, {
+        onIdle: Deferred.succeed(idle, undefined).pipe(Effect.asVoid),
+      })
+
+      const run = yield* runner
+        .ensureRunning(Effect.never.pipe(Effect.ensuring(Deferred.await(release)), Effect.as("x")))
+        .pipe(Effect.forkChild)
+      yield* Effect.sleep("10 millis")
+
+      const cancel = yield* runner.cancel.pipe(Effect.forkChild)
+      // idle 必须在 250ms 内先行触发；若等 finalizer 完成才通知则视为回归
+      const idleExit = yield* Deferred.await(idle).pipe(Effect.timeout("250 millis"), Effect.exit)
+      expect(Exit.isSuccess(idleExit)).toBe(true)
+      expect(runner.busy).toBe(false)
+
+      // release 后 run 收尾与 cancel fiber 各自正常退出，验证通知顺序不产生泄漏
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.await(cancel)
+      yield* Fiber.await(run)
+    }),
+  )
+
+  it.live(
     "onBusy fires when shell starts",
     Effect.gen(function* () {
       const s = yield* Scope.Scope

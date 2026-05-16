@@ -603,6 +603,14 @@ export const {
     const exit = useExit()
     const args = useArgs()
 
+    // #153：session_status 独立刷新，force sync 与 bootstrap 共用同一入口
+    async function refreshStatus() {
+      // 失败随 bootstrap 的 Effect.all 语义上抛，与其他首次拉取保持一致的致命性
+      const x = await sdk.client.session.status({ workspace: project.workspace.current() })
+      // reconcile 保持增量更新，避免全量替换导致订阅组件失去局部状态
+      setStore("session_status", reconcile(x.data ?? {}))
+    }
+
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
@@ -680,9 +688,8 @@ export const {
               .list({ workspace })
               .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-            sdk.client.session.status({ workspace }).then((x) => {
-              setStore("session_status", reconcile(x.data ?? {}))
-            }),
+            // #153：bootstrap 以同一入口拉取 status，替代原先内联的实现
+            refreshStatus(),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
             project.workspace.sync(),
@@ -760,6 +767,9 @@ export const {
               sdk.client.session.messages({ sessionID, limit: 100 }),
               sdk.client.session.todo({ sessionID }),
               sdk.client.session.diff({ sessionID }),
+              // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
+              sdk.client.session.status({ workspace: project.workspace.current() })
+                .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
             ])
             setStore(
               produce((draft) => {
@@ -827,6 +837,7 @@ export const {
           return task
         },
       },
+      sessionStatus: { refresh: refreshStatus },
       bootstrap,
     }
     return result

@@ -152,14 +152,14 @@ const layer = Layer.effect(
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
-      // runner 取消会先发布 Idle，必须在释放前冻结旧助手，不能随后 newest-first 选中新运行。
-      const match = yield* sessions.findMessage(
-        sessionID,
-        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
-      ).pipe(Effect.catch(() => Effect.succeed(Option.none())))
+      // 先冻结全部可见未完成助手；取消发布 idle 后不能选中新开始的消息。
+      const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
+        .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+        .map((msg) => msg.info.id)
       yield* state.cancel(sessionID)
-      // 消息已被删除或 owner 已结算时只结束本次取消；不能扫描其他 pending 助手补位。
-      if (Option.isSome(match)) yield* abortPendingAssistant(sessionID, match.value.info.id).pipe(Effect.ignore)
+      yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+        discard: true,
+      })
     })
 
     const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID, messageID: MessageID) {
@@ -177,6 +177,8 @@ const layer = Layer.effect(
       assistant.time.completed = now
       assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
       // 用户取消不是 provider finish，准备窗口只保存 AbortedError/completed，不伪造模型结束原因。
+      // 空体残留不占可见时间线，仍沿原子 publishAssistant 提交其账本终态。
+      if (match.value.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" }
 
       // 只关闭旧消息仍未终态的工具，已成功完成的结果不能因取消被改写成 error。
       yield* Effect.forEach(

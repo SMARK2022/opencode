@@ -625,6 +625,8 @@ export function Session() {
       },
       run: async () => {
         const status = sync.data.session_status?.[route.sessionID]
+        // #153：undo 重写消息尾部，模型仍在运行时先 abort，避免迟到的流事件复活隐藏消息
+        // abort 失败静默：消息重写不因网络抖动被阻塞，下一轮状态同步会再次收敛
         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
         const message = messagesBeforeRevert().findLast((item) => item.role === "user")
         if (!message) return
