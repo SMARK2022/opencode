@@ -14,6 +14,7 @@ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecy
 import { Database } from "@opencode-ai/core/database/database"
 import { ServerLock } from "@/cli/tui/server-lock"
 import { EventClients } from "@opencode-ai/server/event-clients"
+import { SessionActivity } from "@/session/activity"
 import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
 
 Heap.start()
@@ -176,25 +177,31 @@ if (isDaemon) {
   const IDLE_TIMEOUT_MS = 30_000
 
   let hadClient = false
+  let sseClients = 0
 
-  // 所有协议与 listener 共用客户端计数，native App 不被 global-event 专属计数误判为空闲。
-  const eventClients = EventClients.make((count) => {
-    if (shutdownInProgress) return
-    if (count > 0) {
-      hadClient = true
-      if (idleTimer) {
-        // 任一 listener 重连便取消归零后的宽限 timer，继续保留共享 daemon。
-        clearTimeout(idleTimer)
-        idleTimer = undefined
-      }
-      return
+  // 全部连接断开后仍须等待实际工作结束，不能因 TUI 断线关闭正在生成的会话。
+  const armIdleTimer = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+      idleTimer = undefined
     }
-    // 首次订阅前不计 idle；重复零通知也不重设 timer 或延长宽限期。
-    if (!hadClient || idleTimer) return
-    // 最后一个订阅释放后留出重连宽限，持续空闲才关闭 daemon。
-    idleTimer = setTimeout(() => void gracefulShutdown(), IDLE_TIMEOUT_MS)
+    if (shutdownInProgress || !hadClient || sseClients > 0 || SessionActivity.count() > 0) return
+    idleTimer = setTimeout(() => {
+      if (shutdownInProgress || sseClients > 0 || SessionActivity.count() > 0) return
+      void gracefulShutdown()
+    }, IDLE_TIMEOUT_MS)
     idleTimer.unref?.()
+  }
+
+
+  // 内外 listener 继续共用一个计数源，活动变更只重算退出时机。
+  const eventClients = EventClients.make((count) => {
+    sseClients = count
+    if (count > 0) hadClient = true
+    armIdleTimer()
   })
+
+  SessionActivity.onChange(armIdleTimer)
 
   try {
     const sharedServices = HttpApiApp.createSharedServices()

@@ -33,6 +33,14 @@ export function headers(credentials: ServerAuth.Credentials = {
   return ServerAuth.headers(credentials)
 }
 
+// #152：写锁前若已有存活 pid，拒绝覆盖
+export class ExistingLiveServerError extends Error {
+  constructor(public readonly lock: ServerLock) {
+    super(`Existing live opencode daemon is still running: pid=${lock.pid}, port=${lock.port}`)
+    this.name = "ExistingLiveServerError"
+  }
+}
+
 // 测试覆盖只影响发现文件；不改写 Global 路径或打开临时数据库连接。
 let _lockPath: string | undefined
 export function _setLockPath(p: string | undefined) {
@@ -52,6 +60,11 @@ export function placement() {
 }
 
 export async function write(port: number, externalUrl?: string, network?: ServerLock["network"]): Promise<string> {
+  // #152：已有存活 owner 时拒绝写锁，防止双 daemon
+  const existing = await read()
+  if (existing && alive(existing.pid) && existing.pid !== process.pid) {
+    throw new ExistingLiveServerError(existing)
+  }
   // token 区分同 PID 的历次启动，旧退出清理不能删除新启动发布的 owner。
   const token = randomUUID()
   const lock: ServerLock = {

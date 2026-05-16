@@ -6,6 +6,7 @@ import { BackgroundJob } from "@/background/job"
 import { Effect, Latch, Layer, Scope, Context } from "effect"
 import { Session } from "./session"
 import { SessionID } from "./schema"
+import { SessionActivity } from "@/session/activity"
 import { SessionStatus } from "./status"
 
 export interface Interface {
@@ -90,7 +91,10 @@ const layer = Layer.effect(
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
       work: Effect.Effect<SessionV1.WithParts>,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
+      // 登记实际 work 而非等待者，排队或取消等待不提前释放活动标记。
+      const tracked = SessionActivity.track(`session:${sessionID}`, work)
+      const current = yield* runner(sessionID, onInterrupt)
+      return yield* current.ensureRunning(tracked)
     })
 
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
@@ -99,8 +103,10 @@ const layer = Layer.effect(
       work: Effect.Effect<SessionV1.WithParts>,
       ready?: Latch.Latch,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt))
-        .startShell(work, ready)
+      // Shell 与 loop 独立标记，拒绝启动的 shell 不影响已有运行。
+      const tracked = SessionActivity.track(`shell:${sessionID}`, work)
+      const current = yield* runner(sessionID, onInterrupt)
+      return yield* current.startShell(tracked, ready)
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
