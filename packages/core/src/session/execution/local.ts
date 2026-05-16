@@ -6,6 +6,7 @@ import { SessionRunner } from "../runner"
 import { SessionSchema } from "../schema"
 import { SessionStore } from "../store"
 import { SessionExecution } from "../execution"
+import { SessionActivity } from "../activity"
 
 /** Current-process routing for implicit-local Locations. Future remote placement belongs here. */
 const layer = Layer.effect(
@@ -15,6 +16,8 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError>({
       drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force, maintenance) {
+        // 进程级drain贯穿位置解析、执行与退出清理；SSE断线不能误判仍活动的V2工作。
+        return yield* SessionActivity.track(`native:${sessionID}`, Effect.gen(function* () {
         const session = yield* store.get(sessionID)
         if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
         return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force, maintenance })).pipe(
@@ -25,6 +28,7 @@ const layer = Layer.effect(
               : Effect.logError("Failed to drain Session", cause).pipe(Effect.annotateLogs({ sessionID })),
           ),
         )
+        }))
       }),
     })
 

@@ -733,8 +733,13 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
               }
 
               const step = 100
-              const patch = (file: string, before: string, after: string) =>
-                formatPatch(structuredPatch(file, file, before, after, "", "", { context: Number.MAX_SAFE_INTEGER }))
+              // #152：大文件跳过同步 structuredPatch，避免阻塞心跳/SSE
+              const patchSizeLimit = 500_000
+              const patch = (file: string, before: string, after: string) => {
+                if (before.length + after.length > patchSizeLimit) return ""
+                // #152：context 收窄到 3，降低 O(n²) 与输出体积
+                return formatPatch(structuredPatch(file, file, before, after, "", "", { context: 3 }))
+              }
 
               for (let i = 0; i < rows.length; i += step) {
                 const run = rows.slice(i, i + step)

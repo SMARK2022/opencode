@@ -58,7 +58,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     const retryDelay = 1000
     const maxRetryDelay = 30000
     // #139：默认 15s，与 source 服务端 10s 心跳匹配
-    const heartbeatTimeout = props.heartbeatTimeout ?? 15000
+    const heartbeatTimeout = props.heartbeatTimeout ?? 90_000 /* #152：容忍长 diff/事件循环卡顿 */
 
     const flush = () => {
       if (queue.length === 0) return

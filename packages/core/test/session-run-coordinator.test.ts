@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator"
 import { testEffect } from "./lib/effect"
+import { SessionActivity } from "@opencode-ai/core/session/activity"
 
 const it = testEffect(Layer.empty)
 
@@ -102,32 +103,49 @@ describe("SessionRunCoordinator", () => {
   it.effect("snapshots only active executions", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const baseline = SessionActivity.count()
+        const changes: number[] = []
+        const off = SessionActivity.onChange((count) => changes.push(count - baseline))
+        yield* Effect.addFinalizer(() => Effect.sync(off))
         const firstStarted = yield* Deferred.make<void>()
         const secondStarted = yield* Deferred.make<void>()
         const firstGate = yield* Deferred.make<void>()
         const secondGate = yield* Deferred.make<void>()
         const coordinator = yield* SessionRunCoordinator.make({
           drain: (key: string) =>
-            Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined).pipe(
+            // 使用生产execution相同的资源边界，不用手写计数替身模拟其释放。
+            SessionActivity.track(`native:${key}`, Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined).pipe(
               Effect.andThen(Deferred.await(key === "first" ? firstGate : secondGate)),
-            ),
+            )),
         })
 
         expect(Array.from(yield* coordinator.active)).toEqual([])
         const first = yield* coordinator.run("first").pipe(Effect.forkChild)
         yield* Deferred.await(firstStarted)
         expect(Array.from(yield* coordinator.active)).toEqual(["first"])
+        expect(SessionActivity.count()).toBe(baseline + 1)
 
         const second = yield* coordinator.run("second").pipe(Effect.forkChild)
         yield* Deferred.await(secondStarted)
         expect(Array.from(yield* coordinator.active)).toEqual(["first", "second"])
 
+        expect(SessionActivity.count()).toBe(baseline + 2)
+        const joined = yield* coordinator.run("first").pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        expect(SessionActivity.count()).toBe(baseline + 2)
+        // 中断join等待者只终止等待，不释放仍由实际drain拥有的活动。
+        yield* Fiber.interrupt(joined)
+        expect(SessionActivity.count()).toBe(baseline + 2)
+
         yield* Deferred.succeed(firstGate, undefined)
         yield* Fiber.join(first)
         expect(Array.from(yield* coordinator.active)).toEqual(["second"])
+        expect(SessionActivity.count()).toBe(baseline + 1)
         yield* Deferred.succeed(secondGate, undefined)
         yield* Fiber.join(second)
         expect(Array.from(yield* coordinator.active)).toEqual([])
+        expect(SessionActivity.count()).toBe(baseline)
+        expect(changes).toEqual([1, 2, 1, 0])
       }),
     ),
   )
@@ -136,9 +154,10 @@ describe("SessionRunCoordinator", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const failure = new Error("failed")
+        const baseline = SessionActivity.count()
         const defect = new Error("defect")
         const coordinator = yield* SessionRunCoordinator.make({
-          drain: (key: string) => (key === "failure" ? Effect.fail(failure) : Effect.die(defect)),
+          drain: (key: string) => SessionActivity.track(`native:${key}`, key === "failure" ? Effect.fail(failure) : Effect.die(defect)),
         })
 
         const failed = yield* coordinator.run("failure").pipe(Effect.exit)
@@ -148,6 +167,7 @@ describe("SessionRunCoordinator", () => {
         const died = yield* coordinator.run("defect").pipe(Effect.exit)
         expect(Exit.isFailure(died) && Cause.hasDies(died.cause)).toBeTrue()
         expect(Array.from(yield* coordinator.active)).toEqual([])
+        expect(SessionActivity.count()).toBe(baseline)
       }),
     ),
   )
@@ -155,10 +175,11 @@ describe("SessionRunCoordinator", () => {
   it.effect("cleans active executions when its scope closes", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>()
+      const baseline = SessionActivity.count()
       const coordinator = yield* Effect.scoped(
         Effect.gen(function* () {
           const coordinator = yield* SessionRunCoordinator.make({
-            drain: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+            drain: () => SessionActivity.track("native:scope", Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))),
           })
           yield* coordinator.wake("session")
           yield* Deferred.await(started)
@@ -168,6 +189,7 @@ describe("SessionRunCoordinator", () => {
       )
 
       expect(Array.from(yield* coordinator.active)).toEqual([])
+      expect(SessionActivity.count()).toBe(baseline)
     }),
   )
 
