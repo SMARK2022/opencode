@@ -37,6 +37,9 @@ import {
 import { Prompt, type PromptRef } from "../../component/prompt"
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
 import { ConnectionError } from "../../util/connection-error"
+import { previewDiff } from "../../util/preview-diff"
+// #154：pending/streaming 判定抽到 util，便于单测与去重
+import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
 import type {
   AssistantMessage,
   Part,
@@ -224,7 +227,7 @@ export function Session() {
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
-  const streamingActive = createMemo(() => messages().some((x: any) => x.role === "assistant" && !x.time?.completed))
+  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
@@ -260,15 +263,36 @@ export function Session() {
   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
 
   const pending = createMemo(() => {
-    // idle 或缺省状态不应把残留未完成助手显示为排队；busy/retry 仍保留完成边界扫描。
+    // #154：算法沉淀到 session-pending util（含 completed 游标），此处只保留状态读取
     const status = sync.data.session_status?.[route.sessionID]
-    if (!status || status.type === "idle") return undefined
-    const completed = messages().findLastIndex((message) => message.role === "assistant" && message.time.completed)
-    const pending = messages().findLastIndex(
-      (message, index) => index > completed && message.role === "assistant" && !message.time.completed,
-    )
-    return pending === -1 ? undefined : pending
+    return pendingAssistantIndex(messages(), status)
   })
+
+  // #154：busy 却没有流式 assistant，说明 SSE 状态更新丢失而 DB 已有完成消息；
+  // 延迟 1.5s 强制一次全量 sync，避免 prompt 因状态陈旧被永久禁用
+  createEffect(
+    on(
+      () => {
+        // 依赖键只取末条消息的 id/role/completed：流式 delta 不应反复重启定时器
+        const last = messages().at(-1)
+        return [
+          route.sessionID,
+          sync.data.session_status?.[route.sessionID]?.type,
+          last?.id,
+          last?.role,
+          last?.role === "assistant" ? last.time.completed : undefined,
+        ] as const
+      },
+      ([sessionID]) => {
+        if (!shouldRefreshStaleBusyStatus(messages(), sync.data.session_status?.[sessionID])) return
+        // 1.5s 容忍短暂竞态，超时才认定状态更新丢失
+        const timer = setTimeout(() => {
+          void sync.session.sync(sessionID, { force: true })
+        }, 1_500)
+        onCleanup(() => clearTimeout(timer))
+      },
+    ),
+  )
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
@@ -2314,6 +2338,48 @@ function Shell(props: ToolProps) {
   )
 }
 
+// #154：展开态统一走 DiffView（集中 theme/filetype/syntax props），
+// 折叠态走 DiffPreview：独立挂载裁剪后的短 diff，maxHeight 只作用于预览，
+// 避免旧 maxHeight 内联裁剪把滚轮事件灌进全量 diff、重开时带着 stale offset
+function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
+  const ctx = use()
+  const { theme, syntax } = useTheme()
+
+  return (
+    <box paddingLeft={1}>
+      <diff
+        diff={props.diff}
+        view={props.view}
+        syncScroll={props.syncScroll ?? true}
+        filetype={filetype(props.filePath)}
+        syntaxStyle={syntax()}
+        showLineNumbers={true}
+        width="100%"
+        wrapMode={ctx.diffWrapMode()}
+        fg={theme.text}
+        addedBg={theme.diffAddedBg}
+        removedBg={theme.diffRemovedBg}
+        contextBg={theme.diffContextBg}
+        addedSignColor={theme.diffHighlightAdded}
+        removedSignColor={theme.diffHighlightRemoved}
+        lineNumberFg={theme.diffLineNumber}
+        lineNumberBg={theme.diffContextBg}
+        addedLineNumberBg={theme.diffAddedLineNumberBg}
+        removedLineNumberBg={theme.diffRemovedLineNumberBg}
+      />
+    </box>
+  )
+}
+
+function DiffPreview(props: { diff: string; filePath?: string; view: "split" | "unified"; maxLines: number }) {
+  // 预览与展开是两个独立 Renderable：syncScroll=false 防止预览回写主滚动位置
+  return (
+    <box maxHeight={props.maxLines} overflow="hidden">
+      <DiffView diff={props.diff} filePath={props.filePath} view={props.view} syncScroll={false} />
+    </box>
+  )
+}
+
 function Write(props: ToolProps) {
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
@@ -2368,34 +2434,13 @@ function Write(props: ToolProps) {
       <Match when={isOverwrite()}>
         <BlockTool
           // #144：Write diff 折叠预览
-          preview={diffOverflow() && !expanded() ? <text fg={theme.text}>{previewText(diff() ?? "", 10, maxChars())}</text> : undefined}
+          // 短 diff 独立挂载，折叠滚动不污染展开后的完整 diff。
+          preview={diffOverflow() && !expanded() ? <DiffPreview diff={previewDiff(diff() ?? "", 10)} filePath={filepath()} view={diffView()} maxLines={10} /> : undefined}
           title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
           part={props.part}
           onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
         >
-          {/* 超过 20 行才限高为 10 行，短 diff 与展开态保留完整内容。 */}
-          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 10 : undefined}>
-            <diff
-              diff={diff()!}
-              syncScroll={true}
-              view={diffView()}
-              filetype={filetype(filepath())}
-              syntaxStyle={syntax()}
-              showLineNumbers={true}
-              width="100%"
-              wrapMode={ctx.diffWrapMode()}
-              fg={theme.text}
-              addedBg={theme.diffAddedBg}
-              removedBg={theme.diffRemovedBg}
-              contextBg={theme.diffContextBg}
-              addedSignColor={theme.diffHighlightAdded}
-              removedSignColor={theme.diffHighlightRemoved}
-              lineNumberFg={theme.diffLineNumber}
-              lineNumberBg={theme.diffContextBg}
-              addedLineNumberBg={theme.diffAddedLineNumberBg}
-              removedLineNumberBg={theme.diffRemovedLineNumberBg}
-            />
-          </box>
+          <DiffView diff={diff()!} filePath={filepath()} view={diffView()} />
           <Show when={diffOverflow()}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
@@ -2702,8 +2747,6 @@ function Edit(props: ToolProps) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
-
   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
   // 复用已有 parsePatch 路径，仅统计 hunk 内容；+++ 与 --- 开头的代码不是文件头。
   const stats = createMemo(() => {
@@ -2722,36 +2765,14 @@ function Edit(props: ToolProps) {
       <Match when={stringValue(props.metadata.diff) !== undefined}>
         <BlockTool
           // #144：Edit diff 折叠预览
-          preview={overflow() && !expanded() ? <text fg={theme.text}>{previewText(diffContent(), 10, 10 * Math.max(20, ctx.width - 6))}</text> : undefined}
+          // 与 Write 共用短 diff 的合法 hunk 重写，展开时仍显示完整内容。
+          preview={overflow() && !expanded() ? <DiffPreview diff={previewDiff(diffContent(), 10)} filePath={stringValue(props.input.filePath)} view={view()} maxLines={10} /> : undefined}
           // 保留路径格式化与 unknown 解码，只给真实变更附加统计后缀。
           title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
         >
-          {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
-          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 10 : undefined}>
-            <diff
-              // 同步滚动：diff 视图与代码视图同步滚动，提升编辑体验
-              syncScroll={true}
-              diff={diffContent()}
-              view={view()}
-              filetype={ft()}
-              syntaxStyle={syntax()}
-              showLineNumbers={true}
-              width="100%"
-              wrapMode={ctx.diffWrapMode()}
-              fg={theme.text}
-              addedBg={theme.diffAddedBg}
-              removedBg={theme.diffRemovedBg}
-              contextBg={theme.diffContextBg}
-              addedSignColor={theme.diffHighlightAdded}
-              removedSignColor={theme.diffHighlightRemoved}
-              lineNumberFg={theme.diffLineNumber}
-              lineNumberBg={theme.diffContextBg}
-              addedLineNumberBg={theme.diffAddedLineNumberBg}
-              removedLineNumberBg={theme.diffRemovedLineNumberBg}
-            />
-          </box>
+          <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
           <Show when={overflow()}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
@@ -2816,7 +2837,7 @@ function ApplyPatch(props: ToolProps) {
             return (
             <BlockTool
               // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
-              preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <text fg={theme.text}>{previewText(file.patch || "", 10, 10 * Math.max(20, ctx.width - 6))}</text> : undefined}
+              preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
               title={title(file)}
               part={props.part}
               onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
@@ -2830,29 +2851,7 @@ function ApplyPatch(props: ToolProps) {
                   </text>
                 }
               >
-                {/* 完整 patch 仍供解析，仅超过 20 行的未展开预览限高为 10 行。 */}
-                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 10 : undefined}>
-                  <diff
-                    syncScroll={true}
-                    diff={file.patch || ""}
-                    view={view()}
-                    filetype={filetype(file.filePath)}
-                    syntaxStyle={syntax()}
-                    showLineNumbers={true}
-                    width="100%"
-                    wrapMode={ctx.diffWrapMode()}
-                    fg={theme.text}
-                    addedBg={theme.diffAddedBg}
-                    removedBg={theme.diffRemovedBg}
-                    contextBg={theme.diffContextBg}
-                    addedSignColor={theme.diffHighlightAdded}
-                    removedSignColor={theme.diffHighlightRemoved}
-                    lineNumberFg={theme.diffLineNumber}
-                    lineNumberBg={theme.diffContextBg}
-                    addedLineNumberBg={theme.diffAddedLineNumberBg}
-                    removedLineNumberBg={theme.diffRemovedLineNumberBg}
-                  />
-                </box>
+                <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
                 <Show when={patchOverflow()}>
                   <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
                 </Show>
