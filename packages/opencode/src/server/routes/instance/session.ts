@@ -43,6 +43,15 @@ function queryBoolean(value: z.infer<typeof QueryBoolean> | undefined) {
   return value === true || value === "true"
 }
 
+function inSessionDirectory<A, E, R>(sessionID: SessionID, effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const store = yield* InstanceStore.Service
+    const info = yield* sessions.get(sessionID)
+    return yield* store.provide({ directory: info.directory }, effect)
+  })
+}
+
 export const SessionRoutes = lazy(() =>
   new Hono()
     .get(
@@ -492,14 +501,18 @@ export const SessionRoutes = lazy(() =>
         jsonRequest("SessionRoutes.init", c, function* () {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json")
-          const svc = yield* SessionPrompt.Service
-          yield* svc.command({
+          yield* inSessionDirectory(
             sessionID,
-            messageID: body.messageID,
-            model: body.providerID + "/" + body.modelID,
-            command: Command.Default.INIT,
-            arguments: "",
-          })
+            SessionPrompt.Service.use((svc) =>
+              svc.command({
+                sessionID,
+                messageID: body.messageID,
+                model: body.providerID + "/" + body.modelID,
+                command: Command.Default.INIT,
+                arguments: "",
+              }),
+            ),
+          )
           return true
         }),
     )
@@ -709,34 +722,39 @@ export const SessionRoutes = lazy(() =>
         jsonRequest("SessionRoutes.summarize", c, function* () {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json")
-          const session = yield* Session.Service
-          const revert = yield* SessionRevert.Service
-          const compact = yield* SessionCompaction.Service
-          const prompt = yield* SessionPrompt.Service
-          const agent = yield* Agent.Service
-
-          yield* revert.cleanup(yield* session.get(sessionID))
-          const msgs = yield* session.messages({ sessionID })
-          const defaultAgent = yield* agent.defaultAgent()
-          let currentAgent = defaultAgent
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const info = msgs[i].info
-            if (info.role === "user") {
-              currentAgent = info.agent || defaultAgent
-              break
-            }
-          }
-
-          yield* compact.create({
+          yield* inSessionDirectory(
             sessionID,
-            agent: currentAgent,
-            model: {
-              providerID: body.providerID,
-              modelID: body.modelID,
-            },
-            auto: body.auto,
-          })
-          yield* prompt.loop({ sessionID })
+            Effect.gen(function* () {
+              const session = yield* Session.Service
+              const revert = yield* SessionRevert.Service
+              const compact = yield* SessionCompaction.Service
+              const prompt = yield* SessionPrompt.Service
+              const agent = yield* Agent.Service
+
+              yield* revert.cleanup(yield* session.get(sessionID))
+              const msgs = yield* session.messages({ sessionID })
+              const defaultAgent = yield* agent.defaultAgent()
+              let currentAgent = defaultAgent
+              for (let i = msgs.length - 1; i >= 0; i--) {
+                const info = msgs[i].info
+                if (info.role === "user") {
+                  currentAgent = info.agent || defaultAgent
+                  break
+                }
+              }
+
+              yield* compact.create({
+                sessionID,
+                agent: currentAgent,
+                model: {
+                  providerID: body.providerID,
+                  modelID: body.modelID,
+                },
+                auto: body.auto,
+              })
+              yield* prompt.loop({ sessionID })
+            }),
+          )
           return true
         }),
     )
@@ -1022,8 +1040,11 @@ export const SessionRoutes = lazy(() =>
           const msg = await runRequest(
             "SessionRoutes.prompt",
             c,
-            SessionPrompt.Service.use((svc) =>
-              svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
+            inSessionDirectory(
+              sessionID,
+              SessionPrompt.Service.use((svc) =>
+                svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
+              ),
             ),
           )
           void stream.write(JSON.stringify(msg))
@@ -1057,8 +1078,11 @@ export const SessionRoutes = lazy(() =>
         void runRequest(
           "SessionRoutes.prompt_async",
           c,
-          SessionPrompt.Service.use((svc) =>
-            svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
+          inSessionDirectory(
+            sessionID,
+            SessionPrompt.Service.use((svc) =>
+              svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
+            ),
           ),
         ).catch((err) => {
           log.error("prompt_async failed", { sessionID, error: err })
@@ -1105,8 +1129,10 @@ export const SessionRoutes = lazy(() =>
         jsonRequest("SessionRoutes.command", c, function* () {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json") as Omit<SessionPrompt.CommandInput, "sessionID">
-          const svc = yield* SessionPrompt.Service
-          return yield* svc.command({ ...body, sessionID })
+          return yield* inSessionDirectory(
+            sessionID,
+            SessionPrompt.Service.use((svc) => svc.command({ ...body, sessionID })),
+          )
         }),
     )
     .post(
@@ -1138,8 +1164,10 @@ export const SessionRoutes = lazy(() =>
         jsonRequest("SessionRoutes.shell", c, function* () {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json") as Omit<SessionPrompt.ShellInput, "sessionID">
-          const svc = yield* SessionPrompt.Service
-          return yield* svc.shell({ ...body, sessionID })
+          return yield* inSessionDirectory(
+            sessionID,
+            SessionPrompt.Service.use((svc) => svc.shell({ ...body, sessionID })),
+          )
         }),
     )
     .post(

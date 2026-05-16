@@ -36,9 +36,11 @@ function eventSource(): EventSource {
 
 function createFetch() {
   const session = [] as URL[]
+  const status = [] as URL[]
   const fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
     if (url.pathname === "/session") session.push(url)
+    if (url.pathname === "/session/status") status.push(url)
 
     switch (url.pathname) {
       case "/agent":
@@ -66,6 +68,20 @@ function createFetch() {
         return json({ all: [], default: {}, connected: [] })
       case "/session":
         return json([])
+      case "/session/ses_test":
+        return json({
+          id: "ses_test",
+          slug: "test",
+          projectID: "proj_test",
+          directory,
+          title: "Test",
+          version: "0.0.0",
+          time: { created: 1, updated: 1 },
+        })
+      case "/session/ses_test/message":
+      case "/session/ses_test/todo":
+      case "/session/ses_test/diff":
+        return json([])
       case "/vcs":
         return json({ branch: "main" })
     }
@@ -73,7 +89,7 @@ function createFetch() {
     throw new Error(`unexpected request: ${url.pathname}`)
   }) as typeof globalThis.fetch
 
-  return { fetch, session }
+  return { fetch, session, status }
 }
 
 async function mount() {
@@ -109,7 +125,7 @@ async function mount() {
 
   await ready
   await wait(() => sync.status === "complete")
-  return { app, kv, sync, session: calls.session }
+  return { app, kv, sync, session: calls.session, status: calls.status }
 }
 
 function Probe(props: { onReady: (ctx: { kv: ReturnType<typeof useKV>; sync: ReturnType<typeof useSync> }) => void }) {
@@ -141,6 +157,23 @@ describe("tui sync", () => {
 
       expect(session.at(-1)?.searchParams.get("scope")).toBe("project")
       expect(session.at(-1)?.searchParams.get("path")).toBeNull()
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("force syncing a session refreshes session status", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, sync, status } = await mount()
+
+    try {
+      const before = status.length
+      await sync.session.sync("ses_test", { force: true })
+      expect(status.length).toBe(before + 1)
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

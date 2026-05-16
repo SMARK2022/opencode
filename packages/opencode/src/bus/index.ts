@@ -4,8 +4,11 @@ import * as Log from "@opencode-ai/core/util/log"
 import { BusEvent } from "./bus-event"
 import { GlobalBus } from "./global"
 import { InstanceState } from "@/effect/instance-state"
+import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { makeRuntime } from "@/effect/run-service"
 import { Identifier } from "@/id/id"
+import type { InstanceContext } from "@/project/instance"
+import type { WorkspaceID } from "@/control-plane/schema"
 
 const log = Log.create({ service: "bus" })
 
@@ -27,6 +30,14 @@ type Payload<D extends BusEvent.Definition = BusEvent.Definition> = {
 type State = {
   wildcard: PubSub.PubSub<Payload>
   typed: Map<string, PubSub.PubSub<Payload>>
+}
+
+type PublishOptions = {
+  id?: string
+  context?: {
+    instance: InstanceContext
+    workspace?: WorkspaceID
+  }
 }
 
 export interface Interface {
@@ -187,9 +198,16 @@ export function createID() {
 export async function publish<D extends BusEvent.Definition>(
   def: D,
   properties: BusProperties<D>,
-  options?: { id?: string },
+  options?: PublishOptions,
 ) {
-  return runPromise((svc) => svc.publish(def, properties, options))
+  return runPromise((svc) => {
+    const effect = svc.publish(def, properties, { id: options?.id })
+    if (!options?.context) return effect
+    return effect.pipe(
+      Effect.provideService(InstanceRef, options.context.instance),
+      Effect.provideService(WorkspaceRef, options.context.workspace),
+    )
+  })
 }
 
 export function subscribe<D extends BusEvent.Definition>(def: D, callback: (event: Payload<D>) => unknown) {

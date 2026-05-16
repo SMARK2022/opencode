@@ -711,8 +711,8 @@ export const layer: Layer.Layer<
                 ? { raw: part.state.raw + pendingRaw }
                 : {}),
               status: "error",
-              error: "Tool execution aborted",
-              metadata: { ...metadata, interrupted: true },
+              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
+              metadata: aborted ? { ...metadata, interrupted: true } : metadata,
               time: { start: "time" in part.state ? part.state.time.start : end, end },
             },
           })
@@ -761,7 +761,6 @@ export const layer: Layer.Layer<
         slog.info("process")
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
-
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined

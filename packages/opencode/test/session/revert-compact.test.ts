@@ -6,6 +6,7 @@ import { Session } from "@/session/session"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { SessionRevert } from "../../src/session/revert"
 import { MessageV2 } from "../../src/session/message-v2"
+import { SessionRequestUsage } from "../../src/session/request-usage"
 import { Snapshot } from "../../src/snapshot"
 import * as Log from "@opencode-ai/core/util/log"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -18,6 +19,7 @@ void Log.init({ print: false })
 const env = Layer.mergeAll(
   Session.defaultLayer,
   SessionRevert.defaultLayer,
+  SessionRequestUsage.defaultLayer,
   Snapshot.defaultLayer,
   CrossSpawnSpawner.defaultLayer,
 )
@@ -422,6 +424,56 @@ describe("revert + compact workflow", () => {
           expect(ids).toContain(a1.id)
           expect(ids).not.toContain(u2.id)
           expect(ids).not.toContain(a2.id)
+        }),
+      { git: true },
+    ),
+  )
+
+  it.live(
+    "cleanup terminalizes unfinished assistant messages hidden by undo",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const usage = yield* SessionRequestUsage.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+          const u1 = yield* user(sid)
+          const a1 = yield* assistant(sid, u1.id, dir)
+
+          yield* usage.begin({
+            sessionID: sid,
+            requestID: u1.id,
+            source: "prompt",
+            agent: a1.agent,
+            providerID: a1.providerID,
+            modelID: a1.modelID,
+            timeCreated: u1.time.created,
+          })
+          yield* usage.recordAssistant({ sessionID: sid, requestID: u1.id, assistant: a1 })
+          expect((yield* usage.get({ sessionID: sid, requestID: u1.id }))?.status).toBe("running")
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u1.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+          yield* revert.cleanup(yield* session.get(sid))
+
+          const stored = MessageV2.get({ sessionID: sid, messageID: a1.id })
+          const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
+          const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
+
+          expect(stored.info.role).toBe("assistant")
+          if (stored.info.role === "assistant") {
+            expect(stored.info.hidden?.reason).toBe("undo")
+            expect(stored.info.time.completed).toBeDefined()
+            expect(stored.info.error?.name).toBe("MessageAbortedError")
+          }
+          expect(request?.status).toBe("aborted")
+          expect(assistants.find((item) => item.assistantMessageID === a1.id)?.status).toBe("aborted")
         }),
       { git: true },
     ),

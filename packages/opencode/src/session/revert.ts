@@ -1,4 +1,4 @@
-import { Effect, Layer, Context, Schema } from "effect"
+import { Effect, Layer, Context, Schema, Option } from "effect"
 import { Bus } from "../bus"
 import { Snapshot } from "../snapshot"
 import { Storage } from "@/storage/storage"
@@ -11,6 +11,7 @@ import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { SessionRunState } from "./run-state"
 import { SessionSummary } from "./summary"
+import { SessionRequestUsage } from "./request-usage"
 
 const log = Log.create({ service: "session.revert" })
 
@@ -122,10 +123,19 @@ export const layer = Layer.effect(
         remove.push(msg)
       }
       for (const msg of remove) {
-        yield* sessions.updateMessage({
+        const next = {
           ...msg.info,
-          hidden: { time: Date.now(), reason: "undo" },
-        })
+          hidden: { time: Date.now(), reason: "undo" as const },
+        }
+        if (next.role === "assistant" && !next.time.completed) {
+          next.time.completed = next.hidden.time
+          next.error ??= new MessageV2.AbortedError({ message: "Aborted by undo" }).toObject()
+        }
+        yield* sessions.updateMessage(next)
+        if (next.role === "assistant" && next.parentID) {
+          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next })
+        }
       }
       if (session.revert.partID && target) {
         const partID = session.revert.partID

@@ -473,6 +473,32 @@ describe("Runner", () => {
   )
 
   it.live(
+    "onIdle fires before interrupted run finalizers finish",
+    Effect.gen(function* () {
+      const s = yield* Scope.Scope
+      const idle = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const runner = Runner.make<string>(s, {
+        onIdle: Deferred.succeed(idle, undefined).pipe(Effect.asVoid),
+      })
+
+      const run = yield* runner
+        .ensureRunning(Effect.never.pipe(Effect.ensuring(Deferred.await(release)), Effect.as("x")))
+        .pipe(Effect.forkChild)
+      yield* Effect.sleep("10 millis")
+
+      const cancel = yield* runner.cancel.pipe(Effect.forkChild)
+      const idleExit = yield* Deferred.await(idle).pipe(Effect.timeout("250 millis"), Effect.exit)
+      expect(Exit.isSuccess(idleExit)).toBe(true)
+      expect(runner.busy).toBe(false)
+
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.await(cancel)
+      yield* Fiber.await(run)
+    }),
+  )
+
+  it.live(
     "onBusy fires when shell starts",
     Effect.gen(function* () {
       const s = yield* Scope.Scope

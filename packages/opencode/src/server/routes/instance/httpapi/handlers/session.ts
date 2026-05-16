@@ -60,6 +60,23 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const store = yield* InstanceStore.Service
     const scope = yield* Scope.Scope
 
+    const sessionExecutionContext = Effect.fn("SessionHttpApi.sessionExecutionContext")(function* (sessionID: SessionID) {
+      const info = yield* session.get(sessionID).pipe(Effect.mapError(() => new HttpApiError.NotFound({})))
+      return {
+        instance: yield* store.load({ directory: info.directory }),
+        workspace: yield* InstanceState.workspaceID,
+      }
+    })
+
+    const inSessionDirectory = <A, E, R>(sessionID: SessionID, effect: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const execution = yield* sessionExecutionContext(sessionID)
+        return yield* effect.pipe(
+          Effect.provideService(InstanceRef, execution.instance),
+          Effect.provideService(WorkspaceRef, execution.workspace),
+        )
+      })
+
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       return yield* session.list({
         directory: ctx.query.scope === "project" ? undefined : ctx.query.directory,
@@ -239,13 +256,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof InitPayload.Type
     }) {
-      yield* promptSvc.command({
-        sessionID: ctx.params.sessionID,
-        messageID: ctx.payload.messageID,
-        model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
-        command: Command.Default.INIT,
-        arguments: "",
-      })
+      yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc.command({
+          sessionID: ctx.params.sessionID,
+          messageID: ctx.payload.messageID,
+          model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
+          command: Command.Default.INIT,
+          arguments: "",
+        }),
+      )
       return true
     })
 
@@ -263,21 +283,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      yield* revertSvc.cleanup(yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID)))
-      const messages = yield* session.messages({ sessionID: ctx.params.sessionID })
-      const defaultAgent = yield* agentSvc.defaultAgent()
-      const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
+      const info = yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
+      const execution = {
+        instance: yield* store.load({ directory: info.directory }),
+        workspace: yield* InstanceState.workspaceID,
+      }
+      yield* Effect.gen(function* () {
+        yield* revertSvc.cleanup(info)
+        const messages = yield* session.messages({ sessionID: ctx.params.sessionID })
+        const defaultAgent = yield* agentSvc.defaultAgent()
+        const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
 
-      yield* compactSvc.create({
-        sessionID: ctx.params.sessionID,
-        agent: currentAgent,
-        model: {
-          providerID: ctx.payload.providerID,
-          modelID: ctx.payload.modelID,
-        },
-        auto: ctx.payload.auto ?? false,
-      })
-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+        yield* compactSvc.create({
+          sessionID: ctx.params.sessionID,
+          agent: currentAgent,
+          model: {
+            providerID: ctx.payload.providerID,
+            modelID: ctx.payload.modelID,
+          },
+          auto: ctx.payload.auto ?? false,
+        })
+        yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+      }).pipe(
+        Effect.provideService(InstanceRef, execution.instance),
+        Effect.provideService(WorkspaceRef, execution.workspace),
+      )
       return true
     })
 
@@ -285,8 +315,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof PromptPayload.Type
     }) {
-      const instance = yield* InstanceState.context
-      const workspace = yield* InstanceState.workspaceID
+      const execution = yield* sessionExecutionContext(ctx.params.sessionID)
       return HttpServerResponse.stream(
         Stream.fromEffect(
           promptSvc
@@ -294,7 +323,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
               ...ctx.payload,
               sessionID: ctx.params.sessionID,
             })
-            .pipe(Effect.provideService(InstanceRef, instance), Effect.provideService(WorkspaceRef, workspace)),
+            .pipe(
+              Effect.provideService(InstanceRef, execution.instance),
+              Effect.provideService(WorkspaceRef, execution.workspace),
+            ),
         ).pipe(
           Stream.map((message) => JSON.stringify(message)),
           Stream.encodeText,
@@ -307,16 +339,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof PromptPayload.Type
     }) {
-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.gen(function* () {
-            yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
-            yield* bus.publish(Session.Event.Error, {
-              sessionID: ctx.params.sessionID,
-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-            })
-          }),
+      yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
+              yield* bus.publish(Session.Event.Error, {
+                sessionID: ctx.params.sessionID,
+                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+              })
+            }),
+          ),
         ),
+      ).pipe(
         Effect.forkIn(scope, { startImmediately: true }),
       )
       return HttpApiSchema.NoContent.make()
@@ -326,14 +362,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof CommandPayload.Type
     }) {
-      return yield* promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID })
+      return yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID }),
+      )
     })
 
     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
       params: { sessionID: SessionID }
       payload: typeof ShellPayload.Type
     }) {
-      return yield* promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })
+      return yield* inSessionDirectory(
+        ctx.params.sessionID,
+        promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }),
+      )
     })
 
     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {

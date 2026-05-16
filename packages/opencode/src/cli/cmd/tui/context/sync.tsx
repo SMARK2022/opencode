@@ -130,6 +130,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
+    async function refreshStatus() {
+      const x = await sdk.client.session.status({ workspace: project.workspace.current() })
+      setStore("session_status", reconcile(x.data ?? {}))
+    }
+
     event.subscribe((event) => {
       switch (event.type) {
         case "server.connected":
@@ -488,9 +493,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               .list({ workspace })
               .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-            sdk.client.session.status({ workspace }).then((x) => {
-              setStore("session_status", reconcile(x.data ?? {}))
-            }),
+            refreshStatus(),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
             project.workspace.sync(),
@@ -554,11 +557,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         },
         async sync(sessionID: string, options?: { force?: boolean }) {
           if (!options?.force && fullSyncedSessions.has(sessionID)) return
-          const [session, messages, todo, diff] = await Promise.all([
+          const [session, messages, todo, diff, status] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
             sdk.client.session.messages({ sessionID, limit: 100 }),
             sdk.client.session.todo({ sessionID }),
             sdk.client.session.diff({ sessionID }),
+            sdk.client.session.status({ workspace: project.workspace.current() }),
           ])
           setStore(
             produce((draft) => {
@@ -573,8 +577,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               draft.session_diff[sessionID] = diff.data ?? []
             }),
           )
+          setStore("session_status", reconcile(status.data ?? {}))
           fullSyncedSessions.add(sessionID)
         },
+      },
+      sessionStatus: {
+        refresh: refreshStatus,
       },
       bootstrap,
     }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { ConfigProvider, Effect, Layer } from "effect"
+import { ConfigProvider, Effect, Fiber, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import { HttpRouter } from "effect/unstable/http"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -16,6 +16,7 @@ import type { Config } from "@/config/config"
 import { Session as SessionNs } from "@/session/session"
 import { errorMessage } from "../../src/util/error"
 import { TestLLMServer } from "../lib/llm-server"
+import { waitGlobalBusEvent } from "./global-bus"
 import path from "path"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
@@ -611,6 +612,49 @@ describe("HttpApi SDK", () => {
         }
       }),
     ),
+  )
+
+  parity("prompt routes publish session events from the persisted session directory", (backend) =>
+    Effect.gen(function* () {
+      const sessionTmp = yield* Effect.acquireRelease(
+        call(() => tmpdir({ git: true, config: { formatter: false, lsp: false } })),
+        (tmp) => call(() => tmp[Symbol.asyncDispose]()).pipe(Effect.ignore),
+      )
+      const requestTmp = yield* Effect.acquireRelease(
+        call(() => tmpdir({ git: true, config: { formatter: false, lsp: false } })),
+        (tmp) => call(() => tmp[Symbol.asyncDispose]()).pipe(Effect.ignore),
+      )
+      const session = yield* call(async () =>
+        await WithInstance.provide({
+          directory: sessionTmp.path,
+          fn: () =>
+            Effect.runPromise(
+              SessionNs.Service.use((svc) => svc.create({ title: "prompt dir" })).pipe(
+                Effect.provide(SessionNs.defaultLayer),
+              ),
+            ),
+        }),
+      )
+      const messageID = MessageID.ascending()
+      const event = yield* waitGlobalBusEvent({
+        predicate: (event) =>
+          event.payload.type === "message.updated" && event.payload.properties.info.id === messageID,
+      }).pipe(Effect.forkScoped)
+      const prompt = yield* capture(() =>
+        client(backend, requestTmp.path).session.prompt({
+          sessionID: session.id,
+          messageID,
+          agent: "build",
+          noReply: true,
+          parts: [{ type: "text", text: "hello from persisted directory" }],
+        }),
+      )
+      const published = yield* Fiber.join(event)
+
+      expect(prompt.status).toBe(200)
+      expect(published.directory).toBe(sessionTmp.path)
+      return { directory: published.directory === sessionTmp.path }
+    }),
   )
 
   parity("matches generated SDK prompt streaming through fake LLM across backends", (backend) =>

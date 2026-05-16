@@ -309,12 +309,18 @@ function process<Def extends Definition>(
 
     Database.effect(() => {
       if (options?.publish) {
-        if (!options.context?.instance) {
+        const context = options.context
+        if (!context?.instance) {
           throw new Error("SyncEvent.process: publish requires instance context")
         }
+        const instance = context.instance
 
         const result = convertEvent(def.type, event.data)
-        const publish = (data: unknown) => ProjectBus.publish(def, data as Properties<Def>, { id: event.id })
+        const publish = (data: unknown) =>
+          ProjectBus.publish(def, data as Properties<Def>, {
+            id: event.id,
+            context: { instance, workspace: context.workspace },
+          })
         if (result instanceof Promise) {
           void result.then(publish)
         } else {
@@ -322,9 +328,9 @@ function process<Def extends Definition>(
         }
 
         GlobalBus.emit("event", {
-          directory: options.context.instance.directory,
-          project: options.context.instance.project.id,
-          workspace: options.context.workspace,
+          directory: instance.directory,
+          project: instance.project.id,
+          workspace: context.workspace,
           payload: {
             type: "sync",
             syncEvent: {

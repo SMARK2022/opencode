@@ -935,6 +935,59 @@ it.live(
   3_000,
 )
 
+it.instance("cancel aborts all visible unfinished assistants", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const first = yield* user(chat.id, "first")
+    const firstAssistant: MessageV2.Assistant = {
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: first.id,
+      sessionID: chat.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+    }
+    yield* sessions.updateMessage(firstAssistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: firstAssistant.id,
+      sessionID: chat.id,
+      type: "text",
+      text: "partial",
+    })
+
+    const second = yield* user(chat.id, "second")
+    const secondAssistant: MessageV2.Assistant = {
+      ...firstAssistant,
+      id: MessageID.ascending(),
+      parentID: second.id,
+      time: { created: Date.now() },
+    }
+    yield* sessions.updateMessage(secondAssistant)
+
+    yield* prompt.cancel(chat.id)
+
+    const msgs = Array.from(MessageV2.stream(chat.id, { includeHidden: true })).reverse()
+    const aborted = msgs.filter(
+      (msg): msg is MessageV2.WithParts & { info: MessageV2.Assistant } => msg.info.role === "assistant",
+    )
+    expect(aborted).toHaveLength(2)
+    expect(aborted[0]?.info.time.completed).toBeDefined()
+    expect(aborted[0]?.info.error?.name).toBe("MessageAbortedError")
+    expect(aborted[1]?.info.time.completed).toBeDefined()
+    expect(aborted[1]?.info.error?.name).toBe("MessageAbortedError")
+    expect(aborted[1]?.info.hidden?.reason).toBe("repair-empty-dangling-assistant")
+  }),
+)
+
 // Cancel semantics
 
 it.live(

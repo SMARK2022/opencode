@@ -40,7 +40,7 @@ export { isMedia }
 
 const Hidden = Schema.Struct({
   time: NonNegativeInt,
-  reason: Schema.Literal("undo"),
+  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
 })
 
 export const OutputLengthError = namedSchemaError("MessageOutputLengthError", {})

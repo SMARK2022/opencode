@@ -180,26 +180,26 @@ export const make = <A, E = never>(
       case "Running":
         return [
           Effect.gen(function* () {
+            yield* idleIfCurrent()
             yield* Fiber.interrupt(st.run.fiber)
             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
-            yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,
         ] as const
       case "Shell":
         return [
           Effect.gen(function* () {
-            yield* stopShell(st.shell)
             yield* idleIfCurrent()
+            yield* stopShell(st.shell)
           }),
           { _tag: "Idle" } as const,
         ] as const
       case "ShellThenRun":
         return [
           Effect.gen(function* () {
+            yield* idleIfCurrent()
             yield* stopShell(st.shell)
             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
-            yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,
         ] as const

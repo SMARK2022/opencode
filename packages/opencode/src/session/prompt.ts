@@ -174,22 +174,34 @@ export const layer = Layer.effect(
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* elog.info("cancel", { sessionID })
       yield* state.cancel(sessionID)
-      yield* abortPendingAssistant(sessionID)
+      yield* abortPendingAssistants(sessionID)
     })
 
-    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {
-      const match = yield* sessions.findMessage(
-        sessionID,
-        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
-      )
-      if (Option.isNone(match)) return
+    const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
+      const pending = [] as (MessageV2.WithParts & { info: MessageV2.Assistant })[]
+      for (const msg of MessageV2.stream(sessionID)) {
+        if (msg.info.role !== "assistant") continue
+        if (msg.info.time.completed) continue
+        pending.push(msg as MessageV2.WithParts & { info: MessageV2.Assistant })
+      }
+      if (pending.length === 0) return
 
       const now = Date.now()
-      const assistant = match.value.info
-      if (assistant.role !== "assistant" || assistant.time.completed) return
-      assistant.time.completed = now
-      assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
-      yield* sessions.updateMessage(assistant)
+      const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      yield* Effect.forEach(
+        pending,
+        Effect.fnUntraced(function* (msg) {
+          const assistant = msg.info
+          assistant.time.completed = now
+          assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
+          if (msg.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" as const }
+          yield* sessions.updateMessage(assistant)
+          if (usage && assistant.parentID) {
+            yield* usage.recordAssistant({ sessionID, requestID: assistant.parentID, assistant })
+          }
+        }),
+        { discard: true },
+      )
       // NOTE: Tool part states are NOT modified here. Each tool has its own
       // interrupt/cancel handler that finalizes its state (e.g. bash truncates
       // output and completes, task tool cancels child session). Forcing all

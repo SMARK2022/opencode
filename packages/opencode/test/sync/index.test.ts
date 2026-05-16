@@ -1,8 +1,9 @@
 import { describe, expect, beforeEach, afterEach, afterAll } from "bun:test"
-import { provideTmpdirInstance } from "../fixture/fixture"
-import { Effect, Layer, Schema } from "effect"
+import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
+import { Deferred, Effect, Layer, Schema } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Bus } from "../../src/bus"
+import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
 import { SyncEvent } from "../../src/sync"
 import { Database } from "@/storage/db"
 import { EventSequenceTable, EventTable } from "../../src/sync/event.sql"
@@ -136,6 +137,29 @@ describe("SyncEvent", () => {
           }
         }),
       ),
+    )
+
+    it.instance("emits bus-shaped global events from Effect-only instance context", () =>
+      Effect.gen(function* () {
+        const { Created } = setup()
+        const test = yield* TestInstance
+        const done = yield* Deferred.make<void>()
+        const events: GlobalEvent[] = []
+        const handler = (event: GlobalEvent) => {
+          events.push(event)
+          if (event.payload.type === Created.type) Deferred.doneUnsafe(done, Effect.void)
+        }
+
+        yield* Effect.acquireRelease(
+          Effect.sync(() => GlobalBus.on("event", handler)),
+          () => Effect.sync(() => GlobalBus.off("event", handler)),
+        )
+
+        yield* SyncEvent.use.run(Created, { id: "evt_1", name: "test" })
+        yield* Deferred.await(done).pipe(Effect.timeout("1 second"))
+
+        expect(events.some((event) => event.directory === test.directory && event.payload.type === Created.type)).toBe(true)
+      }),
     )
   })
 
