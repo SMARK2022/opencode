@@ -18,7 +18,8 @@ const readmes = [
       mcp: [/chatgpt-browser-agent-smark/i, /ChatGPT[^\n]{0,20}ask|ask[^\n]{0,20}ChatGPT/i, /图片生成|image generation/i],
     },
   },
-  { file: "README.md",
+  // 英文文档随本次改名迁移；继续在实际英文入口验证原有承诺，不用英文规则检查中文首页。
+  { file: "README.en.md",
     // 三语种 README 结构保持一致，所以每份文档都用本地化安装标题切分“安装前”区域。
     installHeading: "### Installation",
     concepts: {
