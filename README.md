@@ -44,7 +44,7 @@
 
 ---
 
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.14.42-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
+> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.3-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
 
 ---
 
@@ -77,7 +77,7 @@
 curl -fsSL https://opencode.ai/install | bash
 
 # 指定版本安装
-OPENCODE_VERSION=1.14.42 curl -fsSL https://opencode.ai/install | bash
+OPENCODE_VERSION=1.15.3 curl -fsSL https://opencode.ai/install | bash
 
 # 软件包管理器
 npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
