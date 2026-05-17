@@ -49,12 +49,18 @@ it.instance("returns default native agents when no config", () =>
     const agents = yield* load((svc) => svc.list())
     const names = agents.map((a) => a.name)
     expect(names).toContain("build")
+    // interactive 仍保留：旧 review 迁移目标
+    expect(names).toContain("interactive")
     expect(names).toContain("plan")
+    // decide 为新原生 primary
+    expect(names).toContain("decide")
     expect(names).toContain("general")
     expect(names).toContain("explore")
     expect(names).toContain("compaction")
     expect(names).toContain("title")
     expect(names).toContain("summary")
+    // #159：review 已由 decide 取代
+    expect(names).not.toContain("review")
   }),
 )
 
@@ -66,6 +72,13 @@ it.instance("build agent has correct default properties", () =>
     expect(build?.native).toBe(true)
     expect(evalPerm(build, "edit")).toBe("allow")
     expect(evalPerm(build, "bash")).toBe("allow")
+  }),
+)
+
+it.instance("review agent id is not built in", () =>
+  Effect.gen(function* () {
+    const review = yield* load((svc) => svc.get("review"))
+    expect(review).toBeUndefined()
   }),
 )
 
@@ -741,6 +754,20 @@ it.instance(
   },
 )
 
+it.instance("decide agent denies tool permissions", () =>
+  Effect.gen(function* () {
+    const decide = yield* load((svc) => svc.get("decide"))
+    expect(decide).toBeDefined()
+    expect(decide?.mode).toBe("primary")
+    // #159：decide 全工具 deny
+    expect(evalPerm(decide, "bash")).toBe("deny")
+    expect(evalPerm(decide, "read")).toBe("deny")
+    expect(evalPerm(decide, "task")).toBe("deny")
+    expect(evalPerm(decide, "skill")).toBe("deny")
+    expect(evalPerm(decide, "edit")).toBe("deny")
+  }),
+)
+
 it.instance(
   "defaultAgent throws when all primary agents are disabled",
   () => expectDefaultAgentError("no primary visible agent found"),
@@ -750,7 +777,8 @@ it.instance(
         // 禁用所有 primary agent 以触发 "no primary visible agent found" 错误
         build: { disable: true },
         interactive: { disable: true },
-        review: { disable: true },
+        // #159：disable decide 而非已移除的 review
+        decide: { disable: true },
         plan: { disable: true },
       },
     },

@@ -57,6 +57,83 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+// #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
+import { usable } from "./overflow"
+import { Token } from "@opencode-ai/core/util/token"
+
+// #159：decide 最近轮目标占用区间（相对 usable）
+// LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
+// CONTINUE_BELOW：最新一轮<50% 才继续扩
+// TARGET：扩到≥70% 即停
+// MAX：≥100% 视为溢出，回退 fallback
+const DECIDE_LATEST_MIN = 0.6
+const DECIDE_CONTINUE_BELOW = 0.5
+const DECIDE_TARGET = 0.7
+const DECIDE_MAX = 1
+
+// 仅按 agent 名判定，不读 mode/config 别名
+function isDecideAgent(agent: Agent.Info) {
+  return agent.name === "decide"
+}
+
+// 过长 thinking 只保留首尾，避免 decide 上下文被推理占满
+// 阈值 400：中段用省略号替换，保留语义锚点
+function truncateThinking(text: string) {
+  if (text.length <= 400) return text
+  return `${text.slice(0, 200)}...${text.slice(-200)}`
+}
+
+// 把历史 tool part 压成文本，避免 decide 路径出现 tool-call/tool role
+// 按 status 分支输出，保证 completed/error/pending/running 均可读
+function formatDecideToolPart(part: SessionV1.ToolPart) {
+  const body = (() => {
+    switch (part.state.status) {
+      case "completed":
+        // 完成态：保留 output 供决断参考
+        return ["output:", part.state.output]
+      case "error":
+        // 错误态：保留 error 字符串
+        return ["error:", part.state.error]
+      case "pending":
+        // 挂起态：用 raw 输入串，避免半结构化 input
+        return ["raw_input:", part.state.raw]
+      case "running":
+        // 运行中：仅标题/状态，无完整输出
+        return ["status:", part.state.title ?? "running"]
+    }
+  })()
+  return [
+    `<tool-context tool="${part.tool}" status="${part.state.status}">`,
+    `input: ${JSON.stringify(part.state.input)}`,
+    ...body,
+    "</tool-context>",
+  ].join("\n")
+}
+
+// 消毒：reasoning 截断 + tool→synthetic text，供 decide 只读上下文
+// 不改写 info，仅映射 parts；synthetic 标记避免 UI 当用户原文
+function sanitizeDecideMessages(messages: SessionV1.WithParts[]) {
+  return messages.map((msg) => ({
+    info: msg.info,
+    parts: msg.parts.map((part): SessionV1.Part => {
+      // reasoning：截断后仍保留 type=reasoning
+      if (part.type === "reasoning") return { ...part, text: truncateThinking(part.text) }
+      // tool：降级为 text，阻断模型侧 tool role 重建
+      if (part.type === "tool") {
+        return {
+          id: part.id,
+          sessionID: part.sessionID,
+          messageID: part.messageID,
+          type: "text",
+          text: formatDecideToolPart(part),
+          synthetic: true,
+        }
+      }
+      // 其余 part 原样透传
+      return part
+    }),
+  }))
+}
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1169,6 +1246,48 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
+    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 tip #140 tokenEstimate
+    const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
+      messages: SessionV1.WithParts[]
+      model: Provider.Model
+      systemText: string
+    }) {
+      const sanitized = sanitizeDecideMessages(input.messages)
+      const limit = usable({ cfg: yield* config.get(), model: input.model })
+      // limit<=0：无上下文预算时原样返回消毒后全量
+      if (limit <= 0) return sanitized
+
+      // 仅从非 compaction 的 user 消息作为窗口起点，自新到旧
+      const starts = sanitized
+        .map((msg, index) => ({ msg, index }))
+        .filter((item) => item.msg.info.role === "user")
+        .filter((item) => !item.msg.parts.some((part) => part.type === "compaction"))
+        .map((item) => item.index)
+        .toReversed()
+
+      let fallback: SessionV1.WithParts[] | undefined
+      for (const [position, start] of starts.entries()) {
+        const candidate = sanitized.slice(start)
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
+        // 不用 estimateInputTokens：tip 已历史校准，decide 窗口统一 Token.estimate
+        const ratio =
+          Token.estimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
+        // 超满：退回上一个可容纳窗口
+        if (ratio >= DECIDE_MAX) return fallback ?? candidate
+
+        fallback = candidate
+        // 最新一轮已够用：直接采用，避免无谓扩历史
+        if (position === 0 && ratio >= DECIDE_LATEST_MIN) return candidate
+        // 最新一轮过小：继续向历史扩展以补上下文
+        if (position === 0 && ratio < DECIDE_CONTINUE_BELOW) continue
+        // 达到目标占用：停扩，防止再吞旧轮
+        if (ratio >= DECIDE_TARGET) return candidate
+      }
+
+      // 历史全扫后仍无命中阈值：用最大可容纳或全量消毒
+      return fallback ?? sanitized
+    })
+
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         let requestID: MessageID | undefined
@@ -1321,25 +1440,32 @@ const layer = Layer.effect(
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             const promptOps = yield* ops()
+            // #159：decide 路径工具表恒为空，不 resolve 注册表
+            // 空表同时驱动 system 的 WITHOUT any tools 文案
+            const decide = isDecideAgent(agent)
 
-            const tools = yield* SessionTools.resolve({
-              agent,
-              session,
-              model,
-              processor: handle,
-              bypassAgentCheck,
-              messages: msgs,
-              promptOps,
-            }).pipe(
-              Effect.provideService(Plugin.Service, plugin),
-              Effect.provideService(Permission.Service, permission),
-              Effect.provideService(ToolRegistry.Service, registry),
-              Effect.provideService(MCP.Service, mcp),
-              Effect.provideService(Truncate.Service, truncate),
-              Effect.provideService(RuntimeFlags.Service, flags),
-            )
+            // 非 decide：沿用 SessionTools.resolve 完整权限/插件管线
+            const tools: Record<string, AITool> = decide
+              ? {}
+              : yield* SessionTools.resolve({
+                  agent,
+                  session,
+                  model,
+                  processor: handle,
+                  bypassAgentCheck,
+                  messages: msgs,
+                  promptOps,
+                }).pipe(
+                  Effect.provideService(Plugin.Service, plugin),
+                  Effect.provideService(Permission.Service, permission),
+                  Effect.provideService(ToolRegistry.Service, registry),
+                  Effect.provideService(MCP.Service, mcp),
+                  Effect.provideService(Truncate.Service, truncate),
+                  Effect.provideService(RuntimeFlags.Service, flags),
+                )
 
-            if (lastUser.format?.type === "json_schema") {
+            // decide 不挂 StructuredOutput 工具；json_schema 仅非 decide
+            if (!decide && lastUser.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({
                 schema: lastUser.format.schema,
                 onSuccess(output) {
@@ -1351,14 +1477,15 @@ const layer = Layer.effect(
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            // decide 跳过插件 transform，避免外部改写只读上下文
+            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
+            // decide 跳过 skills/MCP 指令，只保留 env + instructions
+            const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
+              decide ? Effect.succeed(undefined) : sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
-              sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model),
+              decide ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
             ])
             const system = [
               ...env,
@@ -1368,6 +1495,12 @@ const layer = Layer.effect(
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            // 只选择发送窗口，原始历史和 prepared 统计仍由各自 owner 管理。
+            const systemText = [(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n"), ...system, lastUser.system ?? ""].join("\n")
+            const requestMsgs = decide
+              ? yield* selectDecideMessages({ messages: msgs, model, systemText })
+              : msgs
+            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1387,7 +1520,7 @@ const layer = Layer.effect(
               ],
               tools,
               model,
-              toolChoice: format.type === "json_schema" ? "required" : undefined,
+              toolChoice: !decide && format.type === "json_schema" ? "required" : undefined,
             })
 
             if (structured !== undefined) {

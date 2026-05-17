@@ -1,4 +1,5 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, spyOn } from "bun:test"
+import { McpTools } from "@opencode-ai/core/mcp/tools"
 import {
   LLM,
   LLMClient,
@@ -275,7 +276,8 @@ const config = Layer.succeed(
       ]),
   }),
 )
-const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
+let runnerMcp: McpTools.Interface | undefined
+const runnerLayer = AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
   [Snapshot.node, Snapshot.noopLayer],
   [LayerNodePlatform.llmClient, client],
   [SessionRunnerModel.node, models],
@@ -289,6 +291,7 @@ const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
 const execution = Layer.effect(
   SessionExecution.Service,
   Effect.gen(function* () {
+    runnerMcp = yield* McpTools.Service
     const sessionRunner = yield* SessionRunner.Service
     const coordinator = yield* SessionRunCoordinator.make<SessionV2.ID, SessionRunner.RunError>({
       drain: (sessionID, force, maintenance) => sessionRunner.run({ sessionID, force, maintenance }),
@@ -1328,6 +1331,81 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Reviewer instructions", "Initial context", expectedModelIdentity])
       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
+    }),
+  )
+
+  it.effect("decide bounds recent context and preserves durable tool history", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const agents = yield* AgentV2.Service
+      yield* agents.transform((draft) => draft.update(AgentV2.ID.make("decide"), (agent) => { agent.mode = "primary" }))
+      skillBaselines.set(AgentV2.ID.make("build"), "Build-only skill instructions")
+      yield* session.switchAgent({ sessionID, agent: "build" })
+      // 先用实际 runner 生成历史，再切换决定模式；不向投影表伪造工具结果。
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "old-marker " + "x".repeat(80_000) }), resume: false })
+      yield* session.resume(sessionID)
+      if (!runnerMcp) throw new Error("expected runner MCP service")
+      // 首次drain已创建实际Location服务；观察真实prepare，再用普通轮证明观察有效。
+      const prepare = spyOn(runnerMcp, "prepare")
+      yield* Effect.addFinalizer(() => Effect.sync(() => prepare.mockRestore()))
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "recent-marker" }), resume: false })
+      const reasoning = "prefix-" + "a".repeat(193) + "-middle-" + "z".repeat(193) + "-suffix"
+      response = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.reasoningStart({ id: "decide-reasoning" }),
+        LLMEvent.reasoningDelta({ id: "decide-reasoning", text: reasoning }),
+        LLMEvent.reasoningEnd({ id: "decide-reasoning" }),
+        LLMEvent.toolCall({ id: "decide-history", name: "echo", input: { text: "history" }, providerExecuted: true }),
+        LLMEvent.toolResult({ id: "decide-history", name: "echo", result: { type: "content", value: [{ type: "text", text: "tail output" }] }, providerExecuted: true }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      ]
+      yield* session.resume(sessionID)
+      yield* events.publish(SessionEvent.AgentSwitched, {
+        sessionID, messageID: SessionMessage.ID.create(), timestamp: DateTime.makeUnsafe(1), agent: "decide",
+      })
+      expect(prepare).toHaveBeenCalled()
+      prepare.mockClear()
+      skillBaselines.set(AgentV2.ID.make("decide"), "Must not load decide skills")
+      currentModel = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 20_000, input: 10_000, output: 1_000 } }) })
+      response = fragmentFixture("text", "decide-answer", ["Decision"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "decide now" }), resume: false })
+      requests.length = 0
+      executions.length = 0
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(1)
+      const request = requests[0]
+      if (!request) throw new Error("expected decide request")
+      expect(request.tools).toEqual([])
+      expect(request.toolChoice).toMatchObject({ type: "none" })
+      const system = request.system.map((part) => part.text).join("\n")
+      expect(system).toContain("Decide mode is active")
+      expect(system).toContain("Previously supplied MCP server instructions and skill guidance")
+      expect(system).toContain("Build-only skill instructions")
+      const serialized = JSON.stringify(request.messages)
+      expect(serialized).toContain("recent-marker")
+      expect(serialized).not.toContain("old-marker")
+      expect(serialized).toContain("tail output")
+      expect(serialized).toContain("prefix-")
+      expect(serialized).toContain("-suffix")
+      expect(serialized).not.toContain("-middle-")
+      expect(serialized).not.toContain('"role":"tool"')
+      expect(serialized).not.toContain('"type":"tool-call"')
+      expect(serialized).not.toContain("Must not load decide skills")
+      expect(executions).toEqual([])
+      // 下一决定轮即使裁掉一次撤销消息，仍逐轮停用旧指导且不准备MCP。
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "confirm the decision" }), resume: false })
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(2)
+      expect(requests[1]?.system.map((part) => part.text).join("\n")).toContain("Previously supplied MCP server instructions and skill guidance")
+      expect(prepare).not.toHaveBeenCalled()
+      // 发送窗口的裁剪不能删除历史，也不能让原生投影中的工具变成文本。
+      const history = yield* session.context(sessionID)
+      expect(history.some((message) => message.type === "user" && message.text.startsWith("old-marker"))).toBe(true)
+      expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "tool"))).toBe(true)
+      expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "reasoning" && part.text === reasoning))).toBe(true)
     }),
   )
 
