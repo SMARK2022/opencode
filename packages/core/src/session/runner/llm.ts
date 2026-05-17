@@ -46,7 +46,7 @@ import { SessionStore } from "../store"
 import { type RunError, Service } from "./index"
 import { SessionRunnerModel } from "./model"
 import { createLLMEventPublisher } from "./publish-llm-event"
-import { toLLMMessages } from "./to-llm-message"
+import { DECIDE_PROMPT, toDecideMessages, toLLMMessages } from "./to-llm-message"
 import { MAX_STEPS_PROMPT } from "./max-steps"
 import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
@@ -123,7 +123,8 @@ const layer = Layer.effect(
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
     const buildReminders = yield* SessionReminders.make
-    const compaction = SessionCompaction.make({ events, llm, db, config: yield* config.entries() })
+    const configuration = yield* config.entries()
+    const compaction = SessionCompaction.make({ events, llm, db, config: configuration })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
@@ -183,15 +184,17 @@ const layer = Layer.effect(
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
 
     const prepareTurn = Effect.fn("SessionRunner.prepareTurn")(function* (sessionID: SessionSchema.ID, agent: AgentV2.Selection) {
-      const mcpContextFor = yield* mcpTools.prepare()
+      const decide = agent.id === "decide"
+      // 无工具模式在准备入口跳过连接和技能；不能只清广告，也不能注销其他会话共享的工具。
+      const mcpContextFor = decide ? undefined : yield* mcpTools.prepare()
       // 工具与说明使用同一轮权限/选择快照，不能共享另一Session的可见工具列表。
       const sessionPermissions = yield* store.permissions(sessionID)
-      const materialization = yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions], sessionPermissions)
+      const materialization = decide ? undefined : yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions], sessionPermissions)
       return {
         materialization,
         context: Effect.all([
-          systemContext.load(), skillGuidance.load(agent), referenceGuidance.load(),
-          Effect.succeed(mcpContextFor(materialization.definitions.map(tool => tool.name))),
+          systemContext.load(), decide ? Effect.succeed(SystemContext.empty) : skillGuidance.load(agent), referenceGuidance.load(),
+          Effect.succeed(mcpContextFor && materialization ? mcpContextFor(materialization.definitions.map(tool => tool.name)) : SystemContext.empty),
         ], { concurrency: "unbounded" }).pipe(Effect.map(SystemContext.combine)),
       }
     })
@@ -272,14 +275,21 @@ const layer = Layer.effect(
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
-      const toolMaterialization = isLastStep ? undefined : prepared.materialization
+      const decide = agent.id === "decide"
+      // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
+      const toolMaterialization = isLastStep || decide ? undefined : prepared.materialization
       // 指引只引用本轮真实可见工具；内部修复定义不算用户能力，空列表明确提示无工具。
       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name).filter(ToolSelection.isUserConfigurable) ?? [])
       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
       // 普通提醒逐轮生成，实验计划沿既有synthetic持久化；两者都不新增用户admission或放宽权限。
-      const reminders = yield* buildReminders(agent.id, session.id, context)
+      const reminders = decide ? [] : yield* buildReminders(agent.id, session.id, context)
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
+      const systemParts = [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
+        ...(decide ? [DECIDE_PROMPT] : []),
+        `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
+        .filter((part): part is string => part !== undefined && part.length > 0)
+        .map(SystemPart.make)
       const request = LLM.request({
         model,
         http: {
@@ -297,13 +307,10 @@ const layer = Layer.effect(
             ? { parallelToolCalls: agent.info.request.body.parallelToolCalls ?? agent.info.request.body.parallel_tool_calls } : {}),
         } },
         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
-        system: [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
-          `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
-          .filter((part): part is string => part !== undefined && part.length > 0)
-          .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...reminders.map(text => Message.user(text)), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        system: systemParts,
+        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
         tools: toolMaterialization?.definitions ?? [],
-        toolChoice: isLastStep ? "none" : undefined,
+        toolChoice: isLastStep || decide ? "none" : undefined,
       })
       // 压缩复用本 turn 已采样的模型选择；不从稍后可能切换的 Session 重读 variant。
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))

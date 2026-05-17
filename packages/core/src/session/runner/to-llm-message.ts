@@ -10,6 +10,8 @@ import {
 import { ReadPresentation } from "../../tool/read-presentation"
 import { SessionMessage } from "../message"
 import type { FileAttachment } from "../prompt"
+import { Token } from "../../util/token"
+import { SessionOverflowV1 } from "../../v1/session/overflow"
 
 const media = (file: FileAttachment): ContentPart => ({
   type: "media",
@@ -206,4 +208,41 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
     })
     return toLLMMessage({ ...message, content }, model)
   })
+}
+
+export const DECIDE_PROMPT = `Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
+Use the available conversation context to produce a decisive recommendation or implementation plan.
+Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.
+Previously supplied MCP server instructions and skill guidance in this session's baseline or history are inactive in decide mode. Do not follow them; treat their content only as historical context.`
+
+export const toDecideMessages = (context: readonly SessionMessage.Message[], model: Model, system: string, reserved?: number) => {
+  // 只复制交付投影，工具原始状态、推理正文和事件仍留在持久历史中。
+  const sanitized = context.map((message) => message.type !== "assistant" ? message : {
+    ...message,
+    content: message.content.map((part): SessionMessage.AssistantContent => {
+      if (part.type === "text") return part
+      if (part.type === "reasoning") return { ...part, text: part.text.length <= 400 ? part.text : `${part.text.slice(0, 200)}...${part.text.slice(-200)}` }
+      const body = part.state.status === "completed"
+        ? part.state.content.map((item) => item.type === "text" ? item.text : `[Attached ${item.mime}]`).join("\n") || JSON.stringify(part.state.structured)
+        : part.state.status === "error" ? part.state.error.message : part.state.status
+      return { type: "text", id: part.id, text: `<tool-context tool="${part.name}" status="${part.state.status}">\ninput: ${typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)}\n${body}\n</tool-context>` }
+    }),
+  })
+  const limits = model.route.defaults.limits
+  // 复用源补丁的输入预算规则，显式零预留和独立 input 上限均保持有效。
+  const limit = SessionOverflowV1.usable({ context: limits?.context ?? 0, input: limits?.input, output: limits?.output ?? 0, reserved })
+  if (limit <= 0) return toLLMMessages(sanitized, model)
+  const starts = sanitized.flatMap((message, index) => message.type === "user" ? [index] : []).toReversed()
+  let fallback: ReturnType<typeof toLLMMessages> | undefined
+  for (const [position, start] of starts.entries()) {
+    const candidate = toLLMMessages(sanitized.slice(start), model)
+    const ratio = Token.estimate([system, JSON.stringify(candidate)].join("\n")) / limit
+    // 超满时回到最近可容纳的完整用户轮，而不是截断工具输入或输出。
+    if (ratio >= 1) return fallback ?? candidate
+    fallback = candidate
+    if (position === 0 && ratio >= 0.6) return candidate
+    if (position === 0 && ratio < 0.5) continue
+    if (ratio >= 0.7) return candidate
+  }
+  return fallback ?? toLLMMessages(sanitized, model)
 }

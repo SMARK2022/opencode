@@ -177,29 +177,18 @@ const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // 审查仍允许读取代码；只有命令与文件变更收紧为审批。
-          review: {
-            name: "review",
-            description: "The default agent. Executes tools based on configured permissions.",
+          // #159：decide 取代 review——只产出决断计划，禁止一切工具
+          // 权限末尾 "*": deny 盖过 defaults/user，保证无工具执行面
+          // 数据迁移把旧 review 会话落到 interactive，不落到 decide
+          decide: {
+            name: "decide",
+            // 描述强调 bounded context + no tools，供 UI/默认 agent 列表展示
+            description: "Decide mode. Produces a decisive plan with bounded recent context and no tools.",
             options: {},
-            permission: Permission.merge(
-              defaults,
-              Permission.fromConfig({
-                question: "allow",
-                plan_enter: "allow",
-                bash: "ask",
-                // 保留编辑审批及原始工具规则，覆盖 V1 的文件修改入口。
-                edit: "ask",
-                write: "ask",
-                apply_patch: "ask",
-                // review 对笔记本变更沿用编辑审批，用户规则仍最后覆盖。
-                vscode_notebook_run: "ask",
-                vscode_notebook_edit: "ask",
-                vscode_notebook_env: "ask",
-              }),
-              // 同名代理的专属配置还会在注册表构建后覆盖这些规则。
-              user,
-            ),
+            // merge 顺序：defaults + user 先合并，最后 deny 全部，防止用户放宽工具权限
+            // 与 compaction 全 deny 同构，但 decide 是 primary 可见主代理
+            permission: Permission.merge(defaults, user, Permission.fromConfig({ "*": "deny" })),
+            // primary + native：可被用户直接选择，非 hidden 子代理
             mode: "primary",
             native: true,
           },

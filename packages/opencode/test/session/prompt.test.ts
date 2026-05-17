@@ -310,6 +310,27 @@ function providerCfg(url: string) {
   }
 }
 
+// #159：收紧 context/input，迫使 decide 窗口裁掉超大历史轮
+function limitedDecideProviderCfg(url: string) {
+  const base = providerCfg(url)
+  return {
+    ...base,
+    compaction: { reserved: 0 },
+    provider: {
+      ...base.provider,
+      test: {
+        ...base.provider.test,
+        models: {
+          "test-model": {
+            ...base.provider.test.models["test-model"],
+            limit: { context: 20_000, input: 10_000, output: 1_000 },
+          },
+        },
+      },
+    },
+  }
+}
+
 const writeText = Effect.fn("test.writeText")(function* (file: string, text: string) {
   const fs = yield* FSUtil.Service
   yield* fs.writeWithDirs(file, text)
@@ -443,6 +464,20 @@ const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
         metadata: {},
         time: { start: Date.now(), end: Date.now() },
       },
+    })
+  })
+
+// #159：写入 reasoning 供 decide 截断首尾校验
+const addReasoning = (sessionID: SessionID, messageID: MessageID, text: string) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "reasoning",
+      text,
+      time: { start: Date.now(), end: Date.now() },
     })
   })
 
@@ -596,6 +631,104 @@ it.instance("loop calls LLM and returns assistant message", () =>
     const parts = result.parts.filter((p) => p.type === "text")
     expect(parts.some((p) => p.type === "text" && p.text === "world")).toBe(true)
     expect(yield* llm.hits).toHaveLength(1)
+  }),
+)
+
+// #159：decide 无工具 + 历史 tool/reasoning 消毒
+// 断言：WITHOUT tools、无 tool role、reasoning 中段被截断
+it.instance("decide sends no tools and sanitizes historical tool and reasoning context", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({ title: "Decide" })
+    // 上一轮 stop 后追加 tool/reasoning，供消毒路径消费
+    const previous = yield* seed(session.id, { finish: "stop" })
+    // 首尾各 200 字符锚点，中段应被 truncateThinking 去掉
+    const keepHead = "prefix-" + "a".repeat(193)
+    const keepTail = "z".repeat(193) + "-suffix"
+
+    yield* addCompletedTool(session.id, previous.assistant.id)
+    yield* addReasoning(session.id, previous.assistant.id, keepHead + "-middle-" + "m".repeat(80) + keepTail)
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "decide",
+      noReply: true,
+      parts: [{ type: "text", text: "decide now" }],
+    })
+    yield* llm.text("decision")
+
+    const result = yield* prompt.loop({ sessionID: session.id })
+    expect(result.info.role).toBe("assistant")
+
+    const inputs = yield* llm.inputs
+    const body = inputs.at(-1)
+    expect(body).toBeDefined()
+    if (!body) return
+
+    const serialized = JSON.stringify(body)
+    expect(serialized).toContain("# WITHOUT any tools")
+    expect(serialized).not.toContain("# Using your tools")
+    // 空工具表：未定义或空对象均可
+    expect(body.tools === undefined || Object.keys(body.tools as object).length === 0).toBe(true)
+    expect(JSON.stringify(body.messages)).not.toContain('"role":"tool"')
+    expect(JSON.stringify(body.messages)).not.toContain("tool-call")
+    expect(JSON.stringify(body.messages)).toContain("tail output")
+    expect(serialized).toContain(keepHead)
+    expect(serialized).toContain(keepTail)
+    expect(serialized).not.toContain("-middle-")
+  }),
+)
+
+// #159：旧轮过大时 decide 窗口从最新 user 起
+// limitedDecideProviderCfg 压低 input limit，迫使 selectDecideMessages 裁剪
+it.instance("decide starts context at latest user prompt when older turn would overflow", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(limitedDecideProviderCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({ title: "Decide context" })
+    // 超大旧 user：tokenEstimate 后必超 usable
+    const old = yield* user(session.id, "old-marker " + "x".repeat(80_000))
+    const assistant: SessionV1.Assistant = {
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: old.id,
+      sessionID: session.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+      finish: "stop",
+    }
+    yield* sessions.updateMessage(assistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: assistant.id,
+      sessionID: session.id,
+      type: "text",
+      text: "old answer",
+    })
+
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "decide",
+      noReply: true,
+      parts: [{ type: "text", text: "current-marker decide now" }],
+    })
+    yield* llm.text("decision")
+    yield* prompt.loop({ sessionID: session.id })
+
+    const inputs = yield* llm.inputs
+    const body = inputs.at(-1)
+    expect(body).toBeDefined()
+    if (!body) return
+    expect(JSON.stringify(body.messages)).toContain("current-marker")
+    expect(JSON.stringify(body.messages)).not.toContain("old-marker")
   }),
 )
 

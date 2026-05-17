@@ -129,8 +129,15 @@ export const Plugin = define({
       })
 
       // 注册归属现有 transform 的作用域，卸载或重载不留下第二份代理状态。
-      for (const id of ["interactive", "review"]) {
+      for (const id of ["interactive", "decide"]) {
         draft.update(AgentV2.ID.make(id), (item) => {
+          // runner 同时禁用工具表，避免配置覆盖改变 decide 的无工具语义。
+          if (id === "decide") {
+            item.description = "Decide mode. Produces a decisive plan with bounded recent context and no tools."
+            item.mode = "primary"
+            item.permissions.push({ action: "*", resource: "*", effect: "deny" })
+            return
+          }
           item.description = "The default agent. Executes tools based on configured permissions."
           // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
           item.mode = "primary"
@@ -143,10 +150,6 @@ export const Plugin = define({
               { action: "bash", resource: "*", effect: "ask" },
               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
               ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
-              // V2 的 edit/write/apply_patch 共用 edit 动作，不能只按工具名设审批。
-              ...(id === "review" ? [{ action: "edit", resource: "*", effect: "ask" as const }] : []),
-              // 笔记本桥接使用独立动作名，沿用 review 的编辑审批，且保留后续用户覆盖。
-              ...(id === "review" ? ["vscode_notebook_run", "vscode_notebook_edit", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
             ]),
           )
         })
