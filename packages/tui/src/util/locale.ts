@@ -59,8 +59,13 @@ export function duration(input: number) {
 }
 
 export function truncate(str: string, len: number): string {
+  // #160：长度未超限则原样返回
   if (str.length <= len) return str
-  return str.slice(0, len - 1) + "…"
+  // #160：预留一位给省略号，再按代理对安全调整 end
+  let end = len - 1
+  // #160：截断点落在高代理项上时回退一位，避免孤立半个 emoji/CJK 扩展字
+  if (end > 0 && str.charCodeAt(end - 1) >= 0xd800 && str.charCodeAt(end - 1) <= 0xdbff) end--
+  return str.slice(0, end) + "…"
 }
 
 export function truncateLeft(str: string, len: number): string {
@@ -69,13 +74,22 @@ export function truncateLeft(str: string, len: number): string {
 }
 
 export function truncateMiddle(str: string, maxLength: number = 35): string {
+  // #160：未超 maxLength 时不改写路径/标题
   if (str.length <= maxLength) return str
 
   const ellipsis = "…"
-  const keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
-  const keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
+  // #160：中间省略时左右保留长度先按半分配，再按代理对微调
+  let keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
+  let keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
 
-  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd)
+  // #160：起始边界若切开代理对，缩短 keepStart 保留完整码点
+  if (keepStart > 0 && str.charCodeAt(keepStart - 1) >= 0xd800 && str.charCodeAt(keepStart - 1) <= 0xdbff) keepStart--
+  // #160：末尾边界若从低代理项起切，缩短 keepEnd 避免孤立低代理
+  const endStart = str.length - keepEnd
+  if (endStart < str.length && str.charCodeAt(endStart) >= 0xdc00 && str.charCodeAt(endStart) <= 0xdfff) keepEnd--
+
+  // #160：keepEnd 被减到 0 时 slice(-0) 会整串回退，改用 undefined 表示空尾
+  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd || undefined)
 }
 
 export function pluralize(count: number, singular: string, plural: string): string {
