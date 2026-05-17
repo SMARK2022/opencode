@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
+import { createMemo, createRoot } from "solid-js"
+import { createStore, produce } from "solid-js/store"
 import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
 import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
-import { contextUsageDetailLines, contextUsageFooter } from "@/cli/cmd/tui/routes/session/context-usage"
+import { contextUsageDetailLines, contextUsageFooter, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
 
 const provider: Provider = {
   id: "test",
@@ -77,6 +79,52 @@ function text(messageID: string, value: string): Part {
 }
 
 describe("context usage", () => {
+  test("snapshot tracks streaming tool input deltas", () => {
+    createRoot((dispose) => {
+      const [store, setStore] = createStore<{ parts: Record<string, Part[]> }>({
+        parts: {
+          message: [
+            {
+              id: "tool",
+              sessionID: "s",
+              messageID: "message",
+              type: "tool",
+              tool: "bash",
+              callID: "call",
+              state: { status: "pending", input: {}, raw: "" },
+            } as Part,
+          ],
+        },
+      })
+      let runs = 0
+      const snapshot = createMemo(() => {
+        runs++
+        return contextUsageSnapshot([...(store.parts.message ?? [])])
+      })
+
+      const initial = snapshot()[0]
+      if (!initial || initial.type !== "tool" || initial.state.status !== "pending") {
+        throw new Error("expected pending tool part")
+      }
+      expect(initial.state.raw).toBe("")
+      setStore(
+        "parts",
+        "message",
+        produce((draft) => {
+          const part = draft[0]
+          if (part?.type === "tool" && part.state.status === "pending") part.state.raw = '{"filePath"'
+        }),
+      )
+      const updated = snapshot()[0]
+      if (!updated || updated.type !== "tool" || updated.state.status !== "pending") {
+        throw new Error("expected pending tool part")
+      }
+      expect(updated.state.raw).toBe('{"filePath"')
+      expect(runs).toBe(2)
+      dispose()
+    })
+  })
+
   test("precise allocation from daemon step-finish inputBreakdown", async () => {
     const messages = [user("1", { bash: true }), assistant("2", "1")]
     const parts: Record<string, Part[]> = {

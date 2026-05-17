@@ -379,6 +379,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             event.properties.messageID,
             produce((draft) => {
               const part = draft[result.index]
+              if (part.type === "tool" && part.state.status === "pending" && event.properties.field === "raw") {
+                part.state.raw += event.properties.delta
+                return
+              }
               const field = event.properties.field as keyof typeof part
               const existing = part[field] as string | undefined
               ;(part[field] as string) = (existing ?? "") + event.properties.delta

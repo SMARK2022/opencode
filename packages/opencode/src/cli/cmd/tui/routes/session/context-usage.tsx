@@ -7,6 +7,7 @@ import { useProject } from "@tui/context/project"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
 import { TextAttributes } from "@opentui/core"
+import type { Message, Part } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util"
 import { createThrottledSignal } from "../../util/signal"
 import {
@@ -20,6 +21,12 @@ function formatTokens(tokens: number) {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`
   return String(tokens)
+}
+
+export function contextUsageSnapshot<T extends Message[] | Part[]>(value: T): T {
+  // The JSON roundtrip deliberately reads nested Solid store fields. A shallow
+  // array copy misses tool/text deltas and only refreshes on whole-part updates.
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 function percent(tokens: number, max: number) {
@@ -226,8 +233,10 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   useRenderer()
 
   const inputRaw = createMemo(() => {
-    const messages = [...(sync.data.message[props.sessionID] ?? [])]
-    const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
+    const messages = contextUsageSnapshot([...(sync.data.message[props.sessionID] ?? [])])
+    const parts = Object.fromEntries(
+      messages.map((msg) => [msg.id, contextUsageSnapshot([...(sync.data.part[msg.id] ?? [])])]),
+    )
     const paths = project.instance.path()
     return {
       messages,
