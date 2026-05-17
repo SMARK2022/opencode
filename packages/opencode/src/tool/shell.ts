@@ -341,8 +341,23 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
 // 只检查解析出的命令头，不能把 echo 参数或路径里的 grep 当成执行工具。
 function shellCompatibilityError(root: Node, shellName: string) {
   // V1 保留完整 AST 提取；分类与错误文字复用 Core 的同一 guard。
-  return Shell.compatibilityError(commands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
+  return Shell.compatibilityError(localCommands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
 }
+
+// #158：只扫描本地 command 节点；祖先含 string 视为远程/WSL 引号载荷
+function localCommands(root: Node) {
+  return commands(root).filter((node) => {
+    let cur: Node | null = node
+    while (cur) {
+      // #158：string/raw_string 等类型包含 string 即视为载荷边界
+      if (cur.type.includes("string")) return false
+      // #158：root 自身 type 不含 string，向上遍历到 null 自然终止
+      cur = cur.parent
+    }
+    return true
+  })
+}
+
 
 // #128：config.tool_output.shell_encoding，默认 auto
 function shellOutputEncoding(config?: { tool_output?: { shell_encoding?: TextEncodingMode } }): TextEncodingMode {

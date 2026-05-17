@@ -402,6 +402,71 @@ describe("tool.shell permissions", () => {
     )
   }
 
+  // #158：ssh 引号内 Unix 管道视为远程载荷，不触发本地兼容拦截
+  for (const item of ps) {
+    it.live(`does not reject Unix commands inside remote ssh string [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            // #158：应越过兼容检查进入 permission
+            expect(
+              yield* fail(
+                { command: `ssh host "grep foo /tmp/file | sed 's/x/y/'"` },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #158：wsl 引号载荷同样放行
+  for (const item of ps) {
+    it.live(`does not reject Unix commands inside wsl string [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            // #158：wsl 与 ssh 同判：引号载荷不构成本地管道
+            expect(
+              yield* fail(
+                { command: `wsl bash -lc "grep foo /tmp/file | head -40"` },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #158：本地管道 head 仍拦截，并提示 Select-Object
+  // #158：错误文案必须含 local command 与 Select-Object -First N
+  for (const item of ps) {
+    it.live(`rejects local Unix pipeline head on PowerShell [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const exit = yield* fail({ command: "Write-Output one,two,three | head -1" }, ctx)
+            expect(String((exit as any)?.message ?? exit)).toMatch(
+              /local command uses Unix utility `head`.*Select-Object -First N/s,
+            )
+          }),
+        ),
+      ),
+    )
+  }
+
   each("asks for external_directory permission for wildcard external paths", () =>
     runIn(
       projectRoot,
