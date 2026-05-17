@@ -333,6 +333,83 @@ describe("tool.shell permissions", () => {
     )
   }
 
+  for (const item of ps) {
+    test(
+      `does not reject Unix commands inside remote ssh command strings [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const err = new Error("stop after permission")
+            await expect(
+              Effect.runPromise(
+                bash.execute(
+                  {
+                    command: `ssh host "grep foo /tmp/file | sed 's/x/y/'"`,
+                    description: "Read remote output",
+                  },
+                  capture([], err),
+                ),
+              ),
+            ).rejects.toThrow(err.message)
+          },
+        })
+      }),
+    )
+  }
+
+  for (const item of ps) {
+    test(
+      `does not reject Unix commands inside local wsl command strings [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            const err = new Error("stop after permission")
+            await expect(
+              Effect.runPromise(
+                bash.execute(
+                  {
+                    command: `wsl bash -lc "grep foo /tmp/file | head -40"`,
+                    description: "Read WSL output",
+                  },
+                  capture([], err),
+                ),
+              ),
+            ).rejects.toThrow(err.message)
+          },
+        })
+      }),
+    )
+  }
+
+  for (const item of ps) {
+    test(
+      `still rejects local Unix pipeline commands [${item.label}]`,
+      withShell(item, async () => {
+        await WithInstance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const bash = await initShell()
+            await expect(
+              Effect.runPromise(
+                bash.execute(
+                  {
+                    command: `Write-Output one,two,three | head -1`,
+                    description: "Read local output head",
+                  },
+                  ctx,
+                ),
+              ),
+            ).rejects.toThrow(/local command uses Unix utility `head`.*Select-Object -First N/s)
+          },
+        })
+      }),
+    )
+  }
+
   each("asks for external_directory permission for wildcard external paths", async () => {
     await WithInstance.provide({
       directory: projectRoot,

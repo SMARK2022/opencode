@@ -455,19 +455,25 @@ function shellCompatibilityError(root: Node, shellName: string): string | undefi
   if (process.platform !== "win32") return
   if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
 
-  for (const node of commands(root)) {
+  for (const node of localCommands(root)) {
     const command = parts(node)
     const raw = command[0]?.text
     if (!raw) continue
     const name = raw.toLowerCase().replace(/\.exe$/, "")
 
     if (UNIX_TEXT_COMMANDS.has(name)) {
+      if (shellName === "powershell" || shellName === "pwsh") {
+        return [
+          `The current shell is ${shellName}, but the local command uses Unix utility \`${raw}\`.`,
+          powershellUnixAlternative(name),
+          `If the command is meant to run remotely, keep it inside the remote shell command instead of the local PowerShell pipeline.`,
+        ].join(" ")
+      }
+
       return [
         `The current shell is ${shellName}, but the command uses Unix utility \`${raw}\`.`,
         `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
-        shellName === "powershell" || shellName === "pwsh"
-          ? `If a shell command is truly required, use PowerShell equivalents such as Get-Content -Tail or Select-String.`
-          : `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
+        `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
       ].join(" ")
     }
 
@@ -479,6 +485,25 @@ function shellCompatibilityError(root: Node, shellName: string): string | undefi
       return `The current shell is ${shellName}; \`find\` is ambiguous on Windows. Use glob for file search or grep for content search.`
     }
   }
+}
+
+function localCommands(root: Node) {
+  return commands(root).filter((node) => {
+    let parent = node.parent
+    while (parent && parent.id !== root.id) {
+      if (parent.type.includes("string")) return false
+      parent = parent.parent
+    }
+    return true
+  })
+}
+
+function powershellUnixAlternative(name: string) {
+  if (name === "head") return `For pipeline output, use \`Select-Object -First N\`; for files, prefer the read tool.`
+  if (name === "tail") return `For pipeline output, use \`Select-Object -Last N\`; for files, prefer the read tool or \`Get-Content -Tail N\`.`
+  if (name === "grep") return `For pipeline output, use \`Select-String\`; for workspace content search, prefer the grep tool.`
+  if (name === "sed" || name === "awk") return `Use PowerShell string processing for local pipeline output, or run \`${name}\` inside a POSIX shell such as a remote ssh command.`
+  return `Use PowerShell equivalents for local pipeline output.`
 }
 
 export const ShellTool = Tool.define(
