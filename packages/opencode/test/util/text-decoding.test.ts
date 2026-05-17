@@ -146,4 +146,89 @@ describe("text-decoding", () => {
     expect(decodeText(input).text).toContain("警告: DOM是内部专用 API")
   })
 
+  // #160：无 NUL/魔数的随机高位字节不得回落 gb18030 产生乱码中文
+  test("random high bytes without NUL should not produce garbled Chinese", () => {
+    // Simulate a fragment of binary data that has no NUL bytes and no magic bytes
+    // but is clearly not valid text in any encoding — e.g., random bytes from a
+    // compiled binary or encrypted stream
+    // #160：随机高位字节样例（无 NUL、无已知魔数）
+    const input = bytes([
+      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
+      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+      0x81, 0x92, 0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8,
+    ])
+    const result = decodeText(input)
+    // #160：应走 UTF-8 替换，而非 gb18030 乱码中文
+    expect(result.encoding).toBe("utf-8")
+  })
+
+  // #160：大体 UTF-8 + 少量坏字节仍优先 UTF-8 替换
+  test("mixed UTF-8 text with a few invalid bytes uses UTF-8 with replacement", () => {
+    // Common scenario: mostly valid UTF-8 with a few corrupted bytes
+    const input = new Uint8Array([
+      ...utf8("hello "),
+      0xff, 0xfe, // invalid UTF-8 bytes
+      ...utf8(" world\n"),
+    ])
+    const result = decodeText(input)
+    // #160：期望编码保持 utf-8，文本仍可读
+    expect(result.encoding).toBe("utf-8")
+    expect(result.text).toContain("hello")
+    expect(result.text).toContain("world")
+  })
+
+  // #160：流式随机二进制不得输出乱码中文
+  test("streaming: random binary bytes do not produce garbled Chinese", () => {
+    const decoder = createAutoTextDecoder()
+    const output =
+      decoder.write(
+        bytes([0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+      ) + decoder.end()
+    // Should contain replacement characters, not Chinese
+    expect(output).toContain("�")
+    expect(decoder.encoding()).toBe("utf-8")
+  })
+
+  // #160：UTF-8 文本后接二进制段，前文不得被编码锁定污染
+  test("streaming: UTF-8 text followed by binary does not corrupt text", () => {
+    const decoder = createAutoTextDecoder()
+    const output =
+      decoder.write(utf8("Build succeeded\n")) +
+      decoder.write(bytes([0x80, 0x91, 0xa2, 0xb3, 0xff, 0xfe, 0xfd, 0x0a])) +
+      decoder.write(utf8("Done.\n")) +
+      decoder.end()
+    expect(output).toContain("Build succeeded")
+    expect(output).toContain("Done.")
+    // The binary segment should use replacement chars, not Chinese
+    expect(output).toContain("�")
+  })
+
+  // #160：Java class 魔数（#128 hasMagic）不得当中文解码
+  test("Java class file bytes are detected as binary", () => {
+    // Java class file magic: 0xCA 0xFE 0xBA 0xBE
+    // #160：class 文件魔数 CAFEBABE 走 looksBinary
+    const input = bytes([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
+    const result = decodeText(input)
+    // Should NOT decode as GB18030 Chinese
+    expect(result.encoding).toBe("utf-8")
+  })
+
+  // #160：合法 GBK 对夹杂离散 0x80 时整体否决 gb18030
+  test("valid GBK with stray byte falls back to UTF-8", () => {
+    // 0xd6 0xd0 is valid GBK for "中", but 0x80 is not a valid GBK lead byte
+    const input = bytes([0xd6, 0xd0, 0x80, 0xce, 0xc4])
+    const result = decodeText(input)
+    // The stray 0x80 means this is not clean GBK
+    expect(result.encoding).toBe("utf-8")
+  })
+
+  // #160：纯合法 GBK 对仍正确回落 gb18030（与 #128/#130 兼容）
+  test("pure valid GBK pairs still decode correctly", () => {
+    // 0xd6 0xd0 = "中", 0xce 0xc4 = "文" — all valid GBK pairs
+    const input = bytes([0xd6, 0xd0, 0xce, 0xc4])
+    const result = decodeText(input)
+    // #160：纯 GBK 中文对必须仍可解码
+    expect(result.encoding).toBe("gb18030")
+    expect(result.text).toBe("中文")
+  })
 })

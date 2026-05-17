@@ -117,6 +117,99 @@ function looksBinary(bytes: Uint8Array) {
   return controls >= 4 || controls / bytes.length > 0.05
 }
 
+/**
+ * #160：校验非 ASCII 是否构成可信 GBK/GB18030 双字节序列。
+ * 引导字节 0x81-0xFE，尾字节 0x40-0xFE（排除 0x7F）；任一离散高位字节即否决。
+ */
+function looksLikeGBK(bytes: Uint8Array) {
+  // #160：短于双字节无法形成 GBK 对
+  if (bytes.length < 2) return false
+  let validPairs = 0
+  let invalidBytes = 0
+  let i = 0
+  while (i < bytes.length) {
+    const b = bytes[i]
+    // #160：ASCII 单字节透传，不计入 GBK 对
+    if (b < 0x80) {
+      i++
+      continue
+    }
+    // #160：GBK 引导字节区间；需成对消费尾字节
+    if (b >= 0x81 && b <= 0xfe && i + 1 < bytes.length) {
+      const trail = bytes[i + 1]
+      // #160：尾字节合法区间且排除 0x7F 控制空洞
+      if (trail >= 0x40 && trail <= 0xfe && trail !== 0x7f) {
+        validPairs++
+        i += 2
+        continue
+      }
+    }
+    // #160：无法落入 GBK 双字节则记为无效，整段不得回落 gb18030
+    invalidBytes++
+    i++
+  }
+  // #160：零合法对说明没有任何中文双字节证据
+  if (validPairs === 0) return false
+  // #160：要求全部非 ASCII 均成合法对，禁止夹杂离散高位字节
+  return invalidBytes === 0
+}
+
+/**
+ * #160：多数非 ASCII 已是合法 UTF-8 多字节时，优先 UTF-8 替换而非乱码中文。
+ * 用于“大体 UTF-8 + 少量坏字节”场景，避免误判为 CP936。
+ */
+function mostlyUtf8(bytes: Uint8Array) {
+  // #160：分别累计合法/非法 UTF-8 多字节，供多数表决
+  let validMultibyte = 0
+  let invalidMultibyte = 0
+  let i = 0
+  while (i < bytes.length) {
+    const b = bytes[i]
+    // #160：ASCII 不参与多数表决
+    if (b < 0x80) {
+      i++
+      continue
+    }
+    // #160：2 字节 UTF-8（110xxxxx 10xxxxxx）
+    if ((b & 0xe0) === 0xc0 && i + 1 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80) {
+      validMultibyte++
+      i += 2
+      continue
+    }
+    // #160：3 字节 UTF-8（1110xxxx 10xxxxxx 10xxxxxx）
+    if (
+      (b & 0xf0) === 0xe0 &&
+      i + 2 < bytes.length &&
+      (bytes[i + 1] & 0xc0) === 0x80 &&
+      (bytes[i + 2] & 0xc0) === 0x80
+    ) {
+      validMultibyte++
+      i += 3
+      continue
+    }
+    // #160：4 字节 UTF-8（11110xxx + 三个续字节）
+    if (
+      (b & 0xf8) === 0xf0 &&
+      i + 3 < bytes.length &&
+      (bytes[i + 1] & 0xc0) === 0x80 &&
+      (bytes[i + 2] & 0xc0) === 0x80 &&
+      (bytes[i + 3] & 0xc0) === 0x80
+    ) {
+      validMultibyte++
+      i += 4
+      continue
+    }
+    // #160：无法匹配 2/3/4 字节 UTF-8 形态则计为无效多字节
+    invalidMultibyte++
+    i++
+  }
+  const total = validMultibyte + invalidMultibyte
+  // #160：全 ASCII 段不适用 mostlyUtf8 偏好
+  if (total === 0) return false
+  // #160：有效多字节序列多于无效时，判定为“大体 UTF-8”
+  return validMultibyte > invalidMultibyte
+}
+
 // #128：固定编码解码并返回 {text,encoding}
 function decodeWith(bytes: Uint8Array, encoding: TextEncoding) {
   return {
@@ -127,11 +220,17 @@ function decodeWith(bytes: Uint8Array, encoding: TextEncoding) {
 
 // Decode a single segment: UTF-16 preferred, then UTF-8, then GB18030 legacy fallback, then UTF-8 replacement.
 // #128：单段自动探测：unicode → utf-8 → gb18030 → utf-8
+// #160：gb18030 回落再与 looksLikeGBK / !mostlyUtf8 合取，保留 #128 魔数与控制密度门
 function decodeAutoSegment(bytes: Uint8Array) {
+  // #160：BOM/NUL 识别的 unicode 仍最优先
   const detected = unicode(bytes)
   if (detected) return decodeWith(bytes, detected)
+  // #160：严格 UTF-8 通过则锁定 utf-8，跳过 legacy
   if (isUtf8(bytes)) return decodeWith(bytes, "utf-8")
-  if (!looksBinary(bytes)) return decodeWith(bytes, "gb18030")
+  // #160：仅当非二进制、像真 GBK、且不像大体 UTF-8 时才回落 gb18030
+  // #160：!looksBinary 保留 #128 魔数与控制密度启发式，不替换只合取
+  if (!looksBinary(bytes) && looksLikeGBK(bytes) && !mostlyUtf8(bytes)) return decodeWith(bytes, "gb18030")
+  // #160：默认 UTF-8 替换字符，避免二进制被译成中文
   return decodeWith(bytes, "utf-8")
 }
 
