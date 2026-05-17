@@ -409,6 +409,10 @@ export function compatibilityError(heads: Iterable<string>, shellName: string) {
     const file = raw.replace(/^[&.]\s+/, "").replace(/^(['"])(.*)\1$/, "$2")
     const command = (shellName === "cmd" ? file.replace(/^@/, "") : file).toLowerCase().replace(/\.exe$/, "")
     if (["tail", "head", "sed", "awk", "grep"].includes(command)) {
+      // 本地 PowerShell 给出对应替代，远程管道继续留在 SSH/WSL 字符串内。
+      if (shellName !== "cmd") {
+        return `The current shell is ${shellName}, but the local command uses Unix utility \`${raw}\`. ${powershellUnixAlternative(command)} Keep remote Unix pipelines inside the remote shell string (ssh/wsl), not as a local pipeline.`
+      }
       return `The current shell is ${shellName}, but the command uses Unix utility ${raw}. Prefer available dedicated file tools; if terminal processing is required, use ${shellName === "cmd" ? "dir/type/findstr" : "Get-Content -Tail or Select-String"}.`
     }
     // ls 是 PS 的目录别名，只有 cmd 需要拦截；find 在 PS 语义含糊。
@@ -416,3 +420,15 @@ export function compatibilityError(heads: Iterable<string>, shellName: string) {
     if (shellName !== "cmd" && command === "find") return `The current shell is ${shellName}; find is ambiguous on Windows. Prefer available dedicated search tools.`
   }
 }
+
+// #158：PowerShell 本地 Unix 工具的可操作替代提示
+function powershellUnixAlternative(name: string) {
+  if (name === "head") return "Prefer Select-Object -First N for local pipelines."
+  if (name === "tail") return "Prefer Get-Content -Tail N or Select-Object -Last N."
+  if (name === "grep") return "Prefer Select-String for local content search."
+  if (name === "sed" || name === "awk") return "Prefer PowerShell -replace / ForEach-Object, or run inside POSIX/ssh."
+  // #158：sed/awk 无单命令直接等价，避免给出误导性的直接映射
+  // #158：默认回退到通用 PowerShell 工具提示
+  return "Prefer PowerShell-native commands, or run the Unix utility inside ssh/wsl."
+}
+
