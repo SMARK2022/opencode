@@ -146,4 +146,81 @@ describe("text-decoding", () => {
     expect(output).toContain("�")
     expect(decoder.encoding()).toBe("utf-8")
   })
+
+  test("random high bytes without NUL should not produce garbled Chinese", () => {
+    // Simulate a fragment of binary data that has no NUL bytes and no magic bytes
+    // but is clearly not valid text in any encoding — e.g., random bytes from a
+    // compiled binary or encrypted stream
+    const input = bytes([
+      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
+      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+      0x81, 0x92, 0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8,
+    ])
+    const result = decodeText(input)
+    // Should use UTF-8 with replacement characters, NOT produce random Chinese
+    // The key assertion: if it falls back to gb18030, it would produce Chinese chars
+    // like "€\u0091¢³ÄÕæ÷" or similar — we want UTF-8 replacement instead
+    expect(result.encoding).toBe("utf-8")
+  })
+
+  test("mixed UTF-8 text with a few invalid bytes uses UTF-8 with replacement", () => {
+    // Common scenario: mostly valid UTF-8 with a few corrupted bytes
+    const input = new Uint8Array([
+      ...utf8("hello "),
+      0xff, 0xfe, // invalid UTF-8 bytes
+      ...utf8(" world\n"),
+    ])
+    const result = decodeText(input)
+    expect(result.encoding).toBe("utf-8")
+    expect(result.text).toContain("hello")
+    expect(result.text).toContain("world")
+  })
+
+  test("streaming: random binary bytes do not produce garbled Chinese", () => {
+    const decoder = createAutoTextDecoder()
+    const output = decoder.write(bytes([
+      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
+      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ])) + decoder.end()
+    // Should contain replacement characters, not Chinese
+    expect(output).toContain("�")
+    expect(decoder.encoding()).toBe("utf-8")
+  })
+
+  test("streaming: UTF-8 text followed by binary does not corrupt text", () => {
+    const decoder = createAutoTextDecoder()
+    const output =
+      decoder.write(utf8("Build succeeded\n")) +
+      decoder.write(bytes([0x80, 0x91, 0xa2, 0xb3, 0xff, 0xfe, 0xfd, 0x0a])) +
+      decoder.write(utf8("Done.\n")) +
+      decoder.end()
+    expect(output).toContain("Build succeeded")
+    expect(output).toContain("Done.")
+    // The binary segment should use replacement chars, not Chinese
+    expect(output).toContain("�")
+  })
+
+  test("Java class file bytes are detected as binary", () => {
+    // Java class file magic: 0xCA 0xFE 0xBA 0xBE
+    const input = bytes([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
+    const result = decodeText(input)
+    // Should NOT decode as GB18030 Chinese
+    expect(result.encoding).toBe("utf-8")
+  })
+
+  test("valid GBK with stray byte falls back to UTF-8", () => {
+    // 0xd6 0xd0 is valid GBK for "中", but 0x80 is not a valid GBK lead byte
+    const input = bytes([0xd6, 0xd0, 0x80, 0xce, 0xc4])
+    const result = decodeText(input)
+    // The stray 0x80 means this is not clean GBK
+    expect(result.encoding).toBe("utf-8")
+  })
+
+  test("pure valid GBK pairs still decode correctly", () => {
+    // 0xd6 0xd0 = "中", 0xce 0xc4 = "文" — all valid GBK pairs
+    const input = bytes([0xd6, 0xd0, 0xce, 0xc4])
+    const result = decodeText(input)
+    expect(result.encoding).toBe("gb18030")
+    expect(result.text).toBe("中文")
+  })
 })

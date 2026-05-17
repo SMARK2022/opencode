@@ -60,17 +60,26 @@ export function duration(input: number) {
 
 export function truncate(str: string, len: number): string {
   if (str.length <= len) return str
-  return str.slice(0, len - 1) + "…"
+  let end = len - 1
+  // Avoid splitting a surrogate pair: if the cut lands on a high surrogate, step back
+  if (end > 0 && str.charCodeAt(end - 1) >= 0xd800 && str.charCodeAt(end - 1) <= 0xdbff) end--
+  return str.slice(0, end) + "…"
 }
 
 export function truncateMiddle(str: string, maxLength: number = 35): string {
   if (str.length <= maxLength) return str
 
   const ellipsis = "…"
-  const keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
-  const keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
+  let keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
+  let keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
 
-  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd)
+  // Avoid splitting a surrogate pair at the start boundary
+  if (keepStart > 0 && str.charCodeAt(keepStart - 1) >= 0xd800 && str.charCodeAt(keepStart - 1) <= 0xdbff) keepStart--
+  // Avoid splitting a surrogate pair at the end boundary
+  const endStart = str.length - keepEnd
+  if (endStart < str.length && str.charCodeAt(endStart) >= 0xdc00 && str.charCodeAt(endStart) <= 0xdfff) keepEnd--
+
+  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd || undefined)
 }
 
 export function pluralize(count: number, singular: string, plural: string): string {

@@ -102,6 +102,66 @@ function looksBinary(bytes: Uint8Array) {
   return controls >= 4 || controls / bytes.length > 0.05
 }
 
+/**
+ * Validate whether non-ASCII bytes form plausible GBK/GB18030 multi-byte sequences.
+ * GBK lead bytes are 0x81-0xFE, trail bytes are 0x40-0xFE (excluding 0x7F).
+ * Returns true only if the bytes look like genuine Chinese-encoded text.
+ */
+function looksLikeGBK(bytes: Uint8Array) {
+  if (bytes.length < 2) return false
+  let validPairs = 0
+  let invalidBytes = 0
+  let asciiCount = 0
+  let i = 0
+  while (i < bytes.length) {
+    const b = bytes[i]
+    if (b < 0x80) {
+      asciiCount++
+      i++
+      continue
+    }
+    // GBK lead byte range: 0x81-0xFE
+    if (b >= 0x81 && b <= 0xfe && i + 1 < bytes.length) {
+      const trail = bytes[i + 1]
+      // GBK trail byte range: 0x40-0xFE, excluding 0x7F
+      if (trail >= 0x40 && trail <= 0xfe && trail !== 0x7f) {
+        validPairs++
+        i += 2
+        continue
+      }
+    }
+    // Byte doesn't fit GBK pattern
+    invalidBytes++
+    i++
+  }
+  if (validPairs === 0) return false
+  // Require ALL non-ASCII bytes to form valid GBK pairs (no stray bytes allowed)
+  return invalidBytes === 0
+}
+
+/**
+ * Check if the majority of the non-ASCII content is valid UTF-8 sequences.
+ * Used to prefer UTF-8 with replacement over GB18030 when most content is valid UTF-8.
+ */
+function mostlyUtf8(bytes: Uint8Array) {
+  let validMultibyte = 0
+  let invalidMultibyte = 0
+  let i = 0
+  while (i < bytes.length) {
+    const b = bytes[i]
+    if (b < 0x80) { i++; continue }
+    if ((b & 0xe0) === 0xc0 && i + 1 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80) { validMultibyte++; i += 2; continue }
+    if ((b & 0xf0) === 0xe0 && i + 2 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80 && (bytes[i + 2] & 0xc0) === 0x80) { validMultibyte++; i += 3; continue }
+    if ((b & 0xf8) === 0xf0 && i + 3 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80 && (bytes[i + 2] & 0xc0) === 0x80 && (bytes[i + 3] & 0xc0) === 0x80) { validMultibyte++; i += 4; continue }
+    invalidMultibyte++
+    i++
+  }
+  const total = validMultibyte + invalidMultibyte
+  if (total === 0) return false
+  // If more than half of the multi-byte sequences are valid UTF-8, prefer UTF-8
+  return validMultibyte > invalidMultibyte
+}
+
 function decodeWith(bytes: Uint8Array, encoding: TextEncoding) {
   return {
     encoding,
@@ -114,7 +174,9 @@ function decodeAutoSegment(bytes: Uint8Array) {
   const detected = unicode(bytes)
   if (detected) return decodeWith(bytes, detected)
   if (isUtf8(bytes)) return decodeWith(bytes, "utf-8")
-  if (!looksBinary(bytes)) return decodeWith(bytes, "gb18030")
+  // Only fall back to GB18030 if the bytes actually look like valid GBK sequences
+  // AND the content doesn't look like mostly-valid UTF-8 with a few bad bytes
+  if (!looksBinary(bytes) && looksLikeGBK(bytes) && !mostlyUtf8(bytes)) return decodeWith(bytes, "gb18030")
   return decodeWith(bytes, "utf-8")
 }
 
