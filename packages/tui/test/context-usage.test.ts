@@ -1,5 +1,6 @@
+import { contextUsageSnapshot } from "../src/routes/session/context-usage"
 import { describe, expect, test } from "bun:test"
-import { createComputed, createRoot, createSignal } from "solid-js"
+import { createComputed, createMemo, createRoot, createSignal } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createBindingLookup } from "@opentui/keymap/extras"
 import { registerCommaBindings, registerTimedLeader } from "@opentui/keymap/addons"
@@ -92,6 +93,35 @@ function text(messageID: string, value: string): TextPart {
   }
 }
 
+
+
+// #157：验证嵌套 raw 流式增量触发 memo（runs=2）
+test("snapshot tracks streaming tool input deltas", () => {
+  createRoot((dispose) => {
+    const [store, setStore] = createStore({
+      parts: [
+        {
+          id: "p1",
+          type: "tool",
+          state: { status: "pending", raw: "" },
+        },
+      ] as any[],
+    })
+    let runs = 0
+    const memo = createMemo(() => {
+      runs++
+      // #157：deep snapshot 读取嵌套 raw
+      return contextUsageSnapshot(store.parts)
+    })
+    expect(memo()[0].state.raw).toBe("")
+    expect(runs).toBe(1)
+    setStore("parts", 0, "state", "raw", '{"filePath"')
+    const snap = memo()
+    expect(snap[0].state.raw).toContain('{"filePath"')
+    expect(runs).toBe(2)
+    dispose()
+  })
+})
 describe("context usage", () => {
   test("confirmed allocation composes input history and live output on the panel path", async () => {
     const inputBreakdown = {

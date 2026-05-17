@@ -19,6 +19,12 @@ import {
   type GridSquare,
 } from "../../util/context-usage"
 
+// 深读 Solid 嵌套字段使 raw 增量参与依赖追踪；节流继续作用于完整快照。
+export function contextUsageSnapshot<T,>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+
 // 显示缩写不改变底层 token，明细相加仍使用原始整数，不能把四舍五入结果当账本。
 function formatTokens(tokens: number) {
   // 先判断百万档，避免百万级窗口仍被显示成四位数 k 并挤掉右侧占比。
@@ -239,7 +245,7 @@ function Details(props: { data: ContextUsageData; columns: number }) {
 
 // SDK 输入只有 wire 数据；在 tracked memo 内序列化才能订阅嵌套字段，unwrap 不会建立订阅。
 export function contextUsageResource(input: () => ComputeContextDataInput) {
-  const snapshot = createMemo<ComputeContextDataInput>(() => JSON.parse(JSON.stringify(input())))
+  const snapshot = createMemo<ComputeContextDataInput>(() => contextUsageSnapshot(input()))
   // 深层快照先追踪原位变更，再首尾节流，避免连续 delta 让异步计算持续失效。
   const [throttled, setThrottled] = createThrottledSignal(snapshot(), 500)
   createEffect(() => setThrottled(snapshot()))
