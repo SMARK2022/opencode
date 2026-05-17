@@ -30,12 +30,15 @@ test("returns default native agents when no config", async () => {
       const agents = await load(tmp.path, (svc) => svc.list())
       const names = agents.map((a) => a.name)
       expect(names).toContain("build")
+      expect(names).toContain("interactive")
       expect(names).toContain("plan")
+      expect(names).toContain("decide")
       expect(names).toContain("general")
       expect(names).toContain("explore")
       expect(names).toContain("compaction")
       expect(names).toContain("title")
       expect(names).toContain("summary")
+      expect(names).not.toContain("review")
     },
   })
 })
@@ -51,6 +54,17 @@ test("build agent has correct default properties", async () => {
       expect(build?.native).toBe(true)
       expect(evalPerm(build, "edit")).toBe("allow")
       expect(evalPerm(build, "bash")).toBe("allow")
+    },
+  })
+})
+
+test("review agent id is not built in", async () => {
+  await using tmp = await tmpdir()
+  await WithInstance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const review = await load(tmp.path, (svc) => svc.get("review"))
+      expect(review).toBeUndefined()
     },
   })
 })
@@ -112,6 +126,23 @@ test("general agent denies todo tools", async () => {
       expect(general?.mode).toBe("subagent")
       expect(general?.hidden).toBeUndefined()
       expect(evalPerm(general, "todowrite")).toBe("deny")
+    },
+  })
+})
+
+test("decide agent denies tool permissions", async () => {
+  await using tmp = await tmpdir()
+  await WithInstance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const decide = await load(tmp.path, (svc) => svc.get("decide"))
+      expect(decide).toBeDefined()
+      expect(decide?.mode).toBe("primary")
+      expect(evalPerm(decide, "bash")).toBe("deny")
+      expect(evalPerm(decide, "read")).toBe("deny")
+      expect(evalPerm(decide, "task")).toBe("deny")
+      expect(evalPerm(decide, "skill")).toBe("deny")
+      expect(evalPerm(decide, "edit")).toBe("deny")
     },
   })
 })
@@ -731,7 +762,7 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
         build: { disable: true },
         plan: { disable: true },
         interactive: { disable: true },
-        review: { disable: true },
+        decide: { disable: true },
       },
     },
   })

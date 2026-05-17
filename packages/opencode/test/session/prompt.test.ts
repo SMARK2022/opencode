@@ -269,6 +269,26 @@ function providerCfg(url: string) {
   }
 }
 
+function limitedDecideProviderCfg(url: string) {
+  const base = providerCfg(url)
+  return {
+    ...base,
+    compaction: { reserved: 0 },
+    provider: {
+      ...base.provider,
+      test: {
+        ...base.provider.test,
+        models: {
+          "test-model": {
+            ...base.provider.test.models["test-model"],
+            limit: { context: 20_000, input: 10_000, output: 1_000 },
+          },
+        },
+      },
+    },
+  }
+}
+
 const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string) {
   const session = yield* Session.Service
   const msg = yield* session.updateMessage({
@@ -369,6 +389,19 @@ const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
     })
   })
 
+const addReasoning = (sessionID: SessionID, messageID: MessageID, text: string) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "reasoning",
+      text,
+      time: { start: Date.now(), end: Date.now() },
+    })
+  })
+
 const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   const config = yield* Config.Service
   const prompt = yield* SessionPrompt.Service
@@ -422,6 +455,101 @@ it.live("loop calls LLM and returns assistant message", () =>
       expect(yield* llm.hits).toHaveLength(1)
     }),
     { git: true, config: providerCfg },
+  ),
+)
+
+it.live("decide sends no tools and sanitizes historical tool and reasoning context", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Decide" })
+      const previous = yield* seed(session.id, { finish: "stop" })
+      const keepHead = "prefix-" + "a".repeat(193)
+      const keepTail = "z".repeat(193) + "-suffix"
+
+      yield* addCompletedTool(session.id, previous.assistant.id)
+      yield* addReasoning(session.id, previous.assistant.id, keepHead + "-middle-" + "m".repeat(80) + keepTail)
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "decide",
+        noReply: true,
+        parts: [{ type: "text", text: "decide now" }],
+      })
+      yield* llm.text("decision")
+
+      const result = yield* prompt.loop({ sessionID: session.id })
+      expect(result.info.role).toBe("assistant")
+
+      const inputs = yield* llm.inputs
+      const body = inputs.at(-1)
+      expect(body).toBeDefined()
+      if (!body) return
+
+      const serialized = JSON.stringify(body)
+      expect(serialized).toContain("# WITHOUT any tools")
+      expect(serialized).not.toContain("# Using your tools")
+      expect(body.tools).toBeUndefined()
+      expect(JSON.stringify(body.messages)).not.toContain('"role":"tool"')
+      expect(JSON.stringify(body.messages)).not.toContain("tool-call")
+      expect(JSON.stringify(body.messages)).toContain("tail output")
+      expect(serialized).toContain(keepHead)
+      expect(serialized).toContain(keepTail)
+      expect(serialized).not.toContain("-middle-")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+it.live("decide starts context at latest user prompt when older turn would overflow", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Decide context" })
+      const old = yield* user(session.id, "old-marker " + "x".repeat(80_000))
+      const assistant: MessageV2.Assistant = {
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: old.id,
+        sessionID: session.id,
+        mode: "build",
+        agent: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now() },
+        finish: "stop",
+      }
+      yield* sessions.updateMessage(assistant)
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistant.id,
+        sessionID: session.id,
+        type: "text",
+        text: "old answer",
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "decide",
+        noReply: true,
+        parts: [{ type: "text", text: "current-marker decide now" }],
+      })
+      yield* llm.text("decision")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const inputs = yield* llm.inputs
+      expect(inputs).toHaveLength(1)
+      const body = inputs.at(-1)
+      expect(body).toBeDefined()
+      if (!body) return
+      expect(JSON.stringify(body.messages)).toContain("current-marker")
+      expect(JSON.stringify(body.messages)).not.toContain("old-marker")
+    }),
+    { git: true, config: limitedDecideProviderCfg },
   ),
 )
 

@@ -96,6 +96,14 @@ function createTestDb() {
   return [sqlite, db] as const
 }
 
+function runMigration(sqlite: Database, name: string) {
+  sqlite.exec(readFileSync(path.join(import.meta.dirname, "../../migration", name, "migration.sql"), "utf-8"))
+}
+
+function getText(sqlite: Database, sql: string) {
+  return sqlite.query(sql).get() as { value: string }
+}
+
 describe("JSON to SQLite migration", () => {
   let storageDir: string
   let sqlite: Database
@@ -828,5 +836,81 @@ describe("JSON to SQLite migration", () => {
     expect(db.select().from(TodoTable).all().length).toBe(1)
     expect(db.select().from(PermissionTable).all().length).toBe(1)
     expect(db.select().from(SessionShareTable).all().length).toBe(1)
+  })
+})
+
+describe("SQLite data migrations", () => {
+  let sqlite: Database
+
+  beforeEach(() => {
+    ;[sqlite] = createTestDb()
+  })
+
+  afterEach(() => {
+    sqlite.close()
+  })
+
+  test("migrates persisted review agents to interactive", () => {
+    sqlite.exec(`
+      INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes)
+      VALUES ('proj_review', '/tmp/review', 'git', 'Review Project', 1, 1, '[]');
+      INSERT INTO session (id, project_id, slug, directory, title, version, agent, time_created, time_updated)
+      VALUES ('ses_review', 'proj_review', 'review', '/tmp/review', 'Review', '1.0.0', 'review', 1, 1);
+      INSERT INTO message (id, session_id, time_created, time_updated, data)
+      VALUES (
+        'msg_user_review',
+        'ses_review',
+        1,
+        1,
+        '{"role":"user","time":{"created":1},"agent":"review","model":{"providerID":"test","modelID":"test-model"}}'
+      );
+      INSERT INTO message (id, session_id, time_created, time_updated, data)
+      VALUES (
+        'msg_assistant_review',
+        'ses_review',
+        2,
+        2,
+        '{"role":"assistant","time":{"created":2},"parentID":"msg_user_review","mode":"review","agent":"review","path":{"cwd":"/tmp/review","root":"/tmp/review"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"test-model","providerID":"test"}'
+      );
+      INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
+      VALUES ('sm_review', 'ses_review', 'agent-switched', 1, 1, '{"agent":"review"}');
+      INSERT INTO event_sequence (aggregate_id, seq) VALUES ('ses_review', 1);
+      INSERT INTO event (id, aggregate_id, seq, type, data)
+      VALUES ('evt_review', 'ses_review', 1, 'session.next.agent.switched', '{"agent":"review"}');
+      INSERT INTO request_usage (
+        session_id,
+        request_id,
+        root_request_id,
+        source,
+        status,
+        agent,
+        provider_id,
+        model_id,
+        time_created,
+        time_updated
+      ) VALUES ('ses_review', 'msg_user_review', 'msg_user_review', 'prompt', 'completed', 'review', 'test', 'test-model', 1, 1);
+    `)
+
+    runMigration(sqlite, "20260517000000_migrate_review_agent")
+
+    expect(getText(sqlite, "SELECT agent AS value FROM session WHERE id = 'ses_review'").value).toBe("interactive")
+    expect(getText(sqlite, "SELECT agent AS value FROM request_usage WHERE request_id = 'msg_user_review'").value).toBe(
+      "interactive",
+    )
+    expect(getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_user_review'").value).toBe(
+      "interactive",
+    )
+    expect(
+      getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_assistant_review'").value,
+    ).toBe("interactive")
+    expect(
+      getText(sqlite, "SELECT json_extract(data, '$.mode') AS value FROM message WHERE id = 'msg_assistant_review'").value,
+    ).toBe("interactive")
+    expect(getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM session_message WHERE id = 'sm_review'").value).toBe(
+      "interactive",
+    )
+    expect(getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM event WHERE id = 'evt_review'").value).toBe(
+      "interactive",
+    )
   })
 })

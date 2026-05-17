@@ -64,6 +64,7 @@ import { eq } from "@/storage/db"
 import * as Database from "@/storage/db"
 import { SessionTable } from "./session.sql"
 import { Token } from "@/util/token"
+import { usable } from "./overflow"
 
 
 // @ts-ignore
@@ -84,6 +85,65 @@ const elog = EffectLogger.create({ service: "session.prompt" })
 const INPUT_CHARS_HISTORY_LIMIT = 100_000
 const MIN_CHARS_PER_TOKEN = 3
 const MAX_CHARS_PER_TOKEN = 4
+const DECIDE_PROMPT = `<system-reminder>
+Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
+Use the available conversation context to produce a decisive recommendation or implementation plan.
+Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.
+</system-reminder>`
+const DECIDE_LATEST_MIN = 0.6
+const DECIDE_CONTINUE_BELOW = 0.5
+const DECIDE_TARGET = 0.7
+const DECIDE_MAX = 1
+
+function isDecideAgent(agent: Agent.Info) {
+  return agent.name === "decide"
+}
+
+function truncateThinking(text: string) {
+  if (text.length <= 400) return text
+  return `${text.slice(0, 200)}...${text.slice(-200)}`
+}
+
+function formatDecideToolPart(part: MessageV2.ToolPart) {
+  const body = (() => {
+    switch (part.state.status) {
+      case "completed":
+        return ["output:", part.state.output]
+      case "error":
+        return ["error:", part.state.error]
+      case "pending":
+        return ["raw_input:", part.state.raw]
+      case "running":
+        return ["status:", part.state.title ?? "running"]
+    }
+  })()
+  return [
+    `<tool-context tool="${part.tool}" status="${part.state.status}">`,
+    `input: ${JSON.stringify(part.state.input)}`,
+    ...body,
+    "</tool-context>",
+  ].join("\n")
+}
+
+function sanitizeDecideMessages(messages: MessageV2.WithParts[]) {
+  return messages.map((msg) => ({
+    info: msg.info,
+    parts: msg.parts.map((part): MessageV2.Part => {
+      if (part.type === "reasoning") return { ...part, text: truncateThinking(part.text) }
+      if (part.type === "tool") {
+        return {
+          id: part.id,
+          sessionID: part.sessionID,
+          messageID: part.messageID,
+          type: "text",
+          text: formatDecideToolPart(part),
+          synthetic: true,
+        }
+      }
+      return part
+    }),
+  }))
+}
 
 function clampCharsPerToken(value: number) {
   return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
@@ -311,6 +371,18 @@ export const layer = Layer.effect(
     }) {
       const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
       if (!userMessage) return input.messages
+
+      if (isDecideAgent(input.agent)) {
+        userMessage.parts.push({
+          id: PartID.ascending(),
+          messageID: userMessage.info.id,
+          sessionID: userMessage.info.sessionID,
+          type: "text",
+          text: DECIDE_PROMPT,
+          synthetic: true,
+        })
+        return input.messages
+      }
 
       if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
         if (input.agent.name === "plan") {
@@ -1523,6 +1595,38 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       throw new Error("Impossible")
     })
 
+    const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
+      messages: MessageV2.WithParts[]
+      model: Provider.Model
+      systemText: string
+    }) {
+      const sanitized = sanitizeDecideMessages(input.messages)
+      const limit = usable({ cfg: yield* config.get(), model: input.model })
+      if (limit <= 0) return sanitized
+
+      const starts = sanitized
+        .map((msg, index) => ({ msg, index }))
+        .filter((item) => item.msg.info.role === "user")
+        .filter((item) => !item.msg.parts.some((part) => part.type === "compaction"))
+        .map((item) => item.index)
+        .toReversed()
+
+      let fallback: MessageV2.WithParts[] | undefined
+      for (const [position, start] of starts.entries()) {
+        const candidate = sanitized.slice(start)
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
+        const ratio = estimateInputTokens([input.systemText, JSON.stringify(modelMessages)].join("\n"), candidate) / limit
+        if (ratio >= DECIDE_MAX) return fallback ?? candidate
+
+        fallback = candidate
+        if (position === 0 && ratio >= DECIDE_LATEST_MIN) return candidate
+        if (position === 0 && ratio < DECIDE_CONTINUE_BELOW) continue
+        if (ratio >= DECIDE_TARGET) return candidate
+      }
+
+      return fallback ?? sanitized
+    })
+
     const runLoop: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
@@ -1647,18 +1751,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
+            const decide = isDecideAgent(agent)
 
-            const tools = yield* resolveTools({
-              agent,
-              session,
-              model,
-              tools: lastUser.tools,
-              processor: handle,
-              bypassAgentCheck,
-              messages: msgs,
-            })
+            const tools: Record<string, AITool> = decide
+              ? {}
+              : yield* resolveTools({
+                  agent,
+                  session,
+                  model,
+                  tools: lastUser.tools,
+                  processor: handle,
+                  bypassAgentCheck,
+                  messages: msgs,
+                })
 
-            if (lastUser.format?.type === "json_schema") {
+            if (!decide && lastUser.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({
                 schema: lastUser.format.schema,
                 onSuccess(output) {
@@ -1688,28 +1795,29 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
             }
 
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const registeredTools = Object.keys(tools).filter(ToolSelection.isUserConfigurable)
-            const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
+            const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
+            const [skills, env, instructions, mcpInstr] = yield* Effect.all([
+              decide ? Effect.succeed(undefined) : sys.skills(agent),
               sys.environment(model, registeredTools),
               instruction.system().pipe(Effect.orDie),
-              sys.mcpInstructions(),
-              MessageV2.toModelMessagesEffect(msgs, model),
+              decide ? Effect.succeed(undefined) : sys.mcpInstructions(),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(mcpInstr ? [mcpInstr] : [])]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
-            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
-            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-            // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
             const baseSystemText = (agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n")
             const envText = env.join("\n")
             const instructionsText = [...instructions, ...(lastUser.system ? [lastUser.system] : [])].join("\n")
             const skillsText = skills ?? ""
             const mcpText = mcpInstr ?? ""
             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
+            const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
+            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
+            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
+            // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
             const messagesText = JSON.stringify(messages)
             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
             const toolsText = Object.entries(tools)
@@ -1733,7 +1841,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             let msgToolInputChars = 0
             let msgToolOutputChars = 0
             let msgAttachmentChars = 0
-            for (const m of msgs) {
+            for (const m of requestMsgs) {
               for (const p of m.parts) {
                 switch (p.type) {
                   case "text":
@@ -1780,7 +1888,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 total: messagesText.length,
               },
             }
-            const estimatedInput = estimateInputTokens(inputText, msgs)
+            const estimatedInput = estimateInputTokens(inputText, requestMsgs)
             // Preflight compaction must judge the request we are about to send,
             // not the last finished assistant's historical usage.  After compaction,
             // retained tail messages can carry huge pre-compaction token counts even
