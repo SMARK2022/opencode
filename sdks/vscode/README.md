@@ -1,3 +1,4 @@
+<!-- #161：文档/安装路径与 1.19.11 协同升号；禁止回写 1.14/1.15 -->
 <!-- #141：本批仅协同升号，禁止回写 1.14.x -->
 # OpenCode IDE Bridge
 
@@ -92,7 +93,7 @@ bun run vsix
 Install the generated package (path matches `scripts.vsix` output):
 
 ```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.19.10.vsix --force
+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.19.11.vsix --force
 ```
 
 ## Development

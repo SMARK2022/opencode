@@ -9,7 +9,8 @@ on:
       # #156：inputs.version 非空才覆盖；空串与未传等同，避免 workflow 与包版本双源漂移
       version:
         # #156：显式版本允许 v 前缀，脚本内统一去 v 后再拼接 tag
-        description: "Override version, for example 1.14.42-smark. Empty means packages/opencode/package.json version."
+        # #161：示例版本随 tip 升号；默认仍读 package.json
+        description: "Override version, for example 1.19.11-smark. Empty means packages/opencode/package.json version."
         required: false
         type: string
   push:
