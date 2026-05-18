@@ -2,9 +2,7 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import * as Log from "@opencode-ai/core/util/log"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Installation } from "../installation"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { OAUTH_DUMMY_KEY } from "../auth"
-import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 
@@ -15,6 +13,17 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+export const CODEX_USER_AGENT = "codex-tui/0.130.0 (Mac OS 15.7.2; arm64) Apple_Terminal/455.1 (codex-tui; 0.130.0)"
+export const CODEX_HEADERS = {
+  "Content-Type": "application/json",
+  originator: "codex-tui",
+  "User-Agent": CODEX_USER_AGENT,
+}
+const CODEX_FORM_HEADERS = {
+  "Content-Type": "application/x-www-form-urlencoded",
+  originator: CODEX_HEADERS.originator,
+  "User-Agent": CODEX_USER_AGENT,
+}
 const ALLOWED_MODELS = new Set([
   "gpt-5.5",
   "gpt-5.2",
@@ -123,7 +132,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
     purpose: "plugin",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: CODEX_FORM_HEADERS,
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -142,7 +151,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> 
   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
     purpose: "plugin",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: CODEX_FORM_HEADERS,
     body: new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -410,6 +419,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
 
         return {
           apiKey: OAUTH_DUMMY_KEY,
+          headers: CODEX_HEADERS,
           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
             // Remove dummy API key authorization header
             if (init?.headers) {
@@ -483,6 +493,10 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                 ? new URL(CODEX_API_ENDPOINT)
                 : parsed
 
+            if (url.href === CODEX_API_ENDPOINT) {
+              Object.entries(CODEX_HEADERS).forEach(([key, value]) => headers.set(key, value))
+            }
+
             return NetworkProxy.fetch(url, {
               ...init,
               purpose: "provider",
@@ -529,10 +543,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
               method: "POST",
               purpose: "plugin",
-              headers: {
-                "Content-Type": "application/json",
-                "User-Agent": `opencode/${InstallationVersion}`,
-              },
+              headers: CODEX_HEADERS,
               body: JSON.stringify({ client_id: CLIENT_ID }),
             })
 
@@ -554,10 +565,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
                     method: "POST",
                     purpose: "plugin",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "User-Agent": `opencode/${InstallationVersion}`,
-                    },
+                    headers: CODEX_HEADERS,
                     body: JSON.stringify({
                       device_auth_id: deviceData.device_auth_id,
                       user_code: deviceData.user_code,
@@ -573,7 +581,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
                       method: "POST",
                       purpose: "plugin",
-                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                      headers: CODEX_FORM_HEADERS,
                       body: new URLSearchParams({
                         grant_type: "authorization_code",
                         code: data.authorization_code,
@@ -616,8 +624,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
     },
     "chat.headers": async (input, output) => {
       if (input.model.providerID !== "openai") return
-      output.headers.originator = "opencode"
-      output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
+      Object.assign(output.headers, CODEX_HEADERS)
       output.headers.session_id = input.sessionID
     },
     "chat.params": async (input, output) => {

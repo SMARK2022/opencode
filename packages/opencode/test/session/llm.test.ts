@@ -414,6 +414,126 @@ describe("session.llm.stream", () => {
     })
   }
 
+  test("uses configured provider User-Agent for OpenAI alias providers", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "daxiao-codex-openai"
+    const request = waitRequest(
+      "/responses",
+      createEventResponse(
+        [
+          {
+            type: "response.created",
+            response: {
+              id: "resp-1",
+              created_at: Math.floor(Date.now() / 1000),
+              model: "gpt-5.5",
+              service_tier: null,
+            },
+          },
+          {
+            type: "response.output_text.delta",
+            item_id: "item-1",
+            delta: "Hello",
+            logprobs: null,
+          },
+          {
+            type: "response.completed",
+            response: {
+              incomplete_details: null,
+              usage: {
+                input_tokens: 1,
+                input_tokens_details: null,
+                output_tokens: 1,
+                output_tokens_details: null,
+              },
+              service_tier: null,
+            },
+          },
+        ],
+        true,
+      ),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://opencode.ai/config.json",
+            enabled_providers: [providerID],
+            provider: {
+              [providerID]: {
+                extends: "openai",
+                npm: "@ai-sdk/openai",
+                name: "DaXiao Codex",
+                options: {
+                  apiKey: "test-key",
+                  baseURL: `${server.url.origin}/v1`,
+                  headers: {
+                    "User-Agent": "codex_cli_rs/0.2333",
+                  },
+                },
+                models: {
+                  "gpt-5.5": {
+                    name: "GPT-5.5",
+                    limit: {
+                      context: 400000,
+                      input: 272000,
+                      output: 128000,
+                    },
+                    modalities: {
+                      input: ["text", "image"],
+                      output: ["text"],
+                    },
+                  },
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await withTestInstance({
+      directory: tmp.path,
+      fn: async (ctx) => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make("gpt-5.5"), ctx)
+        const sessionID = SessionID.make("session-test-daxiao-codex-openai")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-daxiao-codex-openai"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
+        } satisfies MessageV2.User
+
+        await drain(
+          {
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          },
+          ctx,
+        )
+
+        expect((await request).headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
+      },
+    })
+  })
+
   test("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
     const server = state.server
     if (!server) {

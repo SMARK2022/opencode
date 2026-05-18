@@ -1775,8 +1775,7 @@ export const layer = Layer.effect(
 
           if (configuredUserAgent) {
             const headers = new Headers(opts.headers)
-            const currentUserAgent = headers.get("user-agent") ?? ""
-            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) headers.set("User-Agent", configuredUserAgent)
+            headers.set("User-Agent", configuredUserAgent)
             opts.headers = headers
           }
 

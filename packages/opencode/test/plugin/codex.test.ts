@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
+  CODEX_HEADERS,
+  CODEX_USER_AGENT,
+  CodexAuthPlugin,
   parseJwtClaims,
   extractAccountIdFromClaims,
   extractAccountId,
@@ -13,6 +16,38 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  test("uses Codex TUI User-Agent for OAuth model requests", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    const options = await hooks.auth!.loader!(() =>
+      Promise.resolve({
+        type: "oauth" as const,
+        refresh: "refresh-token",
+        access: "access-token",
+        expires: Date.now() + 60_000,
+      }),
+      {} as never,
+    )
+    expect(options.headers).toEqual(CODEX_HEADERS)
+  })
+
+  test("sets Codex TUI User-Agent in chat headers", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    const output = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      {
+        sessionID: "session-id",
+        agent: "build",
+        model: { providerID: "openai" },
+        provider: {},
+        message: {},
+      } as never,
+      output,
+    )
+    expect(output.headers["Content-Type"]).toBe("application/json")
+    expect(output.headers.originator).toBe("codex-tui")
+    expect(output.headers["User-Agent"]).toBe(CODEX_USER_AGENT)
+  })
+
   describe("parseJwtClaims", () => {
     test("parses valid JWT with claims", () => {
       const payload = { email: "test@example.com", chatgpt_account_id: "acc-123" }
