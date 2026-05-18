@@ -315,7 +315,8 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   // 关闭只调用路由的 onClose，不能复用 Session interrupt 将展示操作升级为模型执行取消。
   registerContextUsageKeys(keymap, {
     // gather 保留默认 Ctrl+D、leader 序列与用户覆盖；不能把 app_exit 缩成固定的 Ctrl+C。
-    bindings: () => tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
+    // 新关闭命令仍由既有 layer 消费，保留应用退出键在面板内仅关闭的语义。
+    bindings: () => [...tuiConfig.keybinds.gather("app_exit", ["app.exit"]), ...tuiConfig.keybinds.get("session.context.close")],
     enabled: () => dialog.stack.length === 0,
     onClose: props.onClose,
   })

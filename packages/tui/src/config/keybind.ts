@@ -209,6 +209,8 @@ export const Definitions = {
   "dialog.prompt.submit": keybind("return", "Submit dialog prompt"),
   "dialog.mcp.toggle": keybind("space", "Toggle MCP in MCP dialog"),
   "dialog.tool.toggle": keybind("space", "Toggle tool in tool dialog"),
+  // #166：上下文面板关闭纳入统一 keymap（可覆盖 / which-key），禁止 raw useKeyboard
+  "session.context.close": keybind("escape,ctrl+c", "Close context usage panel"),
   "dialog.move_session.new": keybind("ctrl+m", "New project copy"),
   "dialog.move_session.delete": keybind("ctrl+d", "Delete project copy"),
   "dialog.move_session.refresh": keybind("ctrl+r", "Refresh project copies"),
@@ -355,6 +357,9 @@ export const CommandMap = {
   messages_toggle_conceal: "session.toggle.conceal",
   tool_details: "session.toggle.actions",
   display_thinking: "session.toggle.thinking",
+  // #166：旧 underscore 配置名映射到 tip 点分 command
+  dialog_tool_toggle: "dialog.tool.toggle",
+  session_context_close: "session.context.close",
   prompt_submit: "prompt.submit",
   prompt_editor_context_clear: "prompt.editor_context.clear",
   prompt_skills: "prompt.skills",
