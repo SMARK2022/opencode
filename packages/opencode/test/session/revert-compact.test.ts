@@ -462,7 +462,7 @@ describe("revert + compact workflow", () => {
           })
           yield* revert.cleanup(yield* session.get(sid))
 
-          const stored = MessageV2.get({ sessionID: sid, messageID: a1.id })
+          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id })
           const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
           const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
 
@@ -716,11 +716,11 @@ describe("revert + compact workflow", () => {
           const visible = yield* session.messages({ sessionID: sid })
           expect(visible.length).toBe(0)
 
-          const hidden = MessageV2.get({ sessionID: sid, messageID: u1.id })
+          const hidden = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
           expect(hidden.info.hidden).toBeDefined()
           expect(hidden.info.hidden!.reason).toBe("undo")
 
-          const u1raw = MessageV2.get({ sessionID: sid, messageID: u1.id })
+          const u1raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
           expect(u1raw.info.id).toBe(u1.id)
           expect(u1raw.info.hidden?.reason).toBe("undo")
 

@@ -48,7 +48,7 @@ export async function write(port: number, externalUrl?: string): Promise<string>
     pid: process.pid,
     port,
     token,
-    dbPath: DatabasePath,
+    dbPath: DatabasePath(),
     channel: InstallationChannel,
     startedAt: new Date().toISOString(),
     ...(externalUrl ? { externalUrl } : {}),

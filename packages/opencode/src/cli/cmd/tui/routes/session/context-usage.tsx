@@ -1,11 +1,12 @@
 import { createEffect, createMemo, createResource, For, Show } from "solid-js"
-import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
+import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { useDialog } from "@tui/ui/dialog"
-import { useOpencodeKeymap } from "../../keymap"
+import { useBindings } from "../../keymap"
 import { useLocal } from "@tui/context/local"
 import { useProject } from "@tui/context/project"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
+import { useTuiConfig } from "@tui/context/tui-config"
 import { TextAttributes } from "@opentui/core"
 import type { Message, Part } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util"
@@ -228,7 +229,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   const project = useProject()
   const dimensions = useTerminalDimensions()
   const dialog = useDialog()
-  const keybind = useOpencodeKeymap()
+  const tuiConfig = useTuiConfig()
   const { theme } = useTheme()
   useRenderer()
 
@@ -258,14 +259,20 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
 
   const [data] = createResource(input, computeContextData)
 
-  useKeyboard((evt) => {
-    if (dialog.stack.length > 0) return
-    if (evt.name === "escape" || (evt.ctrl && evt.name === "c") || keybind.match("app_exit", evt)) {
-      props.onClose()
-      evt.preventDefault()
-      evt.stopPropagation()
-    }
-  })
+  useBindings(() => ({
+    commands: [
+      {
+        name: "session.context.close",
+        title: "Close context usage",
+        category: "Session",
+        run: () => {
+          if (dialog.stack.length > 0) return
+          props.onClose()
+        },
+      },
+    ],
+    bindings: tuiConfig.keybinds.get("session.context.close"),
+  }))
 
   return (
     <box

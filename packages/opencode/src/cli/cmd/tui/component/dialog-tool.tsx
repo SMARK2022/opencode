@@ -6,7 +6,6 @@ import { useTheme } from "@tui/context/theme"
 import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
 import { useToast } from "@tui/ui/toast"
 import { ToolSelection } from "@/tool/selection"
-import { Keybind } from "@/util/keybind"
 import { createMemo, createResource, createSignal } from "solid-js"
 
 function Status(props: { enabled: boolean; loading: boolean }) {
@@ -74,7 +73,7 @@ export function DialogTool(props: { sessionID: string }) {
       title="Tools"
       placeholder="Search tools..."
       options={options()}
-      keybind={[{ keybind: Keybind.parse("space")[0], title: "toggle", onTrigger: (option) => void toggle(option.value) }]}
+      actions={[{ command: "dialog.tool.toggle", title: "toggle", onTrigger: (option) => void toggle(option.value) }]}
       onSelect={(option) => void toggle(option.value)}
     />
   )

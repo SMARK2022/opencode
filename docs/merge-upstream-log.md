@@ -30,6 +30,36 @@
 
 ---
 
+## Phase 20: 剩余 typecheck 错误根因修复
+
+### 操作 20.1: TUI keymap/API 迁移修复
+
+- `packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx`: 将旧 `DialogSelect keybind` prop 迁移到新 `actions` API。
+- `packages/opencode/src/cli/cmd/tui/config/keybind.ts`: 新增 `dialog.tool.toggle` 默认 `space` 绑定，并映射到 `dialog_tool_toggle`，让工具开关继续纳入统一 keymap/which-key 体系。
+- `packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx`: 移除旧 `keybind.match` 调用，新增 `session.context.close` command，通过 `useBindings` 与新 keymap API 绑定关闭行为。
+- `packages/opencode/src/cli/cmd/tui/config/keybind.ts`: 新增 `session.context.close` 默认 `escape,ctrl+c` 绑定，并映射到 `session_context_close`。
+
+### 操作 20.2: daemon lock 与接口扩展同步
+
+- `packages/opencode/src/cli/cmd/tui/server-lock.ts`: `dbPath` 写入从函数引用 `DatabasePath` 修正为真实路径 `DatabasePath()`。
+- `packages/opencode/test/session/compaction.test.ts`: fake `SessionProcessor.Handle` 补齐本地 token accounting 新增的 `inputChars` 与 `inputBreakdown` 字段。
+- `packages/opencode/test/session/system.test.ts`: fake `Git.Service` 补齐当前 `Git.Interface` 新增的 `applyPatch` 方法。
+
+### 操作 20.3: Effect API 调用同步
+
+- `packages/opencode/test/session/revert-compact.test.ts`: `MessageV2.get` 已随上游 Effect 迁移变成 Effect-returning API；测试中的同步调用改为 `yield* MessageV2.get(...)`。
+
+### 验证
+
+- 命令: `bun typecheck`（目录: `packages/opencode`）。
+- 结果: 通过，无输出错误。
+- 命令: `bun test --timeout 30000 ./test/session/compaction.test.ts ./test/session/revert-compact.test.ts ./test/session/system.test.ts ./test/cli/cmd/tui/session-integration.test.ts`。
+- 结果: `96 pass, 0 fail, 274 expect() calls`。
+- 命令: `bun test --timeout 30000 ./test/cli/cmd/tui/sdk.test.tsx ./test/cli/tui/use-event.test.tsx ./test/cli/cmd/tui/session-integration.test.ts ./test/cli/cmd/tui/diff-line-stats.test.ts ./test/cli/cmd/tui/flag-tui-fields.test.ts ./test/cli/cmd/tui/smooth-scrollbar.test.ts`。
+- 结果: `55 pass, 0 fail, 87 expect() calls`。
+
+---
+
 ## Phase 14: 聚焦测试失败修复（agent/compaction/session/config/runner）
 
 ### 操作 14.1: agent 默认 agent 语义恢复
