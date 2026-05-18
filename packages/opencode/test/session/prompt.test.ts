@@ -761,6 +761,63 @@ withMcpInstructions.instance(
 
 // #150：running task tool 取消必须传播到子会话 idle（异步 settle）
 // #150：tip harness 必须 user()+prompt.loop，禁止单独 prompt fiber（否则 task 不会 running）
+
+// #173：无 runner 时 cancel 仍须把 running/pending tool 标 interrupted
+// #173：seed 后不启动 loop，专门覆盖 stale tool 收口
+it.instance(
+  "cancel finalizes stale running tool parts without an active runner",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, sessions, chat } = yield* boot()
+      const { assistant } = yield* seed(chat.id)
+      const started = Date.now()
+
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistant.id,
+        sessionID: chat.id,
+        type: "tool",
+        callID: "call_running",
+        tool: "read",
+        state: {
+          status: "running",
+          input: { filePath: "README.md" },
+          title: "Read README.md",
+          metadata: { source: "stale-test" },
+          time: { start: started },
+        },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistant.id,
+        sessionID: chat.id,
+        type: "tool",
+        callID: "call_pending",
+        tool: "bash",
+        state: {
+          status: "pending",
+          input: { command: "sleep 30" },
+          raw: '{"command":"sleep 30"}',
+        },
+      })
+
+      // #173：cancel 后断言 tool error+interrupted，而非仍 pending
+      yield* prompt.cancel(chat.id)
+
+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
+      const tools = stored.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool")
+      expect(tools.length).toBe(2)
+      for (const tool of tools) {
+        expect(tool.state.status).toBe("error")
+        if (tool.state.status === "error") {
+          expect(tool.state.error).toBe("Tool execution aborted")
+          expect(tool.state.metadata?.interrupted).toBe(true)
+        }
+      }
+    }),
+  30_000,
+)
+
 it.instance(
   "cancel propagates from running task tool to child session",
   () =>
@@ -2071,7 +2128,10 @@ it.instance(
       const childID = SessionID.make(sessionID)
       expect((yield* status.get(childID)).type).toBe("busy")
 
+      // #173：并发双 cancel——fork 的 cancel 与串行 cancel 竞争同一 per-session 锁，验证排队不丢弃
+      const cancel = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
       yield* prompt.cancel(chat.id)
+      yield* Fiber.await(cancel)
       const exit = yield* Fiber.await(fiber)
       expect(Exit.isSuccess(exit)).toBe(true)
 

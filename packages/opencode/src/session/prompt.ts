@@ -43,7 +43,7 @@ import { Truncate } from "@/tool/truncate"
 import { Image } from "@/image/image"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
+import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types, Semaphore } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
@@ -217,6 +217,8 @@ const layer = Layer.effect(
     const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    // #173：同 session 并发 cancel 串行，避免双写终态竞态
+    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
     const database = yield* Database.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
@@ -228,15 +230,27 @@ const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      yield* Effect.logInfo("cancel", { "session.id": sessionID })
-      // 先冻结全部可见未完成助手；取消发布 idle 后不能选中新开始的消息。
-      const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
-        .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
-        .map((msg) => msg.info.id)
-      yield* state.cancel(sessionID)
-      yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
-        discard: true,
-      })
+      // #173：每 session 一把信号量，合并并发 cancel
+      let lock = cancelLocks.get(sessionID)
+      if (!lock) {
+        // #173：lazy 创建，空闲 session 不占信号量
+        lock = Semaphore.makeUnsafe(1)
+        cancelLocks.set(sessionID, lock)
+      }
+      // #173：排队后续 cancel，不丢弃第二次请求
+      yield* lock.withPermits(1)(
+        Effect.gen(function* () {
+          yield* Effect.logInfo("cancel", { "session.id": sessionID })
+          // 冻结 ID 在同会话锁内完成，不能在 idle 发布后重新扫描新运行的消息。
+          const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
+            .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+            .map((msg) => msg.info.id)
+          yield* state.cancel(sessionID)
+          yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+            discard: true,
+          })
+        }),
+      )
     })
 
     const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID, messageID: MessageID) {
