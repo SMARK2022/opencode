@@ -375,6 +375,7 @@ const live: Layer.Layer<
                 ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
                 "User-Agent": `opencode/${InstallationVersion}`,
               }),
+          ...Provider.requestHeaders(item.options),
           ...input.model.headers,
           ...headers,
         },

@@ -1891,6 +1891,27 @@ test("provider options are deeply merged", async () => {
   })
 })
 
+test("provider header-ua maps to request headers", () => {
+  expect(Provider.requestHeaders({ "header-ua": "codex_cli_rs/0.2333" })).toEqual({
+    "User-Agent": "codex_cli_rs/0.2333",
+  })
+})
+
+test("provider headers User-Agent overrides header-ua shortcut", () => {
+  expect(
+    Provider.requestHeaders({
+      "header-ua": "shortcut",
+      headers: {
+        "User-Agent": "codex_cli_rs/0.2333",
+        "X-Custom": "custom-value",
+      },
+    }),
+  ).toEqual({
+    "X-Custom": "custom-value",
+    "User-Agent": "codex_cli_rs/0.2333",
+  })
+})
+
 test("hosted nvidia provider adds billing origin header", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

@@ -84,6 +84,12 @@ export const Info = Schema.Struct({
       Schema.Struct({
         apiKey: Schema.optional(Schema.String),
         baseURL: Schema.optional(Schema.String),
+        headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+          description: "Additional HTTP headers to send to this provider.",
+        }),
+        "header-ua": Schema.optional(Schema.String).annotate({
+          description: "Shortcut for setting the provider request User-Agent header.",
+        }),
         version: Schema.optional(Schema.String).annotate({
           description: "Provider-specific client version override, used by custom providers like claudecode",
         }),

@@ -43,6 +43,32 @@ function apiUrl(input: { npm?: string; api?: string }) {
   return input.api ?? (input.npm ? SDK_DEFAULT_API_URL[input.npm] : undefined) ?? ""
 }
 
+export function requestHeaders(options: Readonly<Record<string, unknown>>) {
+  const userAgent = requestUserAgent(options)
+  const headers = options.headers
+  const base =
+    headers && typeof headers === "object" && !Array.isArray(headers)
+      ? Object.fromEntries(
+          Object.entries(headers).filter(
+            (entry): entry is [string, string] => entry[0].toLowerCase() !== "user-agent" && typeof entry[1] === "string",
+          ),
+        )
+      : {}
+  if (!userAgent) return base
+  return { ...base, "User-Agent": userAgent }
+}
+
+export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
+  const headers = options.headers
+  const headerUserAgent =
+    headers && typeof headers === "object" && !Array.isArray(headers)
+      ? Object.entries(headers).find(
+          (entry): entry is [string, string] => entry[0].toLowerCase() === "user-agent" && typeof entry[1] === "string",
+        )?.[1]
+      : undefined
+  return headerUserAgent ?? (typeof options["header-ua"] === "string" ? options["header-ua"] : undefined)
+}
+
 function shouldUseCopilotResponsesApi(modelID: string): boolean {
   const match = /^gpt-(\d+)/.exec(modelID)
   if (!match) return false
@@ -1715,6 +1741,10 @@ export const layer = Layer.effect(
             ...options["headers"],
             ...model.headers,
           }
+        const configuredHeaders = requestHeaders(options)
+        if (Object.keys(configuredHeaders).length > 0) options["headers"] = configuredHeaders
+        const configuredUserAgent = requestUserAgent(options)
+        delete options["header-ua"]
 
         const key = Hash.fast(
           JSON.stringify({
@@ -1742,6 +1772,13 @@ export const layer = Layer.effect(
 
           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
           if (combined) opts.signal = combined
+
+          if (configuredUserAgent) {
+            const headers = new Headers(opts.headers)
+            const currentUserAgent = headers.get("user-agent") ?? ""
+            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) headers.set("User-Agent", configuredUserAgent)
+            opts.headers = headers
+          }
 
           // Strip openai itemId metadata following what codex does
           if (
