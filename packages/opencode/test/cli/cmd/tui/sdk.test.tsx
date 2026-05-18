@@ -57,7 +57,7 @@ describe("SDKProvider", () => {
     }) as typeof globalThis.fetch
 
     const app = await testRender(() => (
-      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"}>
+      <SDKProvider url="http://old" testTransport={{ fetch }} reconnect={async () => "http://new"}>
         <Probe onReady={ready} />
       </SDKProvider>
     ))
@@ -93,7 +93,7 @@ describe("SDKProvider", () => {
     }) as typeof globalThis.fetch
 
     const app = await testRender(() => (
-      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"} heartbeatTimeout={50}>
+      <SDKProvider url="http://old" testTransport={{ fetch }} reconnect={async () => "http://new"} heartbeatTimeout={50}>
         <Probe onReady={ready} />
       </SDKProvider>
     ))

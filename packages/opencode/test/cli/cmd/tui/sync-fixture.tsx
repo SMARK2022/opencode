@@ -5,7 +5,7 @@ import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
 import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
 import { KVProvider, useKV } from "../../../../src/cli/cmd/tui/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/cli/cmd/tui/context/project"
-import { SDKProvider, type EventSource } from "../../../../src/cli/cmd/tui/context/sdk"
+import { SDKProvider, type SDKTestTransport } from "../../../../src/cli/cmd/tui/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 
@@ -27,7 +27,9 @@ export function json(data: unknown, init?: ResponseInit) {
   })
 }
 
-export function eventSource(): EventSource {
+type TestEventSource = NonNullable<SDKTestTransport["events"]>
+
+export function eventSource(): TestEventSource {
   return { subscribe: async () => () => {} }
 }
 
@@ -42,7 +44,7 @@ export function createEventSource() {
           if (fn === handler) fn = undefined
         }
       },
-    } satisfies EventSource,
+    } satisfies TestEventSource,
     emit(event: GlobalEvent) {
       if (!fn) throw new Error("event source not ready")
       fn(event)
@@ -125,7 +127,7 @@ export async function mount(override?: FetchHandler) {
     <ArgsProvider>
       <ExitProvider>
         <KVProvider>
-          <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
+          <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
             <ProjectProvider>
               <SyncProvider>
                 <Probe />

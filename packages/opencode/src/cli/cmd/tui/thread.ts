@@ -11,6 +11,11 @@ import { TuiConfig } from "./config/tui"
 import { validateSession } from "./validate-session"
 import { Daemon } from "./daemon"
 
+// [local-devsmark] Keep the TUI on the shared daemon transport instead of the
+// upstream RPC-thread transport. The daemon is the single SQLite owner for TUI
+// sessions, which avoids cross-TUI database write races when multiple opencode
+// instances are open. Do not reintroduce per-TUI Rpc.client/new Worker startup
+// here unless the database ownership model is redesigned.
 export const DAEMON_START_TIMEOUT_MS = Daemon.DAEMON_START_TIMEOUT_MS
 export const SERVER_ELECTION_TIMEOUT_MS = Daemon.SERVER_ELECTION_TIMEOUT_MS
 export const _spawn = Daemon._spawn

@@ -6,8 +6,11 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { batch, onCleanup, onMount } from "solid-js"
 import { ConnectionError } from "../util/connection-error"
 
-export type EventSource = {
-  subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
+export type SDKTestTransport = {
+  fetch?: typeof fetch
+  events?: {
+    subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
+  }
 }
 
 export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
@@ -15,11 +18,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
   init: (props: {
     url: string
     directory?: string
-    fetch?: typeof fetch
     headers?: RequestInit["headers"]
-    events?: EventSource
     reconnect?: () => Promise<string>
     heartbeatTimeout?: number
+    // [local-devsmark] Test-only transport injection. Production TUI must not
+    // use this as an RPC-thread escape hatch; `tui()` does not expose it.
+    testTransport?: SDKTestTransport
   }) => {
     const abort = new AbortController()
     let sse: AbortController | undefined
@@ -30,7 +34,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         baseUrl: url,
         signal: abort.signal,
         directory: props.directory,
-        fetch: props.fetch,
+        fetch: props.testTransport?.fetch,
         headers: props.headers,
       })
     }
@@ -160,18 +164,18 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     }
 
     onMount(async () => {
-      if (props.events) {
-        const unsub = await props.events.subscribe(handleEvent)
+      // [local-devsmark][deprecated-rpc-thread] The upstream RPC event-source
+      // production branch is disabled. Production always uses daemon HTTP/SSE so
+      // one daemon owns SQLite writes across concurrent TUI instances. The only
+      // alternate event source left is `testTransport`, used by focused tests.
+      if (props.testTransport?.events) {
+        const unsub = await props.testTransport.events.subscribe(handleEvent)
         onCleanup(unsub)
 
-        if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-          // Start syncing workspaces, it's important to do this after
-          // we've started listening to events
-          await sdk.sync.start().catch(() => {})
-        }
-      } else {
-        startSSE()
+        if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) await sdk.sync.start().catch(() => {})
+        return
       }
+      startSSE()
     })
 
     onCleanup(() => {
@@ -186,7 +190,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       },
       directory: props.directory,
       event: emitter,
-      fetch: props.fetch ?? fetch,
+      fetch: props.testTransport?.fetch ?? fetch,
       get url() {
         return url
       },

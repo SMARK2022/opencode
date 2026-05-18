@@ -71,7 +71,6 @@ import { FormatError, FormatUnknownError } from "@/cli/error"
 import { CommandPaletteProvider, useCommandPalette } from "./context/command-palette"
 import { OpencodeKeymapProvider, registerOpencodeKeymap, useBindings, useOpencodeKeymap } from "./keymap"
 
-import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 
 const appBindingCommands = [
@@ -164,9 +163,7 @@ export function tui(input: {
   config: TuiConfig.Resolved
   onSnapshot?: () => Promise<string[]>
   directory?: string
-  fetch?: typeof fetch
   headers?: RequestInit["headers"]
-  events?: EventSource
   reconnect?: () => Promise<string>
 }) {
   // promise to prevent immediate exit
@@ -247,9 +244,7 @@ export function tui(input: {
                         <SDKProvider
                           url={input.url}
                           directory={input.directory}
-                          fetch={input.fetch}
                           headers={input.headers}
-                          events={input.events}
                           reconnect={input.reconnect}
                         >
                           <ProjectProvider>

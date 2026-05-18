@@ -667,3 +667,28 @@
 - 结果: `49 pass, 0 fail, 77 expect() calls`。
 
 ---
+
+## Phase 19: daemon 架构保留与 RPC-thread runtime 禁用
+
+### 操作 19.1: 架构确认
+
+- 当前分支保留本地 devsmark 的共享 daemon 架构: `TuiThreadCommand -> Daemon.ensure() -> worker daemon HTTP/SSE -> TUI SDK`。
+- 上游 `upstream/dev` 使用 per-TUI RPC-thread 架构: `TuiThreadCommand -> new Worker(worker.ts) -> Rpc.client -> RPC fetch/events`。
+- 决策: 本地继续使用 daemon 架构，因为 daemon 是 TUI 场景下的单一 SQLite owner，用于避免多个 opencode/TUI 实例并发写数据库导致竞态。
+
+### 操作 19.2: 禁用 RPC-thread 生产路径
+
+- `packages/opencode/src/cli/cmd/tui/thread.ts`: 添加 `[local-devsmark]` 注释，明确不要重新引入 per-TUI `Rpc.client/new Worker` 启动路径，除非数据库 ownership 模型重做。
+- `packages/opencode/src/cli/cmd/tui/worker.ts`: 删除/禁用 `export const rpc` 与 `Rpc.listen(rpc)`，并移除相关 `Rpc`、`ServerAuth`、`writeHeapSnapshot`、`upgrade`、`Effect` 等 RPC-only import；worker 只保留 shared daemon HTTP/SSE 路径。
+- `packages/opencode/src/cli/cmd/tui/app.tsx`: 从 `tui()` 输入类型和 `SDKProvider` 挂载中移除生产 `fetch`/`events` transport injection，防止后续误以为 upstream RPC-thread transport 仍需保留。
+- `packages/opencode/src/cli/cmd/tui/context/sdk.tsx`: 删除生产 `fetch`/`events` override 分支，默认始终启动 daemon SSE；保留显式 `SDKTestTransport`，只作为 focused tests 的注入 seam，不由 `tui()` 暴露。
+- `packages/opencode/test/cli/cmd/tui/sdk.test.tsx`、`test/cli/cmd/tui/sync-fixture.tsx`、`test/cli/tui/use-event.test.tsx`: 将测试挂载从顶层 `fetch/events` 改为 `testTransport`。
+- `packages/opencode/src/cli/cmd/tui/context/event.ts`: 对事件过滤进一步收紧: global 事件单独返回；若事件明确带 `project`，只按 project 匹配并返回，不再 fallback 到 workspace/directory，避免不同 project 的 daemon event 通过目录匹配串入当前 TUI。
+
+### 验证
+
+- 命令: `bun test --timeout 30000 ./test/cli/cmd/tui/sdk.test.tsx ./test/cli/tui/use-event.test.tsx ./test/cli/cmd/tui/session-integration.test.ts`（目录: `packages/opencode`）。
+- 结果: `42 pass, 0 fail, 70 expect() calls`。
+- 额外检查: `bun typecheck` 不再出现因移除生产 `fetch/events` override 导致的 `SDKProvider` 类型错误；剩余错误仍是既有的 `dialog-tool.tsx`、`context-usage.tsx`、`server-lock.ts` 与 session test mock 类型问题。
+
+---

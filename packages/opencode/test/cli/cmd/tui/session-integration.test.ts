@@ -171,10 +171,13 @@ describe("Session route integration points", () => {
   })
 
   describe("event dispatch", () => {
-    test("project/global event match returns before workspace fallback", () => {
+    test("global and explicit project event matches return before workspace fallback", () => {
       const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
       expect(eventSource).toMatch(
-        /if \(event\.directory === "global" \|\| event\.project === project\.project\(\)\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
+        /if \(event\.directory === "global"\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
+      )
+      expect(eventSource).toMatch(
+        /if \(event\.project\) \{\s*if \(event\.project === project\.project\(\)\) handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
       )
     })
   })
