@@ -164,6 +164,7 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
   waitMs: DAEMON_START_TIMEOUT_MS,
 })
 
+// #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
 export async function discoverOrSpawnDaemon(
   networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
   deps: DiscoverDaemonDeps = defaultDiscoverDeps(),

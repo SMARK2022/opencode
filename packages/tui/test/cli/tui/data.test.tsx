@@ -1,13 +1,29 @@
+// #165：测试统一 testTransport，禁止顶层 fetch/events 生产缝
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
 import type { Event, GlobalEvent } from "@opencode-ai/sdk/v2"
-import { onMount } from "solid-js"
-import { ProjectProvider } from "../../../src/context/project"
+import { createSignal, onMount, Show, type ParentProps } from "solid-js"
+import { ProjectProvider, useProject } from "../../../src/context/project"
 import { SDKProvider } from "../../../src/context/sdk"
 import { DataProvider, useData } from "../../../src/context/data"
 import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
 import { TestTuiContexts } from "../../fixture/tui-environment"
+
+function InitializedDataProvider(props: ParentProps) {
+  const project = useProject()
+  const [ready, setReady] = createSignal(false)
+  onMount(async () => {
+    // 生产 bootstrap 先确认 project 身份，之后才允许 Data 消费带 project 的事件。
+    await project.sync()
+    setReady(true)
+  })
+  // 在真实 provider 外等待初始化，不放宽 shouldDeliverScopedEvent 的隔离条件。
+  return <Show when={ready()}><DataProvider>{props.children}</DataProvider></Show>
+}
+
+// 目录端点属于 project.sync 的真实依赖，fixture 不能遗漏后再绕过初始化。
+
 
 async function wait(fn: () => boolean, timeout = 2000) {
   const start = Date.now()
@@ -65,11 +81,11 @@ test("refreshes resources into reactive getters", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <Probe />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -134,11 +150,11 @@ test("refreshes integrations after integration updates", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <Probe />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -175,11 +191,11 @@ test("refreshes effective catalog data after catalog updates", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <box />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -220,11 +236,11 @@ test("refreshes references after updates", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <Probe />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -258,11 +274,11 @@ test("settles pending tools when a live failure arrives", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <Probe />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -387,11 +403,11 @@ test("renders admitted prompts only after they become model-visible", async () =
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <Probe />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>
@@ -451,11 +467,11 @@ test("projects live context updates with their message ID", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <DataProvider>
+          <InitializedDataProvider>
             <Probe />
-          </DataProvider>
+          </InitializedDataProvider>
         </ProjectProvider>
       </SDKProvider>
     </TestTuiContexts>

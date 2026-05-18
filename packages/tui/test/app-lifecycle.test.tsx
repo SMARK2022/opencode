@@ -32,9 +32,9 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
       run({
         url: "http://test",
         directory,
-        config: createTuiResolvedConfig({ plugin_enabled: {} }),
-        fetch: calls.fetch,
-        events: events.source,
+        config: createTuiResolvedConfig({ plugin_enabled: {} })
+        ,
+        testTransport: { events: events.source, fetch: calls.fetch },
         args: {},
         pluginHost: {
           async start() {
@@ -98,9 +98,9 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
       run({
         url: "http://test",
         directory,
-        config: createTuiResolvedConfig({ plugin_enabled: {} }),
-        fetch: calls.fetch,
-        events: events.source,
+        config: createTuiResolvedConfig({ plugin_enabled: {} })
+        ,
+        testTransport: { events: events.source, fetch: calls.fetch },
         args: { continue: true },
         pluginHost: {
           async start(input) {
@@ -163,8 +163,8 @@ test("fatal startup errors set a nonzero exit after scoped cleanup", async () =>
         url: "http://test",
         directory,
         config: createTuiResolvedConfig({ plugin_enabled: {} }),
-        fetch: calls.fetch,
-        events: events.source,
+        // #165：TuiInput 收敛为 testTransport 嵌套注入，run 调用同步迁移
+        testTransport: { fetch: calls.fetch, events: events.source },
         args: {},
         pluginHost: {
           async start() {},

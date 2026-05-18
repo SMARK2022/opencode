@@ -98,6 +98,8 @@ export function createFetch(override?: FetchHandler, events?: ReturnType<typeof 
         data: [],
       })
     if (url.pathname === "/project/current") return json({ id: "proj_test" })
+    // #165：真实 project 初始化还会列出目录，测试使用无额外工作区的项目。
+    if (url.pathname === "/project/proj_test/directories") return json([])
     if (url.pathname === "/api/reference")
       return json({ location: { directory, project: { id: "proj_test", directory } }, data: [] })
     if (url.pathname === "/provider") return json({ all: [], default: {}, connected: [] })

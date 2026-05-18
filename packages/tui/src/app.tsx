@@ -79,7 +79,6 @@ import {
   useOpencodeKeymap,
 } from "./keymap"
 
-import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
@@ -147,7 +146,11 @@ export type TuiInput = {
   directory?: string
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
-  events?: EventSource
+  // #165：测试事件替身独立于上游已有的生产 HTTP 适配。
+  testTransport?: {
+    fetch?: typeof globalThis.fetch
+    events?: import("./context/sdk").EventSource
+  }
   // #139：运行时 daemon 恢复回调，返回新 base URL
   reconnect?: () => Promise<string>
   // #139：可测心跳超时
@@ -299,12 +302,13 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                   >
                                     <TuiConfigProvider config={input.config}>
                                       <PluginRuntimeProvider value={pluginRuntime}>
+                                        {/* #165：HTTP 适配保留；事件替身不作为线程 RPC 生产入口。 */}
                                         <SDKProvider
+                                          testTransport={input.testTransport}
                                           url={input.url}
                                           directory={input.directory}
                                           fetch={input.fetch}
                                           headers={input.headers}
-                                          events={input.events}
                                           reconnect={input.reconnect}
                                           heartbeatTimeout={input.heartbeatTimeout}
                                         >

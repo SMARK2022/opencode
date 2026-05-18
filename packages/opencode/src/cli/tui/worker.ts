@@ -1,12 +1,8 @@
 import { Server } from "@/server/server"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { InstanceRuntime } from "@/project/instance-runtime"
-import { Rpc } from "@/util/rpc"
 import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config/config"
-import { GlobalBus } from "@/bus/global"
-import { ServerAuth } from "@/server/auth"
-import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Effect } from "effect"
@@ -26,84 +22,9 @@ let onUncaughtException: (error: Error) => void = (_error: Error) => {}
 process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
-// 相同模块保留线程 RPC 与进程 daemon 两种入口，只按明确 worker 角色选择生命周期。
-// 主进程不能同时安装线程转发，否则 GlobalBus 会向没有 parentPort 的 transport 发事件。
 const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
+// 共享 daemon 是唯一生产入口；线程 RPC 不再持有数据库或转发事件。
 
-// 旧线程仍使用 RPC fanout，daemon 的 HTTP 客户端不能改变该兼容入口的事件来源。
-if (!isDaemon) {
-  GlobalBus.on("event", (event) => {
-    Rpc.emit("global.event", event)
-  })
-}
-
-
-let server: Awaited<ReturnType<typeof Server.listen>> | undefined
-
-export const rpc = {
-  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
-    const headers = { ...input.headers }
-    const auth = ServerAuth.header()
-    if (auth && !headers["authorization"] && !headers["Authorization"]) {
-      headers["Authorization"] = auth
-    }
-    const request = new Request(input.url, {
-      method: input.method,
-      headers,
-      body: input.body,
-    })
-    const response = await Server.Default().app.fetch(request)
-    const body = await response.text()
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers.entries()),
-      body,
-    }
-  },
-  snapshot() {
-    const result = writeHeapSnapshot("server.heapsnapshot")
-    return result
-  },
-  async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
-    if (server) await server.stop(true)
-    server = await Server.listen(input)
-    return { url: server.url.toString() }
-  },
-  async checkUpgrade(input: { directory: string }) {
-    await InstanceRuntime.load({ directory: input.directory })
-    return upgrade().catch(() => undefined)
-  },
-  async reload() {
-    await AppRuntime.runPromise(
-      Effect.gen(function* () {
-        const cfg = yield* Config.Service
-        yield* cfg.invalidate()
-        yield* disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true })
-      }),
-    )
-  },
-  async shutdown() {
-    await InstanceRuntime.disposeAllInstances()
-    if (server) await server.stop(true)
-    // 先停止生产者再 checkpoint；server() 的监听重启不能释放进程级数据库。
-    try {
-      await AppRuntime.runPromise(Effect.gen(function* () {
-        const database = yield* Database.Service
-        yield* Database.checkpoint(database.db)
-      }))
-    } finally {
-      // checkpoint 剩余失败仍向 RPC 传播；释放不能被拒绝跳过，native close 仍由既有 Layer 负责。
-      await AppRuntime.dispose()
-    }
-    process.off("unhandledRejection", onUnhandledRejection)
-    process.off("uncaughtException", onUncaughtException)
-  },
-}
-
-// RPC 属于线程模式；主进程 daemon 不安装线程的 message handler。
-if (!isDaemon) Rpc.listen(rpc)
-
-// 线程入口不创建第二个 HTTP listener，也不安装 daemon 的 idle 退出回调。
 if (isDaemon) {
   // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
   NetworkProxy.installGlobalFetch()

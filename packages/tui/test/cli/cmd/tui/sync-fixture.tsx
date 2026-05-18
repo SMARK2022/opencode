@@ -1,3 +1,4 @@
+// #165：测试统一 testTransport，禁止顶层 fetch/events 生产缝
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
 import { onMount } from "solid-js"
@@ -48,7 +49,7 @@ export async function mount(override?: FetchHandler, state?: string) {
     <TestTuiContexts paths={state ? { state } : undefined}>
       <ArgsProvider>
         <KVProvider>
-          <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
+          <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
             <PermissionProvider>
               <ProjectProvider>
                 <ExitProvider exit={() => {}}>
