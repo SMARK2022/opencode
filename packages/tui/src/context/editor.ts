@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { createStore } from "solid-js/store"
 import { Option, Schema, SchemaGetter } from "effect"
+import { Global } from "@opencode-ai/core/global"
 import { isRecord } from "../util/record"
 import { useTuiPaths } from "./runtime"
 import { createSimpleContext } from "./helper"
@@ -458,8 +459,14 @@ function bridgeUriToPath(value?: string) {
   return value
 }
 
+// #171：与 vscode-bridge / 扩展写入同一 registry 根，禁止硬编码 home 分叉
+function bridgeRegistryDir() {
+  // #171：OPENCODE_IDE_REGISTRY_DIR 优先，否则 Global.Path.state/ide
+  return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
+}
+
 function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
-  const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
+  const dir = bridgeRegistryDir()
   let entries: string[]
   try {
     entries = readdirSync(dir)
