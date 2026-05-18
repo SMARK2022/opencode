@@ -2,6 +2,7 @@ import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -15,6 +16,16 @@ import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
 
 const log = Log.create({ service: "server" })
+
+// [local-smark] SSE client count tracking for daemon idle-timeout
+export const GlobalDisposedEvent = BusEvent.define("global.disposed", Schema.Struct({}))
+
+let sseClientCount = 0
+let onSseCountChange: ((n: number) => void) | undefined
+
+export function onSseClientCountChange(cb: (n: number) => void) {
+  onSseCountChange = cb
+}
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -34,6 +45,9 @@ function parseBody(body: string) {
 }
 
 function eventResponse() {
+  // [local-smark] Track SSE client count for daemon idle-timeout
+  sseClientCount++
+  onSseCountChange?.(sseClientCount)
   log.info("global event connected")
   const events = Stream.callback<GlobalBusEvent>((queue) => {
     const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
@@ -53,7 +67,12 @@ function eventResponse() {
       Stream.map(eventData),
       Stream.pipeThroughChannel(Sse.encode()),
       Stream.encodeText,
-      Stream.ensuring(Effect.sync(() => log.info("global event disconnected"))),
+      // [local-smark] Decrement SSE client count on disconnect
+      Stream.ensuring(Effect.sync(() => {
+        sseClientCount--
+        onSseCountChange?.(sseClientCount)
+        log.info("global event disconnected")
+      })),
     ),
     {
       contentType: "text/event-stream",

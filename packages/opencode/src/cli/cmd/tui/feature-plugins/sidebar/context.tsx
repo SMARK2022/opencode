@@ -1,5 +1,7 @@
+// [local-smark] Token accounting and detailed usage tracking
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import type { InternalTuiPlugin } from "../../plugin/internal"
 import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
@@ -19,6 +21,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   const local = useLocal()
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+  // [local-smark] Detailed token accounting state
   const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
 
   type StateValue = {
@@ -190,7 +193,7 @@ const tui: TuiPlugin = async (api) => {
   })
 }
 
-const plugin: TuiPluginModule & { id: string } = {
+const plugin: InternalTuiPlugin = {
   id,
   tui,
 }

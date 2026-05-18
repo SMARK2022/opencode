@@ -12,8 +12,9 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import * as Log from "@opencode-ai/core/util/log"
 import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
 import { which } from "@/util/which"
+// [local-smark] zod for ripgrep schema
 import { zod } from "@/util/effect-zod"
-import { NonNegativeInt, withStatics } from "@/util/schema"
+import { NonNegativeInt } from "@opencode-ai/core/schema"
 import z from "zod"
 
 const log = Log.create({ service: "ripgrep" })
@@ -73,7 +74,7 @@ export const SearchMatch = Schema.Struct({
       end: NonNegativeInt,
     }),
   ),
-}).pipe(withStatics((s) => ({ zod: zod(s) })))
+})
 
 export const Match = Schema.Struct({
   type: Schema.Literal("match"),

@@ -1,7 +1,8 @@
 import { Effect } from "effect"
 import { effectCmd } from "../effect-cmd"
 import { Session } from "@/session/session"
-import { bootstrap } from "../bootstrap"
+// [local-smark] DB-based request usage tracking
+import { NotFoundError } from "@/storage/storage"
 import { Database, eq } from "@/storage/db"
 import { SessionTable } from "../../session/session.sql"
 import { Project } from "@/project/project"
@@ -161,9 +162,11 @@ const aggregateSessionStats = Effect.fn("Cli.stats.aggregate")(function* (
     filteredSessions,
     (session) =>
       Effect.gen(function* () {
-        const messages = yield* svc.messages({ sessionID: session.id })
+        const messages = yield* svc
+          .messages({ sessionID: session.id })
+          .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
 
-        // Try DB-based tracking first, fall back to message metadata.
+        // [local-smark] Try DB-based tracking first, fall back to message metadata.
         const requestUsageRows = Database.use((db) =>
           db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
         )
@@ -190,6 +193,7 @@ const aggregateSessionStats = Effect.fn("Cli.stats.aggregate")(function* (
             sessionTokens.cache.read += row.tokens_cache_read
             sessionTokens.cache.write += row.tokens_cache_write
           }
+          // [local-smark] Per-model breakdown from assistant usage table
           for (const row of assistantUsageRows) {
             upsertModelUsage(
               sessionModelUsage,

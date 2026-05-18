@@ -1,8 +1,6 @@
-import { Effect, Option, Schema, Scope } from "effect"
-import { NonNegativeInt } from "@/util/schema"
-import { createReadStream } from "fs"
+import { Effect, Option, Schema, Scope, Stream } from "effect"
+import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as path from "path"
-import { createInterface } from "readline"
 import * as Tool from "./tool"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { LSP } from "@/lsp/lsp"
@@ -10,9 +8,11 @@ import DESCRIPTION from "./read.txt"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
+// [local-smark] read tool enhancements: image processing, outline
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
 import { readOutline, type Outline } from "./read-outline"
+import { Reference } from "@/reference/reference"
 
 const DEFAULT_READ_LIMIT = 200
 const MAX_BYTES = 24 * 1024
@@ -312,6 +312,8 @@ function renderReadStub(input: {
 
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 
+class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
+
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
 // coercion was useful when the tool was called from a shell but serves no
 // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
@@ -333,6 +335,7 @@ export const ReadTool = Tool.define(
     const fs = yield* AppFileSystem.Service
     const instruction = yield* Instruction.Service
     const lsp = yield* LSP.Service
+    const reference = yield* Reference.Service
     const scope = yield* Scope.Scope
 
     const miss = Effect.fn("ReadTool.miss")(function* (filepath: string) {
@@ -393,6 +396,51 @@ export const ReadTool = Tool.define(
           return Option.getOrElse(yield* file.readAlloc(Math.min(sampleSize, fileSize)), () => new Uint8Array())
         }),
       )
+    })
+
+    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
+      const start = opts.offset - 1
+      const raw: string[] = []
+      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+
+      // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
+      // ends without flushing, decodeText drops the final unterminated line. We also
+      // avoid Stream.runForEachWhile (it currently swallows the final unterminated
+      // line of the upstream splitLines pipeline) and use a tagged error to stop the
+      // upstream file stream as soon as the byte cap is reached.
+      const decoder = new TextDecoder("utf-8")
+      yield* fs.stream(filepath).pipe(
+        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+        Stream.splitLines,
+        Stream.runForEach((text) =>
+          Effect.gen(function* () {
+            if (flags.done) return yield* new ReadStop()
+            flags.count += 1
+            if (flags.count <= start) return
+
+            if (raw.length >= opts.limit) {
+              flags.more = true
+              return
+            }
+
+            const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
+            const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
+            if (flags.bytes + size <= MAX_BYTES) {
+              raw.push(line)
+              flags.bytes += size
+              return
+            }
+
+            flags.cut = true
+            flags.more = true
+            flags.done = true
+            return yield* new ReadStop()
+          }),
+        ),
+        Effect.catchTag("ReadStop", () => Effect.void),
+      )
+
+      return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
     })
 
     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
@@ -456,6 +504,7 @@ export const ReadTool = Tool.define(
         )
       }
 
+      yield* reference.ensure(filepath)
       const title = path.relative(instance.worktree, filepath)
 
       const stat = yield* fs.stat(filepath).pipe(
@@ -466,13 +515,13 @@ export const ReadTool = Tool.define(
       )
 
       yield* assertExternalDirectoryEffect(ctx, filepath, {
-        bypass: Boolean(ctx.extra?.["bypassCwdCheck"]),
+        bypass: Boolean(ctx.extra?.["bypassCwdCheck"]) || (yield* reference.contains(filepath)),
         kind: stat?.type === "Directory" ? "directory" : "file",
       })
 
       yield* ctx.ask({
         permission: "read",
-        patterns: [filepath],
+        patterns: [path.relative(instance.worktree, filepath)],
         always: ["*"],
         metadata: {},
       })
@@ -566,9 +615,7 @@ export const ReadTool = Tool.define(
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* Effect.promise(() =>
-        lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 }),
-      )
+      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
@@ -681,6 +728,7 @@ export const ReadTool = Tool.define(
   }),
 )
 
+// [local-smark] Custom lines reader with byte-cap for read tool
 async function lines(filepath: string, opts: { limit: number; offset: number }) {
   const stream = createReadStream(filepath, { encoding: "utf8" })
   const rl = createInterface({

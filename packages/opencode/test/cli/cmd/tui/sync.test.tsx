@@ -1,142 +1,21 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
-import { testRender } from "@opentui/solid"
-import { onMount } from "solid-js"
 import { Global } from "@opencode-ai/core/global"
-import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
-import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
-import { KVProvider, useKV } from "../../../../src/cli/cmd/tui/context/kv"
-import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
-import { SDKProvider, type EventSource } from "../../../../src/cli/cmd/tui/context/sdk"
-import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
 import { tmpdir } from "../../../fixture/fixture"
+import { mount, wait } from "./sync-fixture"
+import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 
-const worktree = "/tmp/opencode"
-const directory = `${worktree}/packages/opencode`
-
-async function wait(fn: () => boolean, timeout = 2000) {
-  const start = Date.now()
-  while (!fn()) {
-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
-    await Bun.sleep(10)
-  }
-}
-
-function json(data: unknown) {
-  return new Response(JSON.stringify(data), {
-    headers: { "content-type": "application/json" },
-  })
-}
-
-function eventSource(): EventSource {
+function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
-    subscribe: async () => () => {},
+    directory: "/tmp/other",
+    project: "proj_test",
+    workspace,
+    payload: {
+      id: `evt_vcs_${branch}`,
+      type: "vcs.branch.updated",
+      properties: { branch },
+    },
   }
-}
-
-function createFetch() {
-  const session = [] as URL[]
-  const status = [] as URL[]
-  const fetch = (async (input: RequestInfo | URL) => {
-    const url = new URL(input instanceof Request ? input.url : String(input))
-    if (url.pathname === "/session") session.push(url)
-    if (url.pathname === "/session/status") status.push(url)
-
-    switch (url.pathname) {
-      case "/agent":
-      case "/command":
-      case "/experimental/workspace":
-      case "/experimental/workspace/status":
-      case "/formatter":
-      case "/lsp":
-        return json([])
-      case "/config":
-      case "/experimental/resource":
-      case "/mcp":
-      case "/provider/auth":
-      case "/session/status":
-        return json({})
-      case "/config/providers":
-        return json({ providers: {}, default: {} })
-      case "/experimental/console":
-        return json({ consoleManagedProviders: [], switchableOrgCount: 0 })
-      case "/path":
-        return json({ home: "", state: "", config: "", worktree, directory })
-      case "/project/current":
-        return json({ id: "proj_test" })
-      case "/provider":
-        return json({ all: [], default: {}, connected: [] })
-      case "/session":
-        return json([])
-      case "/session/ses_test":
-        return json({
-          id: "ses_test",
-          slug: "test",
-          projectID: "proj_test",
-          directory,
-          title: "Test",
-          version: "0.0.0",
-          time: { created: 1, updated: 1 },
-        })
-      case "/session/ses_test/message":
-      case "/session/ses_test/todo":
-      case "/session/ses_test/diff":
-        return json([])
-      case "/vcs":
-        return json({ branch: "main" })
-    }
-
-    throw new Error(`unexpected request: ${url.pathname}`)
-  }) as typeof globalThis.fetch
-
-  return { fetch, session, status }
-}
-
-async function mount() {
-  const calls = createFetch()
-  let sync!: ReturnType<typeof useSync>
-  let kv!: ReturnType<typeof useKV>
-  let done!: () => void
-  const ready = new Promise<void>((resolve) => {
-    done = resolve
-  })
-
-  const app = await testRender(() => (
-    <ArgsProvider>
-      <ExitProvider>
-        <KVProvider>
-          <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={eventSource()}>
-            <ProjectProvider>
-              <SyncProvider>
-                <Probe
-                  onReady={(ctx) => {
-                    sync = ctx.sync
-                    kv = ctx.kv
-                    done()
-                  }}
-                />
-              </SyncProvider>
-            </ProjectProvider>
-          </SDKProvider>
-        </KVProvider>
-      </ExitProvider>
-    </ArgsProvider>
-  ))
-
-  await ready
-  await wait(() => sync.status === "complete")
-  return { app, kv, sync, session: calls.session, status: calls.status }
-}
-
-function Probe(props: { onReady: (ctx: { kv: ReturnType<typeof useKV>; sync: ReturnType<typeof useSync> }) => void }) {
-  const kv = useKV()
-  const sync = useSync()
-
-  onMount(() => {
-    props.onReady({ kv, sync })
-  })
-
-  return <box />
 }
 
 describe("tui sync", () => {
@@ -163,17 +42,26 @@ describe("tui sync", () => {
     }
   })
 
-  test("force syncing a session refreshes session status", async () => {
+  test("vcs branch updates only apply for the active workspace", async () => {
     const previous = Global.Path.state
     await using tmp = await tmpdir()
     Global.Path.state = tmp.path
     await Bun.write(`${tmp.path}/kv.json`, "{}")
-    const { app, sync, status } = await mount()
+    const { app, emit, project, sync } = await mount()
 
     try {
-      const before = status.length
-      await sync.session.sync("ses_test", { force: true })
-      expect(status.length).toBe(before + 1)
+      expect(sync.data.vcs?.branch).toBe("main")
+
+      project.workspace.set("ws_a")
+      emit(branchEvent("other", "ws_b"))
+      await Bun.sleep(30)
+
+      expect(sync.data.vcs?.branch).toBe("main")
+
+      emit(branchEvent("feature", "ws_a"))
+      await wait(() => sync.data.vcs?.branch === "feature")
+
+      expect(sync.data.vcs?.branch).toBe("feature")
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

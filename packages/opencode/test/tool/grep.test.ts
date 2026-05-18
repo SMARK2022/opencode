@@ -1,4 +1,6 @@
 import { describe, expect } from "bun:test"
+import fs from "fs/promises"
+import os from "os"
 import path from "path"
 import { Effect, Layer } from "effect"
 import { GrepTool } from "../../src/tool/grep"
@@ -10,6 +12,9 @@ import { Agent } from "../../src/agent/agent"
 import { Ripgrep } from "../../src/file/ripgrep"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { testEffect } from "../lib/effect"
+import { Reference } from "@/reference/reference"
+import { Permission } from "../../src/permission"
+import type * as Tool from "../../src/tool/tool"
 
 const it = testEffect(
   Layer.mergeAll(
@@ -18,12 +23,13 @@ const it = testEffect(
     Ripgrep.defaultLayer,
     Truncate.defaultLayer,
     Agent.defaultLayer,
+    Reference.defaultLayer,
   ),
 )
 
 const ctx = {
   sessionID: SessionID.make("ses_test"),
-  messageID: MessageID.make(""),
+  messageID: MessageID.make("msg_test"),
   callID: "",
   agent: "build",
   abort: AbortSignal.any([]),
@@ -109,25 +115,52 @@ describe("tool.grep", () => {
     }),
   )
 
-  it.instance("caps broad match output", () =>
+  it.instance("does not ask for external_directory when alias path is allowed", () =>
     Effect.gen(function* () {
-      const test = yield* TestInstance
-      // Generate more lines than RESULT_LIMIT (64) to trigger truncation
-      const content = Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n")
-      yield* Effect.promise(() => Bun.write(path.join(test.directory, "test.txt"), content))
+      if (process.platform === "win32") return
+
+      yield* TestInstance
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-grep-alias-"))),
+        (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
+      )
+      const real = path.join(tmp, "real")
+      const alias = path.join(tmp, "alias")
+      yield* Effect.promise(() => fs.mkdir(real))
+      yield* Effect.promise(() => fs.symlink(real, alias, "dir"))
+      yield* Effect.promise(() => Bun.write(path.join(real, "test.txt"), "needle"))
+
+      const ruleset = Permission.fromConfig({
+        grep: "allow",
+        external_directory: {
+          [path.join(alias, "*")]: "allow",
+        },
+      })
+      const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+      const next: Tool.Context = {
+        ...ctx,
+        ask: (req) =>
+          Effect.sync(() => {
+            const needsAsk = req.patterns.some(
+              (pattern) => Permission.evaluate(req.permission, pattern, ruleset).action !== "allow",
+            )
+            if (needsAsk) requests.push(req)
+          }),
+      }
+
       const info = yield* GrepTool
       const grep = yield* info.init()
       const result = yield* grep.execute(
         {
           pattern: "needle",
-          path: test.directory,
+          path: alias,
+          include: "*.txt",
         },
-        ctx,
+        next,
       )
-      expect(result.metadata.matches).toBe(64)
-      expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Found 64+ matches")
-      expect(result.output).toContain("Results truncated")
+
+      expect(result.metadata.matches).toBe(1)
+      expect(requests.find((req) => req.permission === "external_directory")).toBeUndefined()
     }),
   )
 })

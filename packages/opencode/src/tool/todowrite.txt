@@ -1,102 +1,50 @@
-Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
-It also helps the user understand the progress of the task and overall progress of their requests.
+Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.
 
-## When to Use This Tool
-Use this tool to create and manage the structured task list for the current coding session.
+## When to use
+Use proactively when:
+- The task requires 3+ distinct steps or actions (not just 3 tool calls for a single conceptual step)
+- The work is non-trivial and benefits from planning
+- The user provides multiple tasks (numbered or comma-separated) or explicitly asks for a todo list
+- New instructions arrive - capture them as todos
+- You start a task - mark it `in_progress` (only one at a time) before working
+- You finish a task - mark it `completed` and add any follow-ups discovered during the work
 
-Use todowrite when:
-- The task has 3 or more meaningful steps.
-- The user explicitly asks for a todo list or progress tracking.
-- The user provides multiple tasks or requirements.
-- The work needs planning, implementation, and verification phases.
-- New instructions change the plan and the task list should be updated.
+## When NOT to use
+Skip when:
+- The work is a single, straightforward task (or <3 trivial steps)
+- The request is purely informational or conversational
+- Tracking adds no organizational value
 
-Do not use todowrite when:
-- The task is a single straightforward action.
-- The task is trivial or purely informational.
-- Tracking would add noise without improving execution.
+## States
+- `pending` - not started
+- `in_progress` - actively working (exactly ONE at a time)
+- `completed` - finished successfully
+- `cancelled` - no longer needed
 
+## Rules
+- Update status in real time; don't batch completions
+- Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.
+- Keep exactly one `in_progress` while work remains
+- If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker
+- Preserve user-provided commands verbatim (flags, args, order)
+- Items should be specific and actionable; break large work into smaller steps
 
+## Examples
 
-NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
-
-## Examples of When to Use the Todo List
+Use it:
+- "Add a dark mode toggle and run the tests" -> multi-step feature + explicit verification
+- "Rename getCwd -> getCurrentWorkingDirectory across the repo" -> grep reveals 15 occurrences in 8 files
+- "Implement registration, catalog, cart, checkout" -> multiple complex features
 
 <example>
 User: I want to add a dark mode toggle to the application settings. Make sure you run the tests and build when you're done!
-Assistant: I'll help add a dark mode toggle to your application settings. Let me create a todo list to track this implementation.
-*Creates todo list with the following items:*
-1. Create dark mode toggle component in Settings page
-2. Add dark mode state management (context/store)
-3. Implement CSS-in-JS styles for dark theme
-4. Update existing components to support theme switching
-5. Run tests and build process, addressing any failures or errors that occur
-*Begins working on the first task*
-
-<reasoning>
-The assistant used the todo list because:
-1. Adding dark mode is a multi-step feature requiring UI, state management, and styling changes
-2. The user explicitly requested tests and build be run afterward
-3. The assistant inferred that tests and build need to pass by adding "Run tests and build process" as the final task
-</reasoning>
+Assistant: Creates todo list: 1) dark mode toggle component, 2) state management, 3) theme styles, 4) update components, 5) run tests and build.
+Begins working on the first task.
 </example>
 
-<example>
-User: Help me rename the function getCwd to getCurrentWorkingDirectory across my project
-Assistant: Let me first search through your codebase to find all occurrences of 'getCwd'.
-*Uses grep or search tools to locate all instances of getCwd in the codebase*
-Assistant: I've found 15 instances of 'getCwd' across 8 different files. Let me create a todo list to track these changes.
-*Creates todo list with specific items for each file that needs updating*
+Skip it:
+- "How do I print Hello World in Python?" -> informational
+- "Add a comment to calculateTotal" -> single edit
+- "Run npm install and tell me what happened" -> one command
 
-<reasoning>
-The assistant used the todo list because:
-1. The assistant first searched to understand the scope of the task
-2. After finding many occurrences across multiple files, it determined this was a complex multi-step change
-3. The todo list helps ensure every instance is tracked and updated systematically
-</reasoning>
-</example>
-
-## Examples of When NOT to Use the Todo List
-
-<example>
-User: How do I print 'Hello World' in Python?
-Assistant: In Python, you can print "Hello World" with this simple code:
-
-python
-print("Hello World")
-
-This will output the text "Hello World" to the console when executed.</assistant>
-
-<reasoning>
-The assistant did not use the todo list because this is a single, trivial task that can be completed in one step. There's no need to track multiple tasks or steps for such a straightforward request.
-</reasoning>
-</example>
-
-<example>
-User: What does the git status command do?
-Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.
-
-<reasoning>
-The assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.
-</reasoning>
-</example>
-
-## Task States and Management
-
-1. **Task States**: Use these states to track progress:
-   - pending: Task not yet started
-   - in_progress: Currently working on (limit to ONE task at a time)
-   - completed: Task finished successfully
-   - cancelled: Task no longer needed
-
-2. **Task Management Rules**:
-   - Keep items short, concrete, and verifiable.
-   - Use exactly one in_progress item at a time.
-   - Move an item to in_progress before working on it.
-   - Mark items completed as soon as they are finished; do not batch completions (this can be called PARALLEL to your coding step since it's just updating the list).
-   - Cancel items that are no longer relevant.
-   - Update the list when your understanding changes before continuing implementation.
-   - Include verification as a task when the work has meaningful risk or the user requested tests/builds.
-
-
-When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
+When in doubt, use it.

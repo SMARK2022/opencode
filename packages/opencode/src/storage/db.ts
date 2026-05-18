@@ -2,49 +2,50 @@ import { type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
 import { migrate } from "drizzle-orm/bun-sqlite/migrator"
 import { type SQLiteTransaction } from "drizzle-orm/sqlite-core"
 export * from "drizzle-orm"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LocalContext } from "@/util/local-context"
-import { lazy } from "../util/lazy"
 import { Global } from "@opencode-ai/core/global"
 import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
-import z from "zod"
 import path from "path"
 import { readFileSync, readdirSync, existsSync, statSync } from "fs"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
-import { InstanceState } from "@/effect/instance-state"
-import { iife } from "@/util/iife"
+import { EffectBridge } from "@/effect/bridge"
 import { init } from "#db"
+import { Effect, Schema } from "effect"
 
 declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
-export const NotFoundError = NamedError.create(
-  "NotFoundError",
-  z.object({
-    message: z.string(),
-  }),
-)
+export const NotFoundError = NamedError.create("NotFoundError", {
+  message: Schema.String,
+})
 
 const log = Log.create({ service: "db" })
 
-export function getChannelPath() {
-  if (["latest", "beta", "prod"].includes(InstallationChannel) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
+type DatabaseFlags = Pick<RuntimeFlags.Info, "disableChannelDb" | "skipMigrations">
+
+const readRuntimeFlags = () =>
+  Effect.runSync(RuntimeFlags.Service.useSync((flags) => flags).pipe(Effect.provide(RuntimeFlags.defaultLayer)))
+
+export function getChannelPath(flags: Pick<DatabaseFlags, "disableChannelDb"> = readRuntimeFlags()) {
+  if (["latest", "beta", "prod"].includes(InstallationChannel) || flags.disableChannelDb)
     return path.join(Global.Path.data, "opencode.db")
   const safe = InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")
   return path.join(Global.Path.data, `opencode-${safe}.db`)
 }
 
-export const Path = iife(() => {
+export const getPath = (flags?: Pick<DatabaseFlags, "disableChannelDb">) => {
   if (Flag.OPENCODE_DB) {
     if (Flag.OPENCODE_DB === ":memory:" || path.isAbsolute(Flag.OPENCODE_DB)) return Flag.OPENCODE_DB
     return path.join(Global.Path.data, Flag.OPENCODE_DB)
   }
-  return getChannelPath()
-})
+  return getChannelPath(flags)
+}
 
 export type Transaction = SQLiteTransaction<"sync", void>
 
-type Client = SQLiteBunDatabase
+type Client = ReturnType<typeof init>
 
 type Journal = { sql: string; timestamp: number; name: string }[]
 
@@ -88,57 +89,74 @@ function migrations(dir: string): Journal {
   return sql.sort((a, b) => a.timestamp - b.timestamp)
 }
 
-export const Client = lazy(() => {
-  log.info("opening database", { path: Path })
+let client: Client | undefined
+let loaded = false
 
-  const db = init(Path)
+export const Client = Object.assign(
+  (flags: DatabaseFlags = readRuntimeFlags()): Client => {
+    if (loaded) return client as Client
 
-  // busy_timeout must be set FIRST so subsequent PRAGMAs can wait if another
-  // process holds a lock during startup or migration.
-  db.run("PRAGMA busy_timeout = 30000")
-  db.run("PRAGMA journal_mode = WAL")
-  db.run("PRAGMA synchronous = " + (Flag.OPENCODE_DB_DURABLE ? "FULL" : "NORMAL"))
-  db.run("PRAGMA cache_size = -64000")
-  db.run("PRAGMA foreign_keys = ON")
-  try {
-    db.run("PRAGMA wal_checkpoint(PASSIVE)")
-  } catch (e) {
-    log.warn("wal_checkpoint on open failed (another process may be active)", { error: String(e) })
-  }
+    const dbPath = getPath(flags)
+    log.info("opening database", { path: dbPath })
 
-  // Warn if a large WAL file is present — indicates prior crash without checkpoint.
-  try {
-    const walStat = statSync(Path + "-wal")
-    if (walStat.size > 1024 * 1024) {
-      log.warn("large WAL file detected — recovering uncommitted data", {
-        path: Path + "-wal",
-        bytes: walStat.size,
-      })
+    const db = init(dbPath)
+
+    // [local-smark] busy_timeout set to 30s (longer than upstream 5s) for multi-instance daemon
+    db.run("PRAGMA busy_timeout = 30000")
+    db.run("PRAGMA journal_mode = WAL")
+    // [local-smark] OPENCODE_DB_DURABLE: use FULL synchronous for durability
+    db.run("PRAGMA synchronous = " + (Flag.OPENCODE_DB_DURABLE ? "FULL" : "NORMAL"))
+    db.run("PRAGMA cache_size = -64000")
+    db.run("PRAGMA foreign_keys = ON")
+    try {
+      db.run("PRAGMA wal_checkpoint(PASSIVE)")
+    } catch (e) {
+      log.warn("wal_checkpoint on open failed (another process may be active)", { error: String(e) })
     }
-  } catch {
-    // WAL file absent — normal case
-  }
 
-  // Apply schema migrations
-  const entries =
-    typeof OPENCODE_MIGRATIONS !== "undefined"
-      ? OPENCODE_MIGRATIONS
-      : migrations(path.join(import.meta.dirname, "../../migration"))
-  if (entries.length > 0) {
-    log.info("applying migrations", {
-      count: entries.length,
-      mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
-    })
-    if (Flag.OPENCODE_SKIP_MIGRATIONS) {
-      for (const item of entries) {
-        item.sql = "select 1;"
+    // [local-smark] Warn if a large WAL file is present — indicates prior crash without checkpoint.
+    try {
+      const walStat = statSync(dbPath + "-wal")
+      if (walStat.size > 1024 * 1024) {
+        log.warn("large WAL file detected — recovering uncommitted data", {
+          path: dbPath + "-wal",
+          bytes: walStat.size,
+        })
       }
+    } catch {
+      // WAL file absent — normal case
     }
-    applyMigrations(db, entries)
-  }
 
-  return db
-})
+    // Apply schema migrations
+    const entries =
+      typeof OPENCODE_MIGRATIONS !== "undefined"
+        ? OPENCODE_MIGRATIONS
+        : migrations(path.join(import.meta.dirname, "../../migration"))
+    if (entries.length > 0) {
+      log.info("applying migrations", {
+        count: entries.length,
+        mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
+      })
+      if (flags.skipMigrations) {
+        for (const item of entries) {
+          item.sql = "select 1;"
+        }
+      }
+      applyMigrations(db, entries)
+    }
+
+    client = db
+    loaded = true
+    return db
+  },
+  {
+    reset: () => {
+      loaded = false
+      client = undefined
+    },
+    loaded: () => loaded,
+  },
+)
 
 export function close() {
   if (!Client.loaded()) return
@@ -173,7 +191,7 @@ export function use<T>(callback: (trx: TxOrDb) => T): T {
 }
 
 export function effect(fn: () => any | Promise<any>) {
-  const bound = InstanceState.bind(fn)
+  const bound = EffectBridge.bind(fn)
   try {
     ctx.use().effects.push(bound)
   } catch {
@@ -194,7 +212,7 @@ export function transaction<T>(
   } catch (err) {
     if (err instanceof LocalContext.NotFound) {
       const effects: (() => void | Promise<void>)[] = []
-      const txCallback = InstanceState.bind((tx: TxOrDb) => ctx.provide({ tx, effects }, () => callback(tx)))
+      const txCallback = EffectBridge.bind((tx: TxOrDb) => ctx.provide({ tx, effects }, () => callback(tx)))
       const result = Client().transaction(txCallback, { behavior: options?.behavior })
       for (const effect of effects) effect()
       return result as NotPromise<T>

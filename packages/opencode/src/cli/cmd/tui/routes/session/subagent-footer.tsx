@@ -3,6 +3,7 @@ import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
+// [local-smark] UserMessage type needed for token accounting
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
@@ -10,6 +11,8 @@ import { Locale } from "@/util/locale"
 import { tokenAccounting } from "../../util/token-accounting"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
+import { useCommandPalette } from "../../context/command-palette"
+import { useCommandShortcut } from "../../keymap"
 
 export function SubagentFooter() {
   const route = useRouteData("session")
@@ -56,6 +59,7 @@ export function SubagentFooter() {
     if (!last) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+    // [local-smark] token accounting for detailed usage tracking
     const acc = tokenAccounting(msg, getParts, model?.limit.context)
     const stepTotal = acc.step.input + acc.step.output
     const requestTotal = acc.request.totalInput + acc.request.totalOutput
@@ -81,8 +85,10 @@ export function SubagentFooter() {
   const usageFlow = createTokenFlowPulse(usage)
 
   const { theme } = useTheme()
-  const keybind = useKeybind()
-  const command = useCommandDialog()
+  const command = useCommandPalette()
+  const parentShortcut = useCommandShortcut("session.parent")
+  const previousShortcut = useCommandShortcut("session.child.previous")
+  const nextShortcut = useCommandShortcut("session.child.next")
   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
   const dimensions = useTerminalDimensions()
   const showCumulative = createMemo(() => dimensions().width > 120)
@@ -125,31 +131,31 @@ export function SubagentFooter() {
             <box
               onMouseOver={() => setHover("parent")}
               onMouseOut={() => setHover(null)}
-              onMouseUp={() => command.trigger("session.parent")}
+              onMouseUp={() => command.run("session.parent")}
               backgroundColor={hover() === "parent" ? theme.backgroundElement : theme.backgroundPanel}
             >
               <text fg={theme.text}>
-                Parent <span style={{ fg: theme.textMuted }}>{keybind.print("session_parent")}</span>
+                Parent <span style={{ fg: theme.textMuted }}>{parentShortcut()}</span>
               </text>
             </box>
             <box
               onMouseOver={() => setHover("prev")}
               onMouseOut={() => setHover(null)}
-              onMouseUp={() => command.trigger("session.child.previous")}
+              onMouseUp={() => command.run("session.child.previous")}
               backgroundColor={hover() === "prev" ? theme.backgroundElement : theme.backgroundPanel}
             >
               <text fg={theme.text}>
-                Prev <span style={{ fg: theme.textMuted }}>{keybind.print("session_child_cycle_reverse")}</span>
+                Prev <span style={{ fg: theme.textMuted }}>{previousShortcut()}</span>
               </text>
             </box>
             <box
               onMouseOver={() => setHover("next")}
               onMouseOut={() => setHover(null)}
-              onMouseUp={() => command.trigger("session.child.next")}
+              onMouseUp={() => command.run("session.child.next")}
               backgroundColor={hover() === "next" ? theme.backgroundElement : theme.backgroundPanel}
             >
               <text fg={theme.text}>
-                Next <span style={{ fg: theme.textMuted }}>{keybind.print("session_child_cycle")}</span>
+                Next <span style={{ fg: theme.textMuted }}>{nextShortcut()}</span>
               </text>
             </box>
           </box>
