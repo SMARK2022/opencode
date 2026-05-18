@@ -1044,6 +1044,63 @@ it.instance(
 )
 
 it.instance(
+  "cancel finalizes stale running tool parts without an active runner",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, sessions, chat } = yield* boot()
+      const { assistant } = yield* seed(chat.id)
+      const started = Date.now()
+
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistant.id,
+        sessionID: chat.id,
+        type: "tool",
+        callID: "call_running",
+        tool: "read",
+        state: {
+          status: "running",
+          input: { filePath: "README.md" },
+          title: "Read README.md",
+          metadata: { source: "stale-test" },
+          time: { start: started },
+        },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistant.id,
+        sessionID: chat.id,
+        type: "tool",
+        callID: "call_pending",
+        tool: "bash",
+        state: {
+          status: "pending",
+          input: { command: "sleep 30" },
+          raw: '{"command":"sleep 30"}',
+        },
+      })
+
+      yield* prompt.cancel(chat.id)
+
+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
+      const tools = stored.parts.filter((part): part is MessageV2.ToolPart => part.type === "tool")
+      expect(stored.info.role).toBe("assistant")
+      if (stored.info.role !== "assistant") return
+      expect(stored.info.time.completed).toBeNumber()
+      expect(stored.info.error?.name).toBe("MessageAbortedError")
+      expect(tools).toHaveLength(2)
+      for (const tool of tools) {
+        expect(tool.state.status).toBe("error")
+        if (tool.state.status !== "error") continue
+        expect(tool.state.error).toBe("Tool execution aborted")
+        expect(tool.state.metadata?.interrupted).toBe(true)
+        expect(tool.state.time.end).toBeGreaterThanOrEqual(tool.state.time.start)
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
   "cancel propagates from slash command subtask to child session",
   () =>
     Effect.gen(function* () {
@@ -1682,7 +1739,9 @@ unix(
       const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
       yield* Effect.sleep(150)
+      const cancel = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
       yield* prompt.cancel(chat.id)
+      yield* Fiber.await(cancel)
 
       const exit = yield* Fiber.await(run)
       expect(Exit.isSuccess(exit)).toBe(true)

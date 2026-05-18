@@ -47,7 +47,7 @@ import { Truncate } from "@/tool/truncate"
 import { Image } from "@/image/image"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
+import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Semaphore, Types } from "effect"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
@@ -269,6 +269,25 @@ function referenceTextPart(input: {
   }
 }
 
+function interruptedToolState(
+  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
+  now: number,
+): MessageV2.ToolStateError {
+  return {
+    status: "error",
+    input: state.input,
+    error: "Tool execution aborted",
+    metadata: state.status === "running" ? { ...state.metadata, interrupted: true } : { interrupted: true },
+    time: { start: state.status === "running" ? state.time.start : now, end: now },
+  }
+}
+
+type OpenToolPart = MessageV2.ToolPart & { state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning }
+
+function isOpenToolPart(part: MessageV2.Part): part is OpenToolPart {
+  return part.type === "tool" && (part.state.status === "pending" || part.state.status === "running")
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
@@ -311,6 +330,7 @@ export const layer = Layer.effect(
     const references = yield* Reference.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
     const runner = Effect.fn("SessionPrompt.runner")(function* () {
       return yield* EffectBridge.make()
     })
@@ -322,11 +342,22 @@ export const layer = Layer.effect(
         loop: (input: LoopInput) => loop(input),
       } satisfies TaskPromptOps
     })
+    const cancelLock = (sessionID: SessionID) => {
+      const hit = cancelLocks.get(sessionID)
+      if (hit) return hit
+      const next = Semaphore.makeUnsafe(1)
+      cancelLocks.set(sessionID, next)
+      return next
+    }
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      yield* elog.info("cancel", { sessionID })
-      yield* state.cancel(sessionID)
-      yield* abortPendingAssistants(sessionID)
+      yield* cancelLock(sessionID).withPermits(1)(
+        Effect.gen(function* () {
+          yield* elog.info("cancel", { sessionID })
+          yield* state.cancel(sessionID)
+          yield* abortPendingAssistants(sessionID)
+        }),
+      )
     })
 
     const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
@@ -344,6 +375,7 @@ export const layer = Layer.effect(
         pending,
         Effect.fnUntraced(function* (msg) {
           const assistant = msg.info
+          yield* abortPendingToolParts(msg.parts, now)
           assistant.time.completed = now
           assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
           if (msg.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" as const }
@@ -354,10 +386,21 @@ export const layer = Layer.effect(
         }),
         { discard: true },
       )
-      // NOTE: Tool part states are NOT modified here. Each tool has its own
-      // interrupt/cancel handler that finalizes its state (e.g. bash truncates
-      // output and completes, task tool cancels child session). Forcing all
-      // running tools to "error" here would race with those handlers.
+    })
+
+    const abortPendingToolParts = Effect.fn("SessionPrompt.abortPendingToolParts")(function* (
+      parts: MessageV2.Part[],
+      now: number,
+    ) {
+      yield* Effect.forEach(
+        parts.filter(isOpenToolPart),
+        (part) =>
+          sessions.updatePart({
+            ...part,
+            state: interruptedToolState(part.state, now),
+          }),
+        { discard: true },
+      )
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {

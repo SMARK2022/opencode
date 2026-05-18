@@ -31,11 +31,12 @@ afterEach(() => {
  * lock appears and the HTTP server responds.  Returns the running proc and the
  * live lock contents.
  */
-async function spawnDaemon(lockPath: string) {
+async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
   const root = path.dirname(lockPath)
   const proc = Bun.spawn([process.execPath, WORKER_TS], {
     env: {
       ...process.env,
+      ...env,
       OPENCODE_PROCESS_ROLE: "worker",
       OPENCODE_LOCK_PATH: lockPath,
       OPENCODE_DB: path.join(root, "opencode.db"),
@@ -158,6 +159,42 @@ describe("daemon lifecycle", () => {
       }
     },
     DAEMON_START_TIMEOUT_MS + 5_000,
+  )
+
+  test(
+    "daemon exits after the last SSE client disconnects",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
+
+      try {
+        const ctrl = new AbortController()
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+        try {
+          const first = await reader.read()
+          expect(first.value).toContain("server.connected")
+          await Bun.sleep(750)
+          expect(ServerLockModule.alive(proc.pid)).toBe(true)
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
+
+        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(exitCode).toBe(0)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
   )
 
   test(

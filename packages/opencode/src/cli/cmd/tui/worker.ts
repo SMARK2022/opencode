@@ -126,7 +126,10 @@ process.prependListener("uncaughtException", () => void gracefulShutdown())
 // Exit 30 s after the last SSE client disconnects AND no session runners are
 // active.  The timer only starts after the first connection, so a slow-starting
 // TUI does not race the daemon.
-const IDLE_TIMEOUT_MS = 30_000
+const IDLE_TIMEOUT_MS = (() => {
+  const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
+  return Number.isFinite(value) && value >= 0 ? value : 30_000
+})()
 
 let hadClient = false
 let sseClients = 0
