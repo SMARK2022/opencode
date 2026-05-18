@@ -6,6 +6,7 @@ type Options = {
 }
 
 const MAX_SEGMENT_BYTES = 8192
+const UTF16_PROBE_BYTES = 4
 const UTF16_NULL_RATIO = 0.2
 const EMPTY: Uint8Array<ArrayBuffer> = new Uint8Array(0)
 
@@ -57,6 +58,12 @@ function asciiPrefixLength(bytes: Uint8Array) {
   let i = 0
   while (i < bytes.length && bytes[i] > 0 && bytes[i] < 0x80) i++
   return i
+}
+
+function shouldBufferAsciiPrefix(bytes: Uint8Array, final: boolean) {
+  if (final) return false
+  if (bytes.length >= MAX_SEGMENT_BYTES) return false
+  return bytes.length < UTF16_PROBE_BYTES
 }
 
 function findLineEnd(bytes: Uint8Array) {
@@ -247,9 +254,11 @@ export function createAutoTextDecoder(options?: Options) {
         output += next
         continue
       }
-      // ASCII prefix is safe in both UTF-8 and GB18030 — emit immediately.
+      // ASCII is safe for UTF-8/GB18030, but a short ASCII byte can be the first
+      // half of UTF-16LE without a BOM. Wait for enough bytes to prove alignment.
       const ascii = asciiPrefixLength(pending)
       if (ascii > 0) {
+        if (shouldBufferAsciiPrefix(pending, final)) break
         output += emit(ascii, "utf-8")
         continue
       }

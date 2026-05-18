@@ -102,6 +102,24 @@ describe("text-decoding", () => {
     expect(decoder.encoding()).toBe("utf-16le")
   })
 
+  test("buffers short ASCII prefixes before detecting UTF-16LE", () => {
+    const text = "JAVA原始UTF16LE无BOM输出：中文编码检查\n"
+    const input = Buffer.from(text, "utf16le")
+
+    for (const splits of [[1], [2], [3], [1, 1], [1, 2], [2, 1], [1, 1, 1]]) {
+      const decoder = createAutoTextDecoder()
+      let offset = 0
+      let output = ""
+      for (const size of splits) {
+        output += decoder.write(input.subarray(offset, offset + size))
+        offset += size
+      }
+      output += decoder.write(input.subarray(offset)) + decoder.end()
+      expect(output).toBe(text)
+      expect(decoder.encoding()).toBe("utf-16le")
+    }
+  })
+
   test("streams mixed GB18030, UTF-16LE, and UTF-8 segments", () => {
     const decoder = createAutoTextDecoder()
     const output =
