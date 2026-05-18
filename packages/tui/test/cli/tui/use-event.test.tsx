@@ -1,3 +1,4 @@
+// #165：测试统一 testTransport，禁止顶层 fetch/events 生产缝
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
@@ -61,7 +62,7 @@ async function mount() {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} events={events.source} fetch={calls.fetch}>
+      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
           <Probe
             onReady={async (ctx) => {

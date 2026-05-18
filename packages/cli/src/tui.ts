@@ -10,6 +10,7 @@ export function runTui(transport: { url: string; headers: RequestInit["headers"]
     ...transport,
     args: {},
     config,
+    // #165：native CLI 的既有 HTTP 适配承接 legacy 查询，与被移除的线程 RPC 无关。
     fetch: gracefulFetch,
     pluginHost: {
       async start() {},

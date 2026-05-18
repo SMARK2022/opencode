@@ -1,3 +1,4 @@
+// #165：重连测试只注入 testTransport.fetch，事件仍走生产 SSE
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
 import { testRender } from "@opentui/solid"
@@ -63,7 +64,7 @@ describe("SDKProvider reconnect", () => {
 
     // #139：挂载真实 SDKProvider，而非本地伪实现
     const app = await testRender(() => (
-      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"}>
+      <SDKProvider url="http://old" testTransport={{ fetch: fetch }} reconnect={async () => "http://new"}>
         <Probe onReady={ready} />
       </SDKProvider>
     ))
@@ -107,7 +108,7 @@ describe("SDKProvider reconnect", () => {
     const app = await testRender(() => (
       <SDKProvider
         url="http://old"
-        fetch={fetch}
+        testTransport={{ fetch: fetch }}
         reconnect={async () => "http://new"}
         heartbeatTimeout={50}
       >

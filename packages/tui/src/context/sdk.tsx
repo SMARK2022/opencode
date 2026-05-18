@@ -5,6 +5,7 @@ import { createSimpleContext } from "./helper"
 import { batch, onCleanup, onMount } from "solid-js"
 import { ConnectionError } from "../util/connection-error"
 
+// #165：事件源类型仅服务 testTransport
 export type EventSource = {
   subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
 }
@@ -15,8 +16,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     url: string
     directory?: string
     fetch?: typeof fetch
+    // #165：事件源替身只服务测试，生产 HTTP fetch 适配仍沿用上游入口。
+    testTransport?: {
+      fetch?: typeof globalThis.fetch
+      events?: EventSource
+    }
     headers?: RequestInit["headers"]
-    events?: EventSource
     // #139：守护进程死后重解析 URL 并重建 client
     reconnect?: () => Promise<string>
     // #139：无事件心跳超时，默认 15s（服务端 ~10s 心跳）
@@ -32,7 +37,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         baseUrl: url,
         signal: abort.signal,
         directory: props.directory,
-        fetch: props.fetch,
+        fetch: props.fetch ?? props.testTransport?.fetch,
         headers: props.headers,
       })
     }
@@ -157,8 +162,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     }
 
     onMount(async () => {
-      if (props.events) {
-        const unsub = await props.events.subscribe(handleEvent)
+      const injected = props.testTransport?.events
+      if (injected) {
+        const unsub = await injected.subscribe(handleEvent)
         onCleanup(unsub)
 
         if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
@@ -182,7 +188,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       },
       directory: props.directory,
       event: emitter,
-      fetch: props.fetch ?? fetch,
+      fetch: props.fetch ?? props.testTransport?.fetch ?? fetch,
       get url() {
         return url
       },
