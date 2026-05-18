@@ -243,7 +243,31 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v2
 
-      - uses: ./.github/actions/setup-bun
+      # Keep macOS/Linux on the shared setup-bun action, but avoid it on Windows:
+      # restoring/saving the multi-GB Bun package cache is slower than a clean install
+      # on GitHub-hosted Windows runners.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install Windows dependencies
+        shell: pwsh
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          ELECTRON_SKIP_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+          CYPRESS_INSTALL_BINARY: "0"
+          HUSKY: "0"
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          python -c "import setuptools" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            python -m pip install setuptools
+          }
+
+          bun install --linker hoisted
 
       - name: Build Windows x64 binary
         shell: pwsh
