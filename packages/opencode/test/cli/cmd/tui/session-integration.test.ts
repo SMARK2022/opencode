@@ -139,6 +139,12 @@ describe("Session route integration points", () => {
     test("TextPart checks OPENCODE_EXPERIMENTAL_MARKDOWN flag", () => {
       expect(sessionSource).toContain("Flag.OPENCODE_EXPERIMENTAL_MARKDOWN")
     })
+
+    test("streaming text keeps dev-smark CodeRenderable streaming semantics", () => {
+      expect(sessionSource).toMatch(
+        /<Match when={streaming\(\)}>\s*<code\s+filetype="markdown"\s+drawUnstyledText={false}\s+streaming={true}\s+syntaxStyle={syntax\(\)}\s+content={content\(\)}/,
+      )
+    })
   })
 
   describe("reasoning part", () => {
@@ -155,6 +161,21 @@ describe("Session route integration points", () => {
     test("ReasoningPart has expand/collapse toggle", () => {
       expect(sessionSource).toContain("▲ collapse")
       expect(sessionSource).toContain("▼ expand")
+    })
+
+    test("streaming reasoning keeps dev-smark CodeRenderable streaming semantics", () => {
+      expect(sessionSource).toMatch(
+        /<Match when={streaming\(\)}>\s*<code\s+filetype="markdown"\s+drawUnstyledText={false}\s+streaming={true}\s+syntaxStyle={subtleSyntax\(\)}\s+content={preview\(\)}/,
+      )
+    })
+  })
+
+  describe("event dispatch", () => {
+    test("project/global event match returns before workspace fallback", () => {
+      const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
+      expect(eventSource).toMatch(
+        /if \(event\.directory === "global" \|\| event\.project === project\.project\(\)\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
+      )
     })
   })
 

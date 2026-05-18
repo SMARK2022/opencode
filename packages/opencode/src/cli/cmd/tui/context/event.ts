@@ -56,6 +56,7 @@ export function useEvent() {
 
       if (event.directory === "global" || event.project === project.project()) {
         handler(event.payload, { workspace: event.workspace })
+        return
       }
 
       if (project.workspace.current()) {

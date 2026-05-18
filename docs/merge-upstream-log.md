@@ -635,3 +635,35 @@
 合并状态：**可以进行 commit 和进一步验证**。
 
 ---
+
+## Phase 18: TUI SSE streaming 文本重复/错位诊断
+
+### 操作 18.1: 对比 dev-smark 与当前渲染路径
+
+- 用户现象: SSE 增量输出期间文本会出现字符重复/错位，例如 `我今天气很好` 流式过程中显示成 `我今今天天气很很好好`；message finished 后整体刷新恢复正常。
+- 对比对象: `7508670af`（dev-smark 最新本地基线）与当前 `350a44271`。
+- 结论: `TextPart`、`ReasoningPart`、`AssistantMessage`、`BlockTool`、`viewportCulling={!streamingActive()}`、`sync.tsx` 的 `message.part.delta` 追加逻辑均与 dev-smark 核心一致；store 最终内容正确，问题不在 SSE delta 数据重复。
+- 关键差异: dev-smark 的 OpenTUI catalog 为 `0.2.2`，当前随上游升级为 `0.2.11`。
+
+### 操作 18.2: 误判排除
+
+- 初步检查曾怀疑 OpenTUI 0.2.11 的 `CodeRenderable.streaming` 缓冲复用；尝试过将 streaming `<code>` 改为 `streaming={false}`，但用户复测仍出现 `用户用户消息消息...` 这种成对重复。
+- 该现象更符合同一个 SSE `message.part.delta` 被本地处理两次，而不是单纯 render buffer 重绘。
+- 已撤回 `TextPart` 与 `ReasoningPart` 的 `streaming={false}` 改动，恢复 dev-smark 的 `streaming={true}` 语义。
+
+### 操作 18.3: 根因修复
+
+- 对比 `packages/opencode/src/cli/cmd/tui/context/event.ts` 后发现，当前 `useEvent.subscribe` 在 `event.directory === "global" || event.project === project.project()` 命中后调用 handler，但没有 `return`。
+- 如果同一事件也匹配当前 workspace，则会继续进入 `project.workspace.current()` 分支并再次调用 handler。
+- 对 `message.part.delta` 来说，这会把同一个 delta append 两次，精准解释 streaming 期间 `用户用户消息消息...` 的成对重复；message finished 后 DB refresh/part updated 覆盖本地临时重复内容，所以最终恢复正常。
+- 修复: project/global 分支调用 handler 后立即 `return`，保留上游 project fallback，同时恢复 dev-smark 的单次分发语义。
+
+### 操作 18.4: 回归断言与验证
+
+- 更新 `packages/opencode/test/cli/cmd/tui/session-integration.test.ts`：
+- 保留断言，确保 TextPart/ReasoningPart streaming 分支继续使用 dev-smark 的 `streaming={true}`。
+- 新增断言，确保 `context/event.ts` 中 project/global event match 会 `return`，避免同一 SSE event 继续进入 workspace fallback。
+- 验证命令: `bun test --timeout 30000 ./test/cli/cmd/tui/session-integration.test.ts ./test/cli/cmd/tui/diff-line-stats.test.ts ./test/cli/cmd/tui/flag-tui-fields.test.ts ./test/cli/cmd/tui/smooth-scrollbar.test.ts`（目录: `packages/opencode`）。
+- 结果: `49 pass, 0 fail, 77 expect() calls`。
+
+---
