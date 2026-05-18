@@ -1366,6 +1366,30 @@ it.instance(
   },
 )
 
+// #168：header-ua 快捷键映射为 User-Agent
+// #168：纯函数单测，不依赖 instance/config 加载
+test("provider header-ua maps to request headers", () => {
+  expect(Provider.requestHeaders({ "header-ua": "codex_cli_rs/0.2333" })).toEqual({
+    "User-Agent": "codex_cli_rs/0.2333",
+  })
+})
+
+// #168：显式 headers.User-Agent 覆盖 shortcut，并保留其它头
+test("provider headers User-Agent overrides header-ua shortcut", () => {
+  expect(
+    Provider.requestHeaders({
+      "header-ua": "shortcut",
+      headers: {
+        "User-Agent": "codex_cli_rs/0.2333",
+        "X-Custom": "custom-value",
+      },
+    }),
+  ).toEqual({
+    "X-Custom": "custom-value",
+    "User-Agent": "codex_cli_rs/0.2333",
+  })
+})
+
 it.instance(
   "hosted nvidia provider adds billing origin header",
   Effect.gen(function* () {

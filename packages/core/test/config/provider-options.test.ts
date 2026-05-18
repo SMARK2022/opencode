@@ -2,6 +2,19 @@ import { describe, expect, test } from "bun:test"
 import { ConfigProviderOptionsV1 } from "@opencode-ai/core/v1/config/provider-options"
 
 describe("ConfigProviderOptionsV1", () => {
+  test("preserves header-ua across provider lowering and explicit header precedence", () => {
+    // 即时与延迟 SDK 迁移共用 lowerer，各协议都必须保留简写且不泄露为 API 设置。
+    for (const name of ["@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/google", "@ai-sdk/azure", "@ai-sdk/amazon-bedrock", "@ai-sdk/openai-compatible"]) {
+      const lowerer = ConfigProviderOptionsV1.get(name)
+      const shortcut = lowerer.provider({ "header-ua": "configured-agent" })
+      expect(new Headers(shortcut.headers).get("user-agent")).toBe("configured-agent")
+      expect(shortcut.settings).not.toHaveProperty("header-ua")
+      // 大小写不同的显式字段仍覆盖简写，保留其余配置头。
+      const explicit = lowerer.provider({ "header-ua": "shortcut", headers: { "uSeR-aGeNt": "explicit-agent", "x-custom": "kept" } })
+      expect(new Headers(explicit.headers).get("user-agent")).toBe("explicit-agent")
+    }
+  })
+
   test("keeps raw provider and request options unchanged", () => {
     const lowerer = ConfigProviderOptionsV1.get("custom-provider")
 

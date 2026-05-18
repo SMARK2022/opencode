@@ -6,7 +6,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
 import { ToolSelection } from "@/tool/selection"
 import type { Agent } from "@/agent/agent"
-import type { Provider } from "@/provider/provider"
+import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
 import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
@@ -212,6 +212,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             "User-Agent": USER_AGENT,
           }),
       ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+      // #168：默认 UA 之后合并 provider 配置头，允许覆盖 User-Agent
+      ...Provider.requestHeaders(input.provider.options),
       ...input.model.headers,
       ...headers,
     },
