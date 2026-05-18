@@ -75,6 +75,27 @@ describe("text-decoding", () => {
     expect(decoder.encoding()).toBe("utf-16le")
   })
 
+  // #172：ASCII 开头的无 BOM UTF-16LE 以 1–3 字节 drip 时不得偷低字节
+  test("buffers short ASCII prefixes before detecting UTF-16LE", () => {
+    const text = "JAVA原始UTF16LE无BOM输出：中文编码检查\n"
+    const input = Buffer.from(text, "utf16le")
+
+    for (const splits of [[1], [2], [3], [1, 1], [1, 2], [2, 1], [1, 1, 1]]) {
+      const decoder = createAutoTextDecoder()
+      let offset = 0
+      let output = ""
+      for (const size of splits) {
+        output += decoder.write(input.subarray(offset, offset + size))
+        offset += size
+      }
+      output += decoder.write(input.subarray(offset)) + decoder.end()
+      expect(output).toBe(text)
+      expect(decoder.encoding()).toBe("utf-16le")
+    }
+  })
+
+
+
   // #128：ASCII 前缀不锁定编码，后续可切到 gb18030
   test("does not lock ASCII prefixes before Windows codepage bytes", () => {
     const decoder = createAutoTextDecoder()

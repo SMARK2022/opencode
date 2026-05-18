@@ -9,6 +9,8 @@ type Options = {
 }
 
 const MAX_SEGMENT_BYTES = 8192
+// #172：UTF-16 对齐探测窗口（至少 1 个 code unit + 样本）
+const UTF16_PROBE_BYTES = 4
 const UTF16_NULL_RATIO = 0.2
 const EMPTY: Uint8Array<ArrayBuffer> = new Uint8Array(0)
 
@@ -64,6 +66,15 @@ function asciiPrefixLength(bytes: Uint8Array) {
   let i = 0
   while (i < bytes.length && bytes[i] > 0 && bytes[i] < 0x80) i++
   return i
+}
+
+// #172：短 ASCII 可能是无 BOM UTF-16LE 的低字节，非 final 时先缓冲
+function shouldBufferAsciiPrefix(bytes: Uint8Array, final: boolean) {
+  // #172：final 必须冲刷，不能再等
+  if (final) return false
+  // #172：达段上限仍强制 emit，避免死等
+  if (bytes.length >= MAX_SEGMENT_BYTES) return false
+  return bytes.length < UTF16_PROBE_BYTES
 }
 
 // #128：按换行切段，避免一段编码污染下一段
@@ -306,9 +317,10 @@ export function createAutoTextDecoder(options?: Options) {
         output += next
         continue
       }
-      // ASCII prefix is safe in both UTF-8 and GB18030 — emit immediately.
+      // #172：ASCII 对 UTF-8/GB 安全，但短前缀可能是无 BOM UTF-16LE 半 code unit
       const ascii = asciiPrefixLength(pending)
       if (ascii > 0) {
+        if (shouldBufferAsciiPrefix(pending, final)) break
         output += emit(ascii, "utf-8")
         continue
       }
