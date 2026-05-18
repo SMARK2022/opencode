@@ -29,10 +29,11 @@ afterEach(() => {
  * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
  * 返回运行中的进程和锁文件内容。
  */
-async function spawnDaemon(lockPath: string) {
+async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
   const proc = Bun.spawn([process.execPath, WORKER_TS], {
     env: {
       ...process.env,
+      ...env,
       OPENCODE_PROCESS_ROLE: "worker",
       OPENCODE_LOCK_PATH: lockPath,
       // 真实生命周期 fixture 保持健康路由受保护，显式使用与客户端相同的认证。
@@ -178,4 +179,52 @@ describe("daemon lifecycle", () => {
     },
     DAEMON_START_TIMEOUT_MS + 5_000,
   )
+  // #173：短 idle 超时 + SSE 断开后守护进程应退出并清锁
+  test(
+    "daemon exits after the last SSE client disconnects",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      // #173：250ms idle，测试不必等 30s
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
+
+      try {
+        const ctrl = new AbortController()
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, {
+          signal: ctrl.signal,
+          headers: ServerLock.headers(credentials),
+        })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+        try {
+          const first = await reader.read()
+          // #173：先读到 connected，确认 SSE 计数已 +1
+          expect(first.value).toContain("server.connected")
+          // #173：连接期间必须仍存活，证明 idle 只在断开后计时
+          await Bun.sleep(750)
+          expect(ServerLock.alive(proc.pid)).toBe(true)
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
+
+        const deadline = Date.now() + 5_000
+        while (Date.now() < deadline && ServerLock.alive(proc.pid)) {
+          await Bun.sleep(50)
+        }
+        // #173：退出后进程与锁都应消失
+        expect(ServerLock.alive(proc.pid)).toBe(false)
+        expect(await Bun.file(lockPath).exists()).toBe(false)
+      } finally {
+        try {
+          proc.kill()
+        } catch {}
+      }
+    },
+    15_000,
+  )
+
 })

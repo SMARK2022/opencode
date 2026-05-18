@@ -95,7 +95,12 @@ if (isDaemon) {
     })
   }
 
-  const IDLE_TIMEOUT_MS = 30_000
+  // #173：OPENCODE_DAEMON_IDLE_TIMEOUT_MS 可配置；非法值回退 30s
+  const IDLE_TIMEOUT_MS = (() => {
+    const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
+    // #173：NaN/负数回退默认；0 合法（尽快 idle 退出，便于测试）
+    return Number.isFinite(value) && value >= 0 ? value : 30_000
+  })()
 
   let hadClient = false
   let sseClients = 0
