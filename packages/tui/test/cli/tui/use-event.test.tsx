@@ -89,7 +89,9 @@ function Probe(props: {
   const project = useProject()
   const event = useEvent()
 
-  onMount(() => {
+  onMount(async () => {
+    // 对齐插件初始化跨 Promise 的调用方式，订阅不能再依赖当前 Solid owner。
+    await Promise.resolve()
     event.subscribe((evt, { workspace }) => {
       props.seen.push(evt)
       props.workspaces.push(workspace)
