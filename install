@@ -29,17 +29,26 @@ Options:
     -b, --binary <path>     Install from a local binary instead of downloading
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
+        --path-profile <path>
+                            Add opencode to this shell config file. Can be repeated.
+        --all-shell-profiles
+                            Add opencode to all existing supported shell config files.
+        --interactive       Ask which shell config files to update.
+        --allow-sudo        Allow running under sudo. Not needed for user installs.
+
 Environment variables:
     OPENCODE_REPO           GitHub repo to download from. Default: SMARK2022/opencode
     OPENCODE_INSTALL_DIR    Install directory. Default: ~/.opencode/bin
     XDG_BIN_DIR             Used as install directory when OPENCODE_INSTALL_DIR is not set
     VERSION                 Same as --version
 
+By default, the installer updates every existing supported shell profile it finds.
+
 Examples:
     curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
     curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash -s -- --version 1.14.41-smark
-    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
-    ./install --binary /path/to/opencode
+    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
+    ./install --binary /path/to/opencode --path-profile "$HOME/.bash_profile"
 EOF_USAGE
 }
 
@@ -85,6 +94,14 @@ sha256_file() {
 requested_version=${VERSION:-}
 no_modify_path=false
 binary_path=""
+# #167：显式 profile 列表（可重复 --path-profile）
+path_profiles=()
+# #167：是否强制 all-shell 扫描
+all_shell_profiles_requested=false
+# #167：交互选择 profile
+interactive_path=false
+# #167：sudo 显式放行开关
+allow_sudo=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,6 +129,28 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-modify-path)
             no_modify_path=true
+            shift
+            ;;
+        # #167：收集显式 profile 路径
+        --path-profile)
+            if [[ -n "${2:-}" ]]; then
+                path_profiles+=("$2")
+                shift 2
+            else
+                print_message error "Error: --path-profile requires a path argument"
+                exit 1
+            fi
+            ;;
+        --all-shell-profiles)
+            all_shell_profiles_requested=true
+            shift
+            ;;
+        --interactive)
+            interactive_path=true
+            shift
+            ;;
+        --allow-sudo)
+            allow_sudo=true
             shift
             ;;
         *)
@@ -145,8 +184,43 @@ resolve_install_dir() {
 }
 
 INSTALL_DIR=$(resolve_install_dir)
-# #156：mkdir -p 幂等：已存在时保留既有安装不中断
-mkdir -p "$INSTALL_DIR"
+
+# #167：uid=0 且带 SUDO_USER 时默认拒绝，避免 root 改用户 profile
+check_sudo() {
+    local uid
+    uid=$(id -u 2>/dev/null || echo "")
+
+    if [ "$uid" != "0" ] || [ -z "${SUDO_USER:-}" ]; then
+        return 0
+    fi
+
+    if [ "$allow_sudo" != "true" ]; then
+        print_message error "Error: refusing to run under sudo by default."
+        print_message error "Re-run without sudo for user installs, or pass --allow-sudo with an explicit OPENCODE_INSTALL_DIR for system installs."
+        exit 1
+    fi
+
+    # #167：sudo 放行但未显式 profile 时强制跳过 PATH 改写，防止 root 写用户 rc
+    if [ "$no_modify_path" != "true" ] && [ "${#path_profiles[@]}" -eq 0 ]; then
+        no_modify_path=true
+        print_message warning "Running under sudo; skipping shell profile modification. Use --path-profile to explicitly choose a user profile."
+    fi
+}
+
+check_sudo
+
+# #156：mkdir -p 幂等：已存在时保留既有安装不中断；#167：mkdir 失败 fail-closed
+if ! mkdir -p "$INSTALL_DIR"; then
+    print_message error "Error: cannot create install directory: $INSTALL_DIR"
+    exit 1
+fi
+
+# #167：目录不可写直接失败，提示 OPENCODE_INSTALL_DIR / --allow-sudo
+if [ ! -w "$INSTALL_DIR" ]; then
+    print_message error "Error: install directory is not writable: $INSTALL_DIR"
+    print_message error "Choose a writable OPENCODE_INSTALL_DIR, or explicitly run with sudo and --allow-sudo for system directories."
+    exit 1
+fi
 
 raw_os=""
 os=""
@@ -298,25 +372,39 @@ else
     esac
 fi
 
+# #167：以目标安装目录为主；PATH 上同版本仅警告，不再 exit 0 跳过安装
 check_version() {
-    local installed_version=""
-    local current_opencode=""
-
-    if command -v opencode >/dev/null 2>&1; then
-        current_opencode=$(command -v opencode)
-        installed_version=$(opencode --version 2>/dev/null || echo "")
-    elif command -v opencode.exe >/dev/null 2>&1; then
-        current_opencode=$(command -v opencode.exe)
-        installed_version=$(opencode.exe --version 2>/dev/null || echo "")
+    local target_name="opencode"
+    if [ "${os:-}" = "windows" ]; then
+        target_name="opencode.exe"
     fi
 
-    if [ -n "$current_opencode" ]; then
-        if [[ "$installed_version" != "$specific_version" ]]; then
-            print_message info "${MUTED}Installed version: ${NC}$installed_version ${MUTED}at ${NC}$current_opencode"
+    local target_bin="${INSTALL_DIR}/${target_name}"
+    local installed_version=""
+    local existing_path=""
+    local existing_version=""
+
+    # #167：目标已有同版本 → 重装刷新，禁止静默跳过
+    if [ -x "$target_bin" ]; then
+        installed_version=$("$target_bin" --version 2>/dev/null || echo "")
+        if [[ "$installed_version" == "$specific_version" ]]; then
+            print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already exists at ${NC}$target_bin${MUTED}; reinstalling to refresh it."
         else
-            print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed at ${NC}$current_opencode"
-            exit 0
+            print_message info "${MUTED}Installed target version: ${NC}$installed_version ${MUTED}at ${NC}$target_bin"
         fi
+    fi
+
+    if command -v "$target_name" >/dev/null 2>&1; then
+        existing_path=$(command -v "$target_name")
+    elif [ "$target_name" = "opencode" ] && command -v opencode.exe >/dev/null 2>&1; then
+        existing_path=$(command -v opencode.exe)
+    fi
+
+    # #167：PATH 上别处同/异版本只警告，仍安装到 OPENCODE_INSTALL_DIR
+    if [ -n "$existing_path" ] && [ "$existing_path" != "$target_bin" ]; then
+        existing_version=$("$existing_path" --version 2>/dev/null || echo "")
+        print_message warning "${MUTED}Found existing opencode at ${NC}$existing_path${MUTED}, version: ${NC}$existing_version"
+        print_message warning "${MUTED}Will still install requested version to ${NC}$target_bin"
     fi
 }
 
@@ -536,13 +624,27 @@ else
     download_and_install
 fi
 
-# #156：可选写 shell rc；--no-modify-path 跳过
+# #156：可选写 shell rc；#167：多 profile / 去重 / 可创建缺失文件
 add_to_path() {
+    # #167：写入失败不得中断已成功的二进制安装
+    # #167：命令行使用引号路径，避免空格目录破坏 rc
     local config_file=$1
     local command=$2
+    local config_dir
 
-    if grep -Fxq "$command" "$config_file"; then
-        print_message info "Command already exists in $config_file, skipping write."
+    # #167：profile 不存在时尽量创建，失败则只打印手工指引
+    if [ ! -e "$config_file" ]; then
+        config_dir=$(dirname "$config_file")
+        if ! mkdir -p "$config_dir" || ! touch "$config_file"; then
+            print_message warning "Manually add the directory to $config_file or similar:"
+            print_message info "  $command"
+            return 0
+        fi
+    fi
+
+    # #167：按 install dir 去重（含 $HOME/ 与 ~/ 写法），避免重复 PATH 行
+    if profile_has_install_dir "$config_file"; then
+        print_message info "opencode install directory already exists in $config_file, skipping write."
     elif [[ -w $config_file ]]; then
         echo -e "\n# opencode" >> "$config_file"
         echo "$command" >> "$config_file"
@@ -553,53 +655,273 @@ add_to_path() {
     fi
 }
 
-XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-current_shell=$(basename "${SHELL:-sh}")
-# SHELL 未导出时回退 sh：cron/CI 等非交互环境不保证设置 SHELL
+# #167：识别字面路径 / $HOME 相对 / ~ 相对是否已写入
+profile_has_install_dir() {
+    # #167：去重必须覆盖三种写法，否则默认全量扫描会双写
+    # #167：文件不存在视为未写入，允许后续 touch 创建
+    local config_file=$1
+    local home_relative=""
+    local tilde_relative=""
 
-case $current_shell in
-    fish)
-        config_files="$HOME/.config/fish/config.fish"
-    ;;
-    zsh)
-        config_files="${ZDOTDIR:-$HOME}/.zshrc ${ZDOTDIR:-$HOME}/.zshenv $XDG_CONFIG_HOME/zsh/.zshrc $XDG_CONFIG_HOME/zsh/.zshenv"
-    ;;
-    bash)
-        config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
-    ;;
-    ash)
-        config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
-    ;;
-    sh)
-        config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
-    ;;
-    # 默认分支收敛 bash 语法：rc 差异只在路径，export 语句 POSIX 兼容
-    *)
-        config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
-    ;;
-esac
+    [ -f "$config_file" ] || return 1
 
-if [[ "$no_modify_path" != "true" ]]; then
-    config_file=""
-    for file in $config_files; do
-        if [[ -f $file ]]; then
-            config_file=$file
-            break
+    if profile_has_path_line "$config_file" "$INSTALL_DIR"; then
+        return 0
+    fi
+
+    if [[ "$INSTALL_DIR" == "$HOME/"* ]]; then
+        home_relative="\$HOME/${INSTALL_DIR#"$HOME/"}"
+        tilde_relative="~/${INSTALL_DIR#"$HOME/"}"
+        if profile_has_path_line "$config_file" "$home_relative" || profile_has_path_line "$config_file" "$tilde_relative"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# #167：只认 PATH=/export PATH=/fish_add_path 行上的 install dir 片段
+profile_has_path_line() {
+    # #167：排除注释/普通文本中偶然出现的目录字符串
+    # #167：fish_add_path 与 export PATH 共用同一去重入口
+    local config_file=$1
+    local install_dir=$2
+
+    grep -F "$install_dir" "$config_file" 2>/dev/null | grep -E '(^|[[:space:]])(export[[:space:]]+PATH=|PATH=|fish_add_path)' >/dev/null 2>&1
+}
+
+# #167：profile_targets 去重追加
+append_profile() {
+    # #167：同一 run 内目标列表必须稳定去重
+    # #167：保持用户指定顺序，先 explicit 后扫描
+    local file=$1
+    local existing
+
+    if [ "${#profile_targets[@]}" -gt 0 ]; then
+        for existing in "${profile_targets[@]}"; do
+            if [ "$existing" = "$file" ]; then
+                return 0
+            fi
+        done
+    fi
+
+    profile_targets+=("$file")
+}
+
+# #167：展开 ~/ 为 $HOME，供 --path-profile
+normalize_profile_path() {
+    # #167：仅展开 tilde，不解析其他 shell 扩展，避免意外求值
+    # #167：相对路径保持原样交给调用方
+    case "$1" in
+        "~")
+            echo "$HOME"
+        ;;
+        "~/"*)
+            echo "$HOME/${1#"~/"}"
+        ;;
+        *)
+            echo "$1"
+        ;;
+    esac
+}
+
+# #167：按 shell 列出候选 profile；ash/sh 不再写 /etc/profile
+append_shell_profile_candidates() {
+    # #167：zsh 增加 .zprofile，覆盖登录 shell 场景
+    # #167：故意不写 /etc/profile，避免系统级污染
+    local shell_name=$1
+
+    case $shell_name in
+        fish)
+            append_candidate "$HOME/.config/fish/config.fish"
+        ;;
+        zsh)
+            append_candidate "${ZDOTDIR:-$HOME}/.zshrc"
+            append_candidate "${ZDOTDIR:-$HOME}/.zprofile"
+            append_candidate "${ZDOTDIR:-$HOME}/.zshenv"
+            append_candidate "$XDG_CONFIG_HOME/zsh/.zshrc"
+            append_candidate "$XDG_CONFIG_HOME/zsh/.zprofile"
+            append_candidate "$XDG_CONFIG_HOME/zsh/.zshenv"
+        ;;
+        bash)
+            append_candidate "$HOME/.bashrc"
+            append_candidate "$HOME/.bash_profile"
+            append_candidate "$HOME/.profile"
+            append_candidate "$XDG_CONFIG_HOME/bash/.bashrc"
+            append_candidate "$XDG_CONFIG_HOME/bash/.bash_profile"
+        ;;
+        ash|sh)
+            append_candidate "$HOME/.ashrc"
+            append_candidate "$HOME/.profile"
+        ;;
+        *)
+            append_shell_profile_candidates bash
+        ;;
+    esac
+}
+
+# #167：候选列表去重
+append_candidate() {
+    # #167：候选去重与目标去重分离，避免扫描阶段丢文件
+    local file=$1
+    local existing
+
+    if [ "${#profile_candidates[@]}" -gt 0 ]; then
+        for existing in "${profile_candidates[@]}"; do
+            if [ "$existing" = "$file" ]; then
+                return 0
+            fi
+        done
+    fi
+
+    profile_candidates+=("$file")
+}
+
+# #167：默认扫描 bash/zsh/fish/sh 全部候选
+append_all_shell_profile_candidates() {
+    # #167：顺序 bash→zsh→fish→sh，稳定可测
+    # #167：覆盖跨 shell 用户（bash 登录但日常 zsh）
+    append_shell_profile_candidates bash
+    append_shell_profile_candidates zsh
+    append_shell_profile_candidates fish
+    append_shell_profile_candidates sh
+}
+
+# #167：无已存在 profile 时按当前 shell 创建默认目标
+select_default_profile() {
+    # #167：优先已存在文件，减少凭空创建
+    # #167：最终 fallback 按当前 SHELL 选一个可创建路径
+    local file
+
+    for file in "${profile_candidates[@]}"; do
+        if [ -f "$file" ]; then
+            append_profile "$file"
+            return 0
         fi
     done
 
-    if [[ -z $config_file ]]; then
-        print_message warning "No config file found for $current_shell. You may need to manually add to PATH:"
-        print_message info "  export PATH=$INSTALL_DIR:\$PATH"
-    elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        case $current_shell in
-            fish)
-                add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
-            ;;
-            *)
-                add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
+    case $current_shell in
+        fish)
+            append_profile "$HOME/.config/fish/config.fish"
+        ;;
+        zsh)
+            append_profile "${ZDOTDIR:-$HOME}/.zshrc"
+        ;;
+        bash)
+            append_profile "$HOME/.bashrc"
+        ;;
+        *)
+            append_profile "$HOME/.profile"
+        ;;
+    esac
+}
+
+# #167：选择所有已存在候选；若无则 fallback 默认
+select_existing_profiles() {
+    # #167：默认策略核心：所有已存在候选都写
+    # #167：空结果才 fallback，避免“静默不写 PATH”
+    local file
+
+    for file in "${profile_candidates[@]}"; do
+        if [ -f "$file" ]; then
+            append_profile "$file"
+        fi
+    done
+
+    if [ "${#profile_targets[@]}" -eq 0 ]; then
+        select_default_profile
+    fi
+}
+
+# #167：/dev/tty 交互；无 TTY 返回失败由调用方回退
+select_interactive_profiles() {
+    # #167：读写 /dev/tty，不与管道 stdin 争用
+    # #167：用户全选 N 时允许零写入并警告
+    local file
+    local reply
+
+    if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+        print_message warning "--interactive requested but no TTY is available; using default profile selection."
+        return 1
+    fi
+
+    print_message info "Select shell config files to update for opencode PATH:"
+    for file in "${profile_candidates[@]}"; do
+        if [ -f "$file" ]; then
+            printf "Update %s? [y/N] " "$file" > /dev/tty
+        else
+            printf "Create and update %s? [y/N] " "$file" > /dev/tty
+        fi
+
+        IFS= read -r reply < /dev/tty || reply=""
+        case $reply in
+            y|Y|yes|YES|Yes)
+                append_profile "$file"
             ;;
         esac
+    done
+
+    if [ "${#profile_targets[@]}" -eq 0 ]; then
+        print_message warning "No shell config file selected; PATH was not modified."
+    fi
+
+    return 0
+}
+
+# #167：fish 用 fish_add_path；其它 shell 写 export PATH=...
+path_command_for_profile() {
+    # #167：路径一律双引号，兼容含空格的 INSTALL_DIR
+    # #167：fish 专用 fish_add_path，避免 export 语法无效
+    local config_file=$1
+
+    case "$config_file" in
+        */fish/config.fish)
+            echo "fish_add_path \"$INSTALL_DIR\""
+        ;;
+        *)
+            echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+        ;;
+    esac
+}
+
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+current_shell=$(basename "${SHELL:-sh}")
+# SHELL 未导出时回退 sh：cron/CI 等非交互环境不保证设置 SHELL
+profile_candidates=()
+profile_targets=()
+
+if [[ "$no_modify_path" != "true" ]]; then
+    # #167：优先级 explicit path-profile > all-shell > interactive > 默认全量已存在
+    # #167：--no-modify-path 整段跳过，保留二进制安装成功语义
+    # #167：explicit 列表不再二次扫描，尊重用户白名单
+    if [ "${#path_profiles[@]}" -gt 0 ]; then
+        for file in "${path_profiles[@]}"; do
+            append_profile "$(normalize_profile_path "$file")"
+        done
+    elif [ "$all_shell_profiles_requested" = "true" ]; then
+        append_all_shell_profile_candidates
+        select_existing_profiles
+    elif [ "$interactive_path" = "true" ]; then
+        append_all_shell_profile_candidates
+        if ! select_interactive_profiles; then
+            profile_candidates=()
+            append_all_shell_profile_candidates
+            select_existing_profiles
+        fi
+    else
+        append_all_shell_profile_candidates
+        select_existing_profiles
+    fi
+
+    if [ "${#profile_targets[@]}" -gt 0 ]; then
+        for file in "${profile_targets[@]}"; do
+            add_to_path "$file" "$(path_command_for_profile "$file")"
+        done
+    fi
+
+    if [ "${#profile_targets[@]}" -eq 0 ]; then
+        print_message warning "No shell config file selected. You may need to manually add to PATH:"
+        print_message info "  export PATH=\"$INSTALL_DIR:\$PATH\""
     fi
 fi
 

@@ -46,19 +46,34 @@
 ### 安装
 
 ```bash
-# 直接安装 (YOLO)
-curl -fsSL https://opencode.ai/install | bash
+# SMARK 发行版安装（推荐）
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
+```
 
-# 软件包管理器
-npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS 和 Linux（推荐，始终保持最新）
-brew install opencode              # macOS 和 Linux（官方 brew formula，更新频率较低）
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # 任意系统
-nix run nixpkgs#opencode           # 或用 github:anomalyco/opencode 获取最新 dev 分支
+> **#167 注意**：`OPENCODE_INSTALL_DIR=... curl ... | bash` 时 env 只作用于 `curl`，不会传到管道里的 `bash`。应写成先下载 install 再 `env OPENCODE_INSTALL_DIR=... bash /tmp/opencode-install`。
+
+#### 安装脚本行为（#167）
+
+| 场景 | 行为 |
+|---|---|
+| 目标目录已有同版本 | **重装刷新**，不跳过 |
+| PATH 上别处已有同版本 | 警告后仍安装到目标目录 |
+| 默认 PATH 改写 | 更新**所有已存在**的支持 shell profile |
+| sudo（uid=0 且 `SUDO_USER`） | 默认拒绝；需 `--allow-sudo` |
+
+#### 常用安装参数
+
+| 参数 | 含义 |
+|---|---|
+| `--path-profile <path>` | 只改写指定 profile（可重复） |
+| `--all-shell-profiles` | 扫描全部支持 profile |
+| `--interactive` | 交互选择（无 TTY 回退默认） |
+| `--allow-sudo` | 允许在 sudo 下运行 |
+| `--no-modify-path` | 不改任何 shell profile |
+
+```bash
+# 兼容上游一键安装（非 SMARK 默认仓库）
+curl -fsSL https://opencode.ai/install | bash
 ```
 
 > [!TIP]
