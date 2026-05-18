@@ -12,6 +12,7 @@ import { Catalog } from "../../catalog"
 import { Credential } from "../../credential"
 import { Integration } from "../../integration"
 import { ModelV2 } from "../../model"
+import { CodexHeaders } from "../../plugin/provider/codex-headers"
 import { ProviderV2 } from "../../provider"
 import { SessionSchema } from "../schema"
 
@@ -132,8 +133,10 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
     provider: model.providerID,
     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
     // protocol-owned 字段在 typed lowering 中处理，不能从 http.body 绕过校验覆盖 system/thinking。
+    // 固定身份仅适用真实 OpenAI provider；显式配置保留优先级，不污染兼容服务。
     headers: claudecode ? Object.fromEntries(Object.entries(model.request.headers).filter(([key]) =>
-      !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) : model.request.headers,
+      !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) :
+      model.providerID === ProviderV2.ID.openai ? CodexHeaders.request(model.request.headers) : model.request.headers,
     http: { body: httpBody },
     ...(anthropic || parallel ? { providerOptions: {
       ...(anthropic ? { anthropic: {

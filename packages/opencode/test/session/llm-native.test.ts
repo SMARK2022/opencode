@@ -564,22 +564,25 @@ describe("session.llm-native.request", () => {
       } satisfies Tool
       const llmClient = {
         prepare: () => Effect.die("unused"),
-        stream: () =>
-          Stream.fromIterable([
+        stream: (request) => {
+          // 实际 native 交付边界不得把配置身份替换为插件预设 UA。
+          expect(new Headers(request.model.route.defaults.headers).get("user-agent")).toBe("configured-agent")
+          return Stream.fromIterable([
             LLMEvent.toolCall({ id: "call-1", name: "lookup", input: {} }),
             LLMEvent.toolCall({ id: "call-2", name: "lookup", input: {} }),
             LLMEvent.finish({ reason: "tool-calls" }),
-          ]),
+          ])
+        },
         generate: () => Effect.die("unused"),
       } as LLMClientShape
       const native = LLMNativeRuntime.stream({
         model: baseModel,
-        provider: providerInfo,
+        provider: { ...providerInfo, options: { ...providerInfo.options, headers: { "User-Agent": "configured-agent" } } },
         auth: undefined,
         llmClient,
         messages: [],
         tools: { lookup },
-        headers: {},
+        headers: { "user-agent": "codex-tui" },
         abort: new AbortController().signal,
       })
       expect(native.type).toBe("supported")

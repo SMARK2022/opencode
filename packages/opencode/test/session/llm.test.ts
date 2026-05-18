@@ -832,6 +832,75 @@ describe("session.llm.stream", () => {
     )
   }
 
+  // #169：openai 别名 provider 上配置 UA 必须无条件到达线上（验证 #169 去掉 startsWith 守卫）
+  it.instance(
+    "uses configured provider User-Agent for OpenAI alias providers",
+    () =>
+      Effect.gen(function* () {
+        const request = waitRequest(
+          "/responses",
+          // #169：createEventResponse 已返回 Response，勿再 new Response 包装
+          createEventResponse([{ type: "response.completed" }], true),
+        )
+
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make("openai-alias-ua"),
+          ModelV2.ID.make("gpt-5.4"),
+        )
+        const sessionID = SessionID.make("session-test-openai-alias-ua")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-openai-alias-ua"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make("openai-alias-ua"), modelID: resolved.id },
+        } satisfies SessionV1.User
+
+        yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        })
+
+        const capture = yield* Effect.promise(() => request)
+        // #169：别名路径常附加 ai-sdk 后缀；配置 UA 仍必须完整等于期望值
+        expect(capture.headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
+      }),
+    {
+      config: () => ({
+        enabled_providers: ["openai-alias-ua"],
+        provider: {
+          "openai-alias-ua": {
+            npm: "@ai-sdk/openai",
+            name: "OpenAI Alias UA",
+            options: {
+              apiKey: "test-key",
+              baseURL: `${state.server!.url.origin}/v1`,
+              headers: { "User-Agent": "codex_cli_rs/0.2333" },
+            },
+            models: {
+              "gpt-5.4": {
+                name: "GPT-5.4",
+                limit: { context: 400000, input: 272000, output: 128000 },
+              },
+            },
+          },
+        },
+      }),
+    },
+  )
+
   const headerCases = [
     { providerID: opencodeFixture.providerID, child: false },
     { providerID: opencodeFixture.providerID, child: true },

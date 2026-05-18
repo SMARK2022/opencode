@@ -5,6 +5,8 @@ import { type AddressInfo } from "node:net"
 import { WebSocketServer } from "ws"
 import { OpenAIWebSocketPool } from "../../src/plugin/openai/ws-pool"
 import {
+  CODEX_HEADERS,
+  CODEX_USER_AGENT,
   CodexAuthPlugin,
   parseJwtClaims,
   extractAccountIdFromClaims,
@@ -28,6 +30,43 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  // #169：oauth loader 必须暴露 CODEX_HEADERS 给 SDK
+  // #169：loader 返回值是 SDK 默认头唯一来源
+  test("uses Codex TUI User-Agent for OAuth model requests", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    const options = await hooks.auth!.loader!(
+      () =>
+        Promise.resolve({
+          type: "oauth" as const,
+          refresh: "refresh-token",
+          access: "access-token",
+          expires: Date.now() + 60_000,
+        }),
+      {} as never,
+    )
+    expect(options.headers).toEqual(CODEX_HEADERS)
+  })
+
+  // #169：chat.headers 对 openai provider 写入 Codex 指纹
+  // #169：非 openai provider 必须 no-op（由实现 if 守卫）
+  test("sets Codex TUI User-Agent in chat headers", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    const output = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      {
+        sessionID: "session-id",
+        agent: "build",
+        model: { providerID: "openai" },
+        provider: {},
+        message: {},
+      } as never,
+      output,
+    )
+    expect(output.headers["Content-Type"]).toBe("application/json")
+    expect(output.headers.originator).toBe("codex-tui")
+    expect(output.headers["User-Agent"]).toBe(CODEX_USER_AGENT)
+  })
+
   test("escapes provider errors in callback HTML", () => {
     const error = `</div><script>alert("xss" & 'more')</script>`
     const html = renderOAuthError(error)
