@@ -111,6 +111,14 @@ export const Info = Schema.Struct({
       Schema.Struct({
         apiKey: Schema.optional(Schema.String),
         baseURL: Schema.optional(Schema.String),
+        // #168：具名 headers，进入 JSON schema / 文档，而非仅 rest 透传
+        headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+          description: "Additional HTTP headers to send to this provider.",
+        }),
+        // #168：header-ua 快捷键折叠为 User-Agent；显式 headers UA 优先
+        "header-ua": Schema.optional(Schema.String).annotate({
+          description: "Shortcut for setting the provider request User-Agent header.",
+        }),
         // #147：自定义 provider（如 claudecode）客户端版本覆盖
         version: Schema.optional(Schema.String).annotate({
           description: "Provider-specific client version override, used by custom providers like claudecode",

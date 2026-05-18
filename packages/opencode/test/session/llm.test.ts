@@ -756,6 +756,82 @@ describe("session.llm.stream", () => {
   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
   const opencodeFixture = { providerID: "opencode-test", modelID: vivgridFixture.modelID }
 
+  // #168：线上抓取 User-Agent，锁定 headers 与 header-ua 两条配置路径
+  // #168：集成测覆盖 openai-compatible 线上头，防止只测纯函数
+  for (const item of [
+    { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } }, id: "daxiao-codex-headers" },
+    { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" }, id: "daxiao-codex-shortcut" },
+  ] as const) {
+    it.instance(
+      `uses configured provider ${item.name} for request user agent`,
+      () =>
+        Effect.gen(function* () {
+          const request = waitRequest(
+            "/chat/completions",
+            new Response(createChatStream("Hello"), {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          )
+
+          const resolved = yield* Provider.use.getModel(ProviderV2.ID.make(item.id), ModelV2.ID.make("gpt-5.5"))
+          const sessionID = SessionID.make(`session-test-${item.id}`)
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+
+          const user = {
+            id: MessageID.make(`msg_user-${item.id}`),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make(item.id), modelID: resolved.id },
+          } satisfies SessionV1.User
+
+          yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          })
+
+          const capture = yield* Effect.promise(() => request)
+          // #168：配置 UA 必须出现在线上，不被默认 opencode/version 覆盖
+          expect(capture.headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
+        }),
+      {
+        config: () => ({
+          enabled_providers: [item.id],
+          provider: {
+            [item.id]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "DaXiao Codex",
+              options: {
+                apiKey: "test-key",
+                baseURL: `${state.server!.url.origin}/v1`,
+                ...item.options,
+              },
+              models: {
+                "gpt-5.5": {
+                  name: "GPT-5.5",
+                  limit: { context: 400000, input: 272000, output: 128000 },
+                  modalities: { input: ["text", "image"], output: ["text"] },
+                },
+              },
+            },
+          },
+        }),
+      },
+    )
+  }
+
   const headerCases = [
     { providerID: opencodeFixture.providerID, child: false },
     { providerID: opencodeFixture.providerID, child: true },

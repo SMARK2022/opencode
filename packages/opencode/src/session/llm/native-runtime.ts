@@ -1,5 +1,5 @@
 import type { Auth } from "@/auth"
-import type { Provider } from "@/provider/provider"
+import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
@@ -109,7 +109,9 @@ export function stream(input: StreamInput): StreamResult {
     topK: input.topK,
     maxOutputTokens: input.maxOutputTokens,
     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
-    headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
+    // #168：native 与 AI-SDK 共用 requestHeaders，避免 header-ua 只在一侧生效
+    // #168：配置头在前、prepared headers 在后：模型/插件仍可覆盖，但配置 UA 不被默认 UA 无条件碾压需由 request 侧保证
+    headers: { ...Provider.requestHeaders(input.provider.options), ...input.headers },
   })
   // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
   const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })

@@ -37,6 +37,35 @@ import { ProviderError } from "./error"
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 // 总超时约束握手后的整个请求，不能靠连续首包或分块活动无限续期。
 const DEFAULT_TIMEOUT_MS = 300_000
+// #168：归一化 provider 请求头；剥离非 string / 原 UA 后再写入权威 User-Agent
+// #168：供 resolveSDK / request / native 共用，禁止复制第二套解析
+export function requestHeaders(options: Readonly<Record<string, unknown>>) {
+  const userAgent = requestUserAgent(options)
+  const headers = options.headers
+  const base =
+    headers && typeof headers === "object" && !Array.isArray(headers)
+      ? Object.fromEntries(
+          Object.entries(headers).filter(
+            (entry): entry is [string, string] => entry[0].toLowerCase() !== "user-agent" && typeof entry[1] === "string",
+          ),
+        )
+      : {}
+  if (!userAgent) return base
+  return { ...base, "User-Agent": userAgent }
+}
+
+// #168：headers 内任意大小写 User-Agent 优先于 header-ua 快捷键
+// #168：单一 UA 解析入口，大小写不敏感匹配 User-Agent 键
+export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
+  const headers = options.headers
+  const headerUserAgent =
+    headers && typeof headers === "object" && !Array.isArray(headers)
+      ? Object.entries(headers).find(
+          (entry): entry is [string, string] => entry[0].toLowerCase() === "user-agent" && typeof entry[1] === "string",
+        )?.[1]
+      : undefined
+  return headerUserAgent ?? (typeof options["header-ua"] === "string" ? options["header-ua"] : undefined)
+}
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -119,6 +148,19 @@ function timeoutFetch(options: Record<string, any>) {
 
     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
     if (combined) opts.signal = combined
+
+          const configuredUserAgent = requestUserAgent(options)
+          // #168：仅当当前 UA 为空或仍以配置 UA 为前缀时回写，避免误伤无关 UA
+          // #168：SDK 可能追加后缀（ai-sdk/...），startsWith 仍允许刷新为配置值
+          if (configuredUserAgent) {
+            const headers = new Headers(opts.headers)
+            const currentUserAgent = headers.get("user-agent") ?? ""
+            // #168：空 UA 或配置前缀才覆盖；完全无关 UA 保持不动
+            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) {
+              headers.set("User-Agent", configuredUserAgent)
+            }
+            opts.headers = headers
+          }
 
     // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
     const res = await (
@@ -2005,6 +2047,12 @@ const layer = Layer.effect(
             ...options["headers"],
             ...model.headers,
           }
+        // #168：把 header-ua 折叠进 headers，并删除 shortcut 避免泄漏给 SDK
+        // #168：model.headers 已并入 options 后再归一化，顺序：options→model→UA 策略
+        const configuredHeaders = requestHeaders(options)
+        if (Object.keys(configuredHeaders).length > 0) options["headers"] = configuredHeaders
+        // #168：shortcut 不得进入 SDK constructor options
+        delete options["header-ua"]
 
         const key = Hash.fast(
           JSON.stringify({
