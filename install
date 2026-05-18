@@ -20,6 +20,12 @@ Options:
     -v, --version <version> Install a specific version, for example 1.14.41-smark or v1.14.41-smark
     -b, --binary <path>     Install from a local binary instead of downloading
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
+        --path-profile <path>
+                            Add opencode to this shell config file. Can be repeated.
+        --all-shell-profiles
+                            Add opencode to all existing supported shell config files.
+        --interactive       Ask which shell config files to update.
+        --allow-sudo        Allow running under sudo. Not needed for user installs.
 
 Environment variables:
     OPENCODE_REPO           GitHub repo to download from. Default: SMARK2022/opencode
@@ -27,11 +33,13 @@ Environment variables:
     XDG_BIN_DIR             Used as install directory when OPENCODE_INSTALL_DIR is not set
     VERSION                 Same as --version
 
+By default, the installer updates every existing supported shell profile it finds.
+
 Examples:
     curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
     curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash -s -- --version 1.14.41-smark
-    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
-    ./install --binary /path/to/opencode
+    curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && env OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash /tmp/opencode-install
+    ./install --binary /path/to/opencode --path-profile "$HOME/.bash_profile"
 EOF_USAGE
 }
 
@@ -69,6 +77,10 @@ sha256_file() {
 requested_version=${VERSION:-}
 no_modify_path=false
 binary_path=""
+path_profiles=()
+all_shell_profiles_requested=false
+interactive_path=false
+allow_sudo=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -98,6 +110,27 @@ while [[ $# -gt 0 ]]; do
             no_modify_path=true
             shift
             ;;
+        --path-profile)
+            if [[ -n "${2:-}" ]]; then
+                path_profiles+=("$2")
+                shift 2
+            else
+                print_message error "Error: --path-profile requires a path argument"
+                exit 1
+            fi
+            ;;
+        --all-shell-profiles)
+            all_shell_profiles_requested=true
+            shift
+            ;;
+        --interactive)
+            interactive_path=true
+            shift
+            ;;
+        --allow-sudo)
+            allow_sudo=true
+            shift
+            ;;
         *)
             print_message warning "Warning: Unknown option '$1'"
             shift
@@ -116,7 +149,39 @@ resolve_install_dir() {
 }
 
 INSTALL_DIR=$(resolve_install_dir)
-mkdir -p "$INSTALL_DIR"
+
+check_sudo() {
+    local uid
+    uid=$(id -u 2>/dev/null || echo "")
+
+    if [ "$uid" != "0" ] || [ -z "${SUDO_USER:-}" ]; then
+        return 0
+    fi
+
+    if [ "$allow_sudo" != "true" ]; then
+        print_message error "Error: refusing to run under sudo by default."
+        print_message error "Re-run without sudo for user installs, or pass --allow-sudo with an explicit OPENCODE_INSTALL_DIR for system installs."
+        exit 1
+    fi
+
+    if [ "$no_modify_path" != "true" ] && [ "${#path_profiles[@]}" -eq 0 ]; then
+        no_modify_path=true
+        print_message warning "Running under sudo; skipping shell profile modification. Use --path-profile to explicitly choose a user profile."
+    fi
+}
+
+check_sudo
+
+if ! mkdir -p "$INSTALL_DIR"; then
+    print_message error "Error: cannot create install directory: $INSTALL_DIR"
+    exit 1
+fi
+
+if [ ! -w "$INSTALL_DIR" ]; then
+    print_message error "Error: install directory is not writable: $INSTALL_DIR"
+    print_message error "Choose a writable OPENCODE_INSTALL_DIR, or explicitly run with sudo and --allow-sudo for system directories."
+    exit 1
+fi
 
 raw_os=""
 os=""
@@ -257,24 +322,35 @@ else
 fi
 
 check_version() {
-    local installed_version=""
-    local current_opencode=""
-
-    if command -v opencode >/dev/null 2>&1; then
-        current_opencode=$(command -v opencode)
-        installed_version=$(opencode --version 2>/dev/null || echo "")
-    elif command -v opencode.exe >/dev/null 2>&1; then
-        current_opencode=$(command -v opencode.exe)
-        installed_version=$(opencode.exe --version 2>/dev/null || echo "")
+    local target_name="opencode"
+    if [ "${os:-}" = "windows" ]; then
+        target_name="opencode.exe"
     fi
 
-    if [ -n "$current_opencode" ]; then
-        if [[ "$installed_version" != "$specific_version" ]]; then
-            print_message info "${MUTED}Installed version: ${NC}$installed_version ${MUTED}at ${NC}$current_opencode"
+    local target_bin="${INSTALL_DIR}/${target_name}"
+    local installed_version=""
+    local existing_path=""
+    local existing_version=""
+
+    if [ -x "$target_bin" ]; then
+        installed_version=$("$target_bin" --version 2>/dev/null || echo "")
+        if [[ "$installed_version" == "$specific_version" ]]; then
+            print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already exists at ${NC}$target_bin${MUTED}; reinstalling to refresh it."
         else
-            print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed at ${NC}$current_opencode"
-            exit 0
+            print_message info "${MUTED}Installed target version: ${NC}$installed_version ${MUTED}at ${NC}$target_bin"
         fi
+    fi
+
+    if command -v "$target_name" >/dev/null 2>&1; then
+        existing_path=$(command -v "$target_name")
+    elif [ "$target_name" = "opencode" ] && command -v opencode.exe >/dev/null 2>&1; then
+        existing_path=$(command -v opencode.exe)
+    fi
+
+    if [ -n "$existing_path" ] && [ "$existing_path" != "$target_bin" ]; then
+        existing_version=$("$existing_path" --version 2>/dev/null || echo "")
+        print_message warning "${MUTED}Found existing opencode at ${NC}$existing_path${MUTED}, version: ${NC}$existing_version"
+        print_message warning "${MUTED}Will still install requested version to ${NC}$target_bin"
     fi
 }
 
@@ -486,9 +562,19 @@ fi
 add_to_path() {
     local config_file=$1
     local command=$2
+    local config_dir
 
-    if grep -Fxq "$command" "$config_file"; then
-        print_message info "Command already exists in $config_file, skipping write."
+    if [ ! -e "$config_file" ]; then
+        config_dir=$(dirname "$config_file")
+        if ! mkdir -p "$config_dir" || ! touch "$config_file"; then
+            print_message warning "Manually add the directory to $config_file or similar:"
+            print_message info "  $command"
+            return 0
+        fi
+    fi
+
+    if profile_has_install_dir "$config_file"; then
+        print_message info "opencode install directory already exists in $config_file, skipping write."
     elif [[ -w $config_file ]]; then
         echo -e "\n# opencode" >> "$config_file"
         echo "$command" >> "$config_file"
@@ -499,51 +585,237 @@ add_to_path() {
     fi
 }
 
-XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-current_shell=$(basename "${SHELL:-sh}")
+profile_has_install_dir() {
+    local config_file=$1
+    local home_relative=""
+    local tilde_relative=""
 
-case $current_shell in
-    fish)
-        config_files="$HOME/.config/fish/config.fish"
-    ;;
-    zsh)
-        config_files="${ZDOTDIR:-$HOME}/.zshrc ${ZDOTDIR:-$HOME}/.zshenv $XDG_CONFIG_HOME/zsh/.zshrc $XDG_CONFIG_HOME/zsh/.zshenv"
-    ;;
-    bash)
-        config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
-    ;;
-    ash)
-        config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
-    ;;
-    sh)
-        config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
-    ;;
-    *)
-        config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
-    ;;
-esac
+    [ -f "$config_file" ] || return 1
 
-if [[ "$no_modify_path" != "true" ]]; then
-    config_file=""
-    for file in $config_files; do
-        if [[ -f $file ]]; then
-            config_file=$file
-            break
+    if profile_has_path_line "$config_file" "$INSTALL_DIR"; then
+        return 0
+    fi
+
+    if [[ "$INSTALL_DIR" == "$HOME/"* ]]; then
+        home_relative="\$HOME/${INSTALL_DIR#"$HOME/"}"
+        tilde_relative="~/${INSTALL_DIR#"$HOME/"}"
+        if profile_has_path_line "$config_file" "$home_relative" || profile_has_path_line "$config_file" "$tilde_relative"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+profile_has_path_line() {
+    local config_file=$1
+    local install_dir=$2
+
+    grep -F "$install_dir" "$config_file" 2>/dev/null | grep -E '(^|[[:space:]])(export[[:space:]]+PATH=|PATH=|fish_add_path)' >/dev/null 2>&1
+}
+
+append_profile() {
+    local file=$1
+    local existing
+
+    if [ "${#profile_targets[@]}" -gt 0 ]; then
+        for existing in "${profile_targets[@]}"; do
+            if [ "$existing" = "$file" ]; then
+                return 0
+            fi
+        done
+    fi
+
+    profile_targets+=("$file")
+}
+
+normalize_profile_path() {
+    case "$1" in
+        "~")
+            echo "$HOME"
+        ;;
+        "~/"*)
+            echo "$HOME/${1#"~/"}"
+        ;;
+        *)
+            echo "$1"
+        ;;
+    esac
+}
+
+append_shell_profile_candidates() {
+    local shell_name=$1
+
+    case $shell_name in
+        fish)
+            append_candidate "$HOME/.config/fish/config.fish"
+        ;;
+        zsh)
+            append_candidate "${ZDOTDIR:-$HOME}/.zshrc"
+            append_candidate "${ZDOTDIR:-$HOME}/.zprofile"
+            append_candidate "${ZDOTDIR:-$HOME}/.zshenv"
+            append_candidate "$XDG_CONFIG_HOME/zsh/.zshrc"
+            append_candidate "$XDG_CONFIG_HOME/zsh/.zprofile"
+            append_candidate "$XDG_CONFIG_HOME/zsh/.zshenv"
+        ;;
+        bash)
+            append_candidate "$HOME/.bashrc"
+            append_candidate "$HOME/.bash_profile"
+            append_candidate "$HOME/.profile"
+            append_candidate "$XDG_CONFIG_HOME/bash/.bashrc"
+            append_candidate "$XDG_CONFIG_HOME/bash/.bash_profile"
+        ;;
+        ash|sh)
+            append_candidate "$HOME/.ashrc"
+            append_candidate "$HOME/.profile"
+        ;;
+        *)
+            append_shell_profile_candidates bash
+        ;;
+    esac
+}
+
+append_candidate() {
+    local file=$1
+    local existing
+
+    if [ "${#profile_candidates[@]}" -gt 0 ]; then
+        for existing in "${profile_candidates[@]}"; do
+            if [ "$existing" = "$file" ]; then
+                return 0
+            fi
+        done
+    fi
+
+    profile_candidates+=("$file")
+}
+
+append_all_shell_profile_candidates() {
+    append_shell_profile_candidates bash
+    append_shell_profile_candidates zsh
+    append_shell_profile_candidates fish
+    append_shell_profile_candidates sh
+}
+
+select_default_profile() {
+    local file
+
+    for file in "${profile_candidates[@]}"; do
+        if [ -f "$file" ]; then
+            append_profile "$file"
+            return 0
         fi
     done
 
-    if [[ -z $config_file ]]; then
-        print_message warning "No config file found for $current_shell. You may need to manually add to PATH:"
-        print_message info "  export PATH=$INSTALL_DIR:\$PATH"
-    elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        case $current_shell in
-            fish)
-                add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
-            ;;
-            *)
-                add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
+    case $current_shell in
+        fish)
+            append_profile "$HOME/.config/fish/config.fish"
+        ;;
+        zsh)
+            append_profile "${ZDOTDIR:-$HOME}/.zshrc"
+        ;;
+        bash)
+            append_profile "$HOME/.bashrc"
+        ;;
+        *)
+            append_profile "$HOME/.profile"
+        ;;
+    esac
+}
+
+select_existing_profiles() {
+    local file
+
+    for file in "${profile_candidates[@]}"; do
+        if [ -f "$file" ]; then
+            append_profile "$file"
+        fi
+    done
+
+    if [ "${#profile_targets[@]}" -eq 0 ]; then
+        select_default_profile
+    fi
+}
+
+select_interactive_profiles() {
+    local file
+    local reply
+
+    if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+        print_message warning "--interactive requested but no TTY is available; using default profile selection."
+        return 1
+    fi
+
+    print_message info "Select shell config files to update for opencode PATH:"
+    for file in "${profile_candidates[@]}"; do
+        if [ -f "$file" ]; then
+            printf "Update %s? [y/N] " "$file" > /dev/tty
+        else
+            printf "Create and update %s? [y/N] " "$file" > /dev/tty
+        fi
+
+        IFS= read -r reply < /dev/tty || reply=""
+        case $reply in
+            y|Y|yes|YES|Yes)
+                append_profile "$file"
             ;;
         esac
+    done
+
+    if [ "${#profile_targets[@]}" -eq 0 ]; then
+        print_message warning "No shell config file selected; PATH was not modified."
+    fi
+
+    return 0
+}
+
+path_command_for_profile() {
+    local config_file=$1
+
+    case "$config_file" in
+        */fish/config.fish)
+            echo "fish_add_path \"$INSTALL_DIR\""
+        ;;
+        *)
+            echo "export PATH=\"$INSTALL_DIR:\$PATH\""
+        ;;
+    esac
+}
+
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+current_shell=$(basename "${SHELL:-sh}")
+profile_candidates=()
+profile_targets=()
+
+if [[ "$no_modify_path" != "true" ]]; then
+    if [ "${#path_profiles[@]}" -gt 0 ]; then
+        for file in "${path_profiles[@]}"; do
+            append_profile "$(normalize_profile_path "$file")"
+        done
+    elif [ "$all_shell_profiles_requested" = "true" ]; then
+        append_all_shell_profile_candidates
+        select_existing_profiles
+    elif [ "$interactive_path" = "true" ]; then
+        append_all_shell_profile_candidates
+        if ! select_interactive_profiles; then
+            profile_candidates=()
+            append_all_shell_profile_candidates
+            select_existing_profiles
+        fi
+    else
+        append_all_shell_profile_candidates
+        select_existing_profiles
+    fi
+
+    if [ "${#profile_targets[@]}" -gt 0 ]; then
+        for file in "${profile_targets[@]}"; do
+            add_to_path "$file" "$(path_command_for_profile "$file")"
+        done
+    fi
+
+    if [ "${#profile_targets[@]}" -eq 0 ]; then
+        print_message warning "No shell config file selected. You may need to manually add to PATH:"
+        print_message info "  export PATH=\"$INSTALL_DIR:\$PATH\""
     fi
 fi
 

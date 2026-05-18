@@ -9,9 +9,10 @@
 </p>
 <p align="center">开源的 AI Coding Agent — SMARK 增强分支</p>
 <p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
+  <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
+  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
+  <a href="https://github.com/SMARK2022/opencode/tree/dev"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev-0969da?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.3--smark-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -39,483 +40,293 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-<!-- TODO: 替换为实际的 TUI 主界面截图 -->
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.3-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
+> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.3-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
 
 ---
 
-## 目录
+## 快速安装
 
-- [安装](#安装)
-- [桌面应用程序](#桌面应用程序)
-- [核心特性](#核心特性)
-  - [终端界面 (TUI) 增强](#终端界面-tui-增强)
-  - [会话管理与生命周期](#会话管理与生命周期)
-  - [Token 统计与上下文管理](#token-统计与上下文管理)
-  - [工具系统增强](#工具系统增强)
-  - [Provider 与模型管理](#provider-与模型管理)
-  - [VSCode 深度集成](#vscode-深度集成)
-  - [跨平台与 Windows 支持](#跨平台与-windows-支持)
-  - [网络代理与连接管理](#网络代理与连接管理)
-  - [守护进程与服务架构](#守护进程与服务架构)
-  - [构建与 CI/CD](#构建与-cicd)
-- [Agents](#agents)
-- [文档](#文档)
-- [常见问题 (FAQ)](#常见问题-faq)
-- [社区](#社区)
+推荐使用 SMARK 分支发布页中的安装脚本。默认会安装最新 release，并把安装目录写入已有的 shell profile。
+
+```bash
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
+```
+
+安装后验证：
+
+```bash
+opencode --version
+which opencode
+```
+
+如果当前 shell 还没有刷新 PATH，可以重新打开终端，或按安装日志提示 source 对应的 profile。
+
+### 指定安装目录
+
+用户级安装推荐放到 `~/.local/bin`。注意环境变量必须传给右侧执行 installer 的 `bash`，不要只传给 `curl`。
+
+```bash
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
+  OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
+```
+
+更适合排查问题的写法是先下载脚本，再执行：
+
+```bash
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install
+env OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash /tmp/opencode-install
+```
+
+不要这样写：
+
+```bash
+OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
+```
+
+这种写法只会把 `OPENCODE_INSTALL_DIR` 传给 `curl`，不会传给真正运行安装脚本的 `bash`。
+
+### 指定版本
+
+```bash
+curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
+  bash -s -- --version 1.15.3-smark
+```
+
+这条命令是完整写法：`bash -s --` 表示让 `bash` 从 stdin 读取 installer，并把后面的 `--version 1.15.3-smark` 作为 installer 参数传入。版本参数可以写 `1.15.3-smark`，也可以写 release tag 形式的 `v1.15.3-smark`。
+
+### 安装脚本行为
+
+| 场景 | 行为 |
+| --- | --- |
+| 默认安装目录 | `$OPENCODE_INSTALL_DIR`，然后 `$XDG_BIN_DIR`，最后 `$HOME/.opencode/bin` |
+| 目标路径已有同版本 | 重新覆盖安装，用于刷新损坏或过期的二进制 |
+| PATH 里其他位置已有同版本 | 只打印提示，不阻止安装到指定目录 |
+| PATH 写入 | 默认更新所有已存在的受支持 profile，且不会重复写入 |
+| sudo | 默认拒绝 `sudo` 启动；系统级安装需要显式传 `--allow-sudo` |
+| macOS quarantine | 安装后自动尝试移除 `com.apple.quarantine` 属性 |
+| checksum | 如果 release 提供 `checksums.txt`，会校验下载资产 |
+
+### PATH 与 shell profile
+
+安装脚本会识别并更新这些已存在的 profile：`.bashrc`、`.bash_profile`、`.profile`、`.zshrc`、`.zprofile`、`.zshenv`、`~/.config/bash/*`、`~/.config/zsh/*`、`~/.config/fish/config.fish`。
+
+| 需求 | 命令 |
+| --- | --- |
+| 不修改 PATH | `bash /tmp/opencode-install --no-modify-path` |
+| 只写入指定 profile | `bash /tmp/opencode-install --path-profile "$HOME/.bash_profile"` |
+| 交互选择 profile | `bash /tmp/opencode-install --interactive` |
+| 系统目录安装 | `sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install --allow-sudo --no-modify-path` |
+
+如果你希望 `~/.local/bin/opencode` 优先于 `/usr/local/bin/opencode`，请确保 profile 里的 PATH 顺序类似这样：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### 其他安装方式
+
+这些方式适合使用上游包管理生态。若你需要 SMARK 分支版本，请优先使用上面的 GitHub release installer。
+
+| 平台 | 命令 | 说明 |
+| --- | --- | --- |
+| Node.js | `npm i -g opencode-ai@latest` | 也可使用 `bun`、`pnpm`、`yarn` |
+| macOS/Linux | `brew install anomalyco/tap/opencode` | 上游 tap，通常更新较快 |
+| macOS/Linux | `brew install opencode` | Homebrew 官方 formula，可能滞后 |
+| Windows | `scoop install opencode` | Scoop 包 |
+| Windows | `choco install opencode` | Chocolatey 包 |
+| Arch Linux | `sudo pacman -S opencode` | 稳定包 |
+| Arch Linux | `paru -S opencode-bin` | AUR 最新二进制包 |
+| 任意系统 | `mise use -g opencode` | 通过 mise 管理工具版本 |
+| Nix | `nix run nixpkgs#opencode` | 也可使用 GitHub 源运行开发版本 |
 
 ---
 
-## 安装
+## 快速开始
 
 ```bash
-# 直接安装 (支持版本指定)
-curl -fsSL https://opencode.ai/install | bash
-
-# 指定版本安装
-OPENCODE_VERSION=1.15.3 curl -fsSL https://opencode.ai/install | bash
-
-# 软件包管理器
-npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS 和 Linux（推荐，始终保持最新）
-brew install opencode              # macOS 和 Linux（官方 brew formula，更新频率较低）
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # 任意系统
-nix run nixpkgs#opencode           # 或用 github:anomalyco/opencode 获取最新 dev 分支
+cd <your-project>
+opencode
 ```
 
-> [!TIP]
-> 安装前请先移除 0.1.x 之前的旧版本。安装脚本已增强错误处理和环境变量配置支持。
+启动后可以直接描述任务，例如“解释这个模块的架构”、“修复这个报错”、“给这个功能补测试”。TUI 内使用 `Tab` 切换 Agent，使用内置工具读写文件、运行命令、查看 diff、管理会话。
 
-### 安装目录
-
-安装脚本按照以下优先级决定安装路径：
-
-1. `$OPENCODE_INSTALL_DIR` - 自定义安装目录
-2. `$XDG_BIN_DIR` - 符合 XDG 基础目录规范的路径
-3. `$HOME/bin` - 如果存在或可创建的用户二进制目录
-4. `$HOME/.opencode/bin` - 默认备用路径
-
-```bash
-# 示例
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
+| 操作 | 说明 |
+| --- | --- |
+| `Tab` | 在可用 Agent 之间切换 |
+| 会话列表 | 查看历史会话、搜索标题和消息内容 |
+| Diff 预览 | 写文件前后展示 git diff 风格变更 |
+| 手动压缩 | 长会话中主动压缩上下文，释放 token 空间 |
+| Shell 工具 | 支持取消、输出压缩、PowerShell 输出规范化 |
 
 ---
 
 ## 桌面应用程序
 
-OpenCode 也提供桌面版应用（BETA）。可直接从 [发布页](https://github.com/anomalyco/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
+OpenCode 也提供桌面版应用（BETA）。可从 [SMARK release 页面](https://github.com/SMARK2022/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
 
-| 平台                  | 下载文件                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows (x64)         | `opencode-desktop-windows-x64.exe` |
-| Windows (arm64)       | `opencode-desktop-windows-arm64.exe` |
-| Linux                 | `.deb`、`.rpm` 或 `.AppImage`      |
+| 平台 | 下载文件 |
+| --- | --- |
+| macOS Apple Silicon | `opencode-desktop-mac-arm64.dmg` |
+| macOS Intel | `opencode-desktop-mac-x64.dmg` |
+| Windows x64 | `opencode-desktop-windows-x64.exe` |
+| Windows arm64 | `opencode-desktop-windows-arm64.exe` |
+| Linux | `.deb`、`.rpm` 或 `.AppImage` |
 
 ```bash
-# macOS (Homebrew Cask)
 brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+scoop bucket add extras && scoop install extras/opencode-desktop
 ```
 
 ---
 
 ## 核心特性
 
-### 终端界面 (TUI) 增强
-
-本分支对 TUI 进行了全面的交互体验升级，使终端操作更加流畅和信息丰富。
-
-<!-- TODO: 插入 TUI 主界面交互截图，展示流式输出和状态栏 -->
-
-**流式输出与实时渲染**
-
-- 流式消息处理：助手消息和推理部分实时渲染，支持动态内容更新
-- 流式处理期间显示实时耗时计时器
-- 文本部分渲染逻辑优化，支持增量流式处理
-- 推理部分可展开预览，避免长推理链占据过多屏幕空间
-
-<!-- TODO: 插入流式输出效果截图 -->
-
-**差异预览与变更展示**
-
-- 预览差异功能：在 TUI 中以 git diff 格式展示文件变更
-- 差异视图增强：添加行统计信息（增/删行数），优化显示逻辑
-- 文件覆盖时自动生成 diff，直观展示变更内容
-
-<!-- TODO: 插入 diff 预览界面截图 -->
-
-**会话列表与对话管理**
-
-- 会话列表支持内容预览（显示最近 2 行消息摘要）
-- 会话搜索功能：支持通过标题或消息内容过滤会话
-- DialogSelect 组件支持预览行，优化选项展示
-- 会话标题自动生成与验证
-
-<!-- TODO: 插入会话列表预览截图 -->
-
-**滚动与布局优化**
-
-- 滚动条渲染逻辑优化，提升大文本浏览体验
-- 滚动视图组件增强，支持动态展开和收缩
-- macOS 和 Windows 终端宽度处理逻辑优化，支持用户覆盖设置
-- CJK 字符渲染修复：强制使用 Unicode 宽度表解决 macOS 上中日韩字符对齐问题
-
-**组件与交互改进**
-
-- BlockTool 组件可折叠逻辑优化，使用响应式信号提升性能
-- Prompt 组件重构：添加 `renderBefore` 属性，支持自定义边框处理
-- Shell 模式 UI：带取消按钮、自定义图标和示例占位符
-- 工具完成状态实时更新显示
-- 编辑器上下文集成：支持 Zed 编辑器多选区上下文
-
----
-
-### 会话管理与生命周期
-
-<!-- TODO: 插入会话管理流程图或状态图 -->
-
-**会话状态与恢复**
-
-- 会话助手状态管理增强，支持错误恢复机制
-- 隐藏消息处理：支持撤销操作并在数据库中保留隐藏消息
-- 会话初始化逻辑优化，防止异步消息加载导致的模型选择重置
-- 待处理消息状态检查优化
-
-**中断与控制**
-
-- 中断处理功能：支持会话中断计数和确认时间追踪
-- 子任务会话取消传播：确保父会话中断时子会话正确终止
-- Shell 命令取消加固，防止僵尸进程
-
-**会话路径与跨平台**
-
-- 会话路径处理：支持 Windows 全局会话路径的规范化和兼容性
-- 按路径过滤会话，支持禁用路径过滤的配置选项
-- 会话存储相对路径，提升可移植性
-
-**压缩与优化**
-
-- 手动压缩功能：支持用户主动触发会话压缩
-- 压缩选择处理改为异步，添加加载提示和错误处理
-- 压缩摘要分隔符清理，优化压缩后的上下文质量
-- Session Warping：支持跨工作区会话跳转
-
-**Git 上下文集成**
-
-- 添加与 Claude Code 一致的 git 上下文处理逻辑
-- 自动获取当前分支、状态、最近提交等信息注入系统提示词
-- 支持配置选项控制 git 上下文的启用/禁用
-
----
-
-### Token 统计与上下文管理
-
-本分支实现了精确的 Token 统计系统，让用户对每次请求的资源消耗一目了然。
-
-<!-- TODO: 插入 Token 统计面板截图，展示输入/输出/breakdown 信息 -->
-
-**精确 Token 统计**
-
-- Token Accounting 系统：实现精确的 token 统计和分类
-- 输入字符和令牌估算功能，支持从服务端获取实时估算
-- 请求体字符数和估算 token 信息展示
-- 流式处理期间从 `step-start` 事件提供 breakdown 信息
-
-**上下文使用面板**
-
-- 上下文使用面板：展示指令、技能、工具调用、工具结果的独立分类
-- 输入信号节流优化，提升面板渲染性能
-- 附件对输入字符的影响纳入计算
-- 工具输出字符估算，完整反映上下文占用
-
-**输入输出流量统计**
-
-- 总输入输出统计，包含 `tool_delta` 的 token 计算
-- 用户输入和请求开销估算
-- 无助手消息时正确显示零值
-- Token 流动状态的响应式管理（`createTokenFlowPulse`）
-
-**输出压缩**
-
-- Shell 输出压缩：自动检测并压缩重复输出内容
-- 高熵行压缩：智能识别并压缩日志等高熵内容
-- Bash 输出压缩配置化，支持用户自定义阈值
-
----
-
-### 工具系统增强
-
-<!-- TODO: 插入工具调用界面截图 -->
-
-**Read 工具重构**
-
-- 完整重构 read 工具：通过元数据处理和存根逻辑增强上下文管理
-- 默认读取行数提升至 400 行，输出字节限制调整至 24KB
-- 保留 XML 敏感内容，优化输出结构确保内容一致性
-- 设备文件保护和恶意代码提醒
-
-**Grep/Ripgrep 增强**
-
-- 添加最大文件和结果限制，防止过于广泛的搜索导致性能问题
-- 搜索结果 schema 迁移至 Effect，提升类型安全
-- 过于广泛的搜索自动报错提示
-
-**Shell 工具重构**
-
-- Shell 感知提示词：针对 bash、pwsh/powershell、cmd 分别优化提示
-- 输出压缩选项：自动压缩重复的终端输出
-- PowerShell CLIXML 输出解码和规范化
-- 工具输出截断限制可配置化
-
-**Write 工具增强**
-
-- 文件覆盖时自动生成 diff，以 git diff 格式展示变更
-
-**工具管理与权限**
-
-- 工具管理功能增强，优化权限合并逻辑
-- 父代理权限过滤：子任务会话继承并过滤父代理权限
-- 工具可用性检查更新
-- 工具完成状态实时更新
-
-**系统提示词增强**
-
-- 环境详情注入：操作系统、Shell、平台信息
-- Git 命令安全协议和多工具并行使用建议
-- 工具使用指导优化，提升 Agent 工具调用准确性
-
----
-
-### Provider 与模型管理
-
-<!-- TODO: 插入 Provider 配置界面截图 -->
-
-**Provider 别名系统**
-
-- 别名支持：允许多个 provider 独立管理身份验证和模型继承
-- 同一底层 provider 可配置多个别名实例，各自维护独立的 API Key
-
-**版本覆盖**
-
-- 支持自定义 provider 的客户端版本覆盖
-- 灵活控制 SDK 版本以适配不同 API 端点
-
-**ClaudeCode Provider**
-
-- 添加 claudecode provider 支持，集成 API 密钥和基本 URL 配置
-- 支持动态鉴权模式切换
-
-**网络与兼容性**
-
-- 移除 HttpClient 依赖，优化模型服务层
-- Cloudflare AI Gateway 路由修复
-- 非 Anthropic 模型默认关闭 tool streaming
-- User-Agent 头标识客户端版本
-
----
-
-### VSCode 深度集成
-
-本分支实现了完整的 VSCode 笔记本（Notebook）操作能力，使 AI Agent 能够直接操作 Jupyter Notebook。
-
-<!-- TODO: 插入 VSCode Notebook 操作截图 -->
-
-**笔记本操作全套工具**
-
-- `notebook_summary`：获取笔记本单元格概览（ID、类型、执行状态、输出摘要）
-- `notebook_source`：读取笔记本源代码（分页虚拟文档，全局行号）
-- `notebook_run`：执行代码单元格（支持单个/范围执行，超时控制）
-- `notebook_edit`：编辑单元格（插入、修改、删除，精确字符串匹配替换）
-- `notebook_output`：读取单元格输出（文本内联、图片/HTML 写入缓存）
-- `notebook_env`：内核管理（info/configure/restart/save）
-
-**VSCode Bridge 架构**
-
-- Bridge Registry：支持多 VSCode 实例的桥接选择
-- 文件锁机制序列化笔记本请求，防止并发冲突
-- `bridgeUriToPath` 函数处理不同 URI 格式
-- 扩展 ID 更新和许可证文件添加
-
-**IDE 插件 SDK 重构**
-
-- 整个 IDE 侧插件 SDK 结构重构
-- 笔记本相关权限选项集成到 Agent 配置
-- 增强单元格 ID 解析和错误处理
-
----
-
-### 跨平台与 Windows 支持
-
-本分支对 Windows 平台进行了全面适配，确保在 Windows 环境下的稳定运行。
-
-<!-- TODO: 插入 Windows 终端运行截图 -->
-
-**文本编码处理**
-
-- 自动文本解码器：支持 UTF-8 和 UTF-16LE 编码的自动检测与解码
-- 多种文本编码支持，包括自动检测和显式编码策略
-- Windows 管道读取乱码问题修复
-
-**行结束符与路径**
-
-- 行结束符处理：补丁应用时保留原始行结束符（CRLF/LF）
-- 目录规范化：优化 Windows 路径比较（大小写不敏感、分隔符统一）
-- 会话路径规范化：支持 Windows 全局会话路径兼容
-
-**PowerShell 支持**
-
-- PowerShell CLIXML 输出解码和规范化，确保输出为纯文本
-- PowerShell stderr 字节保持不变并进行规范化
-- PowerShell UTF-8 输出编码修复
-- Shell 感知提示词针对 PowerShell 专门优化
-
-**构建与运行时**
-
-- Windows 构建架构支持（x64/arm64）
-- VSIX 打包逻辑优化，避免 Windows 环境中的 npm 路径问题
-- Husky 脚本 Windows Bun 命令路径修复
-- 插件加载路径 Windows 兼容
-
-**WSL 支持**
-
-- WSL 迁移与跨平台构建指南文档
-
----
-
-### 网络代理与连接管理
-
-<!-- TODO: 插入网络代理配置示意图 -->
-
-**NetworkProxy 模块**
-
-- 引入 NetworkProxy 核心模块，统一管理所有出站请求的代理配置
-- 支持插件和 provider 的 fetch 请求代理
-- 全局 fetch 安装，确保所有网络请求经过代理层
-- npm 配置中的超时设置优化
-
-**代理路由**
-
-- 代理路由逻辑优化，智能判断请求是否需要代理
-- TTL 常量调整，优化连接复用
-- 环境变量代理处理逻辑增强（`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`）
-- 全局 fetch 被 mock 时仍能正确路由的保障
-
----
-
-### 守护进程与服务架构
-
-<!-- TODO: 插入守护进程架构图 -->
-
-**Daemon 生命周期管理**
-
-- 守护进程启动和服务器选举超时常量
-- 心跳���制优化，确保活动管理的可靠性
-- 服务器锁处理（Server Lock），防止多实例冲突
-- 实例处置逻辑修复，确保正确关闭
-
-**HttpApi 架构迁移**
-
-- 完整的 HttpApi 桥接层：将所有路由从 Hono 迁移至 Effect HttpApi
-- 原生 Bun.serve + WebSocket 升级的 HttpApi 监听器
-- OpenAPI 规范自动生成，与 Hono 输出保持一致性校验
-- PTY WebSocket 认证票据机制
-
-**Effect 架构重构**
-
-- CLI 命令全面迁移至 `effectCmd` 模式
-- InstanceContext 自动释放
-- AppRuntime.runPromise 桥接逐步移除
-- 服务层 Effect-native 端到端重构
-
----
-
-### 构建与 CI/CD
-
-**多平台构建**
-
-- GitHub Actions 工作流：支持 Linux、macOS、Windows 三平台构建
-- 自动触发构建（dev-smark push）
-- 版本自动提取和资产上传
-- 操作系统过滤功能优化目标构建
-
-**安装脚本增强**
-
-- 支持 `OPENCODE_VERSION` 环境变量指定安装版本
-- 增强错误处理和输出信息
-- `--version` 参数支持
+这个分支的重点不是简单堆功能，而是把真实开发中的高频痛点做成可观察、可恢复、可跨平台的工作流。
+
+| 方向 | 解决的问题 | 你会看到的变化 |
+| --- | --- | --- |
+| TUI 交互 | 长输出、流式消息、diff 难读 | 实时渲染、可折叠推理、差异预览、状态即时更新 |
+| 会话管理 | 长会话易丢上下文，恢复成本高 | 会话搜索、路径过滤、手动压缩、中断恢复、Session Warping |
+| Token 统计 | 不知道上下文被什么消耗 | 输入/输出 token、工具结果、附件、请求开销分项展示 |
+| 工具系统 | 文件读写和 shell 输出容易污染上下文 | Read 输出结构化、Shell 输出压缩、Write 自动 diff |
+| Provider | 多账号、多端点、多模型配置复杂 | Provider 别名、客户端版本覆盖、ClaudeCode provider |
+| VSCode | Notebook 场景无法被 CLI Agent 可靠操作 | 单元格概览、读取、编辑、执行、输出读取、内核管理 |
+| Windows | PowerShell、编码、路径、CRLF 容易出错 | CLIXML 解码、UTF-8 修复、路径规范化、CRLF 保留 |
+| 网络代理 | provider、插件、fetch 代理逻辑分散 | NetworkProxy 统一处理 HTTP_PROXY、HTTPS_PROXY、NO_PROXY |
+| 守护进程 | 多实例、锁、健康检查、客户端连接复杂 | Server Lock、健康检查、HttpApi、PTY WebSocket 票据 |
+
+### TUI 与交互体验
+
+| 能力 | 细节 |
+| --- | --- |
+| 流式输出 | 助手消息和推理片段增量渲染，流式处理期间显示耗时 |
+| 推理展示 | 长推理可折叠预览，减少屏幕占用 |
+| 差异预览 | 文件覆盖时自动生成 git diff 风格视图，并显示增删行统计 |
+| 会话列表 | 展示最近消息摘要，支持按标题和消息内容搜索 |
+| 布局稳定性 | 滚动条、终端宽度、CJK 字符宽度处理更可靠 |
+| Shell 模式 | 提供取消按钮、自定义图标、示例占位符和实时完成状态 |
+
+### 会话与上下文管理
+
+| 能力 | 细节 |
+| --- | --- |
+| 会话恢复 | 隐藏消息、撤销操作、待处理消息检查和错误恢复逻辑更稳 |
+| 中断控制 | 记录中断次数和确认时间，父会话中断会传播到子任务 |
+| 路径兼容 | Windows 全局会话路径规范化，会话存储使用相对路径 |
+| 手动压缩 | 用户可以主动触发压缩，压缩选择异步处理并带错误提示 |
+| Git 上下文 | 自动注入当前分支、状态、最近提交等信息，可配置开关 |
+
+### Token 与成本可见性
+
+| 入口 | 使用方式 | 展示内容 |
+| --- | --- | --- |
+| TUI Context usage | 在会话中执行 `/context`，或从命令面板选择 `Context usage` | 展示当前上下文窗口、模型、已用/可用 token、Prompt/Conversation/Window 分类网格 |
+| Context usage footer | TUI 面板底部 | 有会话用量时显示 `Input`、`Output`、`Reason`、`Cache W/R`、`Cost`；无累计用量时显示 `Used`、`Free`、`Usable`、`Buffer` |
+| 会话列表成本列 | `opencode session list --cost` 或 `opencode session list -c` | 在 session list 中追加 `Cost` 和 `Tokens` 列，便于按会话快速定位成本热点 |
+| 单会话明细 | `opencode session info -s <Session_ID>` | 按 provider/model 展示 `Calls`、`Input`、`Cache Write`、`Cache Read`、`Output`、`Cost` |
+| 全局统计 | `opencode stats --models` | 汇总总成本、日均成本、平均 token、工具使用和模型用量 |
+
+内部统计会优先读取 request usage 数据；较旧会话没有 request usage 时，会回退到消息元数据。TUI 的 Context usage 还会估算 instruction、skills、tool definitions、附件、工具结果和 compaction summary 对上下文窗口的占用。
+
+### 工具系统
+
+| 工具 | 增强点 |
+| --- | --- |
+| Read | 元数据、stub、默认读取行数、字节限制、设备文件保护 |
+| Grep/Ripgrep | 最大文件数和结果数限制，搜索过宽时给出明确错误 |
+| Shell | bash、PowerShell、cmd 分别使用 shell 感知提示词 |
+| Write | 覆盖文件时自动生成 diff，帮助用户确认实际修改 |
+| 权限 | 父代理权限会过滤传递给子任务，工具可用性检查更严格 |
+
+### Provider 与模型
+
+| 能力 | 说明 |
+| --- | --- |
+| Provider 别名 | 同一底层 provider 可配置多个账号或端点 |
+| 客户端版本覆盖 | 适配自定义 provider、兼容代理和特殊 API 端点 |
+| ClaudeCode provider | 支持 API Key、Base URL 和动态鉴权模式 |
+| Cloudflare AI Gateway | 路由修复，非 Anthropic 模型默认关闭 tool streaming |
+
+### VSCode Notebook 集成
+
+使用 Notebook 工具前，请先安装 VSCode 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。该扩展负责在 VSCode/Jupyter Notebook 与 OpenCode CLI 之间建立 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
+
+| 工具 | 用途 |
+| --- | --- |
+| `notebook_summary` | 获取单元格 ID、类型、执行状态和输出摘要 |
+| `notebook_source` | 以分页虚拟文档读取 notebook 源码 |
+| `notebook_edit` | 插入、修改、删除单元格，支持精确字符串替换 |
+| `notebook_run` | 执行单个或范围内代码单元格，支持超时控制 |
+| `notebook_output` | 读取文本、图片、HTML、JSON 等单元格输出 |
+| `notebook_env` | 管理内核信息、配置、重启和保存 |
+
+### 跨平台支持
+
+| 平台问题 | 处理方式 |
+| --- | --- |
+| Windows 编码 | 自动检测 UTF-8/UTF-16LE，修复管道乱码 |
+| PowerShell | CLIXML 解码、stderr 规范化、UTF-8 输出修复 |
+| 路径差异 | 大小写、分隔符、全局会话路径统一规范化 |
+| 行结束符 | 补丁应用时保留 CRLF/LF 原始风格 |
+| WSL | 维护迁移与跨平台构建指南 |
 
 ---
 
 ## Agents
 
-OpenCode 内置多种 Agent，可用 `Tab` 键快速切换：
+OpenCode 内置多种 primary agent，可用 `Tab` 快速切换。默认 agent 可通过 `default_agent` 配置覆盖；子 agent 主要通过任务派发或 `@agent` 方式调用。
 
-- **build** — 默认模式，具备完整权限，适合开发工作
-- **plan** — 只读模式，适合代码分析与探索
-  - 默认拒绝修改文件
-  - 运行 bash 命令前会询问
-  - 便于探索未知代码库或规划改动
+| Agent | 类型 | 权限模型 | 适合场景 |
+| --- | --- | --- | --- |
+| `build` | primary | 默认开发模式，按配置权限执行工具，允许问题确认和进入 plan | 实现功能、修复 bug、运行测试、端到端交付 |
+| `interactive` | primary | 更保守的交互模式；`bash`、notebook 执行和 notebook 环境操作默认询问 | 需要用户确认关键命令、希望降低误操作风险的开发任务 |
+| `decide` | primary | 禁用工具，只基于有限近期上下文输出一次性判断 | 使用高性能模型做相对低成本的单次决策、方案取舍、下一步判断 |
+| `plan` | primary | 禁止编辑工具和 notebook 变更，允许写入 plan 文件并退出 plan | 代码分析、方案制定、风险梳理、执行前规划 |
+| `general` | subagent | 通用子代理，禁止 `todowrite`，其余遵循合并后的权限配置 | 复杂搜索、多步骤研究、可并行拆解的辅助任务 |
+| `explore` | subagent | 只允许搜索、读取、列表、web 查询等探索工具 | 快速定位文件、符号、调用链、配置和文档 |
+| `scout` | subagent，实验性 | 面向外部文档和依赖源码，允许 managed repo cache 读取 | 查询第三方库实现、克隆依赖源码、研究外部 API 行为 |
 
-另外还包含以下子 Agent：
-
-- **general** — 用于复杂搜索和多步任务，可在消息中输入 `@general` 调用
-- **interactive** — 交互式代理，增强权限管理
-- **review** — 审查代理，专注代码审查场景
-
-了解更多 [Agents](https://opencode.ai/docs/agents) 相关信息。
+`title`、`summary`、`compaction` 是隐藏的系统 agent，用于标题生成、摘要和压缩流程，不是日常手动切换对象。了解更多 [Agents](https://opencode.ai/docs/agents) 相关信息。
 
 ---
 
 ## 文档
 
-更多配置说明请查看我们的 [**官方文档**](https://opencode.ai/docs)。
+| 资源 | 链接 |
+| --- | --- |
+| 官方文档 | https://opencode.ai/docs |
+| Release | https://github.com/SMARK2022/opencode/releases |
+| 贡献指南 | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 
 ---
 
-## 常见问题 (FAQ)
+## 常见问题
 
 ### 这和 Claude Code 有什么不同？
 
-功能上很相似，关键差异：
+功能定位相近，但 OpenCode 的重点是开源、终端优先、provider 无关、客户端/服务器架构和可扩展工具系统。SMARK 分支在此基础上进一步强化 Windows/PowerShell、VSCode Notebook、Token 可见性、网络代理和安装体验。
 
-- **100% 开源**。
-- **不绑定特定提供商**。推荐使用 [OpenCode Zen](https://opencode.ai/zen) 的模型，但也可搭配 Claude、OpenAI、Google 甚至本地模型。
-- **内置 LSP 支持**。
-- **聚焦终端界面 (TUI)**。OpenCode 由 Neovim 爱好者和 [terminal.shop](https://terminal.shop) 的创建者打造，持续探索终端的极限。
-- **客户端/服务器架构**。可在本机运行，同时用移动设备远程驱动。TUI 只是众多潜在客户端之一。
-- **完整的 Windows 支持**。包括 PowerShell 原生支持、路径规范化、编码自动检测等。
-- **VSCode Notebook 集成**。AI Agent 可直接操作 Jupyter Notebook 单元格。
-- **精确 Token 统计**。实时展示输入/输出 token 消耗和分类明细。
+### 这个分支适合谁？
 
-### 本分支 (dev-smark) 相比上游有什么额外优势？
+如果你经常在终端里开发、需要可审计的 Agent 行为、需要在 Windows/PowerShell 或 VSCode Notebook 场景中使用 AI coding agent，这个分支会比上游默认体验更完整。
 
-- 全面的 Windows/PowerShell 跨平台适配
-- 精确的 Token 统计与上下文使用面板
-- VSCode Notebook 完整操作能力
-- 网络代理统一管理
-- 增强的会话管理（中断处理、路径过滤、手动压缩）
-- Shell 输出智能压缩
-- 流式渲染与差异预览优化
-- 多平台 CI/CD 自动��建
+### 为什么安装脚本不默认使用 sudo？
+
+用户级安装更安全，也更容易管理。安装脚本默认写入用户目录，并拒绝隐式 sudo。只有你明确要安装到 `/usr/local/bin` 这类系统目录时，才需要 `sudo env ... --allow-sudo`，并建议同时使用 `--no-modify-path` 避免 root 修改用户 profile。
+
+### 如果系统里已经有旧的 opencode，会怎样？
+
+安装脚本只以目标安装路径为准。即使 `/usr/local/bin/opencode` 已有同版本，只要你指定 `OPENCODE_INSTALL_DIR="$HOME/.local/bin"`，脚本仍会安装到 `~/.local/bin/opencode`，不会被 PATH 上的旧二进制拦截。
 
 ---
 
 ## 参与贡献
 
-如有兴趣贡献代码，请在提交 PR 前阅读 [贡献指南](./CONTRIBUTING.md)。
+提交 PR 前请阅读 [贡献指南](./CONTRIBUTING.md)。如果你在自己的项目名中使用 `opencode`，请在 README 中说明该项目并非 OpenCode 团队官方项目，也不与 OpenCode 团队存在关联。
 
 ---
 
