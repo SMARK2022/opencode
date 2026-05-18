@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { afterEach, expect, spyOn, test } from "bun:test"
 import { createRoot } from "solid-js"
 import { EditorContextProvider, useEditorContext } from "../../../src/cli/cmd/tui/context/editor"
@@ -9,11 +10,21 @@ import { FakeWebSocket } from "../../lib/websocket"
 
 const originalClaudePort = process.env.CLAUDE_CODE_SSE_PORT
 const originalOpencodePort = process.env.OPENCODE_EDITOR_SSE_PORT
+const originalBridgeRegistryDir = process.env.OPENCODE_IDE_REGISTRY_DIR
 
 afterEach(() => {
   process.env.CLAUDE_CODE_SSE_PORT = originalClaudePort
   process.env.OPENCODE_EDITOR_SSE_PORT = originalOpencodePort
+  restoreEnv("OPENCODE_IDE_REGISTRY_DIR", originalBridgeRegistryDir)
 })
+
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key]
+    return
+  }
+  process.env[key] = value
+}
 
 function nextTick() {
   return new Promise<void>((resolve) => queueMicrotask(resolve))
@@ -91,6 +102,38 @@ function expectedSelection(filePath: string, text = "foo") {
     ],
   }
 }
+
+test("useEditorContext reads VS Code bridge registry from OPENCODE_IDE_REGISTRY_DIR", async () => {
+  await using tmp = await tmpdir()
+  const startupDirectory = path.join(tmp.path, "startup")
+  const registryDirectory = path.join(tmp.path, "ide-registry")
+  const activeFile = path.join(startupDirectory, "file.ts")
+  await mkdir(startupDirectory, { recursive: true })
+  await mkdir(registryDirectory, { recursive: true })
+  await writeFile(
+    path.join(registryDirectory, "bridge.json"),
+    JSON.stringify({
+      schema: 1,
+      updatedAt: Date.now(),
+      workspaceFolders: [{ fsPath: startupDirectory, uri: pathToFileURL(startupDirectory).toString() }],
+      active: { textEditor: pathToFileURL(activeFile).toString() },
+    }),
+  )
+
+  process.env.CLAUDE_CODE_SSE_PORT = undefined
+  process.env.OPENCODE_EDITOR_SSE_PORT = undefined
+  process.env.OPENCODE_IDE_REGISTRY_DIR = registryDirectory
+  spyOn(process, "cwd").mockImplementation(() => startupDirectory)
+  spyOn(os, "homedir").mockImplementation(() => path.join(tmp.path, "unused-home"))
+
+  const mounted = mountEditorContext()
+  await nextTick()
+
+  expect(mounted.editor.connected()).toBeTrue()
+  expect(mounted.editor.selection()).toEqual({ filePath: activeFile, source: "bridge", ranges: [] })
+
+  mounted.dispose()
+})
 
 test("useEditorContext reconnect switches editor server by session directory", async () => {
   await using tmp = await tmpdir()

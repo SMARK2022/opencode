@@ -14,10 +14,14 @@ const stop = new Error("stop")
 const seen = {
   tui: [] as string[],
   tuiUrls: [] as string[],
+  errors: [] as string[],
 }
 type ThreadArgs = Parameters<NonNullable<typeof ThreadModule.TuiThreadCommand.handler>>[0]
 
 function setup() {
+  seen.tui.length = 0
+  seen.tuiUrls.length = 0
+  seen.errors.length = 0
   // Intentionally avoid mock.module() here: Bun keeps module overrides in cache
   // and mock.restore() does not reset mock.module values. If this switches back
   // to module mocks, later suites can see mocked @/config/tui and fail (e.g.
@@ -28,7 +32,9 @@ function setup() {
     seen.tuiUrls.push(input.url)
     throw stop
   })
-  spyOn(UI, "error").mockImplementation(() => {})
+  spyOn(UI, "error").mockImplementation((message) => {
+    seen.errors.push(String(message))
+  })
   spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {})
   spyOn(Win32, "win32InstallCtrlCGuard").mockReturnValue(undefined)
 }
@@ -173,10 +179,33 @@ describe("tui thread", () => {
       }
     })
 
-    test("external request reuses healthy loopback daemon when lock has no external URL", async () => {
-      const { daemonSpawnCount, tuiUrls } = await callWithDaemonSpy("http://127.0.0.1:9999", { port: 8080 })
-      expect(daemonSpawnCount).toBe(0)
-      expect(tuiUrls[0]).toBe("http://127.0.0.1:9999")
+    test("rejects --port for VS Code bridge registry guidance", async () => {
+      setup()
+      const exitCode = process.exitCode
+      try {
+        await expect(call(undefined, { port: 8080 })).resolves.toBeUndefined()
+        expect(seen.errors[0]).toContain("--port is no longer supported")
+        expect(seen.errors[0]).toContain("instead of community bridge plugins")
+        expect(seen.errors[0]).toContain("https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge")
+        expect(seen.tuiUrls).toHaveLength(0)
+      } finally {
+        process.exitCode = exitCode
+      }
+    })
+
+    test("rejects explicit --port=0 for VS Code bridge registry guidance", async () => {
+      setup()
+      const exitCode = process.exitCode
+      const argv = process.argv
+      process.argv = ["opencode", "--port=0"]
+      try {
+        await expect(call()).resolves.toBeUndefined()
+        expect(seen.errors[0]).toContain("--port is no longer supported")
+        expect(seen.tuiUrls).toHaveLength(0)
+      } finally {
+        process.argv = argv
+        process.exitCode = exitCode
+      }
     })
 
     test("no existing server: daemon is spawned", async () => {

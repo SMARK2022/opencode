@@ -1,6 +1,6 @@
 export * as Daemon from "./daemon"
 
-import { resolveNetworkOptionsNoConfig, type NetworkOptions } from "@/cli/network"
+import { hasCliBooleanOption, hasCliOption, resolveNetworkOptionsNoConfig, type NetworkOptions } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
 import { ServerLock } from "@/cli/cmd/tui/server-lock"
 import { Flock } from "@opencode-ai/core/util/flock"
@@ -137,9 +137,9 @@ function wantsExternal(args: Args) {
   return {
     network,
     external:
-      process.argv.includes("--port") ||
-      process.argv.includes("--hostname") ||
-      process.argv.includes("--mdns") ||
+      hasCliOption("--port") ||
+      hasCliOption("--hostname") ||
+      hasCliBooleanOption("--mdns") ||
       network.mdns ||
       network.port !== 0 ||
       network.hostname !== "127.0.0.1",

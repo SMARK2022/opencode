@@ -5,6 +5,7 @@ import { fileURLToPath } from "url"
 import { onCleanup, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { Option, Schema, SchemaGetter } from "effect"
+import { Global } from "@opencode-ai/core/global"
 import { isRecord } from "@/util/record"
 import { createSimpleContext } from "./helper"
 import { resolveZedDbPath, resolveZedSelection } from "./editor-zed"
@@ -527,8 +528,15 @@ function tryParseJson(raw: string): unknown {
   try { return JSON.parse(raw) } catch { return }
 }
 
+function bridgeRegistryDir() {
+  // [dev-smark] Keep TUI active-file discovery on the same IDE bridge registry
+  // path as src/ide/vscode-bridge.ts. The VS Code extension writes this lock
+  // directory; opencode should never guess a separate hard-coded state path.
+  return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
+}
+
 function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
-  const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
+  const dir = bridgeRegistryDir()
   let entries: string[]
   try { entries = readdirSync(dir) } catch { return }
 

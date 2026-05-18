@@ -10,7 +10,8 @@
  * in `./bridge.ts`, and shared utilities in `./util.ts`.
  */
 import * as vscode from "vscode"
-import { startBridge, closeBridge, type BridgeInfo } from "./bridge"
+import { startBridge, closeBridge } from "./bridge"
+import { registryDir } from "./bridge-registry"
 import { notebookBridgeTools } from "./notebook/commands"
 
 const TERMINAL_NAME = "opencode"
@@ -47,9 +48,12 @@ export function activate(context: vscode.ExtensionContext) {
       const fileRef = getActiveFileRef()
       const terminal = vscode.window.activeTerminal
       if (!fileRef || !terminal || terminal.name !== TERMINAL_NAME) return
-      // @ts-ignore — creationOptions.env is not in the public type
-      const port = terminal.creationOptions.env?.["_EXTENSION_OPENCODE_PORT"]
-      port ? await appendPrompt(parseInt(port), fileRef) : terminal.sendText(fileRef, false)
+
+      // [dev-smark] File references are plain TUI input, not transport control.
+      // This shortcut is intentionally restored through VS Code's terminal
+      // stream only; do not couple it back to the removed random-port
+      // /tui/append-prompt transport.
+      terminal.sendText(fileRef, false)
       terminal.show()
     }),
     vscode.commands.registerCommand("opencode.showBridgeLog", () => output.show()),
@@ -61,9 +65,8 @@ export function activate(context: vscode.ExtensionContext) {
 // Terminal management
 // ---------------------------------------------------------------------------
 
-async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<BridgeInfo>) {
-  const bridgeInfo = await bridge
-  const port = Math.floor(Math.random() * (65535 - 16384 + 1)) + 16384
+async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<unknown>) {
+  await bridge
   const terminal = vscode.window.createTerminal({
     name: TERMINAL_NAME,
     iconPath: {
@@ -72,38 +75,17 @@ async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<Br
     },
     location: { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
     env: {
-      _EXTENSION_OPENCODE_PORT: port.toString(),
       OPENCODE_CALLER: "vscode",
+      OPENCODE_IDE_REGISTRY_DIR: registryDir(),
     },
   })
 
   terminal.show()
-  terminal.sendText(`opencode --port ${port}`)
-
-  const fileRef = getActiveFileRef()
-  if (!fileRef) return
-
-  // Wait for the opencode TUI to be ready before appending the prompt
-  let tries = 10
-  while (tries-- > 0) {
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    try {
-      await fetch(`http://localhost:${port}/app`)
-      await appendPrompt(port, `In ${fileRef}`)
-      terminal.show()
-      return
-    } catch {
-      // not ready yet
-    }
-  }
-}
-
-async function appendPrompt(port: number, text: string) {
-  await fetch(`http://localhost:${port}/tui/append-prompt`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  })
+  // [dev-smark] The CLI/TUI now discovers VS Code state exclusively through
+  // the bridge registry written by startBridge(). Do not reintroduce a random
+  // opencode --port launch or auto-prompt injection here; those create a second,
+  // stale transport path that can diverge from the daemon/IDE bridge.
+  terminal.sendText("opencode")
 }
 
 /**

@@ -11,6 +11,8 @@ import { TuiConfig } from "./config/tui"
 import { validateSession } from "./validate-session"
 import { Daemon } from "./daemon"
 
+const SMARK_IDE_BRIDGE_URL = "https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge"
+
 // [local-devsmark] Keep the TUI on the shared daemon transport instead of the
 // upstream RPC-thread transport. The daemon is the single SQLite owner for TUI
 // sessions, which avoids cross-TUI database write races when multiple opencode
@@ -34,11 +36,21 @@ export function resolveThreadDirectory(project?: string, envPWD = process.env.PW
   return Filesystem.resolve(cwd)
 }
 
+function hasPortRequest(args: { port?: number }) {
+  return (
+    (args.port !== undefined && args.port !== 0) ||
+    process.argv.some((arg) => arg === "--port" || arg.startsWith("--port="))
+  )
+}
+
 export const TuiThreadCommand = cmd({
   command: "$0 [project]",
   describe: "start opencode tui",
   builder: (yargs) =>
-    withNetworkOptions(yargs)
+      withNetworkOptions(yargs)
+      // [dev-smark] Keep --port parsed but hidden so the handler can emit the
+      // curated SMARK bridge-extension guidance instead of generic yargs output.
+      .option("port", { type: "number", default: 0, hidden: true })
       .positional("project", {
         type: "string",
         describe: "path to start opencode in",
@@ -81,6 +93,18 @@ export const TuiThreadCommand = cmd({
 
       if (args.fork && !args.continue && !args.session) {
         UI.error("--fork requires --continue or --session")
+        process.exitCode = 1
+        return
+      }
+
+      if (hasPortRequest(args)) {
+        // [dev-smark] VS Code integration is bridge-registry driven now: the
+        // SMARK extension writes the IDE lock/registry and opencode reads that
+        // source of truth. Reject --port here so users do not install or rely
+        // on community plugins that expect the removed random-port TUI path.
+        UI.error(
+          `--port is no longer supported for the VS Code TUI bridge. Install the official SMARK OpenCode IDE Bridge extension instead of community bridge plugins: ${SMARK_IDE_BRIDGE_URL}`,
+        )
         process.exitCode = 1
         return
       }

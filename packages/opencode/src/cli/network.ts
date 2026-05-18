@@ -33,6 +33,15 @@ const options = {
 
 export type NetworkOptions = InferredOptionTypes<typeof options>
 
+export function hasCliOption(name: string, argv = process.argv) {
+  return argv.some((arg) => arg === name || arg.startsWith(`${name}=`))
+}
+
+export function hasCliBooleanOption(name: string, argv = process.argv) {
+  const negative = name.startsWith("--") ? `--no-${name.slice(2)}` : undefined
+  return hasCliOption(name, argv) || (negative ? argv.includes(negative) : false)
+}
+
 export function withNetworkOptions<T>(yargs: Argv<T>) {
   return yargs.options(options)
 }
@@ -42,10 +51,12 @@ export const resolveNetworkOptions = Effect.fn("Cli.resolveNetworkOptions")(func
 })
 
 export function resolveNetworkOptionsNoConfig(args: NetworkOptions, config?: Config.Info) {
-  const portExplicitlySet = process.argv.includes("--port")
-  const hostnameExplicitlySet = process.argv.includes("--hostname")
-  const mdnsExplicitlySet = process.argv.includes("--mdns")
-  const mdnsDomainExplicitlySet = process.argv.includes("--mdns-domain")
+  // [dev-smark] SDK/server callers use --port=... and --hostname=... forms.
+  // Treat those as explicit CLI input so config.server never overrides them.
+  const portExplicitlySet = hasCliOption("--port")
+  const hostnameExplicitlySet = hasCliOption("--hostname")
+  const mdnsExplicitlySet = hasCliBooleanOption("--mdns")
+  const mdnsDomainExplicitlySet = hasCliOption("--mdns-domain")
   const mdns = mdnsExplicitlySet ? args.mdns : (config?.server?.mdns ?? args.mdns)
   const mdnsDomain = mdnsDomainExplicitlySet ? args["mdns-domain"] : (config?.server?.mdnsDomain ?? args["mdns-domain"])
   const port = portExplicitlySet ? args.port : (config?.server?.port ?? args.port)
