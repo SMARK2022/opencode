@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test"
+import path from "node:path"
 import { testRender } from "@opentui/solid"
 import { abbreviateHome } from "../src/runtime"
 import { TuiPathsProvider, useTuiPaths } from "../src/context/runtime"
 
 test("abbreviates paths within home boundaries", () => {
   expect(abbreviateHome("/home/test", "/home/test")).toBe("~")
-  expect(abbreviateHome("/home/test/project", "/home/test")).toBe("~/project")
+  // 缩写使用本机路径分隔符，Windows 不能用 POSIX 字面量判定回归。
+  expect(abbreviateHome("/home/test/project", "/home/test")).toBe(path.join("~", "project"))
   expect(abbreviateHome("/home/tester/project", "/home/test")).toBe("/home/tester/project")
   expect(abbreviateHome("/tmp/project", "/home/test")).toBe("/tmp/project")
 })
