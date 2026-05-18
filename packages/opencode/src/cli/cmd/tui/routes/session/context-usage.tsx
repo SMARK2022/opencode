@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createResource, For, Show } from "solid-js"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { useDialog } from "@tui/ui/dialog"
-import { useKeybind } from "@tui/context/keybind"
+import { useOpencodeKeymap } from "../../keymap"
 import { useLocal } from "@tui/context/local"
 import { useProject } from "@tui/context/project"
 import { useSync } from "@tui/context/sync"
@@ -228,7 +228,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   const project = useProject()
   const dimensions = useTerminalDimensions()
   const dialog = useDialog()
-  const keybind = useKeybind()
+  const keybind = useOpencodeKeymap()
   const { theme } = useTheme()
   useRenderer()
 

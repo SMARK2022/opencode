@@ -1,11 +1,10 @@
 import type { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
-import { GO_UPSELL_MESSAGE } from "./retry-constants"
 import { iife } from "@/util/iife"
 import { isRecord } from "@/util/record"
 
-export { GO_UPSELL_MESSAGE }
+export type Err = ReturnType<NamedError["toObject"]>
 
 export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go"
 export const GO_UPSELL_URL = "https://opencode.ai/go"

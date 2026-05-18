@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -22,7 +23,16 @@ import { useEvent } from "@tui/context/event"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
 import { selectedForeground, useTheme } from "@tui/context/theme"
-import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
+import {
+  BoxRenderable,
+  ScrollBoxRenderable,
+  addDefaultParsers,
+  TextAttributes,
+  RGBA,
+  MouseButton,
+  type MouseEvent as TuiMouseEvent,
+  type OptimizedBuffer,
+} from "@opentui/core"
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type {
   AssistantMessage,
@@ -75,6 +85,7 @@ import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
 import { useExit } from "../../context/exit"
 import { Filesystem } from "@/util/filesystem"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
@@ -84,6 +95,7 @@ import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { nextThinkingMode, reasoningTitle, useThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
+import { createThrottledSignal } from "../../util/signal"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogRetryAction } from "../../component/dialog-retry-action"
 import { SessionRetry } from "@/session/retry"
@@ -130,6 +142,7 @@ const sessionBindingCommands = [
   "session.timeline",
   "session.fork",
   "session.compact",
+  "session.context",
   "session.unshare",
   "session.undo",
   "session.redo",
@@ -207,12 +220,17 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+  const [contextVisible, setContextVisible] = createSignal(false)
+  const visible = createMemo(
+    () => !session()?.parentID && permissions().length === 0 && questions().length === 0 && !contextVisible(),
+  )
+  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
 
   const pending = createMemo(() => {
-    return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
+    const status = sync.data.session_status?.[route.sessionID]
+    return pendingAssistantID(messages(), status)
   })
+  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
@@ -228,7 +246,7 @@ export function Session() {
   const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
-  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", false)
+  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_enabled", true)
   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
   const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
   const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
@@ -245,6 +263,25 @@ export function Session() {
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+  const local = useLocal()
+  const userMessageAgentColors = createMemo(() => {
+    return new Map(messages().filter((m) => m.role === "user").map((m) => [m.id, local.agent.color(m.agent)]))
+  })
+  function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
+    const s = scroll
+    if (!s) return
+
+    const colors = userMessageAgentColors()
+    drawSmoothScrollbar({
+      buffer,
+      scrollBox: s,
+      markers: s.content.getChildrenSortedByPrimaryAxis().flatMap((child): SmoothScrollbarMarker[] => {
+        const color = colors.get(child.id)
+        if (!color) return []
+        return [{ offset: Math.max(0, child.screenY - s.content.screenY), color }]
+      }),
+    })
+  }
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
@@ -285,6 +322,7 @@ export function Session() {
         variant: "error",
         duration: 5000,
       })
+      if (ConnectionError.isConnectionError(error)) return
       navigate({ type: "home" })
     })
   })
@@ -305,6 +343,32 @@ export function Session() {
       lastSwitch = part.id
     }
   })
+
+  event.on("server.connected", () => {
+    void sync.session.sync(route.sessionID, { force: true })
+  })
+
+  createEffect(
+    on(
+      () => {
+        const last = messages().at(-1)
+        return [
+          route.sessionID,
+          sync.data.session_status[route.sessionID]?.type,
+          last?.id,
+          last?.role,
+          last?.role === "assistant" ? last.time.completed : undefined,
+        ] as const
+      },
+      ([sessionID]) => {
+        if (!shouldRefreshStaleBusyStatus(messages(), sync.data.session_status[sessionID])) return
+        const timer = setTimeout(() => {
+          void sync.session.sync(sessionID, { force: true })
+        }, 1_500)
+        onCleanup(() => clearTimeout(timer))
+      },
+    ),
+  )
 
   let seeded = false
   let scroll: ScrollBoxRenderable
@@ -413,8 +477,6 @@ export function Session() {
       scroll.scrollTo(scroll.scrollHeight)
     }, 50)
   }
-
-  const local = useLocal()
 
   function moveFirstChild() {
     if (children().length === 1) return
@@ -569,6 +631,18 @@ export function Session() {
           providerID: selectedModel.providerID,
         })
         dialog.clear()
+      },
+    },
+    {
+      title: contextVisible() ? "Hide context usage" : "Context usage",
+      value: "session.context",
+      category: "Session",
+      slash: {
+        name: "context",
+      },
+      run: () => {
+        dialog.clear()
+        setContextVisible((visible) => !visible)
       },
     },
     {
@@ -1116,15 +1190,20 @@ export function Session() {
             <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
+                viewportCulling={!streamingActive()}
                 viewportOptions={{
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}
+                contentOptions={{
+                  paddingRight: showScrollbar() ? 1 : 0,
+                }}
                 verticalScrollbarOptions={{
-                  paddingLeft: 1,
+                  paddingLeft: 0,
                   visible: showScrollbar(),
                   trackOptions: {
                     backgroundColor: theme.backgroundElement,
-                    foregroundColor: theme.border,
+                    foregroundColor: theme.textMuted,
+                    renderAfter: drawSessionScrollbar,
                   },
                 }}
                 stickyScroll={true}
@@ -1229,12 +1308,24 @@ export function Session() {
                   )}
                 </For>
               </scrollbox>
-              <box flexShrink={0}>
+              <box
+                flexShrink={0}
+                renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+                  const x = Math.max(0, this.screenX)
+                  const y = Math.max(0, this.screenY)
+                  const width = Math.min(this.width, buffer.width - x)
+                  const height = buffer.height - y
+                  if (width > 0 && height > 0) buffer.fillRect(x, y, width, height, theme.background)
+                }}
+              >
                 <Show when={permissions().length > 0}>
                   <PermissionPrompt request={permissions()[0]} />
                 </Show>
                 <Show when={permissions().length === 0 && questions().length > 0}>
                   <QuestionPrompt request={questions()[0]} />
+                </Show>
+                <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>
+                  <ContextUsagePanel sessionID={route.sessionID} onClose={() => setContextVisible(false)} />
                 </Show>
                 <Show when={session()?.parentID}>
                   <SubagentFooter />
@@ -1340,6 +1431,7 @@ function UserMessage(props: {
           borderColor={color()}
           customBorderChars={SplitBorder.customBorderChars}
           marginTop={props.index === 0 ? 0 : 1}
+          flexShrink={0}
         >
           <box
             onMouseOver={() => {
@@ -1418,6 +1510,21 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
+  const visibleParts = createMemo(() => {
+    return props.parts.some((part) => {
+      if (part.type === "text") return part.text.trim().length > 0
+      if (part.type === "reasoning") {
+        if (!ctx.showThinking()) return false
+        return part.text.replace("[REDACTED]", "").trim().length > 0
+      }
+      if (part.type === "tool") return true
+      return false
+    })
+  })
+  const footerVisible = createMemo(() => {
+    if (!visibleParts() && !props.message.error) return false
+    return final() || props.message.error?.name === "MessageAbortedError"
+  })
 
   const duration = createMemo(() => {
     if (!final()) return 0
@@ -1430,7 +1537,19 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const childShortcut = useCommandShortcut("session.child.first")
 
   return (
-    <>
+    <box
+      id={props.message.id}
+      border={["left"]}
+      customBorderChars={SplitBorder.customBorderChars}
+      borderColor={theme.backgroundElement}
+      flexShrink={0}
+      renderAfter={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+        const x = Math.max(0, this.screenX)
+        const y = Math.max(0, this.screenY)
+        if (x >= buffer.width || y >= buffer.height) return
+        buffer.fillRect(x, y, 1, 1, theme.background)
+      }}
+    >
       <For each={props.parts}>
         {(part, index) => {
           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
@@ -1469,7 +1588,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         </box>
       </Show>
       <Switch>
-        <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
+        <Match when={footerVisible()}>
           <box paddingLeft={3}>
             <text marginTop={1}>
               <span
@@ -1494,7 +1613,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           </box>
         </Match>
       </Switch>
-    </>
+    </box>
   )
 }
 
@@ -1507,77 +1626,82 @@ const PART_MAPPING = {
 function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
-  // Collapsed by default in hide mode: a single line throughout, so the
-  // layout never shifts. Click to open the full markdown block, click to close.
+  const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
 
   const content = createMemo(() => {
-    // OpenRouter encrypts some reasoning blocks; drop the placeholder.
     return props.part.text.replace("[REDACTED]", "").trim()
   })
-  // Reasoning is finalized when the server sets `time.end` (see processor.ts).
-  // Flips independently of the parent message completing.
-  const isDone = createMemo(() => props.part.time.end !== undefined)
-  const inMinimal = createMemo(() => ctx.thinkingMode() === "hide")
-  const duration = createMemo(() => {
-    const end = props.part.time.end
-    return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
+  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+  createEffect(() => setDisplayContent(content()))
+  const renderedContent = createMemo(() => displayContent() || content())
+  const lines = createMemo(() => renderedContent().split("\n"))
+  const previewLines = 5
+  const overflow = createMemo(() => lines().length > previewLines)
+  const preview = createMemo(() => {
+    if (expanded() || !overflow()) return renderedContent()
+    return [...lines().slice(0, previewLines), "…"].join("\n")
   })
-  // OpenAI / Copilot / opencode-via-OpenAI emit `**Title**\n\n<body>` summary
-  // blocks. Surface the title both while streaming and after settling so the
-  // collapsed line carries real signal, not just a duration.
-  const title = createMemo(() => reasoningTitle(content()))
-
-  const toggle = () => {
-    if (!inMinimal()) return
-    setExpanded((prev) => !prev)
-  }
+  const streaming = createMemo(() => !props.message.time.completed)
+  const completedKey = createMemo(() => `${ctx.width}\u0000${preview()}`)
 
   return (
-    <Show when={content()}>
-      <Switch>
-        <Match when={!inMinimal() || expanded()}>
-          {/* Full markdown block: `show` mode, or `hide` after the user opens it. */}
-          <box
-            id={"text-" + props.part.id}
-            paddingLeft={2}
-            marginTop={1}
-            flexDirection="column"
-            border={["left"]}
-            customBorderChars={SplitBorder.customBorderChars}
-            borderColor={theme.backgroundElement}
-            onMouseUp={toggle}
-          >
-            <code
-              filetype="markdown"
-              drawUnstyledText={false}
-              streaming={true}
-              syntaxStyle={subtleSyntax()}
-              content={(inMinimal() ? "▼ " : "") + (isDone() ? "_Thought:_ " : "_Thinking:_ ") + content()}
-              conceal={ctx.conceal()}
-              fg={theme.textMuted}
-            />
+    <Show when={content() && ctx.showThinking()}>
+      <box
+        id={"text-" + props.part.id}
+        paddingLeft={2}
+        marginTop={1}
+        flexDirection="column"
+        border={["left"]}
+        customBorderChars={SplitBorder.customBorderChars}
+        borderColor={theme.backgroundElement}
+        flexShrink={0}
+        onMouseUp={() => {
+          if (renderer.getSelection()?.getSelectedText()) return
+          setExpanded((prev) => !prev)
+        }}
+      >
+        <box>
+          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>
+            Thinking ({renderedContent().length.toLocaleString()} chars):
+          </text>
+        </box>
+        <box>
+          <Switch>
+            <Match when={streaming()}>
+              <code
+                filetype="markdown"
+                drawUnstyledText={false}
+                streaming={true}
+                syntaxStyle={subtleSyntax()}
+                content={preview()}
+                conceal={ctx.conceal()}
+                fg={theme.textMuted}
+              />
+            </Match>
+            <Match when={!streaming()}>
+              <Show keyed when={completedKey()}>
+                {(_key) => (
+                  <code
+                    filetype="markdown"
+                    drawUnstyledText={false}
+                    streaming={false}
+                    syntaxStyle={subtleSyntax()}
+                    content={preview()}
+                    conceal={ctx.conceal()}
+                    fg={theme.textMuted}
+                  />
+                )}
+              </Show>
+            </Match>
+          </Switch>
+        </box>
+        <Show when={overflow()}>
+          <box>
+            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
           </box>
-        </Match>
-        <Match when={isDone()}>
-          {/* Settled: ▶ at the start as the click-to-expand cue. */}
-          <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0} onMouseUp={toggle}>
-            <text fg={theme.textMuted} wrapMode="none">
-              {"▶ " +
-                (title()
-                  ? "Thought: " + title() + " · " + Locale.duration(duration())
-                  : "Thought for " + Locale.duration(duration()))}
-            </text>
-          </box>
-        </Match>
-        <Match when={true}>
-          {/* Streaming: leading animated spinner, no disclosure arrow yet — it
-              snaps in once reasoning settles, signalling "done, click to expand". */}
-          <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0} onMouseUp={toggle}>
-            <Spinner color={theme.textMuted}>{title() ? "Thinking: " + title() : "Thinking"}</Spinner>
-          </box>
-        </Match>
-      </Switch>
+        </Show>
+      </box>
     </Show>
   )
 }
@@ -1585,19 +1709,56 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  const streaming = createMemo(() => !props.message.time.completed)
+  const content = createMemo(() => props.part.text.trim())
+  const completedKey = createMemo(() => `${ctx.width}\u0000${content()}`)
   return (
-    <Show when={props.part.text.trim()}>
+    <Show when={content()}>
       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
-        <markdown
-          syntaxStyle={syntax()}
-          streaming={true}
-          internalBlockMode="top-level"
-          content={props.part.text.trim()}
-          tableOptions={{ style: "grid" }}
-          conceal={ctx.conceal()}
-          fg={theme.markdownText}
-          bg={theme.background}
-        />
+        <Switch>
+          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                <markdown
+                  syntaxStyle={syntax()}
+                  streaming={false}
+                  internalBlockMode="top-level"
+                  content={content()}
+                  tableOptions={{ style: "grid" }}
+                  conceal={ctx.conceal()}
+                  fg={theme.markdownText}
+                  bg={theme.background}
+                />
+              )}
+            </Show>
+          </Match>
+          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
+            <Show keyed when={completedKey()}>
+              {(_key) => (
+                <code
+                  filetype="markdown"
+                  drawUnstyledText={false}
+                  streaming={false}
+                  syntaxStyle={syntax()}
+                  content={content()}
+                  conceal={ctx.conceal()}
+                  fg={theme.text}
+                />
+              )}
+            </Show>
+          </Match>
+          <Match when={streaming()}>
+            <code
+              filetype="markdown"
+              drawUnstyledText={false}
+              streaming={true}
+              syntaxStyle={syntax()}
+              content={content()}
+              conceal={ctx.conceal()}
+              fg={theme.text}
+            />
+          </Match>
+        </Switch>
       </box>
     </Show>
   )
@@ -1697,18 +1858,16 @@ type ToolProps<T> = {
   output?: string
   part: ToolPart
 }
+
+function previewText(input: string, maxLines: number) {
+  const lines = input.split("\n")
+  if (lines.length <= maxLines) return input
+  return [...lines.slice(0, maxLines), "…"].join("\n")
+}
 function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
   const ctx = use()
   const output = createMemo(() => props.output?.trim() ?? "")
-  const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const maxLines = 3
-  const overflow = createMemo(() => lines().length > maxLines)
-  const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, maxLines), "…"].join("\n")
-  })
 
   return (
     <Show
@@ -1719,18 +1878,16 @@ function GenericTool(props: ToolProps<any>) {
         </InlineTool>
       }
     >
-      <BlockTool
-        title={`# ${props.tool} ${input(props.input)}`}
-        part={props.part}
-        onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
-      >
-        <box gap={1}>
-          <text fg={theme.text}>{limited()}</text>
-          <Show when={overflow()}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-        </box>
-      </BlockTool>
+        <BlockTool
+          title={`# ${props.tool} ${input(props.input)}`}
+          part={props.part}
+          maxLines={10}
+          threshold={20}
+          totalLines={output().split("\n").length}
+          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+        >
+        <text fg={theme.text}>{output()}</text>
+        </BlockTool>
     </Show>
   )
 }
@@ -1779,6 +1936,7 @@ function InlineTool(props: {
     <box
       marginTop={margin()}
       paddingLeft={3}
+      overflow="hidden"
       onMouseOver={() => props.onClick && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={() => {
@@ -1813,7 +1971,7 @@ function InlineTool(props: {
           <Spinner color={fg()} children={props.children} />
         </Match>
         <Match when={true}>
-          <text paddingLeft={3} fg={fg()} attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
+          <text paddingLeft={3} fg={fg()} wrapMode="none" attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
               <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
             </Show>
@@ -1831,13 +1989,34 @@ function BlockTool(props: {
   title: string
   children: JSX.Element
   onClick?: () => void
+  onRightClick?: () => void
   part?: ToolPart
   spinner?: boolean
+  contextView?: boolean
+  contextLabel?: string
+  maxLines?: number
+  threshold?: number
+  totalLines?: number
+  preview?: JSX.Element
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+  const background = createMemo(() => {
+    if (props.contextView) return theme.diffContextBg
+    if (hover()) return theme.backgroundMenu
+    return theme.backgroundPanel
+  })
+  const previewLines = createMemo(() => props.maxLines ?? 10)
+  const threshold = createMemo(() => props.threshold ?? 20)
+  const [canCollapse, setCanCollapse] = createSignal(false)
+  createEffect(() => {
+    if (canCollapse()) return
+    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) setCanCollapse(true)
+  })
+  const [expanded, setExpanded] = createSignal(false)
+  const collapsed = createMemo(() => canCollapse() && !expanded())
   return (
     <box
       border={["left"]}
@@ -1846,13 +2025,21 @@ function BlockTool(props: {
       paddingLeft={2}
       marginTop={1}
       gap={1}
-      backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
+      backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
-      borderColor={theme.background}
-      onMouseOver={() => props.onClick && setHover(true)}
+      borderColor={props.contextView ? theme.info : theme.background}
+      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt?: TuiMouseEvent) => {
         if (renderer.getSelection()?.getSelectedText()) return
+        if (evt?.button === MouseButton.RIGHT) {
+          if (!props.onRightClick) return
+          evt.preventDefault()
+          evt.stopPropagation()
+          props.onRightClick()
+          return
+        }
+        if (canCollapse()) setExpanded((prev) => !prev)
         props.onClick?.()
       }}
     >
@@ -1861,14 +2048,30 @@ function BlockTool(props: {
         fallback={
           <text paddingLeft={3} fg={theme.textMuted}>
             {props.title}
+            <Show when={props.contextView && props.contextLabel}> · {props.contextLabel}</Show>
           </text>
         }
       >
         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
       </Show>
-      {props.children}
+      <box
+        marginTop={1}
+        maxHeight={collapsed() && !props.preview ? previewLines() : undefined}
+        overflow={collapsed() && !props.preview ? "hidden" : undefined}
+      >
+        <Show when={!collapsed() || !props.preview} fallback={props.preview}>
+          {props.children}
+        </Show>
+      </box>
+      <Show when={canCollapse()}>
+        <box marginTop={1}>
+          <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+        </box>
+      </Show>
       <Show when={error()}>
-        <text fg={theme.error}>{error()}</text>
+        <box marginTop={1}>
+          <text fg={theme.error}>{error()}</text>
+        </box>
       </Show>
     </box>
   )
@@ -1878,13 +2081,11 @@ function Shell(props: ToolProps<typeof ShellTool>) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
-  const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const overflow = createMemo(() => lines().length > 10)
-  const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
+  const [showContextOutput, setShowContextOutput] = createSignal(false)
+  const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
+  const output = createMemo(() => {
+    const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
+    return stripAnsi(text?.trim() ?? "")
   })
 
   const workdirDisplay = createMemo(() => {
@@ -1901,6 +2102,11 @@ function Shell(props: ToolProps<typeof ShellTool>) {
     return `# ${desc} in ${wd}`
   })
 
+  const toggleContextOutput = () => {
+    if (!contextOutputAvailable()) return
+    setShowContextOutput((prev) => !prev)
+  }
+
   return (
     <Switch>
       <Match when={props.metadata.output !== undefined}>
@@ -1908,15 +2114,28 @@ function Shell(props: ToolProps<typeof ShellTool>) {
           title={title()}
           part={props.part}
           spinner={isRunning()}
-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+          maxLines={isRunning() || showContextOutput() ? 0 : 10}
+          threshold={20}
+          totalLines={1 + output().split("\n").length}
+          onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
+          contextView={showContextOutput()}
+          contextLabel="returned to model"
+          preview={
+            <box gap={1}>
+              <text fg={theme.text}>$ {props.input.command}</text>
+              <Show when={output()}>
+                <text fg={theme.text}>{previewText(output(), 10)}</text>
+              </Show>
+            </box>
+          }
         >
           <box gap={1}>
             <text fg={theme.text}>$ {props.input.command}</text>
-            <Show when={output()}>
-              <text fg={theme.text}>{limited()}</text>
+            <Show when={showContextOutput()}>
+              <text fg={theme.info}>Model context output</text>
             </Show>
-            <Show when={overflow()}>
-              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+            <Show when={output()}>
+              <text fg={theme.text}>{output()}</text>
             </Show>
           </box>
         </BlockTool>
@@ -1930,28 +2149,113 @@ function Shell(props: ToolProps<typeof ShellTool>) {
   )
 }
 
+function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
+  const ctx = use()
+  const { theme, syntax } = useTheme()
+
+  return (
+    <box paddingLeft={1}>
+      <diff
+        diff={props.diff}
+        view={props.view}
+        syncScroll={props.syncScroll ?? true}
+        filetype={filetype(props.filePath)}
+        syntaxStyle={syntax()}
+        showLineNumbers={true}
+        width="100%"
+        wrapMode={ctx.diffWrapMode()}
+        fg={theme.text}
+        addedBg={theme.diffAddedBg}
+        removedBg={theme.diffRemovedBg}
+        contextBg={theme.diffContextBg}
+        addedSignColor={theme.diffHighlightAdded}
+        removedSignColor={theme.diffHighlightRemoved}
+        lineNumberFg={theme.diffLineNumber}
+        lineNumberBg={theme.diffContextBg}
+        addedLineNumberBg={theme.diffAddedLineNumberBg}
+        removedLineNumberBg={theme.diffRemovedLineNumberBg}
+      />
+    </box>
+  )
+}
+
+function DiffPreview(props: { diff: string; filePath?: string; view: "split" | "unified"; maxLines: number }) {
+  return (
+    <box maxHeight={props.maxLines} overflow="hidden">
+      <DiffView diff={props.diff} filePath={props.filePath} view={props.view} syncScroll={true} />
+    </box>
+  )
+}
+
 function Write(props: ToolProps<typeof WriteTool>) {
+  const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
   const code = createMemo(() => {
     if (!props.input.content) return ""
     return props.input.content
   })
+  const diff = createMemo(() => props.metadata.diff as string | undefined)
+  const isOverwrite = createMemo(() => props.metadata.exists === true && !!diff())
+  const view = createMemo(() => {
+    const diffStyle = ctx.tui.diff_style
+    if (diffStyle === "stacked") return "unified"
+    return ctx.width > 120 ? "split" : "unified"
+  })
+  const diffStats = createMemo(() => diffLineStats(diff() ?? ""))
 
   return (
     <Switch>
+      <Match when={isOverwrite()}>
+        <BlockTool
+          title={
+            "← Write " +
+            pathFormatter.format(props.input.filePath) +
+            (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")
+          }
+          part={props.part}
+          maxLines={10}
+          threshold={20}
+          totalLines={diffStats().total}
+          preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
+        >
+          <box gap={1} flexDirection="column">
+            <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+          </box>
+        </BlockTool>
+      </Match>
       <Match when={props.metadata.diagnostics !== undefined}>
-        <BlockTool title={"# Wrote " + pathFormatter.format(props.input.filePath)} part={props.part}>
-          <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
-            <code
-              conceal={false}
-              fg={theme.text}
-              filetype={filetype(props.input.filePath!)}
-              syntaxStyle={syntax()}
-              content={code()}
-            />
-          </line_number>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+        <BlockTool
+          title={"# Wrote " + pathFormatter.format(props.input.filePath)}
+          part={props.part}
+          maxLines={10}
+          threshold={20}
+          totalLines={code().split("\n").length}
+          preview={
+            <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+              <code
+                conceal={false}
+                fg={theme.text}
+                filetype={filetype(props.input.filePath!)}
+                syntaxStyle={syntax()}
+                content={previewText(code(), 10)}
+              />
+            </line_number>
+          }
+        >
+          <box gap={1} flexDirection="column">
+            <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+              <code
+                conceal={false}
+                fg={theme.text}
+                filetype={filetype(props.input.filePath!)}
+                syntaxStyle={syntax()}
+                content={code()}
+              />
+            </line_number>
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+          </box>
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -2118,7 +2422,6 @@ function Task(props: ToolProps<typeof TaskTool>) {
 
 function Edit(props: ToolProps<typeof EditTool>) {
   const ctx = use()
-  const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
 
   const view = createMemo(() => {
@@ -2128,36 +2431,28 @@ function Edit(props: ToolProps<typeof EditTool>) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  const ft = createMemo(() => filetype(props.input.filePath))
-
-  const diffContent = createMemo(() => props.metadata.diff)
+  const diffContent = createMemo(() => props.metadata.diff || "")
+  const stats = createMemo(() => diffLineStats(diffContent()))
 
   return (
     <Switch>
       <Match when={props.metadata.diff !== undefined}>
-        <BlockTool title={"← Edit " + pathFormatter.format(props.input.filePath)} part={props.part}>
-          <box paddingLeft={1}>
-            <diff
-              diff={diffContent()}
-              view={view()}
-              filetype={ft()}
-              syntaxStyle={syntax()}
-              showLineNumbers={true}
-              width="100%"
-              wrapMode={ctx.diffWrapMode()}
-              fg={theme.text}
-              addedBg={theme.diffAddedBg}
-              removedBg={theme.diffRemovedBg}
-              contextBg={theme.diffContextBg}
-              addedSignColor={theme.diffHighlightAdded}
-              removedSignColor={theme.diffHighlightRemoved}
-              lineNumberFg={theme.diffLineNumber}
-              lineNumberBg={theme.diffContextBg}
-              addedLineNumberBg={theme.diffAddedLineNumberBg}
-              removedLineNumberBg={theme.diffRemovedLineNumberBg}
-            />
+        <BlockTool
+          title={
+            "← Edit " +
+            pathFormatter.format(props.input.filePath) +
+            (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")
+          }
+          part={props.part}
+          maxLines={10}
+          threshold={20}
+          totalLines={stats().total}
+          preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
+        >
+          <box gap={1} flexDirection="column">
+            <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
           </box>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -2171,7 +2466,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
 
 function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   const ctx = use()
-  const { theme, syntax } = useTheme()
+  const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
 
   const files = createMemo(() => props.metadata.files ?? [])
@@ -2182,59 +2477,60 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  function Diff(p: { diff: string; filePath: string }) {
-    return (
-      <box paddingLeft={1}>
-        <diff
-          diff={p.diff}
-          view={view()}
-          filetype={filetype(p.filePath)}
-          syntaxStyle={syntax()}
-          showLineNumbers={true}
-          width="100%"
-          wrapMode={ctx.diffWrapMode()}
-          fg={theme.text}
-          addedBg={theme.diffAddedBg}
-          removedBg={theme.diffRemovedBg}
-          contextBg={theme.diffContextBg}
-          addedSignColor={theme.diffHighlightAdded}
-          removedSignColor={theme.diffHighlightRemoved}
-          lineNumberFg={theme.diffLineNumber}
-          lineNumberBg={theme.diffContextBg}
-          addedLineNumberBg={theme.diffAddedLineNumberBg}
-          removedLineNumberBg={theme.diffRemovedLineNumberBg}
-        />
-      </box>
-    )
-  }
+  function title(file: { type: string; relativePath: string; filePath: string; deletions: number; patch?: string }) {
+    const baseTitle = (() => {
+      if (file.type === "delete") return "# Deleted " + file.relativePath
+      if (file.type === "add") return "# Created " + file.relativePath
+      if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
+      return "← Patched " + file.relativePath
+    })()
 
-  function title(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
-    if (file.type === "delete") return "# Deleted " + file.relativePath
-    if (file.type === "add") return "# Created " + file.relativePath
-    if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
-    return "← Patched " + file.relativePath
+    if (file.type === "delete" || !file.patch) return baseTitle
+    const stats = diffLineStats(file.patch)
+    if (stats.added === 0 && stats.removed === 0) return baseTitle
+    return `${baseTitle} +${stats.added} -${stats.removed}`
   }
 
   return (
     <Switch>
-      <Match when={files().length > 0}>
-        <For each={files()}>
-          {(file) => (
-            <BlockTool title={title(file)} part={props.part}>
-              <Show
-                when={file.type !== "delete"}
-                fallback={
-                  <text fg={theme.diffRemoved}>
-                    -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                  </text>
+        <Match when={files().length > 0}>
+          <For each={files()}>
+            {(file) => (
+              <BlockTool
+                title={title(file)}
+                part={props.part}
+                maxLines={10}
+                threshold={20}
+                totalLines={(file.patch ?? "").split("\n").length}
+                preview={
+                  <Show
+                    when={file.type !== "delete"}
+                    fallback={
+                      <text fg={theme.diffRemoved} paddingLeft={1}>
+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                      </text>
+                    }
+                  >
+                    <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
+                  </Show>
                 }
               >
-                <Diff diff={file.patch} filePath={file.filePath} />
-                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-              </Show>
-            </BlockTool>
-          )}
-        </For>
+                <box gap={1} flexDirection="column">
+                  <Show
+                    when={file.type !== "delete"}
+                    fallback={
+                      <text fg={theme.diffRemoved} paddingLeft={1}>
+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                      </text>
+                    }
+                  >
+                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
+                  </Show>
+                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+                </box>
+              </BlockTool>
+            )}
+          </For>
       </Match>
       <Match when={true}>
         <InlineTool icon="%" pending="Preparing patch..." complete={false} part={props.part}>
@@ -2329,6 +2625,15 @@ function Diagnostics(props: { diagnostics?: Record<string, Record<string, any>[]
       </box>
     </Show>
   )
+}
+
+function diffLineStats(diff: string) {
+  const lines = diff.split("\n")
+  return {
+    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
+    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+    total: lines.length,
+  }
 }
 
 function input(input: Record<string, any>, omit?: string[]): string {

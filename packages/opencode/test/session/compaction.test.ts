@@ -1431,7 +1431,7 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("<previous-summary>")
         expect(captured).toContain("summary one")
         expect(captured.match(/summary one/g)?.length).toBe(1)
-        expect(captured).toContain("## Constraints & Preferences")
+        expect(captured).toContain("## User Constraints & Preferences")
         expect(captured).toContain("## Progress")
       }).pipe(withCompaction({ llm: stub.layer }))
     },

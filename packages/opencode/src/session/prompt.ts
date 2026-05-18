@@ -1136,7 +1136,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
             // [local-smark] 保留 userMsg 用于后续处理
             return { msg, part, cwd: ctx.directory, userMsg }
->>>>>>> upstream/dev
           }).pipe(Effect.ensuring(markReady))
 
           const cfg = yield* config.get()
@@ -1988,7 +1987,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             })
             msg.time.completed = Date.now()
             yield* sessions.updateMessage(msg)
-          })
           })
 
           const handle = yield* processor

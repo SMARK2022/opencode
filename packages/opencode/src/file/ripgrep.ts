@@ -151,9 +151,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Ri
 
 export const SearchTooBroadError = NamedError.create(
   "SearchTooBroadError",
-  z.object({
-    maxFiles: z.number(),
-    message: z.string(),
+  Schema.Struct({
+    maxFiles: Schema.Number,
+    message: Schema.String,
   }),
 )
 

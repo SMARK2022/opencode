@@ -51,7 +51,6 @@ import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 // [local-smark] Token flow pulse and throttled signal for usage display
 import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
 import {
   confirmWorkspaceFileChanges,
@@ -1572,6 +1571,28 @@ export function Prompt(props: PromptProps) {
 
   return (
     <>
+      <Autocomplete
+        sessionID={props.sessionID}
+        ref={(r) => {
+          setAuto(() => r)
+        }}
+        anchor={() => anchor}
+        input={() => input}
+        setPrompt={(cb) => {
+          setStore("prompt", produce(cb))
+        }}
+        setExtmark={(partIndex, extmarkId) => {
+          setStore("extmarkToPartIndex", (map: Map<number, number>) => {
+            const newMap = new Map(map)
+            newMap.set(extmarkId, partIndex)
+            return newMap
+          })
+        }}
+        value={store.prompt.input}
+        fileStyleId={fileStyleId}
+        agentStyleId={agentStyleId}
+        promptPartTypeId={() => promptPartTypeId}
+      />
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false}>
         <box
           border={["left"]}
@@ -1903,28 +1924,6 @@ export function Prompt(props: PromptProps) {
           </Show>
         </box>
       </box>
-      <Autocomplete
-        sessionID={props.sessionID}
-        ref={(r) => {
-          setAuto(() => r)
-        }}
-        anchor={() => anchor}
-        input={() => input}
-        setPrompt={(cb) => {
-          setStore("prompt", produce(cb))
-        }}
-        setExtmark={(partIndex, extmarkId) => {
-          setStore("extmarkToPartIndex", (map: Map<number, number>) => {
-            const newMap = new Map(map)
-            newMap.set(extmarkId, partIndex)
-            return newMap
-          })
-        }}
-        value={store.prompt.input}
-        fileStyleId={fileStyleId}
-        agentStyleId={agentStyleId}
-        promptPartTypeId={() => promptPartTypeId}
-      />
     </>
   )
 }

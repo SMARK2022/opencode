@@ -3,7 +3,7 @@ import { rename, rm } from "fs/promises"
 import { randomUUID } from "crypto"
 import { Global } from "@opencode-ai/core/global"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
-import { Path as DatabasePath } from "@/storage/db"
+import { getPath as DatabasePath } from "@/storage/db"
 
 export type ServerLock = {
   pid: number

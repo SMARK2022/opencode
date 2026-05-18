@@ -50,7 +50,7 @@ export function useEvent() {
 
       // [local-smark] Handle server.connected event for daemon multi-instance
       if (event.payload.type === "server.connected") {
-        handler(event.payload)
+        handler(event.payload, { workspace: event.workspace })
         return
       }
 
@@ -59,11 +59,11 @@ export function useEvent() {
       }
 
       if (project.workspace.current()) {
-        if (event.workspace === project.workspace.current()) handler(event.payload)
+        if (event.workspace === project.workspace.current()) handler(event.payload, { workspace: event.workspace })
         return
       }
 
-      if (sameDirectory(event.directory, project.instance.directory())) handler(event.payload)
+      if (sameDirectory(event.directory, project.instance.directory())) handler(event.payload, { workspace: event.workspace })
     })
   }
 

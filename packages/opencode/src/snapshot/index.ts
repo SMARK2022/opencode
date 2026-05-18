@@ -676,21 +676,13 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
                     ]
                   })
 
-                // Hide ignored-file removals from the user-facing diff output.
+                // [local-smark] Hide ignored-file removals from the user-facing diff output.
                 const ignored = yield* ignore(rows.map((r) => r.file))
                 if (ignored.size > 0) {
                   const filtered = rows.filter((r) => !ignored.has(r.file))
                   rows.length = 0
                   rows.push(...filtered)
                 }
-
-              // [local-smark] Hide ignored-file removals from the user-facing diff output.
-              const ignored = yield* ignore(rows.map((r) => r.file))
-              if (ignored.size > 0) {
-                const filtered = rows.filter((r) => !ignored.has(r.file))
-                rows.length = 0
-                rows.push(...filtered)
-              }
 
                 const step = 100
                 // [local-smark] Large-file threshold: skip JS-side diff for files whose combined

@@ -501,6 +501,14 @@ function normalizeParameter(param: OpenApiParameter, route: string) {
 }
 
 // [local-smark] pathParameterSchema: 为 request_usage 等本地路由提供路径参数 schema
+const PathParameterSchemas = {
+  sessionID: { type: "string", pattern: "^ses.*" },
+  messageID: { type: "string", pattern: "^msg.*" },
+  partID: { type: "string", pattern: "^prt.*" },
+  permissionID: { type: "string", pattern: "^per.*" },
+  ptyID: { type: "string", pattern: "^pty.*" },
+}
+
 function pathParameterSchema(route: string, name: string) {
   if (name in PathParameterSchemas) return PathParameterSchemas[name as keyof typeof PathParameterSchemas]
   if (name === "id" && route.startsWith("DELETE /experimental/workspace/")) return { type: "string", pattern: "^wrk.*" }

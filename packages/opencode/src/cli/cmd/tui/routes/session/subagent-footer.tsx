@@ -5,8 +5,6 @@ import { useTheme } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
 // [local-smark] UserMessage type needed for token accounting
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
-import { useCommandDialog } from "@tui/component/dialog-command"
-import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util/locale"
 import { tokenAccounting } from "../../util/token-accounting"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"

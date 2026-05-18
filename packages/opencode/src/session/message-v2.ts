@@ -44,7 +44,7 @@ const Hidden = Schema.Struct({
   reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
 })
 
-export const OutputLengthError = NamedError.create("MessageOutputLengthError", {})
+// OutputLengthError is re-exported from ./message-error above
 export const AbortedError = NamedError.create("MessageAbortedError", { message: Schema.String })
 export const StructuredOutputError = NamedError.create("StructuredOutputError", {
   message: Schema.String,

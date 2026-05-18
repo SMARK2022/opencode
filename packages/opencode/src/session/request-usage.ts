@@ -35,9 +35,9 @@ export type Tokens = z.infer<typeof Tokens>
 
 export const Request = z
   .object({
-    sessionID: SessionID.zod,
-    requestID: MessageID.zod,
-    rootRequestID: MessageID.zod,
+    sessionID: z.string(),
+    requestID: z.string(),
+    rootRequestID: z.string(),
     source: Source,
     status: Status,
     agent: z.string(),
@@ -62,10 +62,10 @@ export type Request = z.infer<typeof Request>
 
 export const Assistant = z
   .object({
-    sessionID: SessionID.zod,
-    requestID: MessageID.zod,
-    assistantMessageID: MessageID.zod,
-    rootRequestID: MessageID.zod,
+    sessionID: z.string(),
+    requestID: z.string(),
+    assistantMessageID: z.string(),
+    rootRequestID: z.string(),
     status: Status,
     model: z.object({
       providerID: z.string(),

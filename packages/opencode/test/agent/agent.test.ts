@@ -702,12 +702,12 @@ it.instance(
 )
 
 it.instance(
-  "defaultAgent returns plan when build is disabled and default_agent not set",
+  "defaultAgent returns interactive when build is disabled and default_agent not set",
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      // build is disabled, so it should return plan (next primary agent)
-      expect(agent).toBe("plan")
+      // build is disabled; interactive comes next in the local primary-agent order.
+      expect(agent).toBe("interactive")
     }),
   {
     config: {
@@ -726,6 +726,8 @@ it.instance(
       agent: {
         build: { disable: true },
         plan: { disable: true },
+        interactive: { disable: true },
+        decide: { disable: true },
       },
     },
   },

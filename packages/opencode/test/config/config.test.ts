@@ -1,4 +1,4 @@
-import { test, expect, describe, mock, afterEach, beforeEach } from "bun:test"
+import { test, expect, describe, mock, afterEach, beforeEach, spyOn } from "bun:test"
 import { Effect, Layer, Option } from "effect"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { Config } from "@/config/config"
@@ -31,6 +31,7 @@ import { ProjectID } from "../../src/project/schema"
 import { Filesystem } from "@/util/filesystem"
 import { ConfigPlugin } from "@/config/plugin"
 import { Npm } from "@opencode-ai/core/npm"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 
 const emptyAccount = Layer.mock(Account.Service)({
   active: () => Effect.succeed(Option.none()),
@@ -1938,25 +1939,22 @@ test("local .opencode config can override MCP from project config", async () => 
 })
 
 test.skipIf(process.platform === "win32")("project config overrides remote well-known config", async () => {
-  const originalFetch = globalThis.fetch
   let fetchedUrl: string | undefined
-  globalThis.fetch = mock((url: string | URL | Request) => {
+  const routedFetch = mock((url: string | URL | Request) => {
     const urlStr = url instanceof Request ? url.url : url instanceof URL ? url.href : url
-    if (urlStr.includes(".well-known/opencode")) {
-      fetchedUrl = urlStr
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            config: {
-              mcp: { jira: { type: "remote", url: "https://jira.example.com/mcp", enabled: false } },
-            },
-          }),
-          { status: 200 },
-        ),
-      )
-    }
-    return originalFetch(url)
-  }) as unknown as typeof fetch
+    fetchedUrl = urlStr
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          config: {
+            mcp: { jira: { type: "remote", url: "https://jira.example.com/mcp", enabled: false } },
+          },
+        }),
+        { status: 200 },
+      ),
+    )
+  })
+  const routedFetchSpy = spyOn(NetworkProxy, "routedFetch").mockImplementation(routedFetch)
 
   const fakeAuth = Layer.mock(Auth.Service)({
     all: () =>
@@ -1991,30 +1989,27 @@ test.skipIf(process.platform === "win32")("project config overrides remote well-
       },
     ).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise)
   } finally {
-    globalThis.fetch = originalFetch
+    routedFetchSpy.mockRestore()
   }
 })
 
 test.skipIf(process.platform === "win32")("wellknown URL with trailing slash is normalized", async () => {
-  const originalFetch = globalThis.fetch
   let fetchedUrl: string | undefined
-  globalThis.fetch = mock((url: string | URL | Request) => {
+  const routedFetch = mock((url: string | URL | Request) => {
     const urlStr = url instanceof Request ? url.url : url instanceof URL ? url.href : url
-    if (urlStr.includes(".well-known/opencode")) {
-      fetchedUrl = urlStr
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            config: {
-              mcp: { slack: { type: "remote", url: "https://slack.example.com/mcp", enabled: true } },
-            },
-          }),
-          { status: 200 },
-        ),
-      )
-    }
-    return originalFetch(url)
-  }) as unknown as typeof fetch
+    fetchedUrl = urlStr
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          config: {
+            mcp: { slack: { type: "remote", url: "https://slack.example.com/mcp", enabled: true } },
+          },
+        }),
+        { status: 200 },
+      ),
+    )
+  })
+  const routedFetchSpy = spyOn(NetworkProxy, "routedFetch").mockImplementation(routedFetch)
 
   const fakeAuth = Layer.mock(Auth.Service)({
     all: () =>
@@ -2045,7 +2040,7 @@ test.skipIf(process.platform === "win32")("wellknown URL with trailing slash is 
       { git: true },
     ).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise)
   } finally {
-    globalThis.fetch = originalFetch
+    routedFetchSpy.mockRestore()
   }
 })
 
@@ -2055,24 +2050,26 @@ test("wellknown remote_config supports templated env vars in headers", async () 
   let wellknownFetchedUrl: string | undefined
   let remoteFetchedUrl: string | undefined
   let remoteHeaders: HeadersInit | undefined
+  const routedFetch = mock((url: string | URL | Request) => {
+    const urlStr = url instanceof Request ? url.url : url instanceof URL ? url.href : url
+    wellknownFetchedUrl = urlStr
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          remote_config: {
+            url: "https://config.example.com/opencode.json",
+            headers: {
+              Authorization: "Bearer {env:TEST_TOKEN}",
+            },
+          },
+        }),
+        { status: 200 },
+      ),
+    )
+  })
+  const routedFetchSpy = spyOn(NetworkProxy, "routedFetch").mockImplementation(routedFetch)
   globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
     const urlStr = url instanceof Request ? url.url : url instanceof URL ? url.href : url
-    if (urlStr.includes(".well-known/opencode")) {
-      wellknownFetchedUrl = urlStr
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            remote_config: {
-              url: "https://config.example.com/opencode.json",
-              headers: {
-                Authorization: "Bearer {env:TEST_TOKEN}",
-              },
-            },
-          }),
-          { status: 200 },
-        ),
-      )
-    }
     if (urlStr.includes("config.example.com")) {
       remoteFetchedUrl = urlStr
       remoteHeaders = init?.headers
@@ -2121,6 +2118,7 @@ test("wellknown remote_config supports templated env vars in headers", async () 
     ).pipe(Effect.scoped, Effect.provide(layer), Effect.runPromise)
   } finally {
     globalThis.fetch = originalFetch
+    routedFetchSpy.mockRestore()
     if (originalToken === undefined) delete process.env.TEST_TOKEN
     else process.env.TEST_TOKEN = originalToken
   }

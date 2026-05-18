@@ -402,7 +402,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         before: ctx.query.before,
         rootRequestID: ctx.query.rootRequestID,
         source: ctx.query.source as any,
-      })
+      }).pipe(Effect.mapError(() => new HttpApiError.NotFound({})))
     })
 
     const requestUsageGet = Effect.fn("SessionHttpApi.requestUsageGet")(function* (ctx: {
@@ -410,7 +410,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       yield* requireSession(ctx.params.sessionID)
       const usage = yield* SessionRequestUsage.Service
-      return yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID })
+      return yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
+        Effect.mapError(() => new HttpApiError.NotFound({})),
+      )
     })
 
     const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: {
@@ -418,7 +420,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       yield* requireSession(ctx.params.sessionID)
       const usage = yield* SessionRequestUsage.Service
-      return yield* usage.assistants({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID })
+      return yield* usage.assistants({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
+        Effect.mapError(() => new HttpApiError.NotFound({})),
+      )
     })
 
     return handlers
@@ -450,8 +454,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("deletePart", deletePart)
       .handle("updatePart", updatePart)
       // [local-smark] request_usage endpoints
-      .handle("requestUsageList", requestUsageList)
-      .handle("requestUsageGet", requestUsageGet)
-      .handle("requestUsageAssistants", requestUsageAssistants)
+      .handle("requestUsageList", requestUsageList as any)
+      .handle("requestUsageGet", requestUsageGet as any)
+      .handle("requestUsageAssistants", requestUsageAssistants as any)
   }),
 )

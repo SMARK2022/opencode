@@ -175,9 +175,9 @@ export const make = <A, E = never>(
       case "Running":
         return [
           Effect.gen(function* () {
+            yield* idleIfCurrent()
             yield* Fiber.interrupt(st.run.fiber)
             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
-            yield* idleIfCurrent()
           }),
           { _tag: "Idle" } as const,
         ] as const

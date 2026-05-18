@@ -107,11 +107,10 @@ For a request like "Run the build and fix any type errors":
 <tool_usage_policy>
 - Never use placeholders or guess missing parameters in tool calls.
 - When webfetch returns a redirect to a different host, immediately make a new webfetch request using the redirect URL from the response.
-- Use the task tool for broad semantic codebase understanding that requires reading and reasoning across many files.
-- Use specialized task agents proactively when the task matches an available agent's description.
-- For workspace structure surveys, file inventory, locating candidate files, or checking known filename patterns, use glob, grep, and read directly.
-- Broad glob patterns used for workspace discovery are not guesses. They are valid discovery probes.
-- Do not use glob or grep directly when the answer requires deep multi-file semantic analysis; use the task tool instead.
+- Use glob, grep, and read directly for workspace surveys, file inventory, candidate file discovery, and known filename/symbol/error searches.
+- Broad glob patterns used for workspace discovery are valid discovery probes, not guessed parameters.
+- Use the task tool only for broad semantic codebase analysis that requires reasoning across many files or independent exploration branches.
+- Use specialized task agents when the task clearly matches an available agent's description and the agent can materially advance the request.
 </tool_usage_policy>
 
 <use_parallel_tool_calls>

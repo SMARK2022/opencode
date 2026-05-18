@@ -8,12 +8,14 @@ import path from "path"
 import { Database } from "@/storage/db"
 import { SessionTable } from "@/session/session.sql"
 import { eq } from "drizzle-orm"
+import { SessionPath } from "@/session/path"
 import { testEffect } from "../lib/effect"
 import { Bus } from "@/bus"
 import { Storage } from "@/storage/storage"
 import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
+import { $ } from "bun"
 
 void Log.init({ print: false })
 const it = testEffect(
@@ -96,7 +98,7 @@ describe("session.list", () => {
   )
 
   it.instance(
-    "filters by path and ignores directory when path is provided",
+    "filters by path relatives and ignores directory when path is provided",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -105,6 +107,7 @@ describe("session.list", () => {
         )
         yield* Effect.promise(() => mkdir(path.join(test.directory, "packages", "app"), { recursive: true }))
 
+        const root = yield* withSession({ title: "root" })
         const parent = yield* withSession({ title: "parent" }).pipe(
           provideInstance(path.join(test.directory, "packages", "opencode")),
         )
@@ -124,12 +127,59 @@ describe("session.list", () => {
             path: "packages/opencode/src",
           }),
         )).map((session) => session.id)
-        expect(pathIDs).not.toContain(parent.id)
+        expect(pathIDs).toContain(root.id)
+        expect(pathIDs).toContain(parent.id)
         expect(pathIDs).toContain(current.id)
         expect(pathIDs).toContain(deeper.id)
         expect(pathIDs).not.toContain(sibling.id)
       }),
     { git: true },
+  )
+
+  it.instance("builds path ancestors", () =>
+    Effect.sync(() => {
+      expect(SessionPath.ancestors("packages/opencode/src", { root: true })).toEqual([
+        "",
+        "packages",
+        "packages/opencode",
+        "packages/opencode/src",
+      ])
+      expect(SessionPath.ancestors("F:/A/B/C")).toEqual(["F:", "F:/", "F:/A", "F:/A/B", "F:/A/B/C"])
+    }),
+  )
+
+  it.instance(
+    "includes global parent sessions from a git child project",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const repo = path.join(test.directory, "repo")
+        const child = path.join(repo, "packages", "opencode")
+        yield* Effect.promise(() => mkdir(child, { recursive: true }))
+        yield* Effect.promise(() => $`git init`.cwd(repo).quiet())
+        yield* Effect.promise(() => $`git config core.fsmonitor false`.cwd(repo).quiet())
+        yield* Effect.promise(() => $`git config commit.gpgsign false`.cwd(repo).quiet())
+        yield* Effect.promise(() => $`git config user.email "test@opencode.test"`.cwd(repo).quiet())
+        yield* Effect.promise(() => $`git config user.name "Test"`.cwd(repo).quiet())
+        yield* Effect.promise(() => $`git commit --allow-empty -m "root commit"`.cwd(repo).quiet())
+
+        const parent = yield* withSession({ title: "global-parent" })
+        yield* provideInstance(child)(
+          Effect.gen(function* () {
+            const current = yield* withSession({ title: "git-current" })
+            const ids = (yield* SessionNs.Service.use((session) =>
+              session.list({
+                directory: child,
+                path: SessionPath.relative(repo, child),
+                roots: true,
+              }),
+            )).map((session) => session.id)
+
+            expect(ids).toContain(parent.id)
+            expect(ids).toContain(current.id)
+          }),
+        )
+      }),
   )
 
   it.instance(

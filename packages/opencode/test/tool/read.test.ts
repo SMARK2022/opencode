@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Cause, Effect, Exit, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -10,9 +10,12 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Git } from "@/git"
 import { LSP } from "@/lsp/lsp"
 import { Permission } from "../../src/permission"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { MessageV2 } from "../../src/session/message-v2"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Instruction } from "../../src/session/instruction"
 import { ReadTool } from "../../src/tool/read"
+import { readOutline } from "../../src/tool/read-outline"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { Filesystem } from "@/util/filesystem"
@@ -96,6 +99,10 @@ const fail = Effect.fn("ReadToolTest.fail")(function* (
 const full = (p: string) => (process.platform === "win32" ? Filesystem.normalizePath(p) : p)
 const glob = (p: string) =>
   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
+const canonical = (p: string) => {
+  const normalized = full(p).replaceAll("\\", "/")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
 const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
     Effect.sync(() => {
@@ -145,6 +152,48 @@ const asks = () => {
           items.push(req)
         }),
     },
+  }
+}
+
+function readMessage(
+  input: Tool.InferParameters<typeof ReadTool>,
+  result: Tool.ExecuteResult,
+  options?: { compacted?: boolean },
+): MessageV2.WithParts {
+  const messageID = MessageID.make(`msg-read-${options?.compacted ? "compacted" : "visible"}`)
+  return {
+    info: {
+      id: messageID,
+      sessionID: ctx.sessionID,
+      role: "assistant",
+      time: { created: 0 },
+      parentID: MessageID.make("msg-user"),
+      modelID: ModelID.make("test-model"),
+      providerID: ProviderID.make("test-provider"),
+      mode: "default",
+      agent: "build",
+      path: { cwd: "/", root: "/" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+    parts: [
+      {
+        id: PartID.make(`prt_read_${options?.compacted ? "compacted" : "visible"}`),
+        messageID,
+        sessionID: ctx.sessionID,
+        type: "tool",
+        callID: "call-read",
+        tool: "read",
+        state: {
+          status: "completed",
+          input,
+          output: result.output,
+          title: result.title,
+          metadata: result.metadata,
+          time: { start: 0, end: 1, ...(options?.compacted ? { compacted: 2 } : {}) },
+        },
+      },
+    ],
   }
 }
 
@@ -351,50 +400,55 @@ describe("tool.read env file permissions", () => {
 })
 
 describe("tool.read truncation", () => {
-  it.instance("truncates large file by bytes and sets truncated metadata", () =>
+  it.instance("returns structured file metadata and range for normal reads", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
-      const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
-      const target = 60 * 1024
-      const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
-      yield* put(path.join(test.directory, "large.json"), content)
+      yield* put(path.join(test.directory, "structured.txt"), "alpha\nbeta")
 
-      const result = yield* run({ filePath: path.join(test.directory, "large.json") })
-      expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Output capped at")
-      expect(result.output).toContain("Use offset=")
+      const result = yield* run({ filePath: path.join(test.directory, "structured.txt") })
+      expect(result.output).toContain("<type>file</type>")
+      expect(result.output).toContain('<file size="10" modified="')
+      expect(result.output).toContain('<range start="1" end="2" total="2" returned="2" />')
+      expect(result.output).toContain("<content>\n1: alpha\n2: beta\n</content>")
+      expect(result.output).not.toContain("<stub")
+      expect(result.output).not.toContain("status=\"fresh\"")
+      expect(result.metadata.read).toMatchObject({
+        type: "file",
+        size: 10,
+        canonicalPath: canonical(path.join(test.directory, "structured.txt")),
+        start: 1,
+        end: 2,
+        total: 2,
+        returned: 2,
+        stub: false,
+      })
     }),
   )
 
-  it.instance("stops streaming after the byte cap", () =>
+  it.instance("preserves XML-sensitive file content in structured output", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
-      const filepath = path.join(test.directory, "huge.txt")
-      const content = `${"x".repeat(80)}\n`.repeat(50_000)
-      yield* put(filepath, content)
+      yield* put(path.join(test.directory, "xml-sensitive.txt"), "<tag attr=\"x\">&</tag>")
 
-      const fs = yield* AppFileSystem.Service
-      const counter = { bytes: 0 }
-      const result = yield* run({ filePath: filepath }).pipe(
-        Effect.provideService(
-          AppFileSystem.Service,
-          AppFileSystem.Service.of({
-            ...fs,
-            stream: (file, options) =>
-              fs.stream(file, options).pipe(
-                Stream.tap((chunk) =>
-                  Effect.sync(() => {
-                    counter.bytes += chunk.length
-                  }),
-                ),
-              ),
-          }),
-        ),
-      )
+      const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
+      expect(result.output).toContain("1: <tag attr=\"x\">&</tag>")
+      expect(result.output).not.toContain("1: &lt;tag")
+    }),
+  )
 
+  it.instance("truncates large file by bytes and sets truncated metadata", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const content = Array.from({ length: 100 }, (_, i) => `${i}: ${"x".repeat(1024)}`).join("\n")
+      yield* put(path.join(test.directory, "large.txt"), content)
+
+      const result = yield* run({ filePath: path.join(test.directory, "large.txt") })
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Output capped at")
-      expect(counter.bytes).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
+      expect(result.output).toContain('total="100"')
+      expect(result.metadata.read?.total).toBe(100)
+      expect(result.metadata.read?.returned).toBeLessThan(100)
+      expect(result.output).toContain('<more offset="')
+      expect(result.output).toContain('reason="byte_limit"')
     }),
   )
 
@@ -406,8 +460,8 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "many-lines.txt"), limit: 10 })
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Showing lines 1-10 of 100")
-      expect(result.output).toContain("Use offset=11")
+      expect(result.output).toContain('<range start="1" end="10" total="100" returned="10" />')
+      expect(result.output).toContain('<more offset="11" reason="line_limit" />')
       expect(result.output).toContain("line0")
       expect(result.output).toContain("line9")
       expect(result.output).not.toContain("line10")
@@ -421,7 +475,8 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "small.txt") })
       expect(result.metadata.truncated).toBe(false)
-      expect(result.output).toContain("End of file")
+      expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
+      expect(result.output).not.toContain("<more")
     }),
   )
 
@@ -461,7 +516,8 @@ describe("tool.read truncation", () => {
 
       const result = yield* exec(dir, { filePath: path.join(dir, "empty.txt") })
       expect(result.metadata.truncated).toBe(false)
-      expect(result.output).toContain("End of file - total 0 lines")
+      expect(result.output).toContain('<range start="1" end="0" total="0" returned="0" />')
+      expect(result.output).not.toContain("<more")
     }),
   )
 
@@ -489,6 +545,17 @@ describe("tool.read truncation", () => {
       const result = yield* exec(dir, { filePath: path.join(dir, "dir"), offset: 6, limit: 5 })
       expect(result.metadata.truncated).toBe(false)
       expect(result.output).not.toContain("Showing 5 of 10 entries")
+    }),
+  )
+
+  it.live("preserves XML-sensitive directory entries", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "dir", "a&b.txt"), "content")
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "dir") })
+      expect(result.output).toContain("a&b.txt")
+      expect(result.output).not.toContain("a&amp;b.txt")
     }),
   )
 
@@ -529,7 +596,7 @@ describe("tool.read truncation", () => {
       yield* put(path.join(dir, "image.bin"), jpeg)
 
       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
-      expect(result.output).toBe("Image read successfully")
+      expect(result.output).toStartWith("Image read successfully")
       expect(result.attachments?.[0].mime).toBe("image/jpeg")
       expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
     }),
@@ -601,6 +668,215 @@ describe("tool.read loaded instructions", () => {
       expect(result.output).toContain("Test Instructions")
       expect(result.metadata.loaded).toBeDefined()
       expect(result.metadata.loaded).toContain(path.join(dir, "subdir", "AGENTS.md"))
+    }),
+  )
+})
+
+describe("tool.read visible context", () => {
+  it.live("stubs an unchanged same range already visible in context", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "same.txt")
+      yield* put(filePath, "one\ntwo\nthree")
+      const input = { filePath, offset: 1, limit: 2 }
+
+      const first = yield* exec(dir, input)
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
+
+      expect(second.output).toContain('<range start="1" end="2" total="3" returned="0" />')
+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
+      expect(second.output).toContain("Requested range is already visible in the current context.")
+      expect(second.output).not.toContain("<content>")
+      expect(second.metadata.read).toMatchObject({
+        type: "file",
+        start: 1,
+        end: 2,
+        returned: 0,
+        stub: true,
+        stubStatus: "stub_same_range_visible",
+      })
+    }),
+  )
+
+  it.live("stubs a smaller range fully covered by visible context", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "covered.txt")
+      yield* put(filePath, Array.from({ length: 120 }, (_, i) => `line${i + 1}`).join("\n"))
+      const firstInput = { filePath, offset: 1, limit: 100 }
+      const secondInput = { filePath, offset: 40, limit: 20 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      expect(second.output).toContain('<range start="40" end="59" total="120" returned="0" />')
+      expect(second.output).toContain('<stub status="stub_covered_range_visible" covered_by="1-100">')
+      expect(second.output).not.toContain("<content>")
+      expect(second.metadata.read).toMatchObject({
+        stub: true,
+        stubStatus: "stub_covered_range_visible",
+        coveredBy: "1-100",
+      })
+    }),
+  )
+
+  it.live("does not stub compacted previous reads", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "compacted.txt")
+      yield* put(filePath, "one\ntwo\nthree")
+      const input = { filePath, offset: 1, limit: 2 }
+
+      const first = yield* exec(dir, input)
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first, { compacted: true })] })
+
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain("1: one")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  it.live("does not stub when the file version changed", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "changed.txt")
+      const input = { filePath, offset: 1, limit: 2 }
+      yield* put(filePath, "one\ntwo\nthree")
+
+      const first = yield* exec(dir, input)
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
+      yield* put(filePath, "one changed\ntwo\nthree")
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
+
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain("1: one changed")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  it.live("returns full content with a short note for significant overlap", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "overlap.txt")
+      yield* put(filePath, Array.from({ length: 260 }, (_, i) => `line${i + 1}`).join("\n"))
+      const firstInput = { filePath, offset: 100, limit: 100 }
+      const secondInput = { filePath, offset: 150, limit: 100 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      expect(second.output).toContain('<note type="overlap" ranges="150-199" />')
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain("150: line150")
+      expect(second.output).toContain("249: line249")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  it.live("does not use a visible stub as coverage for later reads", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "stub-source.txt")
+      yield* put(filePath, "one\ntwo\nthree")
+      const input = { filePath, offset: 1, limit: 2 }
+
+      const first = yield* exec(dir, input)
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
+      const third = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, second)] })
+
+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
+      expect(third.output).toContain("<content>")
+      expect(third.output).toContain("1: one")
+      expect(third.output).not.toContain("<stub")
+    }),
+  )
+})
+
+describe("tool.read outline", () => {
+  it.live("includes a short outline only when reading the head of a large source file", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "large.ts")
+      const source = Array.from({ length: 650 }, (_, i) => {
+        if (i === 9) return "export function alpha() {}"
+        if (i === 119) return "class Beta {}"
+        if (i === 239) return "const Gamma = () => {}"
+        if (i === 479) return "interface Delta {}"
+        return `// filler ${i + 1}`
+      }).join("\n")
+      yield* put(filePath, source)
+
+      const head = yield* exec(dir, { filePath, limit: 20 })
+      expect(head.output).toContain("<outline")
+      expect(head.output).toContain("10 function alpha")
+      expect(head.output).toContain("120 class Beta")
+      expect(head.output).not.toContain("import")
+
+      const body = yield* exec(dir, { filePath, offset: 100, limit: 20 })
+      expect(body.output).not.toContain("<outline")
+    }),
+  )
+
+  it.live("preserves XML-sensitive outline labels", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "large.rs")
+      const source = [
+        "impl<T> Parser<T> where T: Clone {",
+        ...Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`),
+      ].join("\n")
+      yield* put(filePath, source)
+
+      const result = yield* exec(dir, { filePath, limit: 20 })
+      expect(result.output).toContain("1 impl Parser<T>")
+      expect(result.output).not.toContain("Parser&lt;T&gt;")
+    }),
+  )
+
+  it.live("extracts conservative labels for common language declarations", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const cases = [
+        ["sample.py", "def py_func():\nclass PyClass:\n"],
+        ["sample.go", "type Server struct {}\nfunc (s *Server) Serve() {}\n"],
+        ["sample.rs", "pub struct State {}\npub async fn run() {}\nimpl State {\n"],
+        ["sample.java", "public record User(String name) {}\npublic void run() {\n"],
+        ["sample.cs", "public class Worker {}\npublic async Task RunAsync() {\n"],
+        ["sample.kt", "data class User(val name: String)\nfun run() {}\n"],
+        ["sample.swift", "struct User {}\nfunc run() {\n"],
+        ["sample.rb", "class Worker\ndef perform\n"],
+        ["sample.php", "class Worker {}\nfunction perform() {}\n"],
+        ["sample.cpp", "struct Worker {};\nint run() {\n"],
+      ] as const
+
+      for (const [filename, header] of cases) {
+        const filePath = path.join(dir, filename)
+        yield* put(filePath, header + Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`).join("\n"))
+        const outline = yield* Effect.promise(() => readOutline(filePath, 650, 1))
+        expect(outline?.items.length).toBeGreaterThan(0)
+      }
+    }),
+  )
+
+  it.live("limits outline item length and total size", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "long-outline.rs")
+      const source = [
+        "impl VeryLongGenericTypeNameWithManySegmentsAndTraitsAndBoundsThatShouldBeTrimmed where T: Clone {",
+        ...Array.from(
+          { length: 650 },
+          (_, i) => `pub fn function_${i}_with_a_very_long_suffix_that_should_not_bloat_the_outline() {}`,
+        ),
+      ].join("\n")
+      yield* put(filePath, source)
+
+      const outline = yield* Effect.promise(() => readOutline(filePath, 651, 1))
+      expect(outline).toBeDefined()
+      expect(outline!.items.length).toBeLessThanOrEqual(32)
+      expect(outline!.items.join("\n").length).toBeLessThanOrEqual(640)
+      expect(outline!.items.every((item) => item.length <= 60)).toBe(true)
+      expect(outline!.items.some((item) => item.endsWith("..."))).toBe(true)
     }),
   )
 })

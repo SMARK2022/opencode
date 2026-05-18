@@ -1,7 +1,4 @@
 import { cmd } from "@/cli/cmd/cmd"
-import { Rpc } from "@/util/rpc"
-import { type rpc } from "./worker"
-// [local-smark] Keep direct tui import for daemon reconnect fallback
 import { tui } from "./app"
 import path from "path"
 import { UI } from "@/cli/ui"
@@ -111,37 +108,23 @@ export const TuiThreadCommand = cmd({
         return
       }
 
-      setTimeout(() => {
-        client.call("checkUpgrade", { directory: cwd }).catch(() => {})
-      }, 1000).unref?.()
-
-      try {
-        const { tui: tuiApp } = await import("./app")
-        await tuiApp({
-          url: transport.url,
-          async onSnapshot() {
-            const tui = writeHeapSnapshot("tui.heapsnapshot")
-            const server = await client.call("snapshot", undefined)
-            return [tui, server]
-          },
-          config,
-          directory: cwd,
-          fetch: transport.fetch,
-          events: transport.events,
-          // [local-smark] daemon reconnect support
-          reconnect: () => Daemon.ensure(args),
-          args: {
-            continue: args.continue,
-            sessionID: args.session,
-            agent: args.agent,
-            model: args.model,
-            prompt,
-            fork: args.fork,
-          },
-        })
-      } finally {
-        await stop()
-      }
+      await tui({
+        url: existingUrl,
+        async onSnapshot() {
+          return [writeHeapSnapshot("tui.heapsnapshot")]
+        },
+        config,
+        directory: cwd,
+        reconnect: () => Daemon.ensure(args),
+        args: {
+          continue: args.continue,
+          sessionID: args.session,
+          agent: args.agent,
+          model: args.model,
+          prompt,
+          fork: args.fork,
+        },
+      })
     } finally {
       unguard?.()
     }
