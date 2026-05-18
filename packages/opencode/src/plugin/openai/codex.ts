@@ -1,8 +1,7 @@
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import { CodexHeaders } from "@opencode-ai/core/plugin/provider/codex-headers"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
-import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { OAUTH_DUMMY_KEY } from "../../auth"
-import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 import { OpenAIWebSocketPool } from "./ws-pool"
@@ -13,6 +12,10 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+// 两代使用同一固定身份；保留 V1 的常量出口供现有插件和测试消费。
+export const CODEX_USER_AGENT = CodexHeaders.USER_AGENT
+export const CODEX_HEADERS = CodexHeaders.JSON_HEADERS
+const CODEX_FORM_HEADERS = CodexHeaders.FORM_HEADERS
 const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-sol", "gpt-6-luna"])
 const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
 
@@ -119,7 +122,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
     purpose: "plugin",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: CODEX_FORM_HEADERS,
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -138,7 +141,7 @@ async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promis
   const response = await NetworkProxy.fetch(`${issuer}/oauth/token`, {
     method: "POST",
     purpose: "plugin",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: CODEX_FORM_HEADERS,
     body: new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -357,6 +360,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
 
         return {
           apiKey: OAUTH_DUMMY_KEY,
+          // #169：SDK 默认头即 Codex TUI 指纹
+          // #169：与 chat.headers 同源，避免 loader/chat 指纹分裂
+          headers: CODEX_HEADERS,
           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
             if (init?.headers) {
               if (init.headers instanceof Headers) {
@@ -436,6 +442,11 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               if (residency) headers.set("x-openai-internal-codex-residency", residency)
             }
 
+            // #169：改写到 Codex API 后强制官方头（含可配置 codexApiEndpoint）
+            if (url.href === new URL(codexApiEndpoint).href) {
+              Object.entries(CODEX_HEADERS).forEach(([key, value]) => headers.set(key, value))
+            }
+
             const requestInit = {
               ...init,
               body: init?.body,
@@ -484,10 +495,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
               method: "POST",
               purpose: "plugin",
-              headers: {
-                "Content-Type": "application/json",
-                "User-Agent": `opencode/${InstallationVersion}`,
-              },
+              // #169：deviceauth usercode 使用 Codex TUI 头
+              headers: CODEX_HEADERS,
               body: JSON.stringify({ client_id: CLIENT_ID }),
             })
 
@@ -509,10 +518,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
                     method: "POST",
                     purpose: "plugin",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "User-Agent": `opencode/${InstallationVersion}`,
-                    },
+                    // #169：deviceauth token 轮询同样使用 Codex TUI 头
+                    headers: CODEX_HEADERS,
                     body: JSON.stringify({
                       device_auth_id: deviceData.device_auth_id,
                       user_code: deviceData.user_code,
@@ -528,7 +535,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
                       method: "POST",
                       purpose: "plugin",
-                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                      headers: CODEX_FORM_HEADERS,
                       body: new URLSearchParams({
                         grant_type: "authorization_code",
                         code: data.authorization_code,
@@ -571,8 +578,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
     },
     "chat.headers": async (input, output) => {
       if (input.model.providerID !== "openai") return
-      output.headers.originator = "opencode"
-      output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
+      // #169：openai oauth 会话对外伪装 Codex TUI，保留 tip session-id / title 头
+      Object.assign(output.headers, CODEX_HEADERS)
       output.headers["session-id"] = input.sessionID
       // Temporary fetch-layer hack: title generation currently shares the conversation
       // session ID, so the OpenAI plugin marks it for HTTP fallback until transport

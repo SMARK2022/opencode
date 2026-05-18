@@ -1,12 +1,14 @@
 import { AISDK } from "@opencode-ai/core/aisdk"
-import { describe, expect } from "bun:test"
+import { describe, expect, spyOn } from "bun:test"
 import type { LanguageModelV3 } from "@ai-sdk/provider"
 import { Effect } from "effect"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { PluginV2 } from "@opencode-ai/core/plugin"
 import { PluginHost } from "@opencode-ai/core/plugin/host"
+import { CodexHeaders } from "@opencode-ai/core/plugin/provider/codex-headers"
 import { OpenAIPlugin } from "@opencode-ai/core/plugin/provider/openai"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { testEffect } from "../lib/effect"
@@ -56,6 +58,63 @@ describe("OpenAIPlugin", () => {
           label: "ChatGPT Pro/Plus (headless)",
         },
       ])
+    }),
+  )
+
+  it.live("uses Codex identity for device authorization, exchange and refresh", () =>
+    Effect.gen(function* () {
+      const calls: Request[] = []
+      // 只隔离外部 HTTP 边界；实际注册方法、异步 admission 和凭据刷新仍由 Integration 执行。
+      yield* Effect.acquireRelease(
+        Effect.sync(() => spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
+          const request = new Request(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, init)
+          calls.push(request)
+          expect(init?.purpose).toBe("plugin")
+          const pathname = new URL(request.url).pathname
+          if (pathname === "/api/accounts/deviceauth/usercode")
+            return Response.json({ device_auth_id: "device", user_code: "1234", interval: "1" })
+          if (pathname === "/api/accounts/deviceauth/token")
+            return Response.json({ authorization_code: "code", code_verifier: "verifier" })
+          if (pathname === "/oauth/token")
+            return Response.json({ id_token: "fixture", access_token: "access", refresh_token: "refresh", expires_in: 0 })
+          throw new Error(`Unexpected auth request: ${request.url}`)
+        })),
+        spy => Effect.sync(() => spy.mockRestore()),
+      )
+      yield* addPlugin()
+      const integration = yield* Integration.Service
+      const integrationID = Integration.ID.make("openai")
+      const attempt = yield* integration.connection.oauth({
+        integrationID, methodID: Integration.MethodID.make("chatgpt-headless"), inputs: {},
+      })
+      // 失败时先关闭自动轮询的 scope，再恢复网络边界，避免迟到回调触及真实网络。
+      yield* Effect.addFinalizer(() => integration.attempt.cancel(attempt.attemptID))
+      const connection = yield* Effect.gen(function* () {
+        while (true) {
+          const active = yield* integration.connection.active(integrationID)
+          if (active) return active
+          yield* Effect.promise(() => Bun.sleep(1))
+        }
+      }).pipe(Effect.timeout(5000))
+      const refreshed = yield* integration.connection.resolve(connection)
+      expect(refreshed).toMatchObject({ type: "oauth", access: "access", refresh: "refresh" })
+      expect(calls.map(request => new URL(request.url).pathname)).toEqual([
+        "/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token", "/oauth/token", "/oauth/token",
+      ])
+      for (const request of calls) {
+        expect(request.headers.get("originator")).toBe("codex-tui")
+        expect(request.headers.get("user-agent")).toBe(CodexHeaders.USER_AGENT)
+      }
+      // 交换和刷新验证实际编码与 grant，不把统一身份误做成统一 JSON 请求体。
+      expect(calls.map(request => request.headers.get("content-type"))).toEqual([
+        "application/json", "application/json", "application/x-www-form-urlencoded", "application/x-www-form-urlencoded",
+      ])
+      const exchange = new URLSearchParams(yield* Effect.promise(() => required(calls[2]).text()))
+      const refresh = new URLSearchParams(yield* Effect.promise(() => required(calls[3]).text()))
+      expect(exchange.get("grant_type")).toBe("authorization_code")
+      expect(exchange.get("code_verifier")).toBe("verifier")
+      expect(refresh.get("grant_type")).toBe("refresh_token")
+      expect(refresh.get("refresh_token")).toBe("refresh")
     }),
   )
 

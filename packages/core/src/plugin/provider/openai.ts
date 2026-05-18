@@ -4,7 +4,7 @@ import { define } from "@opencode-ai/plugin/v2/effect/plugin"
 import { Deferred, Effect } from "effect"
 import type { Scope } from "effect"
 import { Credential } from "../../credential"
-import { InstallationVersion } from "../../installation/version"
+import { CodexHeaders } from "./codex-headers"
 import { NetworkProxy } from "../../network-proxy"
 import { Integration } from "../../integration"
 import { ModelV2 } from "../../model"
@@ -191,7 +191,8 @@ export const OpenAIPlugin = define({
 } satisfies PluginInternal.Plugin<PluginInternal.Requirements | Scope.Scope>)
 
 function headers(contentType: string) {
-  return { "Content-Type": contentType, "User-Agent": `opencode/${InstallationVersion}` }
+  // browser 交换、device-auth 与刷新沿原生命周期，只统一实际发出的身份和编码。
+  return CodexHeaders.request({ "Content-Type": contentType })
 }
 
 function exchange(code: string, redirect: string, pkce: Pkce) {

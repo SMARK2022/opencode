@@ -7,6 +7,7 @@ import { Token } from "@opencode-ai/core/util/token"
 import { Credential } from "@opencode-ai/core/credential"
 import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { CodexHeaders } from "@opencode-ai/core/plugin/provider/codex-headers"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
@@ -72,6 +73,28 @@ describe("SessionRunnerModel", () => {
       }))
       expect(serial.body).toHaveProperty("parallel_tool_calls", false)
       expect(serial.body).not.toHaveProperty("parallelToolCalls")
+      // 上面的第三方路由保持原头；真实 OpenAI 的默认身份和显式 UA 均走同一 resolver。
+      for (const userAgent of [undefined, "configured-agent"]) {
+        const openai = yield* SessionRunnerModel.fromCatalogModel(ModelV2.Info.make({
+          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
+          providerID: ProviderV2.ID.openai,
+          request: {
+            headers: Object.fromEntries([["x-custom", "kept"], ...(userAgent ? [["uSeR-aGeNt", userAgent]] : [])]),
+            body: { apiKey: "secret" },
+          },
+        }))
+        expect(openai.route.defaults.headers).toMatchObject({
+          "content-type": "application/json",
+          originator: "codex-tui",
+          "user-agent": userAgent ?? CodexHeaders.USER_AGENT,
+          "x-custom": "kept",
+        })
+        // 配置的身份不进入协议正文，也不会变成两个仅大小写不同的 UA 字段。
+        expect(Object.keys(openai.route.defaults.headers ?? {}).filter(key => key.toLowerCase() === "user-agent")).toHaveLength(1)
+        const prepared = yield* LLMClient.prepare(LLM.request({ model: openai, prompt: "Hello" }))
+        expect(prepared.body).not.toHaveProperty("originator")
+        expect(prepared.body).not.toHaveProperty("headers")
+      }
     }),
   )
 

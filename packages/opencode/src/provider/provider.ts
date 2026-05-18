@@ -150,15 +150,11 @@ function timeoutFetch(options: Record<string, any>) {
     if (combined) opts.signal = combined
 
           const configuredUserAgent = requestUserAgent(options)
-          // #168：仅当当前 UA 为空或仍以配置 UA 为前缀时回写，避免误伤无关 UA
-          // #168：SDK 可能追加后缀（ai-sdk/...），startsWith 仍允许刷新为配置值
+          // #169：配置 UA 无条件覆盖；AI SDK 常追加后缀导致 startsWith 失败
+          // #169：#168 前缀守卫在 openai 别名路径不可用，本 commit 收紧为 always-set
           if (configuredUserAgent) {
             const headers = new Headers(opts.headers)
-            const currentUserAgent = headers.get("user-agent") ?? ""
-            // #168：空 UA 或配置前缀才覆盖；完全无关 UA 保持不动
-            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) {
-              headers.set("User-Agent", configuredUserAgent)
-            }
+            headers.set("User-Agent", configuredUserAgent)
             opts.headers = headers
           }
 

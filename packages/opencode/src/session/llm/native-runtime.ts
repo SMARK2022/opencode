@@ -98,6 +98,10 @@ export function stream(input: StreamInput): StreamResult {
   // — if a field ever needs to differ between the two surfaces, the
   // translation belongs here, not split across both packages.
   const tools = nativeTools(input.tools, input)
+  // 与 SDK 的最终发送策略一致，配置 UA 在插件合并之后落实且不产生大小写重复头。
+  const headers = new Headers({ ...Provider.requestHeaders(input.provider.options), ...input.headers })
+  const userAgent = Provider.requestUserAgent(input.provider.options)
+  if (userAgent) headers.set("User-Agent", userAgent)
   const request = LLMNative.request({
     model: input.model,
     apiKey: current.apiKey,
@@ -109,9 +113,8 @@ export function stream(input: StreamInput): StreamResult {
     topK: input.topK,
     maxOutputTokens: input.maxOutputTokens,
     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
-    // #168：native 与 AI-SDK 共用 requestHeaders，避免 header-ua 只在一侧生效
-    // #168：配置头在前、prepared headers 在后：模型/插件仍可覆盖，但配置 UA 不被默认 UA 无条件碾压需由 request 侧保证
-    headers: { ...Provider.requestHeaders(input.provider.options), ...input.headers },
+    // 其他模型/插件头保留原合并结果，只将配置 UA 的优先级对齐本项。
+    headers: Object.fromEntries(headers),
   })
   // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
   const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })
