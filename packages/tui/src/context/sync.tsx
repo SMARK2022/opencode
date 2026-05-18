@@ -469,7 +469,8 @@ export const {
             }),
           )
           const updated = store.message[event.properties.info.sessionID]
-          if (updated.length > 100) {
+          // #162：本地缓存消息数阈值与 200 窗口对齐
+          if (updated.length > 200) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -764,7 +765,8 @@ export const {
           const task = (async () => {
             const [session, messages, todo, diff] = await Promise.all([
               sdk.client.session.get({ sessionID }, { throwOnError: true }),
-              sdk.client.session.messages({ sessionID, limit: 100 }),
+              // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
+              sdk.client.session.messages({ sessionID, limit: 200 }),
               sdk.client.session.todo({ sessionID }),
               sdk.client.session.diff({ sessionID }),
               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
@@ -793,8 +795,10 @@ export const {
                   ),
                 )
                 infos.sort(compareMessage)
-                const removed = infos.slice(0, -100)
-                const visible = infos.slice(-100)
+                // #162：裁掉窗口外旧消息，保留最近 200
+                const removed = infos.slice(0, -200)
+                // #162：可见消息切片与 hydrate limit 一致
+                const visible = infos.slice(-200)
                 const visibleIDs = new Set(visible.map((message) => message.id))
                 for (const message of messages.data ?? []) {
                   if (!visibleIDs.has(message.info.id)) {
