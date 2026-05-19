@@ -64,7 +64,8 @@ const colorChoices = ["auto", "always", "never"] as const
 // #174：metricChoices 限制取值
 const metricChoices = ["tokens", "cost"] as const
 // #174：sortChoices 限制取值
-const sortChoices = ["cost", "tokens", "calls", "updated"] as const
+// #177：默认排序优先 tokens
+const sortChoices = ["tokens", "cost", "calls", "updated"] as const
 
 // #174：nonNegativeInteger 拒浮点与负数
 const nonNegativeInteger = (value: unknown): value is number =>
@@ -145,7 +146,7 @@ const withDetailOptions = (yargs: Argv) =>
       describe: "sort order",
       type: "string",
       choices: sortChoices,
-      default: "cost",
+      default: "tokens",
     })
     // #176：明细过滤选项
     .option("session", {
@@ -221,13 +222,15 @@ const colorMode = (value?: string): ColorMode => {
 }
 
 const metricMode = (value?: string): StatsRenderOptions["metric"] => {
+  // #177：metric 与 sort 解耦，cost 必须仍可选
   if (value === "cost") return "cost"
   return "tokens"
 }
 
 const sortMode = (value?: string): StatsRenderOptions["sort"] => {
-  if (value === "tokens" || value === "calls" || value === "updated") return value
-  return "cost"
+  // #177：显式 cost 仍可选；默认 tokens
+  if (value === "cost" || value === "tokens" || value === "calls" || value === "updated") return value
+  return "tokens"
 }
 
 // #174：renderOptions 从 args 组装
