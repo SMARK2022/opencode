@@ -87,9 +87,10 @@ const renderUsageSeries = (series: StatsReport["modelSeries"], options: StatsRen
 // 排名和明细先按同一指标排序再限行，不能从默认费用榜截出 token/calls 的 Top N。
 const topGroups = (groups: StatsReport["models"], options: StatsRenderOptions) =>
   limitRows(groups.toSorted((a, b) => {
-    if (options.sort === "tokens") return b.tokens.total - a.tokens.total
-    if (options.sort === "calls") return b.assistantCalls - a.assistantCalls
-    return b.cost - a.cost || b.tokens.total - a.tokens.total
+    // 默认 token 与显式 cost/calls 共用选择器，所有榜单和台账在限行前取得同一排序。
+    if (options.sort === "cost") return b.cost - a.cost || b.tokens.total - a.tokens.total
+    if (options.sort === "calls") return b.assistantCalls - a.assistantCalls || b.tokens.total - a.tokens.total
+    return b.tokens.total - a.tokens.total || b.cost - a.cost
   }), options.limit)
 
 // 分组台账补足排名图省略的计量，模型、供应商和扩展维度复用同一口径。
@@ -147,6 +148,21 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
   ]
     // #176：tool 维附加 context/count/IO 明细
   if (by === "tool") {
+    // #177：tool breakdown 主路径展示 context 时间序列
+    if ((report.toolSeries?.length ?? 0) > 0) {
+      lines.push("")
+      lines.push(
+        ...renderRoundedLineChart({
+          // #177：固定标题供测试与 UI 契约锁定
+          title: "Tool context tokens over time",
+          series: (report.toolSeries ?? []).slice(0, options.limit ?? 5).map((s) => ({
+            id: s.id,
+            label: s.label || s.id,
+            points: s.points.map((p) => ({ x: p.label, y: p.tokens.total })),
+          })),
+        }),
+      )
+    }
     lines.push("")
     lines.push("Tool context tokens / counts")
     for (const tool of limitRows(report.toolUsage ?? [], options.limit)) {
@@ -228,8 +244,9 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions 
   ].join("\n")
 
 // #174：sessions 按 sort 键排序再切片
+// #177：sessions 默认 tokens 排序
 export const renderSessions = (report: StatsReport, options: StatsRenderOptions = {}) => {
-  const sort = options.sort ?? "cost"
+  const sort = options.sort ?? "tokens"
   const rows = [...report.sessions].sort((a, b) => {
     if (sort === "tokens") return b.tokens.total - a.tokens.total
     if (sort === "calls") return b.assistantCalls - a.assistantCalls
@@ -247,6 +264,18 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions 
 export const renderCharts = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
     ...header(report, "stats charts"),
+    // #177：charts 主路径组合 tool context 时间序列
+    ...((report.toolSeries?.length ?? 0) > 0
+      ? renderRoundedLineChart({
+          // #177：固定标题供测试与 UI 契约锁定
+          title: "Tool context tokens over time",
+          series: (report.toolSeries ?? []).slice(0, options.limit ?? 5).map((s) => ({
+            id: s.id,
+            label: s.label || s.id,
+            points: s.points.map((p) => ({ x: p.label, y: p.tokens.total })),
+          })),
+        })
+      : []),
     ...renderRankBars({ rows: limitRows(report.models, options.limit ?? 8).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
     ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
@@ -274,7 +303,13 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
 export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
     ...header(report, "stats costs"),
-    ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.cost })) }),
+    ...renderRankBars({
+      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
+      rows: limitRows(
+        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
+        options.limit,
+      ).map((m) => ({ label: m.label || m.id, value: m.cost })),
+    }),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
     ...renderWaterfall({ title: "Provider cost waterfall", steps: report.providers.map((provider) => ({ label: provider.label || provider.id, delta: provider.cost })) }),
     ...renderHistogram({ title: "Session cost distribution", values: report.sessions.map((session) => session.cost) }),

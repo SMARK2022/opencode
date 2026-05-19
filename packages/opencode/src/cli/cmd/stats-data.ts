@@ -145,6 +145,8 @@ export type StatsReport = {
   statusSeries: UsageSeries[]
   projectSeries: UsageSeries[]
   modelProviderTokens: { providerID: string; modelID: string; tokens: number }[]
+  // #177：工具上下文 token 时间序列
+  toolSeries: UsageSeries[]
 // #174：tokensPerSession 均摊
   tokensPerSession: number
 // #174：median 抗长尾
@@ -321,6 +323,7 @@ const addGroup = (map: Map<string, UsageGroupAccumulator>, id: string, label: st
 }
 
 // #174：finalizeGroups 定稿分组
+// #177：分组默认按 tokens 排序，cost 作次键
 const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
   Array.from(map.values())
     .map((group): UsageGroup => ({
@@ -339,7 +342,7 @@ const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
       providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
       models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
     }))
-    .sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)
+    .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
 
 // #174：dayStart 对齐本地日界
 const dayStart = (time: number) => {
@@ -417,7 +420,7 @@ const finalizeSeries = (map: Map<string, Map<number, DailyUsage>>, days: DailyUs
           return series
         }, emptySeriesTotals(id)),
     )
-    .sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)
+    .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
 
 const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
   [
@@ -1051,6 +1054,8 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
   const statusSeries = new Map<string, Map<number, DailyUsage>>()
   const projectSeries = new Map<string, Map<number, DailyUsage>>()
   const modelProviderTokens = new Map<string, number>()
+  // #177：按日累加工具 contextTokens
+  const toolSeries = new Map<string, Map<number, DailyUsage>>()
   const sessionsWithUsage: SessionUsage[] = []
   const sessionTokenTotals: number[] = []
   let totalMessages = 0
@@ -1091,7 +1096,16 @@ const filteredAggregates =
     // #176：上下文 token 由 toolEvents 叠加，避免与 count 双计字符
     aggregate.toolEvents
       .filter((event) => toolEventMatches(event, input))
-      .forEach((event) => addToolContextTokens(toolUsage, event.toolID, event.contextTokens))
+      // #177：工具事件同时更新用量与序列
+      .forEach((event) => {
+        addToolContextTokens(toolUsage, event.toolID, event.contextTokens)
+        // #177：工具事件写入日序列（tokens.total 承载 contextTokens）
+        const point = getSeriesDaily(toolSeries, event.toolID, event.time)
+        // #177：日点 tokens.total 承载 context
+        point.tokens.total += event.contextTokens
+        point.tokens.input += event.contextTokens
+        // 工具上下文不是新的提供者请求，保持 source 的零请求/零费用口径。
+      })
 
     for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
       addUsage(sessionUsage, event)
@@ -1184,11 +1198,13 @@ const filteredAggregates =
     statusSeries: finalizeSeries(statusSeries, completeDaily),
     projectSeries: finalizeSeries(projectSeries, completeDaily),
     tokenPartSeries: tokenPartSeries(completeDaily),
-    sessions: sessionsWithUsage.sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total),
+    sessions: sessionsWithUsage.sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost),
     // #176：默认按 contextTokens 再按 count
     // #176：工具榜优先 contextTokens 体现归因
     toolUsage: Object.values(toolUsage).sort((a, b) => b.contextTokens - a.contextTokens || b.count - a.count),
     // #176：模型×供应矩阵供热图/对比
+    // #177：输出 toolSeries 供渲染
+    toolSeries: finalizeSeries(toolSeries, completeDaily),
     modelProviderTokens: Array.from(modelProviderTokens, ([key, tokens]) => {
       const [providerID, modelID] = key.split("\0")
       return { providerID, modelID, tokens }
