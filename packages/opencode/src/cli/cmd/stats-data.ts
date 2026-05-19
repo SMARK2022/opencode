@@ -11,7 +11,7 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
 // #174：单会话缺失降级为空，不中断整批
 import { NotFoundError } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
-import { eq, sql } from "drizzle-orm"
+import { eq, sql, gte } from "drizzle-orm"
 // #174：SessionTable 只用于枚举，不在此写用量
 import { SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -456,9 +456,20 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
 // #174：必须调用 Effect.fn 枚举会话
 // #174：getAllSessions 通过 Database.Service 拉取会话列表
 // #180：按 cutoff 下推 SQL，减少全表 session 扫描
-const getAllSessions = Effect.fnUntraced(function* () {
+const getSessions = Effect.fnUntraced(function* (cutoff: number) {
   const { db } = yield* Database.Service
-  return (yield* db.select().from(SessionTable).all().pipe(Effect.orDie)).map((row) => Session.fromRow(row))
+  // #180：cutoff=0 表示全历史，仍走全表扫描
+  const rows =
+    cutoff > 0
+      ? yield* db
+          .select()
+          .from(SessionTable)
+          // #180：time_updated 与 days 窗口同口径
+          .where(gte(SessionTable.time_updated, cutoff))
+          .all()
+          .pipe(Effect.orDie)
+      : yield* db.select().from(SessionTable).all().pipe(Effect.orDie)
+  return rows.map((row) => Session.fromRow(row))
 })
 
 // #174：cutoffFromDays 解释 0/缺省/正数
@@ -591,22 +602,6 @@ const toolOutputChars = (part: {
   return 0
 }
 
-// #176：截至 time 的各工具 IO 字符（用于上下文归因权重）
-// #176：时间截点前工具 IO 权重
-const toolCharsByName = (messages: any[], time: number) => {
-  const result = new Map<string, { inputChars: number; outputChars: number }>()
-  for (const message of messages) {
-    if (message.info.time.created > time) continue
-    for (const part of message.parts) {
-      if (part.type !== "tool" || !part.tool) continue
-      const item = result.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
-      item.inputChars += toolInputChars(part)
-      item.outputChars += toolOutputChars(part)
-      result.set(part.tool, item)
-    }
-  }
-  return result
-}
 
 // #176：无 inputBreakdown 时，用 assistant tokens 按工具 IO 字符占比归因 contextTokens
 // #176：按 IO 占比分摊 assistant tokens
@@ -706,7 +701,7 @@ const componentsFromAssistant = (message: any | undefined) => {
 const toolEventsFromAssistant = (input: {
   // #176：兼容 Session.WithParts，不绑死 tokens 形状
   message: any
-  visibleMessages: any[]
+  chars: Map<string, { inputChars: number; outputChars: number }>
   event: {
     time: number
     sessionID: SessionID
@@ -722,7 +717,7 @@ const toolEventsFromAssistant = (input: {
   // #176：组件 token 来自 step-finish.inputBreakdown，而非整包 assistant tokens
   // #176：优先 breakdown 组件而非整包 tokens
   const components = componentsFromAssistant(input.message)
-  const chars = toolCharsByName(input.visibleMessages, input.message.info.time.created)
+  const chars = input.chars
   const inputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.inputChars, 0)
   const outputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.outputChars, 0)
   return Array.from(chars.entries())
@@ -753,10 +748,24 @@ const toolEventsFromAssistants = (
   assistants: Array<{ message: any; event: any }>,
   visibleMessages: any[],
 ) => {
-  // #176：批量入口复用归因公式
+  const ordered = assistants.filter((item) => item.message).toSorted((a, b) => a.message.info.time.created - b.message.info.time.created)
+  const messages = visibleMessages.toSorted((a, b) => a.info.time.created - b.info.time.created)
+  const chars = new Map<string, { inputChars: number; outputChars: number }>()
   const events: ToolUsageEvent[] = []
-  for (const item of assistants) {
-    events.push(...toolEventsFromAssistant({ message: item.message, visibleMessages, event: item.event }))
+  let index = 0
+  // 时间游标只消费每条历史工具一次，保留“创建时间不晚于助手”的原归因边界。
+  for (const item of ordered) {
+    while (index < messages.length && messages[index].info.time.created <= item.message.info.time.created) {
+      for (const part of messages[index].parts) {
+        if (part.type !== "tool" || !part.tool) continue
+        const weight = chars.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
+        weight.inputChars += toolInputChars(part)
+        weight.outputChars += toolOutputChars(part)
+        chars.set(part.tool, weight)
+      }
+      index++
+    }
+    events.push(...toolEventsFromAssistant({ message: item.message, chars, event: item.event }))
   }
   return events
 }
@@ -1009,8 +1018,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
 // #174：aggregateStats 生成只读 StatsReport 快照
 export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
   const cutoff = cutoffFromDays(input.days)
-  const sessions =   // #180：聚合入口改用 SQL 预过滤会话
-  yield* getAllSessions()
+  // #180：聚合入口改用 SQL 预过滤会话，降低全表扫描
+  const sessions = yield* getSessions(cutoff)
   const filteredSessions = sessions
 // #174：time.updated 过滤会话
     .filter((session) => includeTime(cutoff, session.time.updated))
