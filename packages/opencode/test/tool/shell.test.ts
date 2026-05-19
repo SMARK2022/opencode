@@ -719,6 +719,76 @@ describe("tool.shell permissions", () => {
         ),
       )
     }
+
+    for (const item of ps) {
+      it.live(`rejects local Unix text utilities in PowerShell pipelines [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              expect(
+                yield* fail({
+                  command: "Write-Output ok | grep ok",
+                  description: "Search local pipeline output",
+                }),
+              ).toMatchObject({
+                message: expect.stringContaining(`The current shell is ${item.label}`),
+              })
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`allows Unix text utilities inside WSL bash scripts [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command:
+                      "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
+                    description: "Run WSL shell script",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
+                    description: "Run SSH remote shell command",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+            }),
+          ),
+        ),
+      )
+    }
   }
 
   if (process.platform === "win32" && cmdShell) {
