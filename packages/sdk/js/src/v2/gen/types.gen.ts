@@ -1276,7 +1276,7 @@ export type Config = {
   tool_output?: {
     max_lines?: number
     /**
-     * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
+     * Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)
      */
     max_bytes?: number
     /**

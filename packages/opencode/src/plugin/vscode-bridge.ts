@@ -40,7 +40,7 @@ const sourceArgs = {
     .positive()
     .max(1000)
     .optional()
-    .describe("Maximum rendered source lines to return, capped at 1000."),
+    .describe("Maximum rendered source lines to return, capped at 1000. Output is also capped at 16 KB."),
 }
 
 const runArgs = {

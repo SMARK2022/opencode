@@ -17,7 +17,7 @@ import { readOutline, type Outline } from "./read-outline"
 import { Reference } from "@/reference/reference"
 
 const DEFAULT_READ_LIMIT = 200
-const MAX_BYTES = 24 * 1024
+const MAX_BYTES = 16 * 1024
 const SAMPLE_BYTES = 4096
 const MAX_CONTENT_TOKENS = 16000
 const MAX_LINE_LENGTH = 2000

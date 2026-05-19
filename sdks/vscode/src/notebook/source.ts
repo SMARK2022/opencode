@@ -23,7 +23,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 /**
  * Bridge endpoint handler: returns notebook source code with global line numbering.
- * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
+ * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 16 KB.
  */
 export async function notebookSource(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
@@ -70,7 +70,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
 
   // Render cells one by one, emitting headers + in-range source lines
-  const maxBytes = 24 * 1024
+  const maxBytes = 16 * 1024
   let bytes = 0
   // `limit` applies to numbered virtual source lines only; headers are context and
   // must not consume the same budget because they do not have real line numbers.
@@ -139,7 +139,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   output += outputCells.join("\n")
 
   if (bytesCut) {
-    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+    output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
   }
