@@ -2040,6 +2040,13 @@ describe("SessionRunnerLLM", () => {
         expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request })).toBe(expected)
         // 阈值触发只产生现有一次 summary turn；未触发和摘要预算拒绝都保持零 provider 调用。
         expect(streams).toBe(expected ? 1 : 0)
+        if (limit === 73_700 && size === 68_000) {
+          // 同样的真实预检入口应把大图算成媒体，避免无谓摘要请求与历史替换。
+          const mediaRequest = LLM.request({ model: resolved, messages: [Message.user([
+            { type: "text", text: "x".repeat(50_000) }, { type: "media", mediaType: "image/png", data: `data:image/png;base64,${"a".repeat(400_000)}` },
+          ])] })
+          expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: mediaRequest })).toBe(false)
+        }
         yield* registration.dispose
       }
     }),

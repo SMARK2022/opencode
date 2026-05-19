@@ -178,6 +178,19 @@ export const InputBreakdown = Schema.Struct({
     // 包含归属消息的 JSON 结构开销，六个子项之和就是 total。
     total: NonNegativeInt,
   }),
+  // #175：media 与 messages 分列，避免 base64 污染文本密度
+  // 未携带媒体的旧样本保持原字符口径，V1/V2 引用同一可选定义。
+  media: optional(
+    Schema.Struct({
+      rawChars: NonNegativeInt,
+      textChars: NonNegativeInt,
+      tokens: NonNegativeInt,
+      count: NonNegativeInt,
+      imageTokens: NonNegativeInt,
+      pdfTokens: NonNegativeInt,
+      otherTokens: NonNegativeInt,
+    }),
+  ),
 }).annotate({ identifier: "Session.Message.InputBreakdown" })
 
 // 请求体估算与 provider tokens 分离；confirmed 只说明校准样本已经结算。

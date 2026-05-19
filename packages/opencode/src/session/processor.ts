@@ -806,7 +806,9 @@ const layer = Layer.effect(
               const charsPerToken = Math.min(4, Math.max(3, estimate.charsPerToken ?? 4))
               ctx.assistantMessage.inputEstimate = {
                 ...estimate,
-                input: Math.round(estimate.bodyChars / charsPerToken),
+                // clamp 只调整文本密度，媒体 token 固定追加一次，raw 字符只作展示基数。
+                input: Math.round((estimate.bodyChars - (estimate.inputBreakdown?.media?.rawChars ?? 0)
+                  + (estimate.inputBreakdown?.media?.textChars ?? 0)) / charsPerToken) + (estimate.inputBreakdown?.media?.tokens ?? 0),
                 charsPerToken,
                 contextLimit: ctx.model.limit.context,
                 // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。

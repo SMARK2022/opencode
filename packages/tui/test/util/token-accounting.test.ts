@@ -266,6 +266,25 @@ describe("tokenAccounting", () => {
     expect(next.breakdown!.system).toBe(80)
     expect(next.breakdown!.assistantText).toBe(35)
   })
+  // #175：media.tokens=10 固定；system/user 经 textDenom 为 242
+  test("breakdown allocates media tokens outside text character ratio", () => {
+    const msgs = [userMsg("1"), assistantMsg("2", "1", undefined, 10)]
+    const getParts = (_id: string) => [{
+      ...stepFinish("sf", { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } }, 9_500),
+      inputBreakdown: {
+        system: 1_000, instructions: 0, skills: 0, tools: 0,
+        messages: { userText: 1_000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 7_500, total: 8_500 },
+        media: { rawChars: 7_500, textChars: 25, tokens: 10, count: 1, imageTokens: 10, pdfTokens: 0, otherTokens: 0 },
+      },
+    }]
+    const acc = tokenAccounting(msgs as any, getParts)
+    // #175：固定侧 10，不按 7500 字符分配
+    expect(acc.breakdown?.attachments).toBe(10)
+    // #175：textDenom 算法回归锁：system 份额 242
+    expect(acc.breakdown?.system).toBe(242)
+    expect(acc.breakdown?.userMessages).toBe(242)
+  })
+
 
   test("durable projection survives an empty visible history and preserves prepared input", () => {
     const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }

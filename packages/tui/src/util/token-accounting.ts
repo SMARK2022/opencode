@@ -1,6 +1,8 @@
+// #175：TUI 固定侧分配 media.tokens，不抢 system/user 文本份额
 // step/request/session 共用统计入口，持久投影拥有完整累计，parts 只提供当前尾部。
 // 确认分类按 categoryChars / inputChars 分配 provider input，不在 TUI 重建请求体。
 
+import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
 import type { AssistantMessage, Part, Session } from "@opencode-ai/sdk/v2"
 import { computeFinalTokens, estimateDataUrlInputTokens } from "./token-estimate"
 
@@ -135,8 +137,11 @@ export function tokenAccounting(
       if (chars && chars >= 100) {
         const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
         if (tok > 0) {
-          const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
-          ratioChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
+          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number } } | undefined
+          // #175：校准剔除 media.raw，加回 text 占位
+          ratioChars += bd?.media
+            ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
+            : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
           ratioTokens += tok
         }
       }
@@ -261,7 +266,8 @@ export function tokenAccounting(
       pendingToolResultChars += (p.state.output?.length ?? 0)
       for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
         // #122：附件 data URL 估算并入待计入 input
-        pendingAttachTokens += estimateDataUrlInputTokens(att.url, att.mime)
+        // #175：pending 附件与 daemon 同口径
+        pendingAttachTokens += AttachmentToken.estimateAttachment({ url: att.url, mime: att.mime, type: "file" }).tokens
       }
     }
     if (p.state?.status === "error") {
@@ -307,6 +313,7 @@ export function tokenAccounting(
     const bd = breakdownSrc.inputBreakdown as {
       system: number; instructions: number; skills: number; tools: number
       messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
+      media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number }
     }
     // provider 确认优先于旧 prepared 密度，不必等整条消息 completed。
     const isConfirmed = breakdownSrc.type === "step-finish" || (breakdownSrc === pendingMsg && estimate?.confirmed === true)
@@ -316,16 +323,25 @@ export function tokenAccounting(
         ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write : 0)
       : breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio)
     const denom = breakdownSrc.inputChars
-
-    // #124/#127：按字符占比分配 input 分类
-    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
+    // #175：先固定切走 media.tokens
+    const media = (bd as any).media as { rawChars: number; textChars: number; tokens: number } | undefined
+    const attachmentTokens = media?.tokens
+    // #175：无 media 时保持旧全量分配
+    // #175：textAllocInput 在无 media 时等于 confirmedInput
+    const textAllocInput = attachmentTokens == null ? confirmedInput : Math.max(0, confirmedInput - attachmentTokens)
+    // #175：textDenom = denom - raw + text，至少为 1
+    // #175：全媒体请求 textDenom 保底 1
+    const textDenom = media ? Math.max(1, denom - media.rawChars + media.textChars) : denom
+    const alloc = (chars: number) => textDenom > 0 ? Math.round((chars / textDenom) * textAllocInput) : 0
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
     const skills = alloc(bd.skills)
     const tools = alloc(bd.tools)
     const userMessages = alloc(bd.messages.userText)
     const toolResults = alloc(bd.messages.toolOutput)
-    const attachments = alloc(bd.messages.attachments)
+    // #175：有 media.tokens 则 attachments 用固定值
+    // #175：attachments UI 槽位优先固定 media.tokens
+    const attachments = attachmentTokens ?? alloc(bd.messages.attachments)
     // #127：历史 assistant/reasoning/tool-call 属于 input context，不是当前 step 新输出
     const inputAssistantText = alloc(bd.messages.assistantText)
     const inputReasoning = alloc(bd.messages.reasoning)

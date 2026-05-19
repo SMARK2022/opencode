@@ -305,7 +305,8 @@ export const make = (dependencies: Dependencies) => {
       ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
       : usable
     if (
-      estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
+      // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
+      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }, []).input <=
       Math.min(usable, inputUsable)
     )
       return false
