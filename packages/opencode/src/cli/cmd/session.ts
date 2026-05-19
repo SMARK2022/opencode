@@ -218,6 +218,8 @@ function formatSessionTable(
         `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(20)} ${costStr.padStart(8)}  ${tokensStr.padStart(7)}`,
       )
     }
+    lines.push("")
+    lines.push("Run opencode stats sessions for distribution, outliers, and drilldown hints.")
   } else {
     const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
     lines.push(header)

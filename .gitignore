@@ -31,3 +31,4 @@ logs/
 *.bun-build
 tsconfig.tsbuildinfo
 archived/
+.temp/

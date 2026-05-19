@@ -1,6 +1,6 @@
-import { formatNumber } from "../format"
-import type { TokenPartSeries, UsageSeries } from "./stats-data"
-import type { ColorMode } from "./stats-render"
+import { formatNumber } from "../../format"
+import type { TokenPartSeries, UsageSeries } from "./data"
+import type { ColorMode } from "./render"
 
 const RESET = "\x1b[0m"
 const BOLD = "\x1b[1m"
@@ -8,7 +8,6 @@ const TEXT_RESET = "\x1b[22m\x1b[39m"
 const ANSI_RE = /\x1b\[[0-9;]*m/g
 const ANSI_PREFIX_RE = /^\x1b\[[0-9;]*m/
 const DEFAULT_PANEL_WIDTH = 104
-const MAX_PANEL_WIDTH = 118
 const MIN_PANEL_WIDTH = 58
 const PANEL_PADDING = 2
 
@@ -49,6 +48,7 @@ export type ChartSeries = {
   id: string
   label: string
   color: ChartColor
+  mark?: string
   points: ChartPoint[]
   total?: number
 }
@@ -110,6 +110,7 @@ const palette: Record<ChartColor, string> = {
 }
 
 const chartColors: ChartColor[] = ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"]
+const chartMarks = ["●", "◆", "■", "▲", "◇", "○", "✕", "+"]
 
 const axisStyle: ChartStyle = { color: "axis", priority: 20 }
 const gridStyle: ChartStyle = { color: "grid", priority: 0 }
@@ -122,7 +123,37 @@ const useColor = (mode: ColorMode = "auto") => {
   return Boolean(process.stdout.isTTY)
 }
 
-export const visibleLength = (text: string) => text.replace(ANSI_RE, "").length
+const isCombining = (code: number) =>
+  (code >= 0x0300 && code <= 0x036f) ||
+  (code >= 0x1ab0 && code <= 0x1aff) ||
+  (code >= 0x1dc0 && code <= 0x1dff) ||
+  (code >= 0x20d0 && code <= 0x20ff) ||
+  (code >= 0xfe20 && code <= 0xfe2f) ||
+  (code >= 0xfe00 && code <= 0xfe0f) ||
+  code === 0x200d
+
+const isWide = (code: number) =>
+  code >= 0x1100 &&
+  (code <= 0x115f ||
+    code === 0x2329 ||
+    code === 0x232a ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff))
+
+const charWidth = (char: string) => {
+  const code = char.codePointAt(0)
+  if (code === undefined) return 0
+  if (code === 0 || code < 32 || (code >= 0x7f && code < 0xa0) || isCombining(code)) return 0
+  return isWide(code) ? 2 : 1
+}
+
+export const visibleLength = (text: string) => Array.from(text.replace(ANSI_RE, "")).reduce((sum, char) => sum + charWidth(char), 0)
 
 export const stripAnsi = (text: string) => text.replace(ANSI_RE, "")
 
@@ -132,10 +163,10 @@ export const padStartVisible = (text: string, width: number) =>
   " ".repeat(Math.max(0, width - visibleLength(text))) + text
 
 export const statsPanelWidth = (width?: number) => {
-  const columns = Number(process.stdout.columns)
+  const columns = Number(process.stdout.columns ?? process.env.COLUMNS)
   const terminalWidth = Number.isFinite(columns) && columns > 0 ? Math.max(20, columns - 2) : DEFAULT_PANEL_WIDTH
-  const preferred = width ?? DEFAULT_PANEL_WIDTH
-  return Math.max(Math.min(MIN_PANEL_WIDTH, terminalWidth), Math.min(preferred, terminalWidth, MAX_PANEL_WIDTH))
+  const preferred = width ?? terminalWidth
+  return Math.max(Math.min(MIN_PANEL_WIDTH, terminalWidth), Math.min(preferred, terminalWidth))
 }
 
 export const statsContentWidth = (width?: number) => Math.max(20, statsPanelWidth(width) - PANEL_PADDING * 2)
@@ -148,7 +179,8 @@ export const truncateVisible = (text: string, width: number) => {
   const parts: string[] = []
   let visible = 0
   let index = 0
-  while (index < text.length && visible < width - 1) {
+  const target = width - visibleLength("…")
+  while (index < text.length && visible < target) {
     const ansi = text.slice(index).match(ANSI_PREFIX_RE)?.[0]
     if (ansi) {
       parts.push(ansi)
@@ -157,8 +189,10 @@ export const truncateVisible = (text: string, width: number) => {
     }
     const char = Array.from(text.slice(index))[0]
     if (!char) break
+    const nextWidth = charWidth(char)
+    if (visible + nextWidth > target) break
     parts.push(char)
-    visible++
+    visible += nextWidth
     index += char.length
   }
 
@@ -208,12 +242,6 @@ const money = (value: number) => {
   if (value >= 100) return `$${value.toFixed(0)}`
   if (value >= 10) return `$${value.toFixed(1)}`
   return `$${value.toFixed(3)}`
-}
-
-const braille = (value: number, max: number) => {
-  const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-  if (max <= 0) return chars[0]
-  return chars[Math.min(chars.length - 1, Math.floor((value / max) * (chars.length - 1)))]
 }
 
 class ChartCanvas {
@@ -399,15 +427,19 @@ const labelTicks = (labels: string[], width: number) => {
   const indexes = labels.length <= 4 ? range(labels.length) : [0, Math.floor(labels.length / 3), Math.floor((labels.length * 2) / 3), labels.length - 1]
   for (const index of indexes) {
     const label = labels[index]
+    const labelWidth = visibleLength(label)
     const x = clamp(
-      Math.round((index / Math.max(1, labels.length - 1)) * (width - 1)) - Math.floor(label.length / 2),
+      Math.round((index / Math.max(1, labels.length - 1)) * (width - 1)) - Math.floor(labelWidth / 2),
       0,
-      Math.max(0, width - label.length),
+      Math.max(0, width - labelWidth),
     )
-    Array.from(label).forEach((char, offset) => {
-      const pos = x + offset
+    let pos = x
+    for (const char of Array.from(label)) {
+      const width = charWidth(char)
       if (pos >= 0 && pos < line.length) line[pos] = char
-    })
+      if (width === 2 && pos + 1 < line.length) line[pos + 1] = ""
+      pos += width
+    }
   }
   return line.join("")
 }
@@ -421,8 +453,11 @@ const withYAxis = (plotLines: string[], max: number, formatter: (value: number) 
   return plotLines.map((line, index) => `${paint(padStartVisible(labels[index], width), "muted", ctx)} ${line}`)
 }
 
-const legend = (series: { label: string; color: ChartColor }[], ctx: RenderContext) =>
-  series.map((item) => `${paint("●", item.color, ctx)} ${paint(item.label, item.color, ctx)}`).join(paint(" · ", "muted", ctx))
+const legend = (series: { label: string; color: ChartColor; mark?: string }[], ctx: RenderContext) =>
+  series.map((item) => `${paint(item.mark ?? "●", item.color, ctx)} ${paint(item.label, item.color, ctx)}`).join(paint(" · ", "muted", ctx))
+
+const layerLegend = (layers: { label: string; color: ChartColor }[], ctx: RenderContext) =>
+  layers.map((item) => `${paint("■", item.color, ctx)} ${paint(item.label, item.color, ctx)}`).join(paint(" · ", "muted", ctx))
 
 export const metricFormatter = (metric: "tokens" | "cost") => (metric === "cost" ? money : formatNumber)
 
@@ -431,6 +466,7 @@ export const seriesFromUsage = (series: UsageSeries[], metric: "tokens" | "cost"
     id: item.id,
     label: item.label,
     color: chartColors[index % chartColors.length],
+    mark: chartMarks[index % chartMarks.length],
     total: metric === "cost" ? item.cost : item.tokens.total,
     points: item.points.map((point) => ({
       x: point.day,
@@ -453,6 +489,7 @@ export const dailySeries = (points: { day: number; label: string; value: number 
   id: label,
   label,
   color,
+  mark: chartMarks[0],
   total: points.reduce((acc, point) => acc + point.value, 0),
   points: points.map((point) => ({ x: point.day, y: point.value, label: point.label, value: point.value })),
 })
@@ -469,7 +506,7 @@ export function renderRoundedLineChart(input: {
   const width = input.width ?? 64
   const height = input.height ?? 12
   const formatter = metricFormatter(input.metric ?? "tokens")
-  const nonEmpty = input.series.filter((item) => item.points.length > 0)
+  const nonEmpty = input.series.filter((item) => item.points.some((point) => point.y > 0))
   if (nonEmpty.length === 0) return [paint(input.title, "title", ctx, true), paint("No line data for this range.", "muted", ctx)]
   const bounds = boundsForSeries(nonEmpty)
   const plotLeft = width > 1 ? 1 : 0
@@ -484,6 +521,7 @@ export function renderRoundedLineChart(input: {
     const style: ChartStyle = { color: item.color, priority: 30 + index }
     const mapped = item.points.map((point) => ({ x: plotLeft + xMap(point.x, bounds, plotWidth), y: yMap(point.y, bounds, plotHeight) }))
     drawOrthogonalPolyline(canvas, mapped, style)
+    mapped.forEach((point) => canvas.put(point.x, point.y, item.mark ?? chartMarks[index % chartMarks.length], style, style.priority + 5))
   })
   const labels = nonEmpty[0]?.points.map((point) => point.label ?? dateLabel(point.x)) ?? []
   return [
@@ -534,49 +572,7 @@ export function renderStackedAreaChart(input: {
     paint(input.title, "title", ctx, true),
     ...withYAxis(canvas.render(ctx), maxTotal, input.formatter ?? formatNumber, ctx),
     `${" ".repeat(7)}${paint(labelTicks(labels, width), "muted", ctx)}`,
-    legend(layers, ctx),
-  ]
-}
-
-export function renderStreamStackChart(input: {
-  title: string
-  layers: ChartLayer[]
-  labels?: string[]
-  width?: number
-  height?: number
-  color?: ColorMode
-}) {
-  const ctx = renderContext(input.color)
-  const width = input.width ?? 64
-  const height = input.height ?? 13
-  const layers = input.layers.filter((layer) => layer.values.some((value) => value > 0))
-  if (layers.length === 0) return [paint(input.title, "title", ctx, true), paint("No stream data for this range.", "muted", ctx)]
-  const maxLength = Math.max(...layers.map((layer) => layer.values.length), 0)
-  const columns = range(width).map((index) => {
-    const sourceIndex = maxLength <= 1 ? 0 : Math.round((index / Math.max(1, width - 1)) * (maxLength - 1))
-    return layers.map((layer) => layer.values[sourceIndex] ?? 0)
-  })
-  const maxTotal = niceMax(Math.max(...columns.map((column) => column.reduce((acc, value) => acc + value, 0)), 1))
-  const center = Math.floor(height / 2)
-  const canvas = new ChartCanvas(width, height)
-  columns.forEach((column, x) => {
-    const total = column.reduce((acc, value) => acc + value, 0)
-    let cursor = center - Math.round((total / maxTotal) * center)
-    column.forEach((value, layerIndex) => {
-      const size = value <= 0 ? 0 : Math.max(1, Math.round((value / maxTotal) * (height - 1)))
-      for (const y of range(size).map((offset) => clamp(cursor + offset, 0, height - 1))) {
-        canvas.put(x, y, "█", { color: layers[layerIndex].color, priority: 10 + layerIndex })
-      }
-      cursor += size
-    })
-  })
-  canvas.horizontal(0, width - 1, center, "─", gridStyle)
-  const labels = input.labels ?? range(maxLength).map(String)
-  return [
-    paint(input.title, "title", ctx, true),
-    ...canvas.render(ctx),
-    paint(labelTicks(labels, width), "muted", ctx),
-    legend(layers, ctx),
+    layerLegend(layers, ctx),
   ]
 }
 
@@ -590,11 +586,12 @@ export function renderHeatmap(input: {
 }) {
   const ctx = renderContext(input.color)
   const width = input.width ?? 52
-  const maxWeeks = Math.max(1, width - 4)
+  // Each day cell is 2 columns wide so the calendar reads naturally.
+  const maxWeeks = Math.max(1, Math.floor((width - 4) / 2))
   const points = input.points.slice(-maxWeeks * 7)
   if (points.length === 0) return [paint(input.title, "title", ctx, true), paint(input.emptyLabel ?? "No heatmap data.", "muted", ctx)]
   const max = safeMax(points.map((point) => point.value))
-  const levels = [" ", "░", "▒", "▓", "█"]
+  const levels = ["  ", "░░", "▒▒", "▓▓", "██"]
   const rows = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => `${paint(label, "muted", ctx)} `)
   const start = new Date(points[0].day)
   const offset = (start.getDay() + 6) % 7
@@ -648,6 +645,9 @@ export function renderRankBars(input: {
   rows: { label: string; value: number; subvalue?: string; color?: ChartColor }[]
   color?: ColorMode
   width?: number
+  totalWidth?: number
+  labelWidth?: number
+  subvalueWidth?: number
   formatter?: (value: number) => string
 }) {
   const ctx = renderContext(input.color)
@@ -656,12 +656,37 @@ export function renderRankBars(input: {
   if (rows.length === 0) return [paint(input.title, "title", ctx, true), paint("No ranked data.", "muted", ctx)]
   const max = Math.max(...rows.map((row) => row.value), 1)
   const formatter = input.formatter ?? formatNumber
+  const valWidth = Math.max(...rows.map((row) => visibleLength(formatter(row.value))), 6)
+  if (input.totalWidth) {
+    const totalWidth = Math.max(20, input.totalWidth)
+    const hasSubvalue = rows.some((row) => row.subvalue)
+    const subvalueWidth = hasSubvalue && totalWidth >= 52 ? Math.min(input.subvalueWidth ?? 12, Math.max(0, totalWidth - 42)) : 0
+    const labelWidth = Math.max(
+      6,
+      Math.min(input.labelWidth ?? 18, Math.max(6, totalWidth - valWidth - (subvalueWidth ? subvalueWidth + 1 : 0) - 10)),
+    )
+    const barWidth = Math.max(1, totalWidth - 2 - 1 - labelWidth - 1 - 1 - valWidth - (subvalueWidth ? subvalueWidth + 1 : 0))
+    return [
+      fitVisible(paint(input.title, "title", ctx, true), totalWidth),
+      ...rows.map((row, index) => {
+        const color = row.color ?? chartColors[index % chartColors.length]
+        const size = Math.max(1, Math.round((row.value / max) * barWidth))
+        const subvalue = subvalueWidth ? ` ${fitVisible(paint(row.subvalue ?? "", "muted", ctx), subvalueWidth)}` : ""
+        return fitVisible(
+          `${paint(String(index + 1).padStart(2), "muted", ctx)} ${padEndVisible(paint(truncateVisible(row.label, labelWidth), "white", ctx, true), labelWidth)} ${paint("█".repeat(size), color, ctx)}${paint("░".repeat(barWidth - size), "grid", ctx)} ${paint(padStartVisible(formatter(row.value), valWidth), "subtitle", ctx)}${subvalue}`,
+          totalWidth,
+        )
+      }),
+    ]
+  }
+  // label(24) + space(1) + bar(width) + space(1) + val(valWidth) + space(1) + subvalue
+  const labelWidth = 24
   return [
     paint(input.title, "title", ctx, true),
     ...rows.map((row, index) => {
       const color = row.color ?? chartColors[index % chartColors.length]
       const size = Math.max(1, Math.round((row.value / max) * width))
-      return `${paint(String(index + 1).padStart(2), "muted", ctx)} ${padEndVisible(paint(row.label.slice(0, 28), "white", ctx, true), 30)} ${paint("█".repeat(size), color, ctx)}${paint("░".repeat(width - size), "grid", ctx)} ${paint(formatter(row.value).padStart(8), "subtitle", ctx)} ${paint(row.subvalue ?? "", "muted", ctx)}`
+      return `${paint(String(index + 1).padStart(2), "muted", ctx)} ${padEndVisible(paint(truncateVisible(row.label, labelWidth), "white", ctx, true), labelWidth)} ${paint("█".repeat(size), color, ctx)}${paint("░".repeat(width - size), "grid", ctx)} ${paint(padStartVisible(formatter(row.value), valWidth), "subtitle", ctx)} ${paint(row.subvalue ?? "", "muted", ctx)}`
     }),
   ]
 }
@@ -680,104 +705,16 @@ export function renderMatrix(input: {
   }
   const max = safeMax(input.values.flat())
   const shades = [" ", "░", "▒", "▓", "█"]
-  const header = `${" ".repeat(16)}${input.xLabels.map((label) => paint(label.slice(0, 3).padStart(4), "muted", ctx)).join("")}`
+  const header = `${" ".repeat(16)}${input.xLabels.map((label) => paint(padStartVisible(truncateVisible(label, 3), 4), "muted", ctx)).join("")}`
   const rows = input.yLabels.map((label, y) => {
     const cells = input.xLabels.map((_, x) => {
       const value = input.values[y]?.[x] ?? 0
       const level = max <= 0 ? 0 : Math.min(shades.length - 1, Math.ceil((value / max) * (shades.length - 1)))
       return paint(shades[level].repeat(4), chartColors[level % chartColors.length], ctx)
     })
-    return `${paint(label.slice(0, 14).padEnd(14), "white", ctx, true)}  ${cells.join("")}`
+    return `${padEndVisible(paint(truncateVisible(label, 14), "white", ctx, true), 14)}  ${cells.join("")}`
   })
   return [paint(input.title, "title", ctx, true), header, ...rows]
-}
-
-export function renderWaterfall(input: {
-  title: string
-  rows: { label: string; value: number; color?: ChartColor }[]
-  color?: ColorMode
-  width?: number
-  formatter?: (value: number) => string
-}) {
-  const ctx = renderContext(input.color)
-  const width = input.width ?? 56
-  const formatter = input.formatter ?? formatNumber
-  const max = safeMax(input.rows.map((row) => Math.abs(row.value)))
-  const center = Math.floor(width / 2)
-  const lines = input.rows.map((row, index) => {
-    const size = max <= 0 ? 0 : Math.max(1, Math.round((Math.abs(row.value) / max) * center))
-    const color = row.color ?? (row.value >= 0 ? chartColors[index % chartColors.length] : "red")
-    const left = row.value < 0 ? `${" ".repeat(center - size)}${paint("█".repeat(size), color, ctx)}` : " ".repeat(center)
-    const right = row.value >= 0 ? paint("█".repeat(size), color, ctx) : ""
-    return `${paint(row.label.slice(0, 18).padEnd(18), "white", ctx, true)} ${left}${paint("│", "axis", ctx)}${right.padEnd(center)} ${paint(formatter(row.value), "subtitle", ctx)}`
-  })
-  return [paint(input.title, "title", ctx, true), ...lines]
-}
-
-export function renderHorizon(input: {
-  title: string
-  series: ChartSeries[]
-  color?: ColorMode
-  width?: number
-  formatter?: (value: number) => string
-}) {
-  const ctx = renderContext(input.color)
-  const width = input.width ?? 64
-  const rows = input.series.map((series, index) => {
-    const max = safeMax(series.points.map((point) => point.y))
-    const values = range(width).map((slot) => {
-      const source = series.points.length <= 1 ? 0 : Math.round((slot / Math.max(1, width - 1)) * (series.points.length - 1))
-      return series.points[source]?.y ?? 0
-    })
-    const line = values.map((value) => paint(braille(value, max), series.color, ctx)).join("")
-    return `${padEndVisible(paint(series.label.slice(0, 20), "white", ctx, true), 22)} ${line} ${paint(input.formatter?.(max) ?? formatNumber(max), "muted", ctx)}`
-  })
-  if (rows.length === 0) rows.push(paint("No horizon data.", "muted", ctx))
-  return [paint(input.title, "title", ctx, true), ...rows]
-}
-
-export function renderSmallMultiples(input: {
-  title: string
-  series: ChartSeries[]
-  color?: ColorMode
-  width?: number
-  formatter?: (value: number) => string
-}) {
-  const ctx = renderContext(input.color)
-  const width = input.width ?? 24
-  const rows = input.series.map((series) => {
-    const max = safeMax(series.points.map((point) => point.y))
-    const sampled = range(width).map((slot) => {
-      const source = series.points.length <= 1 ? 0 : Math.round((slot / Math.max(1, width - 1)) * (series.points.length - 1))
-      return series.points[source]?.y ?? 0
-    })
-    return `${padEndVisible(paint(series.label.slice(0, 22), "white", ctx, true), 24)} ${sampled.map((value) => paint(braille(value, max), series.color, ctx)).join("")} ${paint(input.formatter?.(max) ?? formatNumber(max), "muted", ctx)}`
-  })
-  if (rows.length === 0) rows.push(paint("No small multiple data.", "muted", ctx))
-  return [paint(input.title, "title", ctx, true), ...rows]
-}
-
-export function renderCompositionDonut(input: {
-  title: string
-  rows: { label: string; value: number; color?: ChartColor }[]
-  color?: ColorMode
-  formatter?: (value: number) => string
-}) {
-  const ctx = renderContext(input.color)
-  const rows = input.rows.filter((row) => row.value > 0)
-  const total = rows.reduce((acc, row) => acc + row.value, 0)
-  if (total <= 0) return [paint(input.title, "title", ctx, true), paint("No composition data.", "muted", ctx)]
-  const ring = "◜████◝\n██  ██\n██  ██\n◟████◞".split("\n").map((line, index) => paint(line, chartColors[index % chartColors.length], ctx))
-  const legendRows = rows.slice(0, 6).map((row, index) => {
-    const color = row.color ?? chartColors[index % chartColors.length]
-    const share = ((row.value / total) * 100).toFixed(1)
-    return `${paint("●", color, ctx)} ${padEndVisible(paint(row.label.slice(0, 24), "white", ctx, true), 26)} ${paint(`${share}%`.padStart(7), "subtitle", ctx)} ${paint(input.formatter?.(row.value) ?? formatNumber(row.value), "muted", ctx)}`
-  })
-  const height = Math.max(ring.length, legendRows.length)
-  return [
-    paint(input.title, "title", ctx, true),
-    ...range(height).map((index) => `${padEndVisible(ring[index] ?? "", 10)} ${legendRows[index] ?? ""}`),
-  ]
 }
 
 export function renderPanel(input: { title?: string; lines: string[]; color?: ColorMode; width?: number }) {
@@ -790,9 +727,9 @@ export function renderPanel(input: { title?: string; lines: string[]; color?: Co
   return lines.map((line) => `${palette.panel}${line}${RESET}`).join("\n")
 }
 
-export function renderTwoColumn(left: string[], right: string[], gap = 4, width = statsContentWidth()) {
+export function renderTwoColumn(left: string[], right: string[], gap = 4, width = statsContentWidth(), leftFraction = 0.5) {
   const safeGap = Math.max(1, Math.min(gap, 8))
-  const leftWidth = Math.max(1, Math.floor((width - safeGap) / 2))
+  const leftWidth = Math.max(1, Math.floor((width - safeGap) * Math.min(0.9, Math.max(0.1, leftFraction))))
   const rightWidth = Math.max(1, width - safeGap - leftWidth)
   const height = Math.max(left.length, right.length)
   return range(height).map((index) => `${fitVisible(left[index] ?? "", leftWidth)}${" ".repeat(safeGap)}${fitVisible(right[index] ?? "", rightWidth)}`)
@@ -838,22 +775,6 @@ export function renderNarrative(input: { title: string; lines: string[]; color?:
   return [paint(input.title, "title", ctx, true), ...input.lines.map((line) => `${paint("│", "grid", ctx)} ${paint(line, "subtitle", ctx)}`)]
 }
 
-export function renderGauge(input: {
-  label: string
-  value: number
-  max: number
-  color?: ColorMode
-  width?: number
-  formatter?: (value: number) => string
-}) {
-  const ctx = renderContext(input.color)
-  const width = input.width ?? 32
-  const ratio = input.max <= 0 ? 0 : clamp(input.value / input.max, 0, 1)
-  const filled = Math.round(ratio * width)
-  const bar = `${paint("█".repeat(filled), "green", ctx)}${paint("░".repeat(width - filled), "grid", ctx)}`
-  return `${paint(input.label, "white", ctx, true)} ${bar} ${paint(input.formatter?.(input.value) ?? formatNumber(input.value), "subtitle", ctx)}`
-}
-
 export function renderSlopeChart(input: {
   title: string
   rows: { label: string; start: number; end: number; color?: ChartColor }[]
@@ -876,7 +797,7 @@ export function renderSlopeChart(input: {
       return " "
     }).join("")
     const color = row.color ?? chartColors[index % chartColors.length]
-    return `${padEndVisible(paint(row.label.slice(0, 22), "white", ctx, true), 24)} ${paint(line, color, ctx)} ${paint(`${input.formatter?.(row.start) ?? formatNumber(row.start)} → ${input.formatter?.(row.end) ?? formatNumber(row.end)}`, "muted", ctx)}`
+    return `${padEndVisible(paint(truncateVisible(row.label, 22), "white", ctx, true), 24)} ${paint(line, color, ctx)} ${paint(`${input.formatter?.(row.start) ?? formatNumber(row.start)} → ${input.formatter?.(row.end) ?? formatNumber(row.end)}`, "muted", ctx)}`
   })
   return [paint(input.title, "title", ctx, true), ...rows]
 }
@@ -889,15 +810,20 @@ export function renderPercentStack(input: {
 }) {
   const ctx = renderContext(input.color)
   const width = input.width ?? 48
+  // Reserve space for label(20) + space(1) + total(~8) + space(1) = 30; bar gets the rest
+  const barWidth = Math.max(4, width - 30)
   const rows = input.rows.map((row) => {
     const total = row.parts.reduce((acc, part) => acc + part.value, 0)
     const pieces = row.parts.map((part) => {
-      const size = total <= 0 ? 0 : Math.round((part.value / total) * width)
+      const size = total <= 0 ? 0 : Math.max(0, Math.round((part.value / total) * barWidth))
       return paint("█".repeat(size), part.color, ctx)
     })
-    return `${padEndVisible(paint(row.label.slice(0, 18), "white", ctx, true), 20)} ${pieces.join("").padEnd(width)} ${paint(formatNumber(total), "muted", ctx)}`
+    return `${padEndVisible(paint(truncateVisible(row.label, 18), "white", ctx, true), 20)} ${padEndVisible(pieces.join(""), barWidth)} ${paint(formatNumber(total), "muted", ctx)}`
   })
-  return [paint(input.title, "title", ctx, true), ...rows]
+  // Legend showing each part
+  const allParts = input.rows[0]?.parts ?? []
+  const legendLine = allParts.map((part) => `${paint("■", part.color, ctx)} ${paint(part.label, "muted", ctx)}`).join(paint("  ", "muted", ctx))
+  return [paint(input.title, "title", ctx, true), ...rows, legendLine]
 }
 
 export function renderDayLabels(points: { label: string }[], width: number, color?: ColorMode) {
@@ -908,7 +834,7 @@ export function renderDayLabels(points: { label: string }[], width: number, colo
 export function renderCallout(input: { title: string; body: string; color?: ColorMode; accent?: ChartColor }) {
   const ctx = renderContext(input.color)
   const accent = input.accent ?? "yellow"
-  const width = Math.min(72, statsContentWidth() - 2)
+  const width = Math.max(20, statsContentWidth() - 2)
   const innerWidth = Math.max(10, width - 2)
   return [
     `${paint("╭", accent, ctx)}${paint("─".repeat(width), "grid", ctx)}${paint("╮", accent, ctx)}`,

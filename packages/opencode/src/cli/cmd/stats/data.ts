@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import { Session } from "@/session/session"
+import type { MessageV2 } from "@/session/message-v2"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
 import { NotFoundError } from "@/storage/storage"
 import { Database, eq } from "@/storage/db"
@@ -18,11 +19,28 @@ export type TokenTotals = {
   total: number
 }
 
+export type InputComponentTotals = {
+  system: number
+  instructions: number
+  skills: number
+  toolSchemas: number
+  userMessages: number
+  assistantText: number
+  reasoning: number
+  toolCalls: number
+  toolResults: number
+  attachments: number
+}
+
 export type UsageTotals = {
   tokens: TokenTotals
+  components: InputComponentTotals
   cost: number
   requests: number
   assistantCalls: number
+  errors: number
+  aborted: number
+  durationMs: number
 }
 
 export type UsageGroup = UsageTotals & {
@@ -64,6 +82,14 @@ export type SessionUsage = UsageTotals & {
   models: string[]
 }
 
+export type ToolUsage = {
+  id: string
+  count: number
+  inputChars: number
+  outputChars: number
+  contextTokens: number
+}
+
 export type StatsReport = {
   totalSessions: number
   sessionsWithUsage: number
@@ -75,12 +101,21 @@ export type StatsReport = {
   total: UsageTotals
   models: UsageGroup[]
   providers: UsageGroup[]
+  agents: UsageGroup[]
+  sources: UsageGroup[]
+  statuses: UsageGroup[]
+  projects: UsageGroup[]
   daily: DailyUsage[]
   modelSeries: UsageSeries[]
   providerSeries: UsageSeries[]
+  agentSeries: UsageSeries[]
+  sourceSeries: UsageSeries[]
+  statusSeries: UsageSeries[]
+  projectSeries: UsageSeries[]
   tokenPartSeries: TokenPartSeries[]
   sessions: SessionUsage[]
-  toolUsage: { id: string; count: number }[]
+  toolUsage: ToolUsage[]
+  modelProviderTokens: { providerID: string; modelID: string; tokens: number }[]
   tokensPerSession: number
   medianTokensPerSession: number
 }
@@ -89,25 +124,54 @@ export type StatsFilter = {
   days?: number
   projectFilter?: string
   currentProject?: Project.Info
+  sessionFilter?: string
+  modelFilter?: string
+  providerFilter?: string
+  sourceFilter?: string
+  agentFilter?: string
+  statusFilter?: string
+  toolFilter?: string
 }
 
 type UsageEvent = {
   time: number
   sessionID: SessionID
+  projectID: string
   providerID: string
   modelID: string
+  source: string
+  agent: string
+  status: string
   tokens: TokenTotals
+  components: InputComponentTotals
   cost: number
   requests: number
   assistantCalls: number
+  errors: number
+  aborted: number
+  durationMs: number
 }
 
 type SessionAggregate = {
   session: Session.Info
   messageCount: number
-  toolUsage: Record<string, number>
+  toolUsage: Record<string, ToolUsage>
+  toolEvents: ToolUsageEvent[]
   totalEvents: UsageEvent[]
   breakdownEvents: UsageEvent[]
+}
+
+type ToolUsageEvent = {
+  time: number
+  sessionID: SessionID
+  projectID: string
+  providerID: string
+  modelID: string
+  source: string
+  agent: string
+  status: string
+  toolID: string
+  contextTokens: number
 }
 
 type UsageGroupAccumulator = UsageGroup & {
@@ -124,11 +188,28 @@ const emptyTokens = (): TokenTotals => ({
   total: 0,
 })
 
+const emptyComponents = (): InputComponentTotals => ({
+  system: 0,
+  instructions: 0,
+  skills: 0,
+  toolSchemas: 0,
+  userMessages: 0,
+  assistantText: 0,
+  reasoning: 0,
+  toolCalls: 0,
+  toolResults: 0,
+  attachments: 0,
+})
+
 const emptyUsage = (): UsageTotals => ({
   tokens: emptyTokens(),
+  components: emptyComponents(),
   cost: 0,
   requests: 0,
   assistantCalls: 0,
+  errors: 0,
+  aborted: 0,
+  durationMs: 0,
 })
 
 const tokenTotal = (tokens: Omit<TokenTotals, "total">) =>
@@ -167,14 +248,76 @@ const addTokens = (target: TokenTotals, value: TokenTotals) => {
   target.total += value.total
 }
 
+const addComponents = (target: InputComponentTotals, value: InputComponentTotals) => {
+  target.system += value.system
+  target.instructions += value.instructions
+  target.skills += value.skills
+  target.toolSchemas += value.toolSchemas
+  target.userMessages += value.userMessages
+  target.assistantText += value.assistantText
+  target.reasoning += value.reasoning
+  target.toolCalls += value.toolCalls
+  target.toolResults += value.toolResults
+  target.attachments += value.attachments
+}
+
 const addUsage = (target: UsageTotals, event: UsageEvent) => {
   addTokens(target.tokens, event.tokens)
+  addComponents(target.components, event.components)
   target.cost += event.cost
   target.requests += event.requests
   target.assistantCalls += event.assistantCalls
+  target.errors += event.errors
+  target.aborted += event.aborted
+  target.durationMs += event.durationMs
 }
 
 const increment = (map: Map<string, number>, key: string, value: number) => map.set(key, (map.get(key) ?? 0) + value)
+
+const textMatches = (value: string | undefined, filter: string | undefined) => {
+  if (filter === undefined) return true
+  return (value ?? "").toLowerCase().includes(filter.toLowerCase())
+}
+
+const eventMatches = (event: UsageEvent, input: StatsFilter) =>
+  textMatches(event.modelID, input.modelFilter) &&
+  textMatches(event.providerID, input.providerFilter) &&
+  textMatches(event.source, input.sourceFilter) &&
+  textMatches(event.agent, input.agentFilter) &&
+  textMatches(event.status, input.statusFilter)
+
+const toolEventMatches = (event: ToolUsageEvent, input: StatsFilter) =>
+  textMatches(event.toolID, input.toolFilter) &&
+  textMatches(event.modelID, input.modelFilter) &&
+  textMatches(event.providerID, input.providerFilter) &&
+  textMatches(event.source, input.sourceFilter) &&
+  textMatches(event.agent, input.agentFilter) &&
+  textMatches(event.status, input.statusFilter)
+
+const sessionMatches = (session: Session.Info, input: StatsFilter) =>
+  textMatches(session.id, input.sessionFilter) ||
+  textMatches(session.title, input.sessionFilter) ||
+  textMatches(session.directory, input.sessionFilter)
+
+const getToolUsage = (map: Record<string, ToolUsage>, id: string) => {
+  const existing = map[id]
+  if (existing) return existing
+  const item = { id, count: 0, inputChars: 0, outputChars: 0, contextTokens: 0 }
+  map[id] = item
+  return item
+}
+
+const addToolUsage = (map: Record<string, ToolUsage>, usage: ToolUsage) => {
+  const item = getToolUsage(map, usage.id)
+  item.count += usage.count
+  item.inputChars += usage.inputChars
+  item.outputChars += usage.outputChars
+  item.contextTokens += usage.contextTokens
+}
+
+const addToolContextTokens = (map: Record<string, ToolUsage>, toolID: string, contextTokens: number) => {
+  getToolUsage(map, toolID).contextTokens += contextTokens
+}
 
 const getGroup = (map: Map<string, UsageGroupAccumulator>, id: string, label: string) => {
   const existing = map.get(id)
@@ -208,9 +351,13 @@ const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
       id: group.id,
       label: group.label,
       tokens: group.tokens,
+      components: group.components,
       cost: group.cost,
       requests: group.requests,
       assistantCalls: group.assistantCalls,
+      errors: group.errors,
+      aborted: group.aborted,
+      durationMs: group.durationMs,
       sessions: group.sessionIDs.size,
       providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
       models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
@@ -225,6 +372,15 @@ const dayStart = (time: number) => {
 
 const dateLabel = (time: number) =>
   new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+
+const buildDayBuckets = (start: number, end: number) => {
+  const startDay = dayStart(start)
+  const endDay = dayStart(Math.max(startDay, end))
+  return Array.from({ length: Math.floor((endDay - startDay) / MS_IN_DAY) + 1 }, (_, index) => {
+    const day = startDay + index * MS_IN_DAY
+    return { day, label: dateLabel(day), ...emptyUsage() } satisfies DailyUsage
+  })
+}
 
 const getDaily = (map: Map<number, DailyUsage>, time: number) => {
   const day = dayStart(time)
@@ -259,12 +415,20 @@ const finalizeSeries = (map: Map<string, Map<number, DailyUsage>>, days: DailyUs
           addUsage(series, {
             time: point.day,
             sessionID: "" as SessionID,
+            projectID: id,
             providerID: id,
             modelID: id,
+            source: id,
+            agent: id,
+            status: id,
             tokens: point.tokens,
+            components: point.components,
             cost: point.cost,
             requests: point.requests,
             assistantCalls: point.assistantCalls,
+            errors: point.errors,
+            aborted: point.aborted,
+            durationMs: point.durationMs,
           })
           series.points.push(point)
           return series
@@ -323,12 +487,108 @@ const windowDays = (days?: number) => {
 
 const includeTime = (cutoff: number, time: number) => cutoff === 0 || time >= cutoff
 
+const rowDuration = (row: { time_created: number; time_completed: number | null }) =>
+  row.time_completed ? Math.max(0, row.time_completed - row.time_created) : 0
+
+const statusCounts = (status: string, requests: number) => ({
+  errors: status === "error" ? requests : 0,
+  aborted: status === "aborted" ? requests : 0,
+})
+
+const stepInputTokens = (part: MessageV2.StepFinishPart) => part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
+
+const componentsFromStep = (part: MessageV2.StepFinishPart) => {
+  if (!part.inputBreakdown || !part.inputChars) return emptyComponents()
+  const inputTokens = stepInputTokens(part)
+  const media = part.inputBreakdown.media
+  const attachmentTokens = media?.tokens
+  const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
+  const textChars = media ? Math.max(1, part.inputChars - media.rawChars + media.textChars) : part.inputChars
+  const alloc = (chars: number) => Math.round((chars / textChars) * textTokens)
+  return {
+    system: alloc(part.inputBreakdown.system),
+    instructions: alloc(part.inputBreakdown.instructions),
+    skills: alloc(part.inputBreakdown.skills),
+    toolSchemas: alloc(part.inputBreakdown.tools),
+    userMessages: alloc(part.inputBreakdown.messages.userText),
+    assistantText: alloc(part.inputBreakdown.messages.assistantText),
+    reasoning: alloc(part.inputBreakdown.messages.reasoning),
+    toolCalls: alloc(part.inputBreakdown.messages.toolInput),
+    toolResults: alloc(part.inputBreakdown.messages.toolOutput),
+    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages.attachments),
+  } satisfies InputComponentTotals
+}
+
+const componentsFromAssistant = (message: MessageV2.WithParts | undefined) => {
+  const components = emptyComponents()
+  for (const part of message?.parts ?? []) {
+    if (part.type !== "step-finish") continue
+    addComponents(components, componentsFromStep(part))
+  }
+  return components
+}
+
+const toolInputChars = (part: MessageV2.ToolPart) => {
+  if (part.state.status === "pending") return part.state.raw.length
+  return JSON.stringify(part.state.input).length
+}
+
+const toolOutputChars = (part: MessageV2.ToolPart) => {
+  if (part.state.status === "completed") return part.state.output.length + (part.state.attachments ?? []).reduce((sum, item) => sum + item.url.length, 0)
+  if (part.state.status === "error") return part.state.error.length
+  return 0
+}
+
+const toolCharsByName = (messages: MessageV2.WithParts[], time: number) => {
+  const result = new Map<string, { inputChars: number; outputChars: number }>()
+  for (const message of messages) {
+    if (message.info.time.created > time) continue
+    for (const part of message.parts) {
+      if (part.type !== "tool") continue
+      const item = result.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
+      item.inputChars += toolInputChars(part)
+      item.outputChars += toolOutputChars(part)
+      result.set(part.tool, item)
+    }
+  }
+  return result
+}
+
+const toolEventsFromAssistant = (input: {
+  message: MessageV2.WithParts | undefined
+  visibleMessages: MessageV2.WithParts[]
+  event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
+}) => {
+  if (!input.message) return []
+  const components = componentsFromAssistant(input.message)
+  const chars = toolCharsByName(input.visibleMessages, input.message.info.time.created)
+  const inputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.inputChars, 0)
+  const outputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.outputChars, 0)
+  return Array.from(chars.entries())
+    .map(([toolID, item]) => ({
+      time: input.event.time,
+      sessionID: input.event.sessionID,
+      projectID: input.event.projectID,
+      providerID: input.event.providerID,
+      modelID: input.event.modelID,
+      source: input.event.source,
+      agent: input.event.agent,
+      status: input.event.status,
+      toolID,
+      contextTokens:
+        (inputTotal > 0 ? Math.round((components.toolCalls * item.inputChars) / inputTotal) : 0) +
+        (outputTotal > 0 ? Math.round((components.toolResults * item.outputChars) / outputTotal) : 0),
+    }))
+    .filter((event) => event.contextTokens > 0)
+}
+
 const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
   const svc = yield* Session.Service
   const messages = yield* svc
     .messages({ sessionID: session.id })
     .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
   const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
+  const messagesByID = new Map(visibleMessages.map((message) => [message.info.id, message]))
   const requestUsageRows = Database.use((db) =>
     db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
   )
@@ -337,34 +597,57 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
   )
   const totalEvents: UsageEvent[] = []
   const breakdownEvents: UsageEvent[] = []
+  const toolEvents: ToolUsageEvent[] = []
 
   if (requestUsageRows.length > 0) {
     const requestRows = requestUsageRows.filter((row) => includeTime(cutoff, row.time_created))
     const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
+    const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
 
     if (assistantRows.length > 0) {
       const assistantRequests = new Set(assistantRows.map((row) => row.request_id))
-      const assistantEvents = assistantRows.map((row) => ({
-        time: row.time_created,
-        sessionID: session.id,
-        providerID: row.provider_id,
-        modelID: row.model_id,
-        tokens: rowTokens(row),
-        cost: row.cost_micros / MICROS,
-        requests: 0,
-        assistantCalls: 1,
-      }))
+      const assistantEvents = assistantRows.map((row) => {
+        const request = requestsByID.get(row.request_id)
+        const message = messagesByID.get(row.assistant_message_id)
+        const event = {
+          time: row.time_created,
+          sessionID: session.id,
+          projectID: session.projectID,
+          providerID: row.provider_id,
+          modelID: row.model_id,
+          source: request?.source ?? "assistant",
+          agent: request?.agent ?? session.agent ?? "unknown",
+          status: row.status,
+          tokens: rowTokens(row),
+          components: componentsFromAssistant(message),
+          cost: row.cost_micros / MICROS,
+          requests: 0,
+          assistantCalls: 1,
+          errors: 0,
+          aborted: 0,
+          durationMs: 0,
+        }
+        toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
+        return event
+      })
       const fallbackRequestEvents = requestRows
         .filter((row) => !assistantRequests.has(row.request_id))
         .map((row) => ({
           time: row.time_created,
           sessionID: session.id,
+          projectID: session.projectID,
           providerID: row.provider_id,
           modelID: row.model_id,
+          source: row.source,
+          agent: row.agent || session.agent || "unknown",
+          status: row.status,
           tokens: rowTokens(row),
+          components: emptyComponents(),
           cost: row.cost_micros / MICROS,
           requests: 1,
           assistantCalls: row.assistant_count || 1,
+          ...statusCounts(row.status, 1),
+          durationMs: rowDuration(row),
         }))
       totalEvents.push(...assistantEvents)
       totalEvents.push(...fallbackRequestEvents)
@@ -372,12 +655,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
         ...requestRows.filter((row) => assistantRequests.has(row.request_id)).map((row) => ({
           time: row.time_created,
           sessionID: session.id,
+          projectID: session.projectID,
           providerID: row.provider_id,
           modelID: row.model_id,
+          source: row.source,
+          agent: row.agent || session.agent || "unknown",
+          status: row.status,
           tokens: emptyTokens(),
+          components: emptyComponents(),
           cost: 0,
           requests: 1,
           assistantCalls: 0,
+          ...statusCounts(row.status, 1),
+          durationMs: rowDuration(row),
         })),
       )
       breakdownEvents.push(...assistantEvents)
@@ -386,12 +676,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       const requestEvents = requestRows.map((row) => ({
         time: row.time_created,
         sessionID: session.id,
+        projectID: session.projectID,
         providerID: row.provider_id,
         modelID: row.model_id,
+        source: row.source,
+        agent: row.agent || session.agent || "unknown",
+        status: row.status,
         tokens: rowTokens(row),
+        components: emptyComponents(),
         cost: row.cost_micros / MICROS,
         requests: 1,
         assistantCalls: row.assistant_count || 1,
+        ...statusCounts(row.status, 1),
+        durationMs: rowDuration(row),
       }))
       totalEvents.push(...requestEvents)
       breakdownEvents.push(...requestEvents)
@@ -403,27 +700,39 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       const event = {
         time: message.info.time.created,
         sessionID: session.id,
+        projectID: session.projectID,
         providerID: message.info.providerID,
         modelID: message.info.modelID,
+        source: "legacy-message",
+        agent: session.agent ?? "unknown",
+        status: "completed",
         tokens,
+        components: componentsFromAssistant(message),
         cost: message.info.cost ?? 0,
         requests: 0,
         assistantCalls: 1,
+        errors: 0,
+        aborted: 0,
+        durationMs: 0,
       }
+      toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
       totalEvents.push(event)
       breakdownEvents.push(event)
     }
   }
 
-  const toolUsage: Record<string, number> = {}
+  const toolUsage: Record<string, ToolUsage> = {}
   for (const message of visibleMessages) {
     for (const part of message.parts) {
       if (part.type !== "tool" || !part.tool) continue
-      toolUsage[part.tool] = (toolUsage[part.tool] ?? 0) + 1
+      const item = getToolUsage(toolUsage, part.tool)
+      item.count++
+      item.inputChars += toolInputChars(part)
+      item.outputChars += toolOutputChars(part)
     }
   }
 
-  return { session, messageCount: visibleMessages.length, toolUsage, totalEvents, breakdownEvents } satisfies SessionAggregate
+  return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, totalEvents, breakdownEvents } satisfies SessionAggregate
 })
 
 export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
@@ -431,6 +740,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
   const sessions = yield* getAllSessions
   const filteredSessions = sessions
     .filter((session) => includeTime(cutoff, session.time.updated))
+    .filter((session) => sessionMatches(session, input))
     .filter((session) => {
       if (input.projectFilter === undefined) return true
       if (input.projectFilter === "") return session.projectID === input.currentProject?.id
@@ -444,20 +754,33 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
   const aggregates = yield* Effect.forEach(filteredSessions, (session) => aggregateSession(session, cutoff), {
     concurrency: 20,
   })
+  const filteredAggregates = input.toolFilter === undefined
+    ? aggregates
+    : aggregates.filter((aggregate) => Object.values(aggregate.toolUsage).some((tool) => textMatches(tool.id, input.toolFilter)))
 
   const total = emptyUsage()
   const daily = new Map<number, DailyUsage>()
   const modelSeries = new Map<string, Map<number, DailyUsage>>()
   const providerSeries = new Map<string, Map<number, DailyUsage>>()
+  const agentSeries = new Map<string, Map<number, DailyUsage>>()
+  const sourceSeries = new Map<string, Map<number, DailyUsage>>()
+  const statusSeries = new Map<string, Map<number, DailyUsage>>()
+  const projectSeries = new Map<string, Map<number, DailyUsage>>()
   const models = new Map<string, UsageGroupAccumulator>()
   const providers = new Map<string, UsageGroupAccumulator>()
-  const toolUsage: Record<string, number> = {}
+  const agents = new Map<string, UsageGroupAccumulator>()
+  const sources = new Map<string, UsageGroupAccumulator>()
+  const statuses = new Map<string, UsageGroupAccumulator>()
+  const projects = new Map<string, UsageGroupAccumulator>()
+  const modelProviderTokens = new Map<string, number>()
+  const toolUsage: Record<string, ToolUsage> = {}
   const sessionsWithUsage: SessionUsage[] = []
   const sessionTokenTotals: number[] = []
   let totalMessages = 0
   let totalTools = 0
 
-  for (const aggregate of aggregates) {
+  for (const aggregate of filteredAggregates) {
+    const matchingTools = Object.values(aggregate.toolUsage).filter((tool) => textMatches(tool.id, input.toolFilter))
     const sessionUsage: SessionUsage = {
       id: aggregate.session.id,
       title: aggregate.session.title,
@@ -466,7 +789,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
       created: aggregate.session.time.created,
       updated: aggregate.session.time.updated,
       messages: aggregate.messageCount,
-      tools: Object.values(aggregate.toolUsage).reduce((acc, count) => acc + count, 0),
+      tools: matchingTools.reduce((acc, tool) => acc + tool.count, 0),
       providers: [],
       models: [],
       ...emptyUsage(),
@@ -476,21 +799,31 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
 
     totalMessages += aggregate.messageCount
     totalTools += sessionUsage.tools
-    for (const [tool, count] of Object.entries(aggregate.toolUsage)) {
-      toolUsage[tool] = (toolUsage[tool] ?? 0) + count
-    }
+    matchingTools.forEach((tool) => addToolUsage(toolUsage, { ...tool, contextTokens: 0 }))
+    aggregate.toolEvents
+      .filter((event) => toolEventMatches(event, input))
+      .forEach((event) => addToolContextTokens(toolUsage, event.toolID, event.contextTokens))
 
-    for (const event of aggregate.totalEvents) {
+    for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
       addUsage(total, event)
       addUsage(sessionUsage, event)
       addUsage(getDaily(daily, event.time), event)
     }
 
-    for (const event of aggregate.breakdownEvents) {
+    for (const event of aggregate.breakdownEvents.filter((event) => eventMatches(event, input))) {
       addGroup(models, event.modelID, event.modelID, event)
       addGroup(providers, event.providerID, event.providerID, event)
+      addGroup(agents, event.agent, event.agent, event)
+      addGroup(sources, event.source, event.source, event)
+      addGroup(statuses, event.status, event.status, event)
+      addGroup(projects, event.projectID, event.projectID, event)
       addUsage(getSeriesDaily(modelSeries, event.modelID, event.time), event)
       addUsage(getSeriesDaily(providerSeries, event.providerID, event.time), event)
+      addUsage(getSeriesDaily(agentSeries, event.agent, event.time), event)
+      addUsage(getSeriesDaily(sourceSeries, event.source, event.time), event)
+      addUsage(getSeriesDaily(statusSeries, event.status, event.time), event)
+      addUsage(getSeriesDaily(projectSeries, event.projectID, event.time), event)
+      increment(modelProviderTokens, `${event.providerID}\0${event.modelID}`, event.tokens.total)
       sessionProviders.add(event.providerID)
       sessionModels.add(event.modelID)
     }
@@ -509,9 +842,13 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     Date.now(),
   )
   const fallbackLatest = filteredSessions.reduce((latest, session) => Math.max(latest, session.time.updated), 0)
-  const earliest = sortedDaily.at(0)?.day ?? fallbackEarliest
-  const latest = sortedDaily.at(-1)?.day ?? fallbackLatest
-  const effectiveDays = windowDays(input.days) ?? Math.max(1, Math.ceil((latest - earliest) / MS_IN_DAY) + 1)
+  const requestedWindow = windowDays(input.days)
+  const latest = requestedWindow ? dayStart(Date.now()) : dayStart((sortedDaily.at(-1)?.day ?? fallbackLatest) || fallbackEarliest)
+  const earliest = requestedWindow
+    ? latest - (requestedWindow - 1) * MS_IN_DAY
+    : dayStart(sortedDaily.at(0)?.day ?? fallbackEarliest)
+  const completeDaily = buildDayBuckets(earliest, latest).map((day) => daily.get(day.day) ?? day)
+  const effectiveDays = completeDaily.length
   const sortedSessionTotals = sessionTokenTotals.sort((a, b) => a - b)
   const mid = Math.floor(sortedSessionTotals.length / 2)
   const medianTokensPerSession =
@@ -522,7 +859,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
         : sortedSessionTotals[mid]
 
   return {
-    totalSessions: filteredSessions.length,
+    totalSessions: filteredAggregates.length,
     sessionsWithUsage: sessionsWithUsage.length,
     totalMessages,
     totalTools,
@@ -532,14 +869,25 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     total,
     models: finalizeGroups(models),
     providers: finalizeGroups(providers),
-    daily: sortedDaily,
-    modelSeries: finalizeSeries(modelSeries, sortedDaily),
-    providerSeries: finalizeSeries(providerSeries, sortedDaily),
-    tokenPartSeries: tokenPartSeries(sortedDaily),
+    agents: finalizeGroups(agents),
+    sources: finalizeGroups(sources),
+    statuses: finalizeGroups(statuses),
+    projects: finalizeGroups(projects),
+    daily: completeDaily,
+    modelSeries: finalizeSeries(modelSeries, completeDaily),
+    providerSeries: finalizeSeries(providerSeries, completeDaily),
+    agentSeries: finalizeSeries(agentSeries, completeDaily),
+    sourceSeries: finalizeSeries(sourceSeries, completeDaily),
+    statusSeries: finalizeSeries(statusSeries, completeDaily),
+    projectSeries: finalizeSeries(projectSeries, completeDaily),
+    tokenPartSeries: tokenPartSeries(completeDaily),
     sessions: sessionsWithUsage.sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total),
-    toolUsage: Object.entries(toolUsage)
-      .map(([id, count]) => ({ id, count }))
-      .sort((a, b) => b.count - a.count),
+    toolUsage: Object.values(toolUsage)
+      .sort((a, b) => b.contextTokens - a.contextTokens || b.count - a.count),
+    modelProviderTokens: Array.from(modelProviderTokens, ([key, tokens]) => {
+      const [providerID, modelID] = key.split("\0")
+      return { providerID, modelID, tokens }
+    }),
     tokensPerSession: sessionsWithUsage.length > 0 ? total.tokens.total / sessionsWithUsage.length : 0,
     medianTokensPerSession,
   } satisfies StatsReport

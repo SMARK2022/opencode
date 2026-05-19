@@ -1,11 +1,10 @@
-import type { DailyUsage, SessionUsage, StatsReport, UsageGroup } from "./stats-data"
-import type { ColorMode } from "./stats-render"
-import { formatNumber } from "../format"
+import type { DailyUsage, SessionUsage, StatsReport, UsageGroup } from "./data"
+import type { ColorMode, StatsRenderOptions } from "./render"
+import { formatNumber } from "../../format"
 import {
   metricFormatter,
   renderCallout,
   renderComparisonTable,
-  renderGauge,
   renderHistogram,
   renderRankBars,
   renderRoundedLineChart,
@@ -19,7 +18,8 @@ import {
   padEndVisible,
   padStartVisible,
   type ChartColor,
-} from "./stats-charts"
+} from "./charts"
+import { renderStatsHeader } from "./render"
 
 export type InsightSeverity = "info" | "good" | "warn" | "risk"
 
@@ -323,7 +323,7 @@ const recommendationRows = (cards: InsightCard[]) =>
       if (card.id === "cache-efficiency") return [card.title, "Review prompt reuse and cache-friendly system prompt boundaries."]
       if (card.id === "cost-efficiency") return [card.title, "Inspect expensive models and route routine tasks to lower-cost models."]
       if (card.id === "session-outlier") return [card.title, "Open the top session and inspect long loops or repeated tool retries."]
-      if (card.id === "cost-volatility") return [card.title, "Use stats timeline/costs to find burst days before they become habits."]
+      if (card.id === "cost-volatility") return [card.title, "Use stats timeline --metric cost to find burst days before they become habits."]
       return [card.title, "Investigate this signal with the detailed stats subcommands."]
     })
 
@@ -428,18 +428,74 @@ function providerMomentumRows(report: StatsReport) {
   })
 }
 
-export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number } = {}) {
+const forecastLedgerRows = (forecast: ForecastReport) => [
+  ["daily average", money(forecast.dailyAverage)],
+  ["weekly run-rate", money(forecast.weeklyRunRate)],
+  ["monthly run-rate", money(forecast.monthlyRunRate)],
+  ["projected month-end", money(forecast.projectedMonthEnd)],
+  ["confidence", `${(forecast.confidence * 100).toFixed(0)}%`],
+]
+
+const forecastDetailLines = (report: StatsReport, forecast: ForecastReport, color?: ColorMode) => [
+  "",
+  ...renderTwoColumn(
+    renderRoundedLineChart({
+      title: "Observed daily cost",
+      series: [dailySeries(dailyPointValues(report.daily, "cost"), "pink", "observed cost")],
+      color,
+      metric: "cost",
+      width: halfChartWidth(),
+      height: 10,
+    }),
+    renderRoundedLineChart({
+      title: "Projected month-end spend",
+      series: forecastSeries(forecast),
+      color,
+      metric: "cost",
+      width: halfChartWidth(),
+      height: 10,
+    }),
+    5,
+  ),
+  "",
+  ...renderSlopeChart({
+    title: "Cost slope · first third vs last third",
+    rows: report.providers.slice(0, 8).map((provider) => {
+      const series = report.providerSeries.find((item) => item.id === provider.id)
+      const item = trend(series?.points.map((point) => point.cost) ?? [])
+      return { label: provider.label, start: item.first, end: item.last }
+    }),
+    color,
+    formatter: metricFormatter("cost"),
+  }),
+]
+
+export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number; forecast?: boolean } & StatsRenderOptions = {}) {
   const cards = buildInsights(report)
   const forecast = buildForecast(report)
+  const ctx = renderContext(options.color)
+
+  // Sparkline of daily costs
+  const dailyCosts = dailyValues(report.daily, "cost")
+  const maxCost = Math.max(...dailyCosts, 1)
+  const sparkChars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+  const sparkline = dailyCosts.map((v) => paint(sparkChars[Math.min(sparkChars.length - 1, Math.floor((v / maxCost) * (sparkChars.length - 1)))], v > maxCost * 0.7 ? "red" : v > maxCost * 0.4 ? "yellow" : "green", ctx)).join("")
+
   const lines = [
-    ...renderCallout({
-      title: "opencode stats insights",
-      body: "Signals, recommendations, and outlier analysis derived from the selected stats range.",
-      color: options.color,
-      accent: "cyan",
+    ...renderStatsHeader(report, options, "insights"),
+    // Insight cards — wider value column
+    ...cards.flatMap((card) => {
+      const accent = severityColor[card.severity]
+      const value = card.value ? paint(card.value, accent, ctx, true) : ""
+      const detail = card.detail ? paint(` · ${card.detail}`, "muted", ctx) : ""
+      return [
+        `${paint("●", accent, ctx)} ${padEndVisible(paint(card.title, "white", ctx, true), 30)} ${padStartVisible(value, 14)}${detail}`,
+        `  ${paint(card.body, "subtitle", ctx)}`,
+      ]
     }),
     "",
-    ...renderInsightCards(cards, options.color),
+    // Daily cost sparkline
+    `${paint("Daily cost", "subtitle", ctx, true)}  ${sparkline}  ${paint(`peak ${money(maxCost)}`, "muted", ctx)}`,
     "",
     ...renderTwoColumn(
       renderRankBars({
@@ -475,68 +531,26 @@ export function renderInsights(report: StatsReport, options: { color?: ColorMode
     ),
     "",
     ...renderTwoColumn(
-      [renderGauge({ label: "Forecast confidence", value: forecast.confidence, max: 1, color: options.color, width: Math.max(12, halfChartWidth() - 28), formatter: (value) => `${(value * 100).toFixed(0)}%` })],
-      renderHistogram({ title: "Daily cost variance", values: dailyValues(report.daily, "cost"), color: options.color, width: Math.max(12, halfChartWidth() - 18), formatter: metricFormatter("cost") }),
-      5,
-    ),
-  ]
-  return renderPanel({ lines, color: options.color })
-}
-
-export function renderForecast(report: StatsReport, options: { color?: ColorMode } = {}) {
-  const forecast = buildForecast(report)
-  const costs = dailyPointValues(report.daily, "cost")
-  const lines = [
-    ...renderCallout({
-      title: "opencode stats forecast",
-      body: "Run-rate projection using active-day averages and observed daily volatility.",
-      color: options.color,
-      accent: "pink",
-    }),
-    "",
-    ...renderTwoColumn(
-      renderRoundedLineChart({
-        title: "Observed daily cost",
-        series: [dailySeries(costs, "pink", "observed cost")],
+      renderComparisonTable({
+        title: "Run-rate forecast",
+        headers: ["metric", "value"],
+        rows: [
+          ...forecastLedgerRows(forecast),
+          ["active days", String(dailyCosts.filter((v) => v > 0).length)],
+          ["zero days", String(dailyCosts.filter((v) => v === 0).length)],
+        ],
         color: options.color,
-        metric: "cost",
-        width: halfChartWidth(),
-        height: 10,
       }),
-      renderRoundedLineChart({
-        title: "Projected month-end spend",
-        series: forecastSeries(forecast),
+      renderHistogram({
+        title: "Daily cost distribution",
+        values: dailyValues(report.daily, "cost"),
         color: options.color,
-        metric: "cost",
-        width: halfChartWidth(),
-        height: 10,
+        width: Math.max(12, halfChartWidth() - 18),
+        formatter: metricFormatter("cost"),
       }),
       5,
     ),
-    "",
-    ...renderComparisonTable({
-      title: "Run-rate ledger",
-      headers: ["metric", "value"],
-      rows: [
-        ["daily average", money(forecast.dailyAverage)],
-        ["weekly run-rate", money(forecast.weeklyRunRate)],
-        ["monthly run-rate", money(forecast.monthlyRunRate)],
-        ["projected month-end", money(forecast.projectedMonthEnd)],
-        ["confidence", `${(forecast.confidence * 100).toFixed(0)}%`],
-      ],
-      color: options.color,
-    }),
-    "",
-    ...renderSlopeChart({
-      title: "Cost slope · first third vs last third",
-      rows: report.providers.slice(0, 8).map((provider) => {
-        const series = report.providerSeries.find((item) => item.id === provider.id)
-        const item = trend(series?.points.map((point) => point.cost) ?? [])
-        return { label: provider.label, start: item.first, end: item.last }
-      }),
-      color: options.color,
-      formatter: metricFormatter("cost"),
-    }),
+    ...(options.forecast ? forecastDetailLines(report, forecast, options.color) : []),
   ]
   return renderPanel({ lines, color: options.color })
 }

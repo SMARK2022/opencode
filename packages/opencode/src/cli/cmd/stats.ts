@@ -2,29 +2,33 @@ import type { Argv } from "yargs"
 import { Effect } from "effect"
 import { effectCmd } from "../effect-cmd"
 import { InstanceRef } from "@/effect/instance-ref"
-import { aggregateStats, type StatsReport } from "./stats-data"
-import { renderForecast, renderInsights } from "./stats-insights"
+import { aggregateStats, type StatsReport } from "./stats/data"
+import { renderInsights } from "./stats/insights"
 import {
-  renderCharts,
-  renderCosts,
+  renderBreakdown,
   renderDashboard,
-  renderHeatmapPage,
   renderModels,
-  renderOverview,
   renderProviders,
   renderSessions,
   renderTimeline,
-  renderTokens,
+  type BreakdownDimension,
   type ColorMode,
   type StatsRenderOptions,
-} from "./stats-render"
+} from "./stats/render"
 
-export { formatNumber } from "./stats-render"
+export { formatNumber } from "./stats/render"
 
 type BaseArgs = {
   days?: number
   project?: string
   color?: string
+  session?: string
+  model?: string
+  provider?: string
+  source?: string
+  agent?: string
+  status?: string
+  tool?: string
 }
 
 type DashboardArgs = BaseArgs & {
@@ -40,9 +44,24 @@ type DetailArgs = BaseArgs & {
   sort?: string
 }
 
+type TimelineArgs = DetailArgs & {
+  heatmap?: boolean
+}
+
+type BreakdownArgs = DetailArgs & {
+  dimension?: string
+  by?: string
+}
+
+type InsightsArgs = DetailArgs & {
+  forecast?: boolean
+}
+
 const colorChoices = ["auto", "always", "never"] as const
 const metricChoices = ["tokens", "cost"] as const
 const sortChoices = ["cost", "tokens", "calls", "updated"] as const
+const breakdownChoices = ["model", "provider", "agent", "source", "project", "tool", "status"] as const
+const statusChoices = ["running", "completed", "error", "aborted"] as const
 
 const nonNegativeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0
@@ -94,7 +113,6 @@ const withDetailOptions = (yargs: Argv) =>
       describe: "primary bar metric",
       type: "string",
       choices: metricChoices,
-      default: "tokens",
     })
     .option("sort", {
       describe: "sort order",
@@ -102,10 +120,80 @@ const withDetailOptions = (yargs: Argv) =>
       choices: sortChoices,
       default: "cost",
     })
+    .option("session", {
+      describe: "filter by session id/title/directory substring",
+      type: "string",
+    })
+    .option("model", {
+      describe: "filter by model id substring",
+      type: "string",
+    })
+    .option("provider", {
+      describe: "filter by provider id substring",
+      type: "string",
+    })
+    .option("source", {
+      describe: "filter by request source substring",
+      type: "string",
+    })
+    .option("agent", {
+      describe: "filter by agent substring",
+      type: "string",
+    })
+    .option("status", {
+      describe: "filter by request status",
+      type: "string",
+      choices: statusChoices,
+    })
+    .option("tool", {
+      describe: "filter by tool name substring",
+      type: "string",
+    })
+
+const withTimelineOptions = (yargs: Argv) =>
+  withDetailOptions(yargs).option("heatmap", {
+    describe: "include the calendar heatmap section",
+    type: "boolean",
+    default: true,
+  })
+
+const withBreakdownOptions = (yargs: Argv) =>
+  withDetailOptions(yargs)
+    .positional("dimension", {
+      describe: "attribution dimension",
+      type: "string",
+      choices: breakdownChoices,
+      default: "model",
+    })
+    .option("by", {
+      alias: "b",
+      describe: "attribution dimension",
+      type: "string",
+      choices: breakdownChoices,
+    })
+
+const withInsightsOptions = (yargs: Argv) =>
+  withDetailOptions(yargs).option("forecast", {
+    describe: "include run-rate projection charts",
+    type: "boolean",
+    default: false,
+  })
 
 const loadReport = Effect.fn("Cli.stats.load")(function* (args: BaseArgs) {
   const ctx = yield* InstanceRef
-  return yield* aggregateStats({ days: args.days, projectFilter: args.project, currentProject: ctx?.project })
+  const report: StatsReport = yield* aggregateStats({
+    days: args.days,
+    projectFilter: args.project,
+    currentProject: ctx?.project,
+    sessionFilter: args.session,
+    modelFilter: args.model,
+    providerFilter: args.provider,
+    sourceFilter: args.source,
+    agentFilter: args.agent,
+    statusFilter: args.status,
+    toolFilter: args.tool,
+  })
+  return report
 })
 
 const colorMode = (value?: string): ColorMode => {
@@ -123,55 +211,65 @@ const sortMode = (value?: string): StatsRenderOptions["sort"] => {
   return "cost"
 }
 
+const breakdownMode = (value?: string): BreakdownDimension => {
+  if (value === "provider" || value === "agent" || value === "source" || value === "project" || value === "tool" || value === "status") return value
+  return "model"
+}
+
 const renderOptions = (args: DetailArgs | DashboardArgs): StatsRenderOptions => ({
   color: colorMode(args.color),
   limit: "limit" in args ? args.limit : undefined,
-  metric: "metric" in args ? metricMode(args.metric) : undefined,
+  metric: "metric" in args && args.metric !== undefined ? metricMode(args.metric) : undefined,
   sort: "sort" in args ? sortMode(args.sort) : undefined,
 })
 
-export const StatsOverviewCommand = effectCmd({
-  command: "overview",
-  aliases: ["summary"],
-  describe: "show a rich usage overview",
-  builder: (yargs) =>
-    withBaseOptions(yargs).option("limit", {
-      alias: "n",
-      describe: "number of tools to show",
-      type: "number",
-    }),
-  handler: Effect.fn("Cli.stats.overview")(function* (args: BaseArgs & { limit?: number }) {
-    console.log(renderOverview(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit }))
+const timelineOptions = (args: TimelineArgs): StatsRenderOptions => ({
+  ...renderOptions(args),
+  heatmap: args.heatmap,
+})
+
+const breakdownOptions = (args: BreakdownArgs): StatsRenderOptions => ({
+  ...renderOptions(args),
+  by: breakdownMode(args.by ?? args.dimension),
+})
+
+export const StatsBreakdownCommand = effectCmd({
+  command: "breakdown [dimension]",
+  aliases: ["by"],
+  describe: "attribute cost, tokens, and requests by one dimension",
+  builder: withBreakdownOptions,
+  handler: Effect.fn("Cli.stats.breakdown")(function* (args: BreakdownArgs) {
+    console.log(renderBreakdown(yield* loadReport(args), breakdownOptions(args)))
   }),
 })
 
 export const StatsModelsCommand = effectCmd({
   command: "models",
   aliases: ["model"],
-  describe: "rank token usage and cost by model id",
+  describe: false,
   builder: withDetailOptions,
   handler: Effect.fn("Cli.stats.models")(function* (args: DetailArgs) {
-    console.log(renderModels(yield* loadReport(args), renderOptions(args)))
+    console.log(renderModels(yield* loadReport(args), { ...renderOptions(args), by: "model" }))
   }),
 })
 
 export const StatsProvidersCommand = effectCmd({
   command: "providers",
   aliases: ["provider"],
-  describe: "rank token usage and cost by provider",
+  describe: false,
   builder: withDetailOptions,
   handler: Effect.fn("Cli.stats.providers")(function* (args: DetailArgs) {
-    console.log(renderProviders(yield* loadReport(args), renderOptions(args)))
+    console.log(renderProviders(yield* loadReport(args), { ...renderOptions(args), by: "provider", metric: args.metric === "tokens" ? "tokens" : "cost" }))
   }),
 })
 
 export const StatsTimelineCommand = effectCmd({
   command: "timeline",
   aliases: ["daily"],
-  describe: "render daily token stacks or cost bars",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.timeline")(function* (args: DetailArgs) {
-    console.log(renderTimeline(yield* loadReport(args), renderOptions(args)))
+  describe: "inspect daily trends, token mix, request outcomes, and heatmap",
+  builder: withTimelineOptions,
+  handler: Effect.fn("Cli.stats.timeline")(function* (args: TimelineArgs) {
+    console.log(renderTimeline(yield* loadReport(args), timelineOptions(args)))
   }),
 })
 
@@ -187,7 +285,7 @@ export const StatsSessionsCommand = effectCmd({
 
 export const StatsDashboardCommand = effectCmd({
   command: "dashboard",
-  aliases: ["dash"],
+  aliases: ["dash", "overview", "summary"],
   describe: "show a balanced usage dashboard",
   builder: (yargs) =>
     withBaseOptions(yargs)
@@ -198,7 +296,7 @@ export const StatsDashboardCommand = effectCmd({
       })
       .option("interactive", {
         alias: "i",
-        describe: "cycle dashboard views with keyboard shortcuts",
+        describe: "cycle stats views with keyboard shortcuts",
         type: "boolean",
         default: false,
       }),
@@ -212,43 +310,33 @@ export const StatsDashboardCommand = effectCmd({
   }),
 })
 
-export const StatsChartsCommand = effectCmd({
-  command: "charts",
-  aliases: ["graphs"],
-  describe: "show the chart gallery for visual diagnostics",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.charts")(function* (args: DetailArgs) {
-    console.log(renderCharts(yield* loadReport(args), renderOptions(args)))
-  }),
-})
-
 export const StatsHeatmapCommand = effectCmd({
   command: "heatmap",
   aliases: ["heat"],
-  describe: "show density maps for days and provider/model usage",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.heatmap")(function* (args: DetailArgs) {
-    console.log(renderHeatmapPage(yield* loadReport(args), renderOptions(args)))
+  describe: false,
+  builder: withTimelineOptions,
+  handler: Effect.fn("Cli.stats.heatmap")(function* (args: TimelineArgs) {
+    console.log(renderTimeline(yield* loadReport(args), { ...timelineOptions(args), heatmap: true }))
   }),
 })
 
 export const StatsCostsCommand = effectCmd({
   command: "costs",
   aliases: ["cost"],
-  describe: "show cost-only curves, waterfalls, and distributions",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.costs")(function* (args: DetailArgs) {
-    console.log(renderCosts(yield* loadReport(args), renderOptions(args)))
+  describe: false,
+  builder: withTimelineOptions,
+  handler: Effect.fn("Cli.stats.costs")(function* (args: TimelineArgs) {
+    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), metric: "cost" }))
   }),
 })
 
 export const StatsTokensCommand = effectCmd({
   command: "tokens",
   aliases: ["token"],
-  describe: "show token-only input/output/cache stacks and ledger",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.tokens")(function* (args: DetailArgs) {
-    console.log(renderTokens(yield* loadReport(args), renderOptions(args)))
+  describe: false,
+  builder: withTimelineOptions,
+  handler: Effect.fn("Cli.stats.tokens")(function* (args: TimelineArgs) {
+    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), metric: "tokens" }))
   }),
 })
 
@@ -256,19 +344,19 @@ export const StatsInsightsCommand = effectCmd({
   command: "insights",
   aliases: ["insight"],
   describe: "show trend insights, risks, recommendations, and outliers",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.insights")(function* (args: DetailArgs) {
-    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit }))
+  builder: withInsightsOptions,
+  handler: Effect.fn("Cli.stats.insights")(function* (args: InsightsArgs) {
+    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit, forecast: args.forecast }))
   }),
 })
 
 export const StatsForecastCommand = effectCmd({
   command: "forecast",
   aliases: ["run-rate"],
-  describe: "project cost run-rate and month-end spend",
+  describe: false,
   builder: withDetailOptions,
   handler: Effect.fn("Cli.stats.forecast")(function* (args: DetailArgs) {
-    console.log(renderForecast(yield* loadReport(args), { color: colorMode(args.color) }))
+    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit, forecast: true }))
   }),
 })
 
@@ -276,32 +364,46 @@ export const StatsCommand = effectCmd({
   command: "stats",
   describe: "show token usage and cost statistics",
   builder: (yargs: Argv) =>
-    withBaseOptions(yargs)
+    yargs
+      .option("days", {
+        describe: "show stats for the last N days (0 means today, default: all time)",
+        type: "number",
+      })
+      .option("project", {
+        describe: "filter by project (default: all projects, empty string: current project)",
+        type: "string",
+      })
+      .option("color", {
+        describe: "ANSI color mode",
+        type: "string",
+        choices: colorChoices,
+        default: "auto",
+      })
       .option("tools", {
-        describe: "number of tools to show in overview mode",
+        describe: "shortcut to tool breakdown; optionally pass number of tools",
         type: "number",
       })
       .option("models", {
-        describe: "legacy shortcut: show top model rows in the dashboard; pass a number for top N",
+        describe: "shortcut to model breakdown; pass a number for top N",
       })
       .option("limit", {
         alias: "n",
-        describe: "number of model/provider rows to show",
+        describe: "number of rows to show",
         type: "number",
       })
       .option("interactive", {
         alias: "i",
-        describe: "cycle dashboard views with keyboard shortcuts",
+        describe: "cycle stats views with keyboard shortcuts",
         type: "boolean",
         default: false,
       })
-      .command(StatsOverviewCommand)
+      .check(validateStatsArgs)
       .command(StatsDashboardCommand)
+      .command(StatsBreakdownCommand)
       .command(StatsModelsCommand)
       .command(StatsProvidersCommand)
       .command(StatsTimelineCommand)
       .command(StatsSessionsCommand)
-      .command(StatsChartsCommand)
       .command(StatsHeatmapCommand)
       .command(StatsCostsCommand)
       .command(StatsTokensCommand)
@@ -315,7 +417,11 @@ export const StatsCommand = effectCmd({
       return
     }
     if (args.tools !== undefined) {
-      console.log(renderOverview(yield* loadReport(args), { color: colorMode(args.color), limit: args.tools }))
+      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit: args.tools, by: "tool" }))
+      return
+    }
+    if (args.models !== undefined) {
+      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit, by: "model" }))
       return
     }
     console.log(renderDashboard(yield* loadReport(args), { color: colorMode(args.color), limit }))
@@ -346,15 +452,10 @@ function runInteractiveDashboard(reports: { days?: number; report: StatsReport }
 
         const views = [
           { name: "dashboard", render: (report: StatsReport) => renderDashboard(report, { color: colorMode(args.color), limit: args.limit }) },
-          { name: "models", render: (report: StatsReport) => renderModels(report, { color: colorMode(args.color), limit: args.limit }) },
-          {
-            name: "providers",
-            render: (report: StatsReport) => renderProviders(report, { color: colorMode(args.color), limit: args.limit, metric: "cost" }),
-          },
+          { name: "breakdown", render: (report: StatsReport) => renderBreakdown(report, { color: colorMode(args.color), limit: args.limit, by: "model" }) },
           { name: "timeline", render: (report: StatsReport) => renderTimeline(report, { color: colorMode(args.color), limit: 30 }) },
           { name: "sessions", render: (report: StatsReport) => renderSessions(report, { color: colorMode(args.color), limit: args.limit }) },
           { name: "insights", render: (report: StatsReport) => renderInsights(report, { color: colorMode(args.color), limit: args.limit }) },
-          { name: "forecast", render: (report: StatsReport) => renderForecast(report, { color: colorMode(args.color) }) },
         ]
         const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => NodeJS.ReadStream }
         let view = 0
