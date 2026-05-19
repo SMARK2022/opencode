@@ -122,6 +122,23 @@ describe("tokenAccounting", () => {
     expect(bd.toolCalls).toBe(10)
   })
 
+  test("breakdown allocates media tokens outside text character ratio", () => {
+    const msgs = [userMsg("1"), assistantMsg("2", "1", undefined, 10)]
+    const getParts = (_id: string) => [{
+      ...stepFinish(500, 200, 0, 0, 0, 9_500),
+      inputBreakdown: {
+        system: 1_000, instructions: 0, skills: 0, tools: 0,
+        messages: { userText: 1_000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 7_500, total: 8_500 },
+        media: { rawChars: 7_500, textChars: 25, tokens: 10, count: 1, imageTokens: 10, pdfTokens: 0, otherTokens: 0 },
+      },
+    }]
+    const acc = tokenAccounting(msgs, getParts)
+
+    expect(acc.breakdown?.attachments).toBe(10)
+    expect(acc.breakdown?.system).toBe(242)
+    expect(acc.breakdown?.userMessages).toBe(242)
+  })
+
   test("breakdown available from step-start during streaming (before step-finish)", () => {
     // 模拟 daemon 写入的 step-start input snapshot；assistant 正在 streaming 中
     const msgs = [userMsg("1"), assistantMsg("2", "1", { input: 400, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })]

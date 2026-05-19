@@ -66,6 +66,7 @@ import { eq } from "@/storage/db"
 import * as Database from "@/storage/db"
 import { SessionTable } from "./session.sql"
 import { Token } from "@/util/token"
+import { AttachmentToken } from "@/util/attachment-token"
 import { usable } from "./overflow"
 
 
@@ -173,7 +174,9 @@ function charsPerToken(messages: MessageV2.WithParts[]) {
       if (!chars || chars < 100) continue
       const tokens = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
       if (tokens <= 0) continue
-      historyInputChars += Math.max(0, chars - (part.inputBreakdown?.messages.attachments ?? 0))
+      historyInputChars += part.inputBreakdown?.media
+        ? Math.max(0, chars - part.inputBreakdown.media.rawChars + part.inputBreakdown.media.textChars)
+        : Math.max(0, chars - (part.inputBreakdown?.messages.attachments ?? 0))
       historyInputTokens += tokens
     }
   }
@@ -2110,7 +2113,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
             // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
-            const messagesText = JSON.stringify(messages)
+            const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(messages)
+            const messagesText = messageEstimate.text
+            const rawMessagesText = JSON.stringify(messages)
             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
             const toolsText = Object.entries(tools)
               .filter(
@@ -2125,7 +2130,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               })
               .join("\n")
             const inputText = [systemText, messagesText, toolsText].join("\n")
-            const inputChars = inputText.length
+            const inputChars = [systemText, rawMessagesText, toolsText].join("\n").length
             // 从原始 parts 计算 messages 子组件字符数，供 TUI /context 面板直接使用
             let msgUserChars = 0
             let msgAssistantChars = 0
@@ -2177,10 +2182,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 toolInput: msgToolInputChars,
                 toolOutput: msgToolOutputChars,
                 attachments: msgAttachmentChars,
-                total: messagesText.length,
+                total: rawMessagesText.length,
               },
+              ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
             }
-            const estimatedInput = estimateInputTokens(inputText, requestMsgs)
+            const estimatedInput = estimateInputTokens(inputText, requestMsgs) + messageEstimate.attachments.tokens
             // Preflight compaction must judge the request we are about to send,
             // not the last finished assistant's historical usage.  After compaction,
             // retained tail messages can carry huge pre-compaction token counts even

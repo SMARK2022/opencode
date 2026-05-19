@@ -251,6 +251,17 @@ const InputBreakdownSchema = Schema.Struct({
     /** Total serialized JSON character count — must equal the wire-format length */
     total: NonNegativeInt,
   }),
+  media: Schema.optional(
+    Schema.Struct({
+      rawChars: NonNegativeInt,
+      textChars: NonNegativeInt,
+      tokens: NonNegativeInt,
+      count: NonNegativeInt,
+      imageTokens: NonNegativeInt,
+      pdfTokens: NonNegativeInt,
+      otherTokens: NonNegativeInt,
+    }),
+  ),
 })
 
 export const StepStartPart = Schema.Struct({

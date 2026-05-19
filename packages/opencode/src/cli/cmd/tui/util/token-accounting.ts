@@ -13,7 +13,7 @@
  * 这不是"估计"，是按字符占比精确分配已确认 token 总量。
  */
 
-import { estimateDataUrlInputTokens } from "./token-estimate"
+import { AttachmentToken } from "@/util/attachment-token"
 
 const DEFAULT_RATIO = 4
 
@@ -83,6 +83,7 @@ type Msg = {
   inputBreakdown?: {
     system: number; instructions: number; skills: number; tools: number
     messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
+    media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number }
   }
   /** Character count of the pending request body before the provider stream starts. */
   inputChars?: number
@@ -147,8 +148,10 @@ export function tokenAccounting(
       if (chars && chars >= 100) {
         const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
         if (tok > 0) {
-          const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
-          ratioChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
+          const bd = p.inputBreakdown as { messages?: { attachments?: number }, media?: { rawChars: number; textChars: number } } | undefined
+          ratioChars += bd?.media
+            ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
+            : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
           ratioTokens += tok
         }
       }
@@ -242,7 +245,7 @@ export function tokenAccounting(
     if (p.state?.status === "completed") {
       pendingToolResultChars += (p.state.output?.length ?? 0)
       for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
-        pendingAttachTokens += estimateDataUrlInputTokens(att.url, att.mime)
+        pendingAttachTokens += AttachmentToken.estimateAttachment(att).tokens
       }
     }
     if (p.state?.status === "error") {
@@ -284,8 +287,12 @@ export function tokenAccounting(
       ? stepSF!.tokens.input + stepSF!.tokens.cache.read + stepSF!.tokens.cache.write
       : (breakdownSrc.inputTokens ?? Math.round(((breakdownSrc as any).inputChars as number) / inputRatio))
     const denom = (breakdownSrc as any).inputChars as number
+    const media = bd.media
+    const attachmentTokens = media?.tokens
+    const textAllocInput = attachmentTokens == null ? allocInput : Math.max(0, allocInput - attachmentTokens)
+    const textDenom = media ? Math.max(1, denom - media.rawChars + media.textChars) : denom
 
-    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * allocInput) : 0
+    const alloc = (chars: number) => textDenom > 0 ? Math.round((chars / textDenom) * textAllocInput) : 0
     // 7a. input context composition：全部来自本次 request 上传的历史上下文。
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
@@ -293,7 +300,7 @@ export function tokenAccounting(
     const tools = alloc(bd.tools)
     const userMessages = alloc(bd.messages.userText)
     const toolResults = alloc(bd.messages.toolOutput)
-    const attachments = alloc(bd.messages.attachments)
+    const attachments = attachmentTokens ?? alloc(bd.messages.attachments)
     // 历史 assistant/reasoning/tool-call 也是 input context，不是当前 step 新输出。
     const inputAssistantText = alloc(bd.messages.assistantText)
     const inputReasoning = alloc(bd.messages.reasoning)
