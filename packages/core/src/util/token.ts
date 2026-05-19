@@ -1,14 +1,16 @@
 export * as Token from "./token"
 
 import type { SessionMessage } from "@opencode-ai/schema/session-message"
+import { AttachmentToken } from "./attachment-token"
 
 export type SystemSection = { readonly kind: "instructions" | "skills"; readonly text: string }
-type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
+type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages" | "media"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
 type Node = {
   bucket: Bucket
   section: "body" | "system" | "messages" | "tools" | "options"
   role?: string
   entries: number
+  media?: boolean
 }
 const CHARS_PER_TOKEN = 4
 
@@ -18,8 +20,11 @@ export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: num
   const sample = history.reduce((sum, item) => {
     // 调用方筛选同 API 的确认样本；分子分母同时截止，零确认和不足100字符的样本不校准。
     if (sum.bodyChars >= 100_000 || !Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return sum
-    // 附件/base64 字符不参与文本密度，确认输入与缓存 token 仍保留原分母。
-    return { bodyChars: sum.bodyChars + Math.max(0, item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
+    // 媒体样本用占位字符替换 raw；文本密度不能把 base64 当普通正文。
+    const media = item.inputBreakdown?.media
+    return { bodyChars: sum.bodyChars + Math.max(0, media
+      ? item.bodyChars - media.rawChars + media.textChars
+      : item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
   }, { bodyChars: 0, input: 0 })
   // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
   return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
@@ -32,6 +37,8 @@ export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChar
     messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: 0 },
   } satisfies SessionMessage.InputBreakdown
   const nodes = new WeakMap<object, Node>()
+  // 媒体沿同一个 JSON visitor 统计；getter、toJSON 与原 provider body 仍只观察一次。
+  const media = AttachmentToken.estimateAttachment({})
   // 唯一 stringify 的 visitor 同时计数，既不重跑 Schema parser，也不按子树再次序列化。
   const bodyChars = JSON.stringify(body, function(this: object, key: string, value: unknown) {
     const parent = nodes.get(this)
@@ -82,6 +89,26 @@ export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChar
     const chars = absent || scalar === null ? 4 : typeof scalar === "string" ? stringChars(scalar)
       : typeof scalar === "number" ? Number.isFinite(scalar) ? String(scalar).length : 4
       : typeof scalar === "boolean" ? scalar ? 4 : 5 : 2
+    // Buffer 在 JSON visitor 前已执行 toJSON，必须识别其原生字节形态而非再序列化。
+    const bytes = value instanceof Uint8Array ? value
+      : value !== null && typeof value === "object" && "type" in value && value.type === "Buffer" && "data" in value && Array.isArray(value.data)
+        ? Buffer.from(value.data) : undefined
+    const binary = bucket === "attachments" && bytes !== undefined && (key === "data" || key === "image")
+    const source = this as Record<string, unknown>
+    const attachment = binary
+      ? AttachmentToken.estimateAttachment({ type: "media", data: Buffer.from(bytes).toString("base64"),
+          mediaType: typeof source.mediaType === "string" ? source.mediaType : "image/png" })
+      : bucket === "attachments" && typeof scalar === "string" && ["data", "image", "url", "image_url", "file_data"].includes(key)
+        ? AttachmentToken.estimateAttachment({ type: "file", url: scalar, data: scalar,
+            // Anthropic 的已校验 source 使用 media_type，不能把图片预算退成 base64 文本预算。
+            mediaType: typeof source.mediaType === "string" ? source.mediaType : typeof source.media_type === "string" ? source.media_type : undefined }) : undefined
+    if (attachment?.count) {
+      for (const field of ["tokens", "textChars", "count", "imageTokens", "pdfTokens", "otherTokens"] as const)
+        media[field] += attachment[field]
+      // 字符串外引号保留；二进制对象的实际 JSON 长度由后续子节点计入，不另做 stringify。
+      if (!binary) media.rawChars += chars - 2
+    }
+    if (parent?.media) media.rawChars += prefix + chars
     if (section === "system" && typeof scalar === "string" && sections) {
       // 仅匹配服务端 source 真正渲染的片段；插件删除或改写的文本不会凭本地文件重新补回。
       const spans = sections.flatMap((item) => {
@@ -108,14 +135,16 @@ export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChar
       counts.messages[bucket] += prefix + chars
     }
     // 同一对象在请求内重复引用时每次重新开始计数，WeakMap 不能成为省略第二次载荷的缓存。
-    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0 })
+    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0, media: binary || parent?.media })
     return value
   }).length
   // total 只求和六个消息桶，不能用 bodyChars 补残差来掩盖 system 或转义计数的遗漏。
   counts.messages.total = counts.messages.userText + counts.messages.assistantText + counts.messages.reasoning + counts.messages.toolInput + counts.messages.toolOutput + counts.messages.attachments
   // 不请求细分的既有纯估算调用保留返回契约；两个运行时 owner 均显式请求该元数据。
-  return { input: Math.max(0, Math.round(bodyChars / ratio)), bodyChars, confirmed: false,
-    ...(sections === undefined ? {} : { charsPerToken: ratio, inputBreakdown: counts }) }
+  return { input: Math.max(0, Math.round((bodyChars - media.rawChars + media.textChars) / ratio)) + media.tokens, bodyChars, confirmed: false,
+    ...(sections === undefined ? {} : { charsPerToken: ratio, inputBreakdown: {
+      ...counts, ...(media.count > 0 ? { media } : {}),
+    } }) }
 }
 
 function stringChars(value: string) {

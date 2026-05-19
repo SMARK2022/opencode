@@ -1,3 +1,4 @@
+import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
 import type { AssistantMessage, Part, SessionRequestUsage } from "@opencode-ai/sdk/v2"
 import { estimate } from "@opencode-ai/core/util/token"
 
@@ -11,17 +12,8 @@ export type UsageInfo = {
 }
 
 export function estimateDataUrlInputTokens(url: string, mime: string) {
-  if (!url.startsWith("data:")) return 0
-  const comma = url.indexOf(",")
-  if (comma < 0) return 0
-  const payloadLength = url.length - comma - 1
-  if (payloadLength <= 0) return 0
-  // 图片沿用每 750 字符约 1 token、1600 封顶的视觉启发式，不把 base64 当等长文本；实际用量以 provider 确认为准。
-  if (mime.startsWith("image/")) return Math.max(1, Math.min(1600, Math.round(payloadLength / 750)))
-  // PDF 沿用每 1100 字符约 1 token 且不套图片封顶，多页文档负载增长仍参与估算。
-  if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
-  // 其他 MIME 没有视觉估算规则，负载回到通用文本估算。
-  return Math.max(1, estimate(url.slice(comma + 1)))
+  // #175：委托 core，禁止 TUI 本地 /750 分叉
+  return AttachmentToken.estimateAttachment({ url, mime, type: "file" }).tokens
 }
 
 export function sumConfirmed(

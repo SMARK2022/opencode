@@ -104,3 +104,23 @@ test("source JSON and mixed-content calibration exercises the estimator rather t
   expect(normal.input).toBeLessThan(middle.input)
   expect(dense.input).toBeGreaterThan(middle.input)
 })
+
+test("prepared media handles SDK binary, base64 and native fields without inflating text tokens", () => {
+  const bytes = Buffer.alloc(5625)
+  // 同一7500字符图片负载经过不同 provider 准备格式，视觉预算与 raw JSON 计数都应一致。
+  for (const content of [
+    { type: "file", mediaType: "image/png", data: bytes },
+    { type: "file", mediaType: "image/png", data: new Uint8Array(bytes) },
+    { type: "file", mediaType: "image/png", data: bytes.toString("base64") },
+    { type: "input_image", image_url: `data:image/png;base64,${bytes.toString("base64")}` },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: bytes.toString("base64") } },
+  ]) {
+    const body = { messages: [{ role: "user", content: [content] }] }
+    const result = Token.estimateRequest(body, [], [])
+    expect(result.bodyChars).toBe(JSON.stringify(body).length)
+    expect(result.inputBreakdown?.media?.tokens).toBe(10)
+    expect(result.inputBreakdown?.media?.count).toBe(1)
+    // 文本估量只含包装与占位，不能把二进制展开或 base64 再除四计入。
+    expect(result.input).toBeLessThan(250)
+  }
+})

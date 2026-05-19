@@ -3204,6 +3204,65 @@ noLLMServer.instance(
   30_000,
 )
 
+// #175：大图 preflight media.tokens=1600 且 inputTokens<90000
+it.instance(
+  "preflight estimates image attachments as media tokens",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => {
+        const base = providerCfg(url)
+        return {
+          ...base,
+          compaction: { reserved: 1_000 },
+          provider: {
+            test: {
+              ...base.provider.test,
+              models: {
+                "test-model": {
+                  ...base.provider.test.models["test-model"],
+                  attachment: true,
+                  modalities: { input: ["text", "image"], output: ["text"] },
+                  limit: { context: 100_000, output: 10_000 },
+                },
+              },
+            },
+          },
+        }
+      })
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const payload = Buffer.from(
+        yield* Effect.promise(() =>
+          Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer(),
+        ),
+      ).toString("base64")
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          { type: "text", text: "describe this image" },
+          { type: "file", mime: "image/png", filename: "large-image.png", url: `data:image/png;base64,${payload}` },
+        ],
+      })
+      yield* llm.text("image accepted", { usage: { input: 1_700, output: 1 } })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role !== "assistant") return
+      expect(result.parts.some((p) => p.type === "text" && p.text === "image accepted"), JSON.stringify(result.info)).toBe(true)
+      // #175：若仍按 base64/4，inputTokens 会远超 90k
+      expect(result.info.inputEstimate?.input).toBeLessThan(90_000)
+      // #175：large-image 夹紧上限 1600
+      expect(result.info.inputEstimate?.inputBreakdown?.media?.tokens).toBe(1_600)
+      expect(yield* llm.calls).toBe(1)
+    }),
+  { git: true },
+)
+
 noLLMServer.instance(
   "unknown agent error includes available agent names",
   () =>
