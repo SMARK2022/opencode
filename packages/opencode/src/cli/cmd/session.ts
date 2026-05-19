@@ -1,3 +1,4 @@
+// #174：从 format 导入 formatNumber 解环
 import type { Argv } from "yargs"
 import { Effect } from "effect"
 import { cmd } from "./cmd"
@@ -18,7 +19,7 @@ import { which } from "@opencode-ai/core/util/which"
 import { Database } from "@opencode-ai/core/database/database"
 import { sql } from "drizzle-orm"
 import { RequestUsageTable, RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
-import { formatNumber } from "./stats"
+import { formatNumber } from "../format"
 
 // CLI 复用 source 的微美元存储单位，不能按微美分换算而放大费用。
 const MICROS = 1_000_000
