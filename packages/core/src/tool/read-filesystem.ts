@@ -16,7 +16,8 @@ export const DEFAULT_READ_LINES = 200
 const MAX_SCAN_BYTES = 256 * 1024
 export const MAX_READ_LINES = 2_000
 // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
-export const MAX_READ_BYTES = 24 * 1024
+// #178：V2 读路径对齐 16KiB
+export const MAX_READ_BYTES = 16 * 1024
 export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
 
 export class BinaryFileError extends Schema.TaggedErrorClass<BinaryFileError>()("ReadTool.BinaryFileError", {

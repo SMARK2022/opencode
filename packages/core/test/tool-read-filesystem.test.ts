@@ -51,12 +51,12 @@ describe("ReadToolFileSystem", () => {
       const clamped = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { limit: 2500 })
       expect(clamped.content.split("\n")).toHaveLength(2000)
       expect(clamped).toMatchObject({ truncated: true, next: 2001 })
-      // 多字节每行计 2000 字节，十二行连同换行仍可容纳，第十三行必须留给 next。
+      // 多字节每行计 2000 字节，16 KiB 可容纳八行，第九行必须留给 next。
       yield* fixtureData.files.writeFileString(file, Array.from({ length: 20 }, () => "é".repeat(1000)).join("\n"))
       const bytes = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
-      expect(bytes).toMatchObject({ type: "text-page", truncated: true, next: 13 })
-      expect(bytes.content.split("\n")).toHaveLength(12)
-      expect(Buffer.byteLength(bytes.content)).toBe(24_011)
+      expect(bytes).toMatchObject({ type: "text-page", truncated: true, next: 9 })
+      expect(bytes.content.split("\n")).toHaveLength(8)
+      expect(Buffer.byteLength(bytes.content)).toBe(16_007)
       // 文本页预算独立于媒体摄入，不让降默认行数顺带降图片上限。
       expect(ReadToolFileSystem.MAX_MEDIA_INGEST_BYTES).toBe(20 * 1024 * 1024)
       const directory = path.join(fixtureData.directory, "entries")
@@ -95,9 +95,13 @@ describe("ReadToolFileSystem", () => {
         `${"p".repeat(64 * 1024 - 4097)}\n${Array.from({ length: 5 }, () => long).join("\n")}`,
       )
       const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 2 })
-      expect(first.content).toBe(Array.from({ length: 4 }, () => long).join("\n"))
-      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 6 })
-      expect(Buffer.byteLength(first.content)).toBe(24_003)
+      expect(first.content).toBe(Array.from({ length: 2 }, () => long).join("\n"))
+      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 4 })
+      expect(Buffer.byteLength(first.content)).toBe(12_001)
+      // 预算缩小后仍逐页检查完整长行，不能跳过中间两行来放宽原来的连续性断言。
+      const middle = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 4 })
+      expect(middle.content).toBe(Array.from({ length: 2 }, () => long).join("\n"))
+      expect(middle).toMatchObject({ type: "text-page", truncated: true, next: 6 })
       const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 6 })
       expect(last.content).toBe(long)
       expect(last).toMatchObject({ type: "text-page", truncated: false })

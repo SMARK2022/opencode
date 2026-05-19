@@ -798,7 +798,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
     // 列目录示例使用 shell 原生命令，避免 Windows 出现 ls 示例。
     .replaceAll("${listCommand}", process.platform !== "win32" ? "`ls`" : ["powershell", "pwsh"].includes(shellName) ? "`Get-ChildItem`" : shellName === "cmd" ? "`dir`" : "the shell-native directory listing command")
     .replaceAll("${maxLines}", "1000")
-    .replaceAll("${maxBytes}", "24576")
+    .replaceAll("${maxBytes}", "16384")
     // 压缩指引由运行时提供，此处没有虚构第二套配置。
     .replaceAll("${compressionGuidance}", "")
     // websearch 的年度提示也属于 catalog 文本渲染，不能留下未展开标记。

@@ -10,6 +10,8 @@ export const VscodeNotebookDescriptions = {
   ].join("\n"),
 
   source: [
+    // 两代描述与同一 Notebook 源码分页预算同步，保留原有全局坐标续读契约。
+    "Returned source is capped at 16 KB; use offset/limit to continue.",
     "Read notebook source as a paginated virtual text document with 1-based global line numbers.",
     "Use this instead of reading raw .ipynb JSON when source content is needed. filePath is required. Pass cellId=#VSC-xxx to focus one cell; use offset/limit to page through large notebooks.",
     "Line numbers are global virtual source lines across notebook cell sources. Headers and visual separators are unnumbered; line ranges are not per-cell local line numbers.",

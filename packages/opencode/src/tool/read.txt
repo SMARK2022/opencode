@@ -3,7 +3,7 @@ Read a file or directory from the local filesystem. If the path does not exist, 
 Usage:
 - The filePath parameter should be an absolute path.
 - By default, this tool returns up to 200 lines from the start of the file.
-- Text content is capped at 24 KiB per read; displayed lines are limited to 2000 characters.
+- Text content is capped at 16 KiB per read; displayed lines are limited to 2000 characters. Use offset/limit to continue.
 - Line accounting scans at most 256 KiB beyond the returned page. If `<range total_exact="false">` appears, `total` is a lower bound; otherwise it is exact.
 - The offset parameter is the line number to start from (1-indexed).
 - To read later sections, call this tool again with a larger offset.

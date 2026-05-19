@@ -14,7 +14,8 @@ import type { ToolOutput } from "@opencode-ai/llm"
 // 通用投影默认与 V1 对齐，不把它当作 Read 参数 schema 的硬上限。
 export const MAX_LINES = 1_000
 // 缺省投影与 capture 内存窗口共同收紧；retain 的原始字节仍完整保存到托管文件。
-export const MAX_BYTES = 24 * 1024
+// #178：默认输出上限 24KiB→16KiB
+export const MAX_BYTES = 16 * 1024
 export const RETENTION = Duration.days(7)
 
 export const MANAGED_DIRECTORY = "tool-output"
