@@ -1,3 +1,4 @@
+// #178：桥接描述与工具默认 16KiB 对齐
 // Plugin 入口：注册 notebook bridge 工具并转发到 ide/vscode-bridge 客户端
 import { Effect } from "effect"
 import { tool, type ToolContext, type PluginInput, type Hooks } from "@opencode-ai/plugin"
@@ -41,7 +42,7 @@ const sourceArgs = {
     .positive()
     .max(1000)
     .optional()
-    .describe("Maximum rendered source lines to return, capped at 1000."),
+    .describe("Maximum rendered source lines to return, capped at 1000. Output is also capped at 16 KB."),
 }
 
 const runArgs = {

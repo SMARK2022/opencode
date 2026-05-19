@@ -146,7 +146,7 @@ describe("ToolOutputStore", () => {
         expect(yield* fs.exists(directory)).toBe(false)
         // 固定单份低于预算、双份超过预算；不能让 fixture 随实现常量一起漂移而失去辨错力。
         const text = "x".repeat(16_000)
-        expect(ToolOutputStore.MAX_BYTES).toBe(24 * 1024)
+        expect(ToolOutputStore.MAX_BYTES).toBe(16 * 1024)
         expect(Buffer.byteLength(text)).toBeLessThan(ToolOutputStore.MAX_BYTES)
         expect(Buffer.byteLength(text) * 2).toBeGreaterThan(ToolOutputStore.MAX_BYTES)
         const output = { structured: { output: text }, content: [{ type: "text" as const, text }] }

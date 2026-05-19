@@ -14,7 +14,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
  * filePath 必填，主定位参数为完整规范化 cellId。
  * offset 默认 1，所选格默认从其全局起点读取；越界时警告并重置到格起点。
  * limit 默认 400，源码长行完整保留；未编号格头不占正文行预算。
- * 24 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
+ * 16 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
  * 返回 ran=false、实际 globalStart、returned、totalLines 与续读提示；分页只省略未返回的完整行。
  */
 export async function notebookSource(input: Record<string, unknown>) {
@@ -62,7 +62,8 @@ export async function notebookSource(input: Record<string, unknown>) {
   // 空文档仍使用一作为起点，零总行数不能使 clamp 生成负的续读位置。
   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
 
-  const maxBytes = 24 * 1024
+  // #178：源码页预算降为16KiB，保留既有长行推进与全局续读坐标。
+  const maxBytes = 16 * 1024
   let bytes = 0
   // 正文行数与字节截断分开记录，格头只计入字节预算。
   let renderedLines = 0
@@ -132,7 +133,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   output += outputCells.join("\n")
 
   if (bytesCut) {
-    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+    output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
   } else if (more) {
     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
   }
