@@ -201,6 +201,13 @@ const layer = Layer.effectDiscard(
                       .descendantsOfType("command")
                       .flatMap((node) => {
                         if (!node) return []
+                        // 引号与内部 ERROR 恢复出的远程脚本片段不是本地 PowerShell 命令。
+                        let parent = node.parent
+                        while (parent && parent.id !== tree.rootNode.id) {
+                          if (parent.type === "ERROR" || parent.type.includes("string")) return []
+                          parent = parent.parent
+                        }
+                        // 根 ERROR 仍承载真实主机命令，不能因此绕过本地管道的拒绝检查。
                         // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
                         const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
                         return escaped && escaped.length % 2 ? [] : [...Shell.commandHeads(node.text, Shell.name(shell))]
