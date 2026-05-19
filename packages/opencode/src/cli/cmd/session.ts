@@ -285,6 +285,9 @@ function formatSessionTable(sessions: Session.Info[], costBySession?: Map<string
     }
   }
 
+  // #176：列表页引导 dig 到 stats sessions
+  lines.push("")
+  lines.push("Run opencode stats sessions for distribution, outliers, and drilldown hints.")
   return lines.join(EOL)
 }
 
