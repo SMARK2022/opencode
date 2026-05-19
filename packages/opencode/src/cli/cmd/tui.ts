@@ -259,17 +259,39 @@ export async function discoverOrSpawnDaemon(
           stdout: printLogs ? "inherit" : "ignore",
           stderr: printLogs ? "inherit" : "ignore",
         })
+        let exitedBeforeReady = false
         try {
           // exited 的拒绝先安装 observer；read/unref 的同步异常仍由两层 finally 清理。
           void proc.exited.catch(() => undefined)
           proc.unref()
 
+          // 首等和轮询共用退出观察，崩溃不能一直占用选举租约直到超时。
+          const exited = proc.exited.then(
+            (code) => ({ kind: "code" as const, code }),
+            () => ({ kind: "error" as const }),
+          )
+          const raceSleep = async (ms: number) => {
+            const result = await Promise.race([deps.sleep(ms).then(() => ({ kind: "sleep" as const })), exited])
+            if (result.kind === "sleep") return
+            // Windows 启动器可退出而真实 daemon 已发布锁，交付仍经过唯一 read/reuse 的身份认证。
+            if (result.kind === "code" && result.code === 0) {
+              const lock = await deps.read(lockPath)
+              if (lock && deps.alive(lock.pid)) existingUrl = await reuse(lock)
+              if (existingUrl) { fwdPid = lock!.pid; return }
+            }
+            exitedBeforeReady = true
+            const msg = result.kind === "code"
+              ? `opencode daemon exited before startup with exit code ${result.code}. Re-run with --print-logs to show daemon startup logs.`
+              : "opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs."
+            UI.error(msg)
+            throw new Error(msg)
+          }
           // 等待放在 proc 与 lease 的 finally 内，sleep 拒绝也不能泄漏选举所有权。
           // 完整启动预算从 sleep 后开始，不能用避让早期探测的延迟吃掉健康等待时间。
-          await deps.sleep(1000)
+          await raceSleep(1000)
           const deadline = Date.now() + deps.waitMs
           // 启动器 PID 可不同；健康锁仍必须通过 reuse 的身份与稳定 owner 校验。
-          while (Date.now() < deadline) {
+          while (!existingUrl && Date.now() < deadline) {
             const daemonLock = await deps.read(lockPath)
             if (daemonLock && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
               // 交付身份、认证与 token 复读均通过的 daemon owner，启动器 PID 不代替锁身份。
@@ -280,18 +302,21 @@ export async function discoverOrSpawnDaemon(
                 break
               }
             }
-            await deps.sleep(deps.pollMs)
+            // 轮询间隔也被退出打断，不扩大原有健康等待期限。
+            await raceSleep(Math.min(deps.pollMs, Math.max(0, deadline - Date.now())))
           }
 
           if (!existingUrl) {
             // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
             // 超时仍向上失败；杀本次 proc 与释放 lease 继续由原有两层 finally 执行。
-            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
+            // 超时诊断与提前退出共享日志指引，资源仍由原 finally 清理。
+            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`)
+            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`)
           }
         } finally {
           // 只终止本次启动且尚未交付的子进程；read/sleep/ping 异常也会进入此处。
-          if (!existingUrl) proc.kill()
+          // 已观察退出不重复终止；其他未交付异常仍保留原清理责任。
+          if (!existingUrl && !exitedBeforeReady) proc.kill()
         }
       }
     } finally {

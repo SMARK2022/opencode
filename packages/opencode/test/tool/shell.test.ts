@@ -125,6 +125,7 @@ const glob = (p: string) =>
   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
 
 const forms = (dir: string) => {
+    // #179：ERROR 节点用例主要覆盖 Windows PS
   if (process.platform !== "win32") return [dir]
   const full = Filesystem.normalizePath(dir)
   const slash = full.replaceAll("\\", "/")
@@ -1553,6 +1554,84 @@ describe("tool.shell windows PS stderr and progress", () => {
             )
           }),
         ),
+    )
+  }
+})
+
+// #179：PowerShell ERROR 恢复节点上的本地 Unix 工具拒绝/放行
+describe("tool.shell local command ERROR nodes (#179)", () => {
+  // #179：ERROR 节点用例主要覆盖 Windows PS
+  if (process.platform !== "win32") return
+  // #179：无 PS 则跳过
+  if (ps.length === 0) return
+
+  for (const item of ps) {
+    it.live(`rejects local Unix text utilities in PowerShell pipelines [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            // #179：本地管道应拒绝 grep
+            expect(
+              yield* fail({
+                command: "Write-Output ok | grep ok",
+              }),
+            ).toMatchObject({
+              message: expect.stringContaining(`The current shell is ${item.label}`),
+            })
+          }),
+        ),
+      ),
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`allows Unix text utilities inside WSL bash scripts [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            // #179：WSL 包装内允许 Unix 工具
+            expect(
+              yield* fail(
+                {
+                  command:
+                    "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+          }),
+        ),
+      ),
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            // #179：SSH 远程串内允许 Unix 工具
+            expect(
+              yield* fail(
+                {
+                  command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+          }),
+        ),
+      ),
     )
   }
 })

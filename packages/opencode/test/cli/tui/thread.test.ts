@@ -15,6 +15,11 @@ import { Global } from "@opencode-ai/core/global"
 import { cliIt } from "../../lib/cli-process"
 
 // 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
+// #179：幸福路径 mock 使用永不 resolve 的 exited
+function hangingExited() {
+  return new Promise<number>(() => {})
+}
+
 describe("tui thread", () => {
   test("loads the TUI integration lazily", async () => {
     const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
@@ -184,7 +189,7 @@ describe("tui thread", () => {
         },
         spawn: ((_cmd, _opts) => {
           daemonSpawnCount++
-          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+          return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
         }) as DiscoverDaemonDeps["spawn"],
       }))
       expect(daemonSpawnCount).toBe(0)
@@ -243,7 +248,7 @@ describe("tui thread", () => {
               expect(env?.OPENCODE_PROCESS_ROLE).toBe("worker")
               expect(env?.SMARK_ENV_KEEP).toBe("retained")
               // 注入 proc handle 不创建进程；就绪仍走真实 PID、身份和 token 复查。
-              return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+              return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
             }) as DiscoverDaemonDeps["spawn"],
           }))
           expect(spawns).toBe(1)
@@ -355,7 +360,7 @@ describe("tui thread", () => {
         },
         spawn: ((_cmd, _opts) => {
           daemonSpawnCount++
-          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+          return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
         }) as DiscoverDaemonDeps["spawn"],
       }))
       expect(daemonSpawnCount).toBe(1)
@@ -377,7 +382,7 @@ describe("tui thread", () => {
           sleep: async () => { if (stage === "sleep") fail() },
           spawn: (() => {
             if (stage === "spawn") fail()
-            return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0),
+            return { pid: FAKE_DAEMON_PID, exited: hangingExited(),
               unref() { if (stage === "unref") fail() }, kill() { kills++ } } as ReturnType<typeof Bun.spawn>
           }) as DiscoverDaemonDeps["spawn"],
         }))).rejects.toThrow(stage)
@@ -444,4 +449,48 @@ describe("tui thread", () => {
       expect(result.stderr).toContain("--port cannot be used with --mini")
     }),
   )
+})
+
+
+// #179：单元覆盖启动前崩溃的快速失败路径
+describe("daemon startup exit (#179)", () => {
+  test("reports daemon worker exit before startup instead of waiting for timeout", async () => {
+    const started = Date.now()
+    let killed = false
+    await expect(
+      discoverOrSpawnDaemon({} as never, {
+                // #179：超时故意很长，证明快速失败不是靠缩短 waitMs
+        waitMs: 60_000,
+        pollMs: 50,
+        electionTimeoutMs: 1000,
+        electionStaleMs: 1000,
+        read: async () => undefined,
+        alive: () => false,
+        ping: async () => false,
+        acquire: async () => ({ release: async () => undefined }),
+        clear: async () => undefined,
+        resolveDaemonFile: async () => "/tmp/fake-daemon.js",
+        identity: () => ({ dbPath: "/tmp/test.db", channel: "local" }),
+        placement: () => undefined,
+        resolveNetwork: async (args: Parameters<DiscoverDaemonDeps["resolveNetwork"]>[0]) => resolveNetworkOptionsNoConfig(args),
+        spawn: () =>
+          ({
+            pid: 4242,
+                        // #179：模拟启动前崩溃 exit 132
+            exited: Promise.resolve(132),
+            unref() {},
+            kill() {
+              killed = true
+            },
+          }) as never,
+        sleep: async (ms: number) => {
+          await new Promise((r) => setTimeout(r, Math.min(ms, 15)))
+        },
+      } as never),
+    ).rejects.toThrow(/exited before startup with exit code 132/)
+    expect(Date.now() - started).    // #179：必须远快于 60s 超时
+    toBeLessThan(5_000)
+    // #179：进程已退出，不应再 kill
+    expect(killed).toBe(false)
+  })
 })

@@ -350,6 +350,10 @@ function localCommands(root: Node) {
     let cur: Node | null = node
     while (cur) {
       // #158：string/raw_string 等类型包含 string 即视为载荷边界
+      // #179：ERROR 恢复节点中的 POSIX 碎片不算本地命令
+      // #179：与 string 载荷过滤叠加，避免 WSL/ssh 引号内误判
+      // #179：根 ERROR 仍承载主机命令，不能清空权限扫描；只排除内部恢复碎片。
+      if (cur.id !== root.id && cur.type === "ERROR") return false
       if (cur.type.includes("string")) return false
       // #158：root 自身 type 不含 string，向上遍历到 null 自然终止
       cur = cur.parent

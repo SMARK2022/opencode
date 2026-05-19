@@ -317,6 +317,7 @@ describe("BashTool", () => {
                   cmd ? 'call "grep.exe" missing' : ". 'grep.exe' missing",
                   cmd ? "@g^rep.exe missing" : "gre`p.exe missing",
                   cmd ? "echo ok&head missing" : "Write-Output ok;head missing",
+                  "Write-Output ok | grep ok",
                   // cmd 命令组与 PowerShell 条件块都应在授权前拒绝内部 Unix 命令。
                   ...(cmd ? ["(head)", "(head -n 1 missing)", "echo ok && (head -n 1 missing)"] : ["Write-Output ok; if ($?) { head -n 1 missing }"]),
                   "echo ok&&grep.exe missing",
@@ -339,6 +340,9 @@ describe("BashTool", () => {
                   "Write-Output head`;grep.exe", "Write-Output 'it''s head; grep'", "'head'", "ls",
                   "g`rep.exe missing",
                   "& ' head' missing",
+                  // 复用 source 载荷；只有 AST、权限和既有进程替身参与，绝不执行远程命令。
+                  "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
+                  "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
                 ]
                 if (cmd) allowed.push(
                   // 显式路径即使basename是head也不属于源guard裸名范围，仍走实际授权。
