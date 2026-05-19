@@ -2,6 +2,7 @@ import type { Argv } from "yargs"
 import { Effect, Schema } from "effect"
 import { AppRuntime, type AppServices } from "@/effect/app-runtime"
 import { InstanceStore } from "@/project/instance-store"
+import { context as instanceContext } from "@/project/instance-context"
 import { InstanceRef } from "@/effect/instance-ref"
 import { cmd, type WithDoubleDash } from "./cmd/cmd"
 
@@ -86,7 +87,9 @@ export const effectCmd = <Args, A>(opts: EffectCmdOpts<Args, A>) =>
         InstanceStore.Service.use((store) => store.load({ directory }).pipe(Effect.map((ctx) => ({ store, ctx })))),
       )
       try {
-        await AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx)))
+        await instanceContext.provide(ctx, () =>
+          AppRuntime.runPromise(opts.handler(args).pipe(Effect.provideService(InstanceRef, ctx))),
+        )
       } finally {
         await AppRuntime.runPromise(store.dispose(ctx))
       }

@@ -16,7 +16,7 @@ import { which } from "../../util/which"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Database, eq, sql } from "@/storage"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
-import { formatNumber } from "./stats"
+import { formatNumber } from "../format"
 import { Instance } from "@/project/instance"
 import { SessionPath } from "@/session/path"
 
