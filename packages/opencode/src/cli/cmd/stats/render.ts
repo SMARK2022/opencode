@@ -185,7 +185,7 @@ const inputContextTokens = (group: UsageGroup) =>
   group.components.attachments
 
 const dashboardCallout = (report: StatsReport) => {
-  const topSession = report.sessions[0]
+  const topSession = [...report.sessions].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)[0]
   if (report.total.errors + report.total.aborted > 0) {
     return `${formatNumber(report.total.errors + report.total.aborted)} failed or aborted requests in this range; inspect stats insights for wasted-cost signals.`
   }
@@ -384,15 +384,15 @@ const renderRichHeader = (report: StatsReport, options: StatsRenderOptions, acti
   ]
 }
 
-const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) => {
-  const sort = options.sort ?? "cost"
-  const sorted = [...groups].sort((a, b) => {
-    if (sort === "tokens") return b.tokens.total - a.tokens.total
-    if (sort === "calls") return b.assistantCalls - a.assistantCalls
-    return b.cost - a.cost || b.tokens.total - a.tokens.total
+const sortGroups = (groups: UsageGroup[], sort: StatsRenderOptions["sort"] = "tokens") =>
+  [...groups].sort((a, b) => {
+    if (sort === "cost") return b.cost - a.cost || b.tokens.total - a.tokens.total
+    if (sort === "calls") return b.assistantCalls - a.assistantCalls || b.tokens.total - a.tokens.total
+    return b.tokens.total - a.tokens.total || b.cost - a.cost
   })
-  return sorted.slice(0, options.limit ?? 8)
-}
+
+const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) =>
+  sortGroups(groups, options.sort ?? "tokens").slice(0, options.limit ?? 8)
 
 export function renderStatsHeader(report: StatsReport, options: StatsRenderOptions, active: string) {
   return renderRichHeader(report, options, active)
@@ -400,7 +400,10 @@ export function renderStatsHeader(report: StatsReport, options: StatsRenderOptio
 
 export function renderDashboard(report: StatsReport, options: StatsRenderOptions = {}) {
   const enabled = useColor(options.color)
-  const topSession = report.sessions[0]
+  const dashboardSessions = [...report.sessions]
+    .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
+    .slice(0, 5)
+  const maxSessionTokens = Math.max(0, ...dashboardSessions.map((session) => session.tokens.total))
   const cacheReadPct = percent(report.total.tokens.cache.read, report.total.tokens.total)
   const inputPct = percent(report.total.tokens.input, report.total.tokens.total)
   const outputPct = percent(report.total.tokens.output + report.total.tokens.reasoning, report.total.tokens.total)
@@ -443,12 +446,12 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
       renderComparisonTable({
         title: "Top providers",
         headers: ["provider", "cost", "tokens", "calls", "share"],
-        rows: topGroups(report.providers, { ...options, limit: options.limit ?? 6, sort: "cost" }).map((provider) => [
+        rows: topGroups(report.providers, { ...options, limit: options.limit ?? 6, sort: "tokens" }).map((provider) => [
           truncateVisible(provider.label, 18),
           money(provider.cost),
           formatNumber(provider.tokens.total),
           formatNumber(provider.assistantCalls),
-          percent(provider.cost, report.total.cost),
+          percent(provider.tokens.total, report.total.tokens.total),
         ]),
         color: options.color,
       }),
@@ -504,9 +507,9 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
     ),
     "",
     // Top sessions inline
-    title("Top sessions by cost", enabled),
-    ...report.sessions.slice(0, 5).flatMap((session, index) => {
-      const bar = metricBar(session.cost, Math.max(0, ...report.sessions.slice(0, 5).map((s) => s.cost)), 36, enabled, "pink")
+    title("Top sessions by tokens", enabled),
+    ...dashboardSessions.flatMap((session, index) => {
+      const bar = metricBar(session.tokens.total, maxSessionTokens, 36, enabled, "blue")
       return [
         `${padStartVisible(String(index + 1), 2)} ${fitVisible(color(session.title || session.id, "white", enabled, true), 42)} ${padStartVisible(money(session.cost), 9)} ${padStartVisible(formatNumber(session.tokens.total), 8)} tok`,
         `   ${bar} ${muted(`${session.models.slice(0, 2).join(", ")} · ${formatNumber(session.requests)} req · ${avgDuration(session.durationMs, session.requests)} avg`, enabled)}`,
@@ -526,8 +529,9 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
 export function renderBreakdown(report: StatsReport, options: StatsRenderOptions = {}) {
   const enabled = useColor(options.color)
   const by = options.by ?? "model"
-  const groups = breakdownGroups(report, by)
   const metric = options.metric ?? "tokens"
+  const sort = options.sort ?? "tokens"
+  const groups = sortGroups(breakdownGroups(report, by), sort)
   const limit = options.limit ?? 12
 
   if (by === "tool") {
@@ -549,6 +553,15 @@ export function renderBreakdown(report: StatsReport, options: StatsRenderOptions
         title(`Tool breakdown · ${report.totalTools} total calls · ${formatNumber(tokenTotal)} est context tokens`, enabled),
         muted("Estimated ctx tokens from step inputBreakdown.", enabled),
         muted("Allocation uses tool-call/result chars × confirmed input/cache tokens.", enabled),
+        "",
+        ...renderRoundedLineChart({
+          title: "Tool context tokens over time",
+          series: seriesFromUsage(report.toolSeries, "tokens", Math.min(limit, 8)),
+          color: options.color,
+          metric: "tokens",
+          width: fullChartWidth(),
+          height: 12,
+        }),
         "",
         ...renderTwoColumn(
           renderRankBars({
@@ -585,7 +598,7 @@ export function renderBreakdown(report: StatsReport, options: StatsRenderOptions
   const topGroup = groups[0]
   const topShare = topGroup ? percent(metric === "cost" ? topGroup.cost : topGroup.tokens.total, metric === "cost" ? report.total.cost : report.total.tokens.total) : "—"
   const summaryLine = topGroup
-    ? `${breakdownTitle(by)} · top: ${topGroup.label} (${topShare}) · ${groups.length} total · sorted by ${metric === "cost" ? "cost" : "tokens"}`
+    ? `${breakdownTitle(by)} · top: ${topGroup.label} (${topShare}) · ${groups.length} total · sorted by ${sort === "cost" ? "cost" : sort === "calls" ? "calls" : "tokens"}`
     : `${breakdownTitle(by)} · no data in this range`
   const ledgerGap = 4
   const contentWidth = statsContentWidth()
@@ -607,7 +620,7 @@ export function renderBreakdown(report: StatsReport, options: StatsRenderOptions
     "",
     ...renderUsageGroupDetails({
       title: `${breakdownTitle(by)} token detail`,
-      groups: topGroups(groups, { ...options, limit, sort: options.sort }),
+      groups: topGroups(groups, { ...options, limit, sort }),
       total: report.total,
       metric,
       limit,
@@ -627,7 +640,7 @@ export function renderBreakdown(report: StatsReport, options: StatsRenderOptions
       renderComparisonTable({
         title: `${breakdownTitle(by)} ledger`,
         headers: [by, "cost", "tokens", "calls", "sessions", "share", "$/call"],
-        rows: topGroups(groups, { ...options, limit, sort: options.sort }).map((group) => [
+        rows: topGroups(groups, { ...options, limit, sort }).map((group) => [
           truncateVisible(group.label, 22),
           money(group.cost),
           formatNumber(group.tokens.total),
@@ -785,7 +798,7 @@ export function renderTimeline(report: StatsReport, options: StatsRenderOptions 
 
 export function renderSessions(report: StatsReport, options: StatsRenderOptions = {}) {
   const enabled = useColor(options.color)
-  const sort = options.sort ?? "cost"
+  const sort = options.sort ?? "tokens"
   const sessions = [...report.sessions]
     .sort((a, b) => {
       if (sort === "tokens") return b.tokens.total - a.tokens.total
@@ -796,6 +809,7 @@ export function renderSessions(report: StatsReport, options: StatsRenderOptions 
     .slice(0, options.limit ?? 20)
   const maxCost = Math.max(0, ...sessions.map((session) => session.cost))
   const maxTokens = Math.max(0, ...sessions.map((session) => session.tokens.total))
+  const maxCalls = Math.max(0, ...sessions.map((session) => session.assistantCalls))
 
   // Per-session stats
   const sessionCosts = report.sessions.map((s) => s.cost)
@@ -858,7 +872,13 @@ export function renderSessions(report: StatsReport, options: StatsRenderOptions 
     title(`Session leaderboard · sorted by ${sort}`, enabled),
     ...sessions.flatMap((session, index) => {
       const cacheRatio = percent(session.tokens.cache.read, session.tokens.total)
-      const bar = metricBar(session.cost, maxCost, 36, enabled, "pink")
+      const bar = metricBar(
+        sort === "cost" ? session.cost : sort === "calls" ? session.assistantCalls : session.tokens.total,
+        sort === "cost" ? maxCost : sort === "calls" ? maxCalls : maxTokens,
+        36,
+        enabled,
+        sort === "cost" ? "pink" : sort === "calls" ? "green" : "blue",
+      )
       return [
         `${padStartVisible(String(index + 1), 2)} ${fitVisible(color(session.title || session.id, "white", enabled, true), 46)} ${padStartVisible(money(session.cost), 9)} ${padStartVisible(formatNumber(session.tokens.total), 8)} tok`,
         `   ${bar} ${muted(`${session.models.slice(0, 2).join(", ") || "?"} · ${formatNumber(session.requests)} req · ${formatNumber(session.assistantCalls)} calls · ${avgDuration(session.durationMs, session.requests)} avg · cache ${cacheRatio}`, enabled)}`,

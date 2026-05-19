@@ -112,6 +112,7 @@ export type StatsReport = {
   sourceSeries: UsageSeries[]
   statusSeries: UsageSeries[]
   projectSeries: UsageSeries[]
+  toolSeries: UsageSeries[]
   tokenPartSeries: TokenPartSeries[]
   sessions: SessionUsage[]
   toolUsage: ToolUsage[]
@@ -319,6 +320,31 @@ const addToolContextTokens = (map: Record<string, ToolUsage>, toolID: string, co
   getToolUsage(map, toolID).contextTokens += contextTokens
 }
 
+const toolEventUsage = (event: ToolUsageEvent): UsageEvent => ({
+  time: event.time,
+  sessionID: event.sessionID,
+  projectID: event.projectID,
+  providerID: event.providerID,
+  modelID: event.modelID,
+  source: event.source,
+  agent: event.agent,
+  status: event.status,
+  tokens: {
+    input: event.contextTokens,
+    output: 0,
+    reasoning: 0,
+    cache: { read: 0, write: 0 },
+    total: event.contextTokens,
+  },
+  components: emptyComponents(),
+  cost: 0,
+  requests: 0,
+  assistantCalls: 0,
+  errors: 0,
+  aborted: 0,
+  durationMs: 0,
+})
+
 const getGroup = (map: Map<string, UsageGroupAccumulator>, id: string, label: string) => {
   const existing = map.get(id)
   if (existing) return existing
@@ -362,7 +388,7 @@ const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
       providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
       models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
     }))
-    .sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)
+    .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
 
 const dayStart = (time: number) => {
   const date = new Date(time)
@@ -434,7 +460,7 @@ const finalizeSeries = (map: Map<string, Map<number, DailyUsage>>, days: DailyUs
           return series
         }, emptySeriesTotals(id)),
     )
-    .sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)
+    .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
 
 const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
   [
@@ -766,6 +792,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
   const sourceSeries = new Map<string, Map<number, DailyUsage>>()
   const statusSeries = new Map<string, Map<number, DailyUsage>>()
   const projectSeries = new Map<string, Map<number, DailyUsage>>()
+  const toolSeries = new Map<string, Map<number, DailyUsage>>()
   const models = new Map<string, UsageGroupAccumulator>()
   const providers = new Map<string, UsageGroupAccumulator>()
   const agents = new Map<string, UsageGroupAccumulator>()
@@ -802,7 +829,10 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     matchingTools.forEach((tool) => addToolUsage(toolUsage, { ...tool, contextTokens: 0 }))
     aggregate.toolEvents
       .filter((event) => toolEventMatches(event, input))
-      .forEach((event) => addToolContextTokens(toolUsage, event.toolID, event.contextTokens))
+      .forEach((event) => {
+        addToolContextTokens(toolUsage, event.toolID, event.contextTokens)
+        addUsage(getSeriesDaily(toolSeries, event.toolID, event.time), toolEventUsage(event))
+      })
 
     for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
       addUsage(total, event)
@@ -880,8 +910,9 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     sourceSeries: finalizeSeries(sourceSeries, completeDaily),
     statusSeries: finalizeSeries(statusSeries, completeDaily),
     projectSeries: finalizeSeries(projectSeries, completeDaily),
+    toolSeries: finalizeSeries(toolSeries, completeDaily),
     tokenPartSeries: tokenPartSeries(completeDaily),
-    sessions: sessionsWithUsage.sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total),
+    sessions: sessionsWithUsage.sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost),
     toolUsage: Object.values(toolUsage)
       .sort((a, b) => b.contextTokens - a.contextTokens || b.count - a.count),
     modelProviderTokens: Array.from(modelProviderTokens, ([key, tokens]) => {

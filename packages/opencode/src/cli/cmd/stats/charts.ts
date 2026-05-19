@@ -222,10 +222,8 @@ const niceMax = (value: number) => {
   const exponent = Math.floor(Math.log10(value))
   const base = 10 ** exponent
   const scaled = value / base
-  if (scaled <= 1) return base
-  if (scaled <= 2) return 2 * base
-  if (scaled <= 5) return 5 * base
-  return 10 * base
+  const step = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10].find((item) => scaled <= item) ?? 10
+  return step * base
 }
 
 const range = (count: number) => Array.from({ length: Math.max(0, count) }, (_, index) => index)

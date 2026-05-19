@@ -39,6 +39,23 @@ const usage = (value: number, cost: number, requests: number, calls: number, err
   durationMs,
 })
 
+const contextUsage = (value: number): UsageTotals => ({
+  tokens: {
+    input: value,
+    output: 0,
+    reasoning: 0,
+    cache: { read: 0, write: 0 },
+    total: value,
+  },
+  components: components(),
+  cost: 0,
+  requests: 0,
+  assistantCalls: 0,
+  errors: 0,
+  aborted: 0,
+  durationMs: 0,
+})
+
 const addUsage = (items: UsageTotals[]): UsageTotals =>
   items.reduce(
     (acc, item) => ({
@@ -91,6 +108,16 @@ const report = (): StatsReport => {
       ...usage(point.tokens.input * (item.id.includes("claude") ? 1 : 0.35), point.cost * (item.id.includes("claude") ? 1 : 0.35), point.requests, point.assistantCalls),
     })),
   })
+  const toolTrend = (id: string, values: number[]) => ({
+    id,
+    label: id,
+    ...addUsage(values.map(contextUsage)),
+    points: daily.map((point, index) => ({
+      day: point.day,
+      label: point.label,
+      ...contextUsage(values[index] ?? 0),
+    })),
+  })
 
   return {
     totalSessions: 8,
@@ -114,6 +141,7 @@ const report = (): StatsReport => {
     sourceSeries: [series(group("prompt", 1))],
     statusSeries: [series(group("completed", 1))],
     projectSeries: [series(group("本地项目", 1))],
+    toolSeries: [toolTrend("apply_patch", [80, 100, 90, 180, 150, 200]), toolTrend("bash", [20, 40, 30, 100, 110, 300])],
     tokenPartSeries: [
       part("input", "Input", (item) => item.input),
       part("output", "Output + Reasoning", (item) => item.output + item.reasoning),
@@ -188,7 +216,9 @@ describe("stats render width", () => {
 
   test("keeps breakdown rank bars from being double-truncated", () => {
     withColumns(140, () => {
-      for (const output of [renderBreakdown(report(), { color: "never", by: "tool" }), renderBreakdown(report(), { color: "never", by: "source" })]) {
+      const toolOutput = renderBreakdown(report(), { color: "never", by: "tool" })
+      expect(toolOutput).toContain("Tool context tokens over time")
+      for (const output of [toolOutput, renderBreakdown(report(), { color: "never", by: "source" })]) {
         const widths = new Set(output.split("\n").map(visibleLength))
         expect(widths).toEqual(new Set([138]))
         expect(output).not.toContain("ctx tok ·")

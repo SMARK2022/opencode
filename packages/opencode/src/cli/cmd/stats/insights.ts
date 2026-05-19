@@ -229,7 +229,7 @@ const costEfficiencyInsight = (report: StatsReport): InsightCard => {
 const sessionOutlierInsight = (report: StatsReport): InsightCard => {
   const costs = report.sessions.map((session) => session.cost)
   const p95 = percentile(costs, 95)
-  const top = report.sessions[0]
+  const top = [...report.sessions].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)[0]
   const severity: InsightSeverity = top && top.cost > Math.max(1, p95 * 1.5) ? "risk" : top && top.cost > p95 ? "warn" : "info"
   return {
     id: "session-outlier",
@@ -396,7 +396,7 @@ function sessionOutlierRows(sessions: SessionUsage[]) {
   const costs = sessions.map((session) => session.cost)
   const p75 = percentile(costs, 75)
   const p95 = percentile(costs, 95)
-  return sessions.slice(0, 8).map((session) => ({
+  return [...sessions].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total).slice(0, 8).map((session) => ({
     label: session.title || session.id,
     value: session.cost,
     subvalue: session.cost >= p95 ? "p95+" : session.cost >= p75 ? "p75+" : "normal",

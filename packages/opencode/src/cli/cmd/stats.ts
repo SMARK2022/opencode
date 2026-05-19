@@ -59,7 +59,7 @@ type InsightsArgs = DetailArgs & {
 
 const colorChoices = ["auto", "always", "never"] as const
 const metricChoices = ["tokens", "cost"] as const
-const sortChoices = ["cost", "tokens", "calls", "updated"] as const
+const sortChoices = ["tokens", "cost", "calls", "updated"] as const
 const breakdownChoices = ["model", "provider", "agent", "source", "project", "tool", "status"] as const
 const statusChoices = ["running", "completed", "error", "aborted"] as const
 
@@ -118,7 +118,7 @@ const withDetailOptions = (yargs: Argv) =>
       describe: "sort order",
       type: "string",
       choices: sortChoices,
-      default: "cost",
+      default: "tokens",
     })
     .option("session", {
       describe: "filter by session id/title/directory substring",
@@ -207,8 +207,9 @@ const metricMode = (value?: string): StatsRenderOptions["metric"] => {
 }
 
 const sortMode = (value?: string): StatsRenderOptions["sort"] => {
+  if (value === "cost") return "cost"
   if (value === "tokens" || value === "calls" || value === "updated") return value
-  return "cost"
+  return "tokens"
 }
 
 const breakdownMode = (value?: string): BreakdownDimension => {
@@ -276,7 +277,7 @@ export const StatsTimelineCommand = effectCmd({
 export const StatsSessionsCommand = effectCmd({
   command: "sessions",
   aliases: ["session"],
-  describe: "rank individual sessions by cost, tokens, calls, or recency",
+  describe: "rank individual sessions by tokens, cost, calls, or recency",
   builder: withDetailOptions,
   handler: Effect.fn("Cli.stats.sessions")(function* (args: DetailArgs) {
     console.log(renderSessions(yield* loadReport(args), renderOptions(args)))
