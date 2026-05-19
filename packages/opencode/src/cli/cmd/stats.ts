@@ -6,8 +6,7 @@ import { effectCmd } from "../effect-cmd"
 import { InstanceRef } from "@/effect/instance-ref"
 import { aggregateStats, type StatsReport } from "./stats-data"
 import { renderForecast, renderInsights } from "./stats-insights"
-import {
-  renderCharts,
+import { renderBreakdown, renderCharts,
   renderCosts,
   renderDashboard,
   renderHeatmapPage,
@@ -18,8 +17,7 @@ import {
   renderTimeline,
   renderTokens,
   type ColorMode,
-  type StatsRenderOptions,
-} from "./stats-render"
+  type StatsRenderOptions, } from "./stats-render"
 
 export { formatNumber } from "../format"
 
@@ -45,6 +43,20 @@ type DetailArgs = BaseArgs & {
   limit?: number
   metric?: string
   sort?: string
+  // #176：明细过滤透传到 aggregateStats
+  session?: string
+  model?: string
+  provider?: string
+  source?: string
+  agent?: string
+  status?: string
+  tool?: string
+}
+
+// #176：breakdown 参数含维度
+type BreakdownArgs = DetailArgs & {
+  dimension?: string
+  by?: string
 }
 
 // #174：colorChoices 限制取值
@@ -66,6 +78,23 @@ const modelLimit = (value: unknown): number | undefined => {
 }
 
 // #174：非法 days/limit/tools 在 check 失败
+const breakdownChoices = ["model", "provider", "agent", "source", "project", "tool", "status"] as const
+const statusChoices = ["running", "completed", "error", "aborted"] as const
+
+// #176：breakdown 维度默认 model
+const breakdownMode = (value?: string) => {
+  if (
+    value === "provider" ||
+    value === "agent" ||
+    value === "source" ||
+    value === "project" ||
+    value === "tool" ||
+    value === "status"
+  )
+    return value
+  return "model"
+}
+
 const validateStatsArgs = (args: { days?: unknown; limit?: unknown; tools?: unknown; models?: unknown }) => {
   for (const key of ["days", "limit", "tools"] as const) {
     const value = args[key]
@@ -118,12 +147,72 @@ const withDetailOptions = (yargs: Argv) =>
       choices: sortChoices,
       default: "cost",
     })
+    // #176：明细过滤选项
+    .option("session", {
+      describe: "filter by session id/title/directory substring",
+      type: "string",
+    })
+    .option("model", {
+      describe: "filter by model id substring",
+      type: "string",
+    })
+    .option("provider", {
+      describe: "filter by provider id substring",
+      type: "string",
+    })
+    .option("source", {
+      describe: "filter by request source substring",
+      type: "string",
+    })
+    .option("agent", {
+      describe: "filter by agent substring",
+      type: "string",
+    })
+    .option("status", {
+      describe: "filter by request status",
+      type: "string",
+      choices: statusChoices,
+    })
+    .option("tool", {
+      describe: "filter by tool name substring",
+      type: "string",
+    })
 
 // #174：loadReport 是唯一聚合入口
 // #174：loadReport 把 CLI 参数映射为过滤条件后聚合
-const loadReport = Effect.fn("Cli.stats.load")(function* (args: BaseArgs) {
+const withBreakdownOptions = (yargs: Argv) =>
+  withDetailOptions(yargs)
+    .positional("dimension", {
+      describe: "attribution dimension",
+      type: "string",
+      choices: breakdownChoices,
+      default: "model",
+    })
+    .option("by", {
+      alias: "b",
+      describe: "attribution dimension",
+      type: "string",
+      choices: breakdownChoices,
+    })
+
+const loadReport = Effect.fn("Cli.stats.load")(function* (args: BaseArgs & Partial<DetailArgs>) {
   const ctx = yield* InstanceRef
-  return yield* aggregateStats({ days: args.days, projectFilter: args.project, currentProject: ctx?.project })
+  // #176：CLI 明细过滤全部下推到聚合层
+  return yield* aggregateStats({
+    days: args.days,
+    projectFilter: args.project,
+    currentProject: ctx?.project,
+        // #176：映射 CLI session → sessionFilter
+    sessionFilter: args.session,
+        // #176：映射 CLI model → modelFilter
+    modelFilter: args.model,
+    providerFilter: args.provider,
+    sourceFilter: args.source,
+    agentFilter: args.agent,
+    statusFilter: args.status,
+        // #176：映射 CLI tool → toolFilter
+    toolFilter: args.tool,
+  })
 })
 
 const colorMode = (value?: string): ColorMode => {
@@ -142,11 +231,32 @@ const sortMode = (value?: string): StatsRenderOptions["sort"] => {
 }
 
 // #174：renderOptions 从 args 组装
-const renderOptions = (args: DetailArgs | DashboardArgs): StatsRenderOptions => ({
+const renderOptions = (args: DetailArgs | DashboardArgs | BreakdownArgs): StatsRenderOptions => ({
   color: colorMode(args.color),
   limit: "limit" in args ? args.limit : undefined,
   metric: "metric" in args ? metricMode(args.metric) : undefined,
   sort: "sort" in args ? sortMode(args.sort) : undefined,
+  // #176：breakdown 维度
+  by: "by" in args || "dimension" in args ? breakdownMode(("by" in args ? args.by : undefined) ?? ("dimension" in args ? (args as BreakdownArgs).dimension : undefined)) : undefined,
+})
+
+
+// #176：按维度归因成本/tokens/请求
+// #176：breakdown 是维度归因主入口
+export const StatsBreakdownCommand = effectCmd({
+  command: "breakdown [dimension]",
+  aliases: ["by"],
+  describe: "attribute cost, tokens, and requests by one dimension",
+  builder: withBreakdownOptions,
+  handler: Effect.fn("Cli.stats.breakdown")(function* (args: BreakdownArgs) {
+    console.log(
+      renderBreakdown(yield* loadReport(args), {
+        ...renderOptions(args),
+                // #176：--by 优先于 positional dimension
+        by: breakdownMode(args.by ?? args.dimension),
+      }),
+    )
+  }),
 })
 
 export const StatsOverviewCommand = effectCmd({
@@ -324,6 +434,8 @@ export const StatsCommand = effectCmd({
         type: "boolean",
         default: false,
       })
+            // #176：注册 breakdown 子命令
+      .command(StatsBreakdownCommand)
       .command(StatsOverviewCommand)
       .command(StatsDashboardCommand)
       .command(StatsModelsCommand)
@@ -344,7 +456,7 @@ export const StatsCommand = effectCmd({
       return
     }
     if (args.tools !== undefined) {
-      console.log(renderOverview(yield* loadReport(args), { color: colorMode(args.color), limit: args.tools }))
+      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit: args.tools, by: "tool" }))
       return
     }
     console.log(renderDashboard(yield* loadReport(args), { color: colorMode(args.color), limit }))

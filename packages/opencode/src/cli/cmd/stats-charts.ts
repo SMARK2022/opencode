@@ -34,7 +34,49 @@ const DENSITY = " ·░▒▓█"
 
 // #174：visibleLength 忽略 CSI 占列
 // #174：测宽忽略 CSI 控制序列
-export const visibleLength = (text: string) => text.replace(CSI, "").length
+
+// #176：组合音标/ZWJ 等零宽码点不计列宽
+const isCombining = (code: number) =>
+  (code >= 0x0300 && code <= 0x036f) ||
+  (code >= 0x1ab0 && code <= 0x1aff) ||
+  (code >= 0x1dc0 && code <= 0x1dff) ||
+  (code >= 0x20d0 && code <= 0x20ff) ||
+  (code >= 0xfe20 && code <= 0xfe2f) ||
+  (code >= 0xfe00 && code <= 0xfe0f) ||
+  code === 0x200d
+
+// #176：CJK/全角等宽字符占两列，避免终端裁切错位
+const isWide = (code: number) =>
+  code >= 0x1100 &&
+  (code <= 0x115f ||
+    code === 0x2329 ||
+    code === 0x232a ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x20000 && code <= 0x2fffd) ||
+    (code >= 0x30000 && code <= 0x3fffd))
+
+// #176：单码点显示列宽：宽=2，组合=0，其余=1
+const charWidth = (code: number) => {
+  if (isCombining(code)) return 0
+  if (isWide(code)) return 2
+  return 1
+}
+
+export const visibleLength = (text: string) => {
+  // #176：先剥 CSI 再按显示列宽累加，而非 UTF-16 length
+  const plain = text.replace(CSI, "")
+  let width = 0
+  for (const ch of plain) {
+    width += charWidth(ch.codePointAt(0) ?? 0)
+  }
+  return width
+}
 // #174：stripAnsi 专供测宽
 export const stripAnsi = (text: string) => text.replace(CSI, "")
 // #174：padEnd 按可见列补空
@@ -54,9 +96,19 @@ export const statsContentWidth = () => Math.max(36, statsPanelWidth() - 4)
 // #174：truncate 按可见宽截断并加省略
 // #174：按可见宽截断并加省略号
 export const truncateVisible = (text: string, width: number) => {
+  // #176：按显示列宽截断，预留 1 列给省略号
   const plain = stripAnsi(text)
-  if (plain.length <= width) return text
-  return plain.slice(0, Math.max(0, width - 1)) + "…"
+  if (visibleLength(plain) <= width) return text
+  const budget = Math.max(0, width - 1)
+  let out = ""
+  let used = 0
+  for (const ch of plain) {
+    const w = charWidth(ch.codePointAt(0) ?? 0)
+    if (used + w > budget) break
+    out += ch
+    used += w
+  }
+  return out + "…"
 }
 // #174：fitVisible 先截断再垫到目标可见宽
 export const fitVisible = (text: string, width: number) => padEndVisible(truncateVisible(text, width), width)

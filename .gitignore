@@ -32,4 +32,6 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+# #176：物化/scratch 目录不入 VCS
+.temp/
 /artifacts/

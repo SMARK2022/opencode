@@ -1,6 +1,7 @@
 
 import { renderCompositionDonut, renderPercentStack, renderStreamStackChart, renderWaterfall, renderHistogram } from "./stats-charts"
 import type { StatsReport } from "./stats-data"
+import { emptyComponents } from "./stats-data"
 // #174：render 再导出 formatNumber 方便调用
 import { formatNumber } from "../format"
 import {
@@ -37,7 +38,17 @@ import {
 // #174：ColorMode 仅 auto/always/never
 export type ColorMode = "auto" | "always" | "never"
 // #174：StatsRenderOptions 收 color/limit/metric/sort
-export type StatsRenderOptions = { color?: ColorMode; limit?: number; metric?: "tokens" | "cost"; sort?: "cost" | "tokens" | "calls" | "updated" }
+export type BreakdownDimension = "model" | "provider" | "agent" | "source" | "project" | "tool" | "status"
+
+// #176：渲染选项含 by/heatmap
+export type StatsRenderOptions = {
+  color?: ColorMode
+  limit?: number
+  metric?: "tokens" | "cost"
+  sort?: "cost" | "tokens" | "calls" | "updated"
+  by?: BreakdownDimension
+  heatmap?: boolean
+}
 
 // #174：auto 非 TTY=never
 // #174：color=auto 在非 TTY 视为 never，避免管道脏码
@@ -90,9 +101,80 @@ const renderGroupDetails = (groups: StatsReport["models"], options: StatsRenderO
 
 // #174：dashboard 固定模型榜后日线
 // #174：dashboard 固定先模型榜后日线
+
+// #176：按维度输出归因表/条形图
+export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions = {}) => {
+  // #176：默认按 model 归因
+  const by = options.by ?? "model"
+  const metric = options.metric ?? "tokens"
+  const groups =
+    by === "provider"
+      ? report.providers
+      : by === "agent"
+        ? report.agents ?? []
+        : by === "source"
+          ? report.sources ?? []
+          : by === "project"
+            ? report.projects ?? []
+            : by === "status"
+              ? report.statuses ?? []
+              : by === "tool"
+                ? (report.toolUsage ?? []).map((tool) => ({
+                    id: tool.id,
+                    label: tool.id,
+                    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: tool.contextTokens },
+                    cost: 0,
+                    requests: tool.count,
+                    assistantCalls: 0,
+                    // #176：合成行补齐用量契约字段，与 UsageGroup 联合类型对齐
+                    components: emptyComponents(),
+                    errors: 0,
+                    aborted: 0,
+                    durationMs: 0,
+                    sessions: 0,
+                    providers: [],
+                    models: [],
+                  }))
+                : report.models
+
+  const rows = (by === "tool" ? limitRows(groups, options.limit) : topGroups(groups, options)).map((group) => {
+    const value = metric === "cost" ? group.cost : group.tokens.total
+    return { label: group.label || group.id, value }
+  })
+  const lines = [
+    `Breakdown by ${by} (${metric})`,
+    ...renderRankBars({ title: `${by} ranking`, rows }),
+  ]
+    // #176：tool 维附加 context/count/IO 明细
+  if (by === "tool") {
+    lines.push("")
+    lines.push("Tool context tokens / counts")
+    for (const tool of limitRows(report.toolUsage ?? [], options.limit)) {
+      lines.push(
+        `  ${tool.id.padEnd(24)} ctx=${tool.contextTokens} count=${tool.count} in=${tool.inputChars} out=${tool.outputChars}`,
+      )
+    }
+  }
+  if (by !== "tool") {
+    // 数据层的各维度序列与输入组件必须有实际输出入口，不能只保留在报告对象中。
+    const series = { model: report.modelSeries, provider: report.providerSeries, agent: report.agentSeries, source: report.sourceSeries, project: report.projectSeries, status: report.statusSeries }[by]
+    lines.push("", ...renderUsageSeries(series, options, `${by} usage over time`))
+    lines.push(...renderGroupDetails(groups, options))
+    if (by === "source") {
+      lines.push("Input components by source")
+      for (const group of topGroups(groups, options)) {
+        lines.push(`  ${group.label || group.id} ${Object.entries(group.components).map(([key, value]) => `${key}=${formatNumber(value)}`).join(" ")}`)
+      }
+    }
+  }
+  return lines.join("\n")
+}
+
 export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
     ...header(report, "stats dashboard"),
+    // #176：失败/中止请求存在时置顶提示，与 usage 表 errors/aborted 同源
+    ...(report.total.errors + report.total.aborted > 0 ? [`requests failed=${report.total.errors} aborted=${report.total.aborted}`] : []),
     ...renderCallout("models", `top ${Math.min(5, report.models.length)}`),
     ...renderRankBars({
       rows: limitRows(report.models, options.limit ?? 5).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
@@ -141,6 +223,8 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions 
     ...header(report, "stats timeline"),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
     ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
+    // 每日结局与时长来自同一报告，保留错误/中止集中日期的诊断能力。
+    ...report.daily.map((day) => `${day.label} completed=${Math.max(0, day.requests - day.errors - day.aborted)} error=${day.errors} aborted=${day.aborted} avg=${Math.round(day.durationMs / Math.max(1, day.requests))}ms`),
   ].join("\n")
 
 // #174：sessions 按 sort 键排序再切片
@@ -154,11 +238,12 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions 
   })
   return [
     ...header(report, "stats sessions"),
-    ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)}`),
+    ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)} avg=${Math.round(s.durationMs / Math.max(1, s.requests))}ms`),
   ].join("\n")
 }
 
 // #174：charts 拼条形与日线
+// #177：charts 页附加 tool context 时间序列
 export const renderCharts = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
     ...header(report, "stats charts"),
@@ -208,3 +293,17 @@ export const renderTokens = (report: StatsReport, options: StatsRenderOptions = 
   ].join("\n")
 
 export { formatNumber }
+
+
+// #177：独立导出工具上下文时间序列块，供 charts/dashboard 组合
+export const renderToolSeries = (report: StatsReport, options: StatsRenderOptions = {}) => {
+  if (!report.toolSeries?.length) return ""
+  return renderRoundedLineChart({
+    title: "Tool context tokens over time",
+    series: report.toolSeries.slice(0, options.limit ?? 5).map((s) => ({
+      id: s.id,
+      label: s.label || s.id,
+      points: s.points.map((p) => ({ x: p.label, y: p.tokens.total })),
+    })),
+  }).join("\n")
+}
