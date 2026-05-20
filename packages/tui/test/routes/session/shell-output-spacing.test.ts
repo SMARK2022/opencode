@@ -56,4 +56,14 @@ describe("Session Shell output spacing", () => {
     expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
     expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
   })
+
+  // 首帧从实际 preview 同步决定正文挂载，不恢复已移除的内置折叠状态。
+  test("BlockTool decides collapse eligibility before mounting previews", () => {
+    const start = sessionSource.indexOf("function BlockTool(")
+    const end = sessionSource.indexOf("function Shell(")
+    const blockToolSource = sessionSource.slice(start, end)
+    expect(blockToolSource).toContain("const collapsed = createMemo(() => props.preview !== undefined)")
+    expect(blockToolSource).toContain("createSignal(!collapsed())")
+    expect(blockToolSource).not.toContain("setCanCollapse")
+  })
 })
