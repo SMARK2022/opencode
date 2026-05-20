@@ -24,6 +24,12 @@ test("block tool keeps content after collapse and re-expand", async () => {
   await mkdir(stateDir, { recursive: true })
   await writeFile(path.join(stateDir, "kv.json"), "{}")
   const output = Array.from({ length: 24 }, (_, index) => `source line ${index + 1}`).join("\n")
+  // 组件边界记录真实挂载次数，不能把折叠后隐藏误当成首帧未挂载。
+  let bodyMounts = 0
+  function Body() {
+    bodyMounts++
+    return <text>{output}</text>
+  }
 
   function Harness() {
     const [expanded, setExpanded] = createSignal(false)
@@ -40,7 +46,7 @@ test("block tool keeps content after collapse and re-expand", async () => {
                     autoReview={false}
                     onClick={() => setExpanded((value) => !value)}
                     preview={expanded() ? undefined : preview}>
-                    <text>{output}</text>
+                    <Body />
                     <text>Click to collapse</text>
                   </BlockTool>
                 </RouteProvider>
@@ -68,22 +74,26 @@ test("block tool keeps content after collapse and re-expand", async () => {
     let frame = app.captureCharFrame()
     expect(frame).toContain("PREVIEW-FRONT")
     expect(frame).not.toContain("source line 24")
+    expect(bodyMounts).toBe(0)
 
     await click("Click to expand")
     await app.waitForFrame((f) => f.includes("Click to collapse"))
     frame = app.captureCharFrame()
     expect(frame).toContain("source line 24")
+    expect(bodyMounts).toBe(1)
 
     await click("Click to collapse")
     await app.waitForFrame((f) => f.includes("Click to expand"))
     frame = app.captureCharFrame()
     expect(frame).not.toContain("source line 24")
+    expect(bodyMounts).toBe(1)
 
     // 回归点：再展开后完整内容必须恢复——旧的 <Show> 卸载实现在此处会渲染空白。
     await click("Click to expand")
     await app.waitForFrame((f) => f.includes("Click to collapse"))
     frame = app.captureCharFrame()
     expect(frame).toContain("source line 24")
+    expect(bodyMounts).toBe(1)
   } finally {
     app.renderer.destroy()
     engine.detach()
