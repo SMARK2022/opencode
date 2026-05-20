@@ -21,8 +21,31 @@ describe("Session Shell output spacing", () => {
     expect(shellStart).toBeGreaterThan(-1)
     const shellBody = sessionSource.slice(shellStart, shellStart + 6000)
     expect(shellBody).toContain("gap={1}")
-    // 折叠预览的 join 数组必须显式承载空行元素，filter 只剔除 undefined 不剔除空串。
-    expect(shellBody).toContain(`limited() ? "" : undefined`)
-    expect(shellBody).toContain(`filter((x): x is string => x !== undefined)`)
+    // 合成文本仅在存在输出时插入空行，展开态仍由原 gap 承担间距。
+    expect(shellBody).toContain('if (!output()) return `$ ${stringValue(props.input.command) ?? ""}`')
+    expect(shellBody).toContain('[`$ ${stringValue(props.input.command) ?? ""}`, "", output()].join("\\n")')
+  })
+
+  test("BlockTool uses one vertical spacing strategy", () => {
+    const blockToolSource = sessionSource.slice(sessionSource.indexOf("function BlockTool("), sessionSource.indexOf("function Shell("))
+    expect(blockToolSource).toContain("marginTop={1}")
+    expect(blockToolSource).not.toContain("gap={1}")
+  })
+
+  test("BlockTool can collapse long wrapped single-line content", () => {
+    // 源 totalChars 契约由目标 preview owner 承担，不恢复第二套折叠状态。
+    expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
+    expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
+    expect(sessionSource).toContain("Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)")
+    expect(sessionSource).toContain('diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD')
+    expect(sessionSource).toContain('(file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
+    expect(sessionSource).toContain('(diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
+  })
+
+  test("Shell counts command and output characters for collapse", () => {
+    const shellSource = sessionSource.slice(sessionSource.indexOf("function Shell("), sessionSource.indexOf("function DiffView("))
+    expect(shellSource).toContain("shellPreviewText")
+    expect(shellSource).toContain("collapseToolOutput(shellPreviewText(), 20,")
+    expect(shellSource).toContain("previewText(shellPreviewText(), maxLines, maxChars())")
   })
 })

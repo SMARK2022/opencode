@@ -2073,10 +2073,12 @@ type ToolProps = {
   part: ToolPart
 }
 // #144：折叠预览沿用现有行数与字符预算，避免长单行绕过限幅
+// 长单行也会占满终端；800 是字符上界，窄屏仍沿用更小的宽度预算。
+const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
 
-function previewText(input: string, maxLines: number, maxChars: number) {
+function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
   // #144：复用 Unicode 安全的 collapseToolOutput，宽度变化仍驱动原预算。
-  return collapseToolOutput(input, maxLines, maxChars).output
+  return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD)).output
 }
 
 // #224：工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
@@ -2092,10 +2094,10 @@ function GenericTool(props: ToolProps) {
   // 20 行判断是否折叠，预览保留 10 行；字符预算继续随终端宽度变化。
   const maxLines = 10
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(output(), 20, maxChars() * 2))
+  const collapsed = createMemo(() => collapseToolOutput(output(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)))
   const limited = createMemo(() => {
     if (expanded() || !collapsed().overflow) return output()
-    return collapseToolOutput(output(), maxLines, maxChars()).output
+    return previewText(output(), maxLines, maxChars())
   })
   // Notebook完成态消费紧凑元数据，流式参数只用于pending摘要，不访问VS Code。
   const pendingStats = createPendingToolInputStats(() => props.part)
@@ -2714,12 +2716,16 @@ function Shell(props: ToolProps) {
     return stripAnsi(text?.trim() ?? "")
   })
   const [expanded, setExpanded] = createSignal(false)
-  // 命令占一行，空闲预览按总行数 10/20 与字符预算判断；运行及模型上下文视图保持完整。
+  // 命令和非空输出共用同一文本；空输出不添加分隔行，长命令不能绕过折叠。
+  const shellPreviewText = createMemo(() => {
+    if (!output()) return `$ ${stringValue(props.input.command) ?? ""}`
+    return [`$ ${stringValue(props.input.command) ?? ""}`, "", output()].join("\n")
+  })
   const maxLines = 10
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
   const collapsed = createMemo(() => {
-    if (isRunning() || showContextOutput()) return { output: output(), overflow: false }
-    return collapseToolOutput(output(), 19, maxChars() * 2)
+    if (isRunning() || showContextOutput()) return { output: shellPreviewText(), overflow: false }
+    return collapseToolOutput(shellPreviewText(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD))
   })
   // #111：外置 collapseToolOutput 主路径 sticky（Shell 唯一折叠 owner）
   const [shellCanCollapse, setShellCanCollapse] = createSignal(false)
@@ -2728,8 +2734,8 @@ function Shell(props: ToolProps) {
     if (collapsed().overflow) setShellCanCollapse(true)
   })
   const limited = createMemo(() => {
-    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return output()
-    return collapseToolOutput(output(), maxLines - 1, (maxLines - 1) * Math.max(20, ctx.width - 6)).output
+    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return shellPreviewText()
+    return previewText(shellPreviewText(), maxLines, maxChars())
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2763,11 +2769,10 @@ function Shell(props: ToolProps) {
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
-          // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
+          // 折叠判定和可见预览共用命令/输出预算，运行及模型上下文视图仍完整展示。
           preview={
             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
-              // 保留现有预览预算；非空输出才加入分隔行，空输出不制造额外空白。
-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, limited() ? "" : undefined, limited() ? previewText(limited(), 10, maxChars()) : undefined].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
+              <text fg={theme.text}>{limited()}</text>
             ) : undefined
           }
         >
@@ -2776,7 +2781,7 @@ function Shell(props: ToolProps) {
               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
             </Show>
             <Show when={output()}>
-              <text fg={theme.text}>{limited()}</text>
+              <text fg={theme.text}>{output()}</text>
             </Show>
             <Show when={shellCanCollapse()}>
               <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
@@ -2864,7 +2869,7 @@ function Write(props: ToolProps) {
   const maxLines = 10
   // 完整展示阈值为 20 行，折叠预览为 10 行；两者都保留字符预算。
   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(code(), 20, maxChars() * 2))
+  const collapsed = createMemo(() => collapseToolOutput(code(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)))
   // #111：Write 外置折叠 sticky（唯一折叠 owner；勿传 totalLines 给 BlockTool）
   const [writeCanCollapse, setWriteCanCollapse] = createSignal(false)
   createEffect(() => {
@@ -2873,7 +2878,7 @@ function Write(props: ToolProps) {
   })
   const limited = createMemo(() => {
     if (expanded() || !writeCanCollapse()) return code()
-    return collapseToolOutput(code(), maxLines, maxChars()).output
+    return previewText(code(), maxLines, maxChars())
   })
   // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
   const diff = createMemo(() => props.metadata.diff as string | undefined)
@@ -2897,7 +2902,8 @@ function Write(props: ToolProps) {
     const removed = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length
     return { added, removed, total: lines.length }
   })
-  const diffOverflow = createMemo(() => diffStats().total > 20)
+  // 字符超限只决定是否折叠，预览仍保留合法 hunk，展开正文不截断。
+  const diffOverflow = createMemo(() => diffStats().total > 20 || (diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
 
   return (
     <Switch>
@@ -3292,7 +3298,8 @@ function Edit(props: ToolProps) {
     return { ...changes, total: diffContent().split("\n").length }
   })
   // 20 行是展开阈值，10 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
-  const overflow = createMemo(() => stats().total > 20)
+  // 与 Write 共享字符门槛，少量超长行也能进入现有 DiffPreview。
+  const overflow = createMemo(() => stats().total > 20 || diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD)
 
   return (
     <Switch>
@@ -3396,7 +3403,8 @@ function ApplyPatch(props: ToolProps) {
             // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
             const [patchExpanded, setPatchExpanded] = createSignal(false)
             const patchLines = createMemo(() => (file.patch || "").split("\n"))
-            const patchOverflow = createMemo(() => patchLines().length > 20)
+            // 每文件沿用独立展开状态，字符门槛不改变 add/delete/move 语义。
+            const patchOverflow = createMemo(() => patchLines().length > 20 || (file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
 
             return (
             <BlockTool
