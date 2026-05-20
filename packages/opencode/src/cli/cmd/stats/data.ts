@@ -3,7 +3,7 @@ import { Session } from "@/session/session"
 import type { MessageV2 } from "@/session/message-v2"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
 import { NotFoundError } from "@/storage/storage"
-import { Database, eq } from "@/storage/db"
+import { Database, eq, gte } from "@/storage/db"
 import { SessionTable } from "@/session/session.sql"
 import type { Project } from "@/project/project"
 import type { SessionID } from "@/session/schema"
@@ -173,6 +173,12 @@ type ToolUsageEvent = {
   status: string
   toolID: string
   contextTokens: number
+}
+
+type ToolEventSeed = {
+  message: MessageV2.WithParts | undefined
+  components: InputComponentTotals
+  event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
 }
 
 type UsageGroupAccumulator = UsageGroup & {
@@ -491,9 +497,15 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
     total: daily.reduce((acc, day) => acc + part.pick(day.tokens), 0),
   }))
 
-const getAllSessions = Effect.sync(() =>
-  Database.use((db) => db.select().from(SessionTable).all()).map((row) => Session.fromRow(row)),
-)
+const getSessions = (cutoff: number) =>
+  Effect.sync(() =>
+    Database.use((db) => {
+      const rows = cutoff > 0
+        ? db.select().from(SessionTable).where(gte(SessionTable.time_updated, cutoff)).all()
+        : db.select().from(SessionTable).all()
+      return rows.map((row) => Session.fromRow(row))
+    }),
+  )
 
 const cutoffFromDays = (days?: number) => {
   if (days === undefined) return 0
@@ -565,47 +577,66 @@ const toolOutputChars = (part: MessageV2.ToolPart) => {
   return 0
 }
 
-const toolCharsByName = (messages: MessageV2.WithParts[], time: number) => {
-  const result = new Map<string, { inputChars: number; outputChars: number }>()
-  for (const message of messages) {
-    if (message.info.time.created > time) continue
-    for (const part of message.parts) {
-      if (part.type !== "tool") continue
-      const item = result.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
-      item.inputChars += toolInputChars(part)
-      item.outputChars += toolOutputChars(part)
-      result.set(part.tool, item)
+// Preserve the old attribution formula, but scan each session once instead of once per assistant turn.
+const toolEventsFromAssistants = (visibleMessages: MessageV2.WithParts[], seeds: ToolEventSeed[]) => {
+  const tasks = seeds
+    .filter((seed): seed is ToolEventSeed & { message: MessageV2.WithParts } => seed.message !== undefined)
+    .sort((a, b) => a.message.info.time.created - b.message.info.time.created)
+  if (tasks.length === 0) return []
+
+  const deltas = visibleMessages
+    .flatMap((message) =>
+      message.parts
+        .filter((part): part is MessageV2.ToolPart => part.type === "tool")
+        .map((part) => ({
+          time: message.info.time.created,
+          toolID: part.tool,
+          inputChars: toolInputChars(part),
+          outputChars: toolOutputChars(part),
+        })),
+    )
+    .sort((a, b) => a.time - b.time)
+
+  const result: ToolUsageEvent[] = []
+  const chars = new Map<string, { inputChars: number; outputChars: number }>()
+  let inputTotal = 0
+  let outputTotal = 0
+  let deltaIndex = 0
+
+  for (const task of tasks) {
+    // Current attribution includes every tool message created at or before the assistant turn.
+    while (deltaIndex < deltas.length && deltas[deltaIndex].time <= task.message.info.time.created) {
+      const delta = deltas[deltaIndex]
+      const item = chars.get(delta.toolID) ?? { inputChars: 0, outputChars: 0 }
+      item.inputChars += delta.inputChars
+      item.outputChars += delta.outputChars
+      inputTotal += delta.inputChars
+      outputTotal += delta.outputChars
+      chars.set(delta.toolID, item)
+      deltaIndex++
+    }
+
+    for (const [toolID, item] of chars) {
+      const contextTokens =
+        (inputTotal > 0 ? Math.round((task.components.toolCalls * item.inputChars) / inputTotal) : 0) +
+        (outputTotal > 0 ? Math.round((task.components.toolResults * item.outputChars) / outputTotal) : 0)
+      if (contextTokens === 0) continue
+      result.push({
+        time: task.event.time,
+        sessionID: task.event.sessionID,
+        projectID: task.event.projectID,
+        providerID: task.event.providerID,
+        modelID: task.event.modelID,
+        source: task.event.source,
+        agent: task.event.agent,
+        status: task.event.status,
+        toolID,
+        contextTokens,
+      })
     }
   }
-  return result
-}
 
-const toolEventsFromAssistant = (input: {
-  message: MessageV2.WithParts | undefined
-  visibleMessages: MessageV2.WithParts[]
-  event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
-}) => {
-  if (!input.message) return []
-  const components = componentsFromAssistant(input.message)
-  const chars = toolCharsByName(input.visibleMessages, input.message.info.time.created)
-  const inputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.inputChars, 0)
-  const outputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.outputChars, 0)
-  return Array.from(chars.entries())
-    .map(([toolID, item]) => ({
-      time: input.event.time,
-      sessionID: input.event.sessionID,
-      projectID: input.event.projectID,
-      providerID: input.event.providerID,
-      modelID: input.event.modelID,
-      source: input.event.source,
-      agent: input.event.agent,
-      status: input.event.status,
-      toolID,
-      contextTokens:
-        (inputTotal > 0 ? Math.round((components.toolCalls * item.inputChars) / inputTotal) : 0) +
-        (outputTotal > 0 ? Math.round((components.toolResults * item.outputChars) / outputTotal) : 0),
-    }))
-    .filter((event) => event.contextTokens > 0)
+  return result
 }
 
 const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
@@ -632,9 +663,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
 
     if (assistantRows.length > 0) {
       const assistantRequests = new Set(assistantRows.map((row) => row.request_id))
+      const assistantToolEvents: ToolEventSeed[] = []
       const assistantEvents = assistantRows.map((row) => {
         const request = requestsByID.get(row.request_id)
         const message = messagesByID.get(row.assistant_message_id)
+        const components = componentsFromAssistant(message)
         const event = {
           time: row.time_created,
           sessionID: session.id,
@@ -645,7 +678,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
           agent: request?.agent ?? session.agent ?? "unknown",
           status: row.status,
           tokens: rowTokens(row),
-          components: componentsFromAssistant(message),
+          components,
           cost: row.cost_micros / MICROS,
           requests: 0,
           assistantCalls: 1,
@@ -653,9 +686,10 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
           aborted: 0,
           durationMs: 0,
         }
-        toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
+        assistantToolEvents.push({ message, components, event })
         return event
       })
+      toolEvents.push(...toolEventsFromAssistants(visibleMessages, assistantToolEvents))
       const fallbackRequestEvents = requestRows
         .filter((row) => !assistantRequests.has(row.request_id))
         .map((row) => ({
@@ -720,9 +754,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       breakdownEvents.push(...requestEvents)
     }
   } else {
+    const legacyToolEvents: ToolEventSeed[] = []
     for (const message of visibleMessages) {
       if (message.info.role !== "assistant") continue
       const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
+      const components = componentsFromAssistant(message)
       const event = {
         time: message.info.time.created,
         sessionID: session.id,
@@ -733,7 +769,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
         agent: session.agent ?? "unknown",
         status: "completed",
         tokens,
-        components: componentsFromAssistant(message),
+        components,
         cost: message.info.cost ?? 0,
         requests: 0,
         assistantCalls: 1,
@@ -741,10 +777,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
         aborted: 0,
         durationMs: 0,
       }
-      toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
+      legacyToolEvents.push({ message, components, event })
       totalEvents.push(event)
       breakdownEvents.push(event)
     }
+    toolEvents.push(...toolEventsFromAssistants(visibleMessages, legacyToolEvents))
   }
 
   const toolUsage: Record<string, ToolUsage> = {}
@@ -763,7 +800,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
 
 export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
   const cutoff = cutoffFromDays(input.days)
-  const sessions = yield* getAllSessions
+  const sessions = yield* getSessions(cutoff)
   const filteredSessions = sessions
     .filter((session) => includeTime(cutoff, session.time.updated))
     .filter((session) => sessionMatches(session, input))

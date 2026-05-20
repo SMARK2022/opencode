@@ -490,6 +490,9 @@ function localCommands(root: Node) {
   return commands(root).filter((node) => {
     let parent = node.parent
     while (parent && parent.id !== root.id) {
+      // tree-sitter-powershell can recover POSIX fragments inside quoted WSL/ssh
+      // arguments as commands under ERROR nodes; those are not local shell commands.
+      if (parent.type === "ERROR") return false
       if (parent.type.includes("string")) return false
       parent = parent.parent
     }

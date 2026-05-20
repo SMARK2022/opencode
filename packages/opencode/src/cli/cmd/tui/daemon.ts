@@ -25,6 +25,7 @@ const SERVER_ELECTION_STALE_MS = 5_000
 const SERVER_POLL_INTERVAL_MS = 200
 
 type Args = NetworkOptions
+type DaemonExit = { exitCode: number } | { error: unknown }
 
 // Exposed for tests only.  Keep the daemon spawn path injectable without
 // forcing production code through a heavier process abstraction.
@@ -204,10 +205,15 @@ export async function ensure(args: Args) {
     })
     proc.unref()
     forwardReload(proc)
+    const exited = proc.exited.then(
+      (exitCode): DaemonExit => ({ exitCode }),
+      (error): DaemonExit => ({ error }),
+    )
 
     // The daemon cannot be ready immediately: worker startup has to load the
     // server, bind a port, and write the lock atomically before health can pass.
-    await Bun.sleep(1000)
+    const initialExit = await Promise.race([exited, Bun.sleep(1000).then(() => undefined)])
+    if (initialExit) throw new Error(daemonExitMessage(initialExit))
 
     const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
     while (Date.now() < deadline) {
@@ -219,12 +225,24 @@ export async function ensure(args: Args) {
           return internalUrl(lock.port)
         }
       }
-      await Bun.sleep(SERVER_POLL_INTERVAL_MS)
+      const exit = await Promise.race([
+        exited,
+        Bun.sleep(Math.min(SERVER_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now()))).then(() => undefined),
+      ])
+      if (exit) throw new Error(daemonExitMessage(exit))
     }
 
     proc.kill()
-    throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
+    throw new Error(
+      `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
+    )
   } finally {
     await electionLease?.release().catch(() => undefined)
   }
+}
+
+function daemonExitMessage(exit: DaemonExit) {
+  if ("exitCode" in exit)
+    return `opencode daemon exited before startup with exit code ${exit.exitCode}. Re-run with --print-logs to show daemon startup logs.`
+  return `opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs.`
 }

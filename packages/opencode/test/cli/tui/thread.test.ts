@@ -102,6 +102,16 @@ describe("tui thread", () => {
       startedAt: new Date().toISOString(),
     }
 
+    function spawnedDaemon(pid = FAKE_DAEMON_PID, overrides: Partial<ReturnType<typeof Bun.spawn>> = {}) {
+      return {
+        pid,
+        exited: new Promise<number>(() => {}),
+        unref() {},
+        kill() {},
+        ...overrides,
+      } as ReturnType<typeof Bun.spawn>
+    }
+
     async function callWithDaemonSpy(existingUrl: string | null, overrides?: Partial<ThreadArgs>) {
       setup()
       await using tmp = await tmpdir()
@@ -115,7 +125,7 @@ describe("tui thread", () => {
       let daemonSpawnCount = 0
       ThreadModule._setSpawn(() => {
         daemonSpawnCount++
-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon()
       })
 
       if (existingUrl) {
@@ -224,7 +234,7 @@ describe("tui thread", () => {
       let spawnOptions: Parameters<typeof Bun.spawn>[1] | undefined
       ThreadModule._setSpawn((_cmd, opts) => {
         spawnOptions = opts
-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon()
       })
 
       let readCount = 0
@@ -246,6 +256,35 @@ describe("tui thread", () => {
         if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
         else delete (process.stdin as { isTTY?: boolean }).isTTY
       }
+    })
+
+    test("reports daemon worker exit before startup instead of waiting for timeout", async () => {
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+
+      let killed = false
+      DaemonModule._setSpawn(() =>
+        spawnedDaemon(FAKE_DAEMON_PID, {
+          exited: Promise.resolve(132),
+          kill() {
+            killed = true
+          },
+        }),
+      )
+      spyOn(ServerLockModule, "read").mockResolvedValue(undefined)
+
+      const started = Date.now()
+      await expect(
+        DaemonModule.ensure({
+          port: 0,
+          hostname: "127.0.0.1",
+          mdns: false,
+          "mdns-domain": "opencode.local",
+          cors: [],
+        }),
+      ).rejects.toThrow("opencode daemon exited before startup with exit code 132")
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(killed).toBe(false)
     })
 
     test("thread installs and releases the Windows Ctrl+C guard around TUI lifetime", async () => {
@@ -280,7 +319,7 @@ describe("tui thread", () => {
       spyOn(ServerLockModule, "ping").mockResolvedValue(true)
       ThreadModule._setSpawn(() => {
         order.push("spawn")
-        return { pid: 99999, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon(99999)
       })
 
       const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
@@ -328,7 +367,7 @@ describe("tui thread", () => {
       spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
       ThreadModule._setSpawn(() => {
         order.push("spawn")
-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon()
       })
 
       const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
@@ -362,7 +401,7 @@ describe("tui thread", () => {
       DaemonModule._setSpawn(() => {
         spawnCount++
         spawned = true
-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon()
       })
       spyOn(ServerLockModule, "read").mockImplementation(async () => (spawned ? fakeLock : undefined))
       spyOn(ServerLockModule, "alive").mockReturnValue(true)
@@ -408,7 +447,7 @@ describe("tui thread", () => {
       let daemonSpawnCount = 0
       ThreadModule._setSpawn(() => {
         daemonSpawnCount++
-        return { pid: launcherPid, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon(launcherPid)
       })
 
       let readCount = 0
@@ -473,7 +512,7 @@ describe("tui thread", () => {
       let daemonSpawnCount = 0
       ThreadModule._setSpawn(() => {
         daemonSpawnCount++
-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon()
       })
 
       let clearCalled = false
@@ -520,7 +559,7 @@ describe("tui thread", () => {
       let daemonSpawnCount = 0
       ThreadModule._setSpawn(() => {
         daemonSpawnCount++
-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+        return spawnedDaemon()
       })
 
       let clearCalled = false
