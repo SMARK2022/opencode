@@ -16,6 +16,7 @@ import {
   renderRoundedLineChart,
   renderStackedAreaChart,
   renderTabs,
+  renderThreeColumn,
   renderTwoColumn,
   seriesFromUsage,
   padEndVisible,
@@ -38,21 +39,26 @@ const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
 const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
 
 const theme = {
-  bg: bg(25, 8, 28),
-  title: fg(224, 222, 226),
-  subtitle: fg(150, 132, 155),
-  muted: fg(122, 106, 130),
-  border: fg(86, 55, 88),
-  sep: fg(96, 80, 98),
-  blue: fg(78, 199, 224),
-  cyan: fg(76, 215, 220),
-  green: fg(82, 205, 126),
-  yellow: fg(224, 186, 76),
-  orange: fg(232, 145, 76),
-  purple: fg(190, 120, 225),
-  pink: fg(230, 120, 175),
-  red: fg(238, 106, 114),
-  white: fg(226, 226, 226),
+  bg: bg(19, 6, 24),
+  title: fg(246, 241, 248),
+  subtitle: fg(198, 171, 207),
+  muted: fg(158, 130, 170),
+  border: fg(116, 70, 124),
+  sep: fg(142, 97, 152),
+  blue: fg(78, 198, 224),
+  cyan: fg(98, 226, 218),
+  green: fg(95, 216, 139),
+  yellow: fg(238, 203, 83),
+  orange: fg(236, 145, 70),
+  purple: fg(196, 123, 232),
+  pink: fg(239, 119, 178),
+  red: fg(246, 111, 125),
+  white: fg(248, 244, 250),
+  lavender: fg(184, 158, 198),
+  mauve: fg(172, 126, 170),
+  tealSoft: fg(126, 174, 176),
+  amberSoft: fg(190, 162, 104),
+  roseSoft: fg(198, 132, 158),
 }
 
 export type ColorMode = "auto" | "always" | "never"
@@ -93,9 +99,10 @@ const dateRange = (report: StatsReport) => {
 }
 
 const money = (value: number) => {
-  if (!Number.isFinite(value)) return "$0.00"
+  if (!Number.isFinite(value) || value <= 0) return "—"
   if (value >= 100) return `$${value.toFixed(0)}`
   if (value >= 10) return `$${value.toFixed(1)}`
+  if (value >= 1) return `$${value.toFixed(2)}`
   return `$${value.toFixed(4)}`
 }
 
@@ -112,10 +119,21 @@ const metricBar = (value: number, max: number, width: number, enabled: boolean, 
 const title = (text: string, enabled: boolean) => color(text, "title", enabled, true)
 const muted = (text: string, enabled: boolean) => color(text, "muted", enabled)
 const sep = (enabled: boolean) => color(" · ", "sep", enabled)
+const clipVisible = (text: string, width: number) => {
+  if (visibleLength(text) <= width) return text
+  return Array.from(text).reduce(
+    (acc, char) => visibleLength(acc + char) > width ? acc : acc + char,
+    "",
+  )
+}
+const fitPlain = (text: string, width: number) => padEndVisible(clipVisible(text, width), width)
 const activityColors = ["blue", "green", "yellow", "purple", "pink"] as const
 
 const fullChartWidth = () => Math.max(38, statsContentWidth() - 8)
 const halfChartWidth = () => Math.max(22, Math.floor((statsContentWidth() - 5) / 2) - 8)
+const terminalContentWidth = () => statsContentWidth()
+const layoutModeFor = (width: number) => width >= 130 ? "wide" : "medium"
+const chartPlotWidth = (availableWidth: number) => Math.max(12, availableWidth - 8)
 
 const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => item.label)
 
@@ -124,6 +142,12 @@ const dailyTokenPoints = (report: StatsReport) =>
 
 const dailyCostPoints = (report: StatsReport) =>
   report.daily.map((item) => ({ day: item.day, label: item.label, value: item.cost }))
+
+const dailyCacheHitPoints = (report: StatsReport) =>
+  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total > 0 ? (item.tokens.cache.read / item.tokens.total) * 100 : 0 }))
+
+const dailyErrorRatePoints = (report: StatsReport) =>
+  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.requests > 0 ? ((item.errors + item.aborted) / item.requests) * 100 : 0 }))
 
 const groupRows = (groups: UsageGroup[], metric: "tokens" | "cost", limit: number) =>
   groups.slice(0, limit).map((group, index) => ({
@@ -184,17 +208,6 @@ const inputContextTokens = (group: UsageGroup) =>
   group.components.toolCalls +
   group.components.toolResults +
   group.components.attachments
-
-const dashboardCallout = (report: StatsReport) => {
-  const topSession = [...report.sessions].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)[0]
-  if (report.total.errors + report.total.aborted > 0) {
-    return `${formatNumber(report.total.errors + report.total.aborted)} failed or aborted requests in this range; inspect stats insights for wasted-cost signals.`
-  }
-  if (topSession && topSession.cost > report.total.cost * 0.35) {
-    return `${topSession.title || topSession.id} accounts for ${percent(topSession.cost, report.total.cost)} of cost; inspect it with opencode session info -s ${topSession.id}.`
-  }
-  return `Cache is ${cacheShare(report.total.tokens)} of tokens; use stats timeline for daily changes and stats breakdown for attribution.`
-}
 
 const tokenComponentLineSeries = (report: StatsReport): ChartSeries[] =>
   report.tokenPartSeries
@@ -385,6 +398,22 @@ const renderRichHeader = (report: StatsReport, options: StatsRenderOptions, acti
   ]
 }
 
+const renderDashboardHeader = (report: StatsReport, options: StatsRenderOptions, width: number) => {
+  if (width >= 100) return renderRichHeader(report, options, "dashboard")
+  const enabled = useColor(options.color)
+  return [
+    title("opencode stats", enabled),
+    muted(`${dateRange(report)}${sep(enabled)}${report.days} day window${sep(enabled)}${report.sessionsWithUsage}/${report.totalSessions} sessions`, enabled),
+    `${color("●", "pink", enabled)} Cost ${money(report.total.cost)}  ${color("●", "blue", enabled)} Tok ${formatNumber(report.total.tokens.total)}  ${color("●", "green", enabled)} Req ${formatNumber(report.total.requests)}`,
+    `${color("●", "yellow", enabled)} Cache ${cacheShare(report.total.tokens)}  ${color("●", "red", enabled)} Err ${formatNumber(report.total.errors + report.total.aborted)}`,
+    renderTabs({
+      color: options.color,
+      tabs: ["dashboard", "timeline", "breakdown", "sessions", "insights"].map((label) => ({ label, active: label === "dashboard" })),
+    }),
+    "",
+  ]
+}
+
 const sortGroups = (groups: UsageGroup[], sort: StatsRenderOptions["sort"] = "tokens") =>
   [...groups].sort((a, b) => {
     if (sort === "cost") return b.cost - a.cost || b.tokens.total - a.tokens.total
@@ -395,127 +424,371 @@ const sortGroups = (groups: UsageGroup[], sort: StatsRenderOptions["sort"] = "to
 const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) =>
   sortGroups(groups, options.sort ?? "tokens").slice(0, options.limit ?? 8)
 
+// Dashboard helpers stay local to this file because they compose existing chart
+// primitives rather than adding new public chart types. The public surface stays
+// `renderDashboard(report, options)`, which is what the tests exercise.
+const renderSectionDivider = (label: string, enabled: boolean, width: number) => {
+  const head = `━━━ ${clipVisible(label, Math.max(8, width - 8))} `
+  return color(`${head}${"━".repeat(Math.max(3, width - visibleLength(head)))}`, "border", enabled)
+}
+
+const tokenIntensity = (value: number): { char: string; color: keyof typeof theme } => {
+  if (value <= 0) return { char: "·", color: "muted" }
+  if (value < 50_000_000) return { char: "░", color: "blue" }
+  if (value < 150_000_000) return { char: "▒", color: "cyan" }
+  if (value < 250_000_000) return { char: "▓", color: "purple" }
+  return { char: "█", color: "white" }
+}
+
+const requestIntensity = (value: number): { char: string; color: keyof typeof theme } => {
+  if (value <= 0) return { char: "·", color: "muted" }
+  if (value < 50) return { char: "░", color: "blue" }
+  if (value < 150) return { char: "▒", color: "cyan" }
+  if (value < 300) return { char: "▓", color: "purple" }
+  return { char: "█", color: "white" }
+}
+
+const intensityGlyph = (level: { char: string; color: keyof typeof theme }, enabled: boolean, width = 1) =>
+  color(level.char === "·" ? level.char : level.char.repeat(width), level.color, enabled)
+const plainIntensityGlyph = (level: { char: string }, width = 1) =>
+  level.char === "·" ? level.char : level.char.repeat(width)
+
+const hourActivity = (report: StatsReport) =>
+  report.sessions.reduce(
+    (buckets, session) => {
+      buckets[new Date(session.updated).getHours()] += Math.max(1, session.requests)
+      return buckets
+    },
+    Array.from({ length: 24 }, () => 0),
+  )
+
+const dayOfWeekTokens = (report: StatsReport) =>
+  report.daily.reduce(
+    (buckets, day) => {
+      buckets[(new Date(day.day).getDay() + 6) % 7] += day.tokens.total
+      return buckets
+    },
+    Array.from({ length: 7 }, () => 0),
+  )
+
+const renderHourOfDayStrip = (report: StatsReport, width: number) => {
+  const buckets = hourActivity(report)
+  const paired = Array.from({ length: 12 }, (_, index) => (buckets[index * 2] ?? 0) + (buckets[index * 2 + 1] ?? 0))
+  const nonZero = buckets.map((value, hour) => ({ value, hour })).filter((item) => item.value > 0)
+  const peak = nonZero.sort((a, b) => b.value - a.value)[0]
+  const quiet = nonZero.sort((a, b) => a.value - b.value)[0]
+  const legend = ["legend  · =0    ░ <50    ▒ <150", "        ▓ <300    █ ≥300"]
+  return [
+    "Hour-of-day · avg requests per hour",
+    "",
+    rangeLabels(0, 22, 2).join(" "),
+    paired.map((value) => plainIntensityGlyph(requestIntensity(value))).join("  "),
+    "",
+    peak ? `peak  ${String(peak.hour).padStart(2, "0")}:00 — ${formatNumber(peak.value)} req` : "no hourly activity",
+    quiet ? `quiet ${String(quiet.hour).padStart(2, "0")}:00 — ${formatNumber(quiet.value)} req` : "",
+    "",
+    ...(width < 60 ? legend : [legend.join("    ")]),
+  ]
+}
+
+const rangeLabels = (start: number, end: number, step: number) =>
+  Array.from({ length: Math.floor((end - start) / step) + 1 }, (_, index) => String(start + index * step).padStart(2, "0"))
+
+const isoWeek = (time: number) => {
+  const date = new Date(time)
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+  target.setUTCDate(target.getUTCDate() + 3 - ((target.getUTCDay() + 6) % 7))
+  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4))
+  return 1 + Math.round(((target.getTime() - firstThursday.getTime()) / 86_400_000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7)
+}
+
+const renderCalendarActivity = (report: StatsReport, width: number) => {
+  const byDay = new Map(report.daily.map((day) => [day.day, day.tokens.total]))
+  const first = report.daily[0]?.day ?? Date.now()
+  const last = report.daily.at(-1)?.day ?? first
+  const start = first - ((new Date(first).getUTCDay() + 6) % 7) * 86_400_000
+  const weeks = Math.max(1, Math.ceil((last - start + 86_400_000) / (7 * 86_400_000)))
+  const legend = [
+    `${plainIntensityGlyph(tokenIntensity(1), 2)} <50M`,
+    `${plainIntensityGlyph(tokenIntensity(50_000_000), 2)} 50-150M`,
+    `${plainIntensityGlyph(tokenIntensity(150_000_000), 2)} 150-250M`,
+    `${plainIntensityGlyph(tokenIntensity(250_000_000), 2)} >250M`,
+  ]
+  return [
+    "Calendar · cell intensity = daily tokens",
+    "",
+    `      ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => fitPlain(label, 3)).join(" ")}`,
+    ...Array.from({ length: weeks }, (_, week) => {
+      const weekStart = start + week * 7 * 86_400_000
+      const cells = Array.from({ length: 7 }, (_, day) => padEndVisible(plainIntensityGlyph(tokenIntensity(byDay.get(weekStart + day * 86_400_000) ?? 0), 2), 3)).join(" ")
+      return `${padStartVisible(String(isoWeek(weekStart)), 4)}  ${cells}`
+    }),
+    "",
+    ...(width < 54 ? [`${legend[0]}     ${legend[1]}`, `${legend[2]}     ${legend[3]}`] : [legend.join("     ")]),
+  ]
+}
+
+// Activity is deliberately three small views of the same window: calendar for
+// date-level rhythm, hour strip for intra-day load, and weekday share for bias.
+const renderDayOfWeekShare = (report: StatsReport, enabled: boolean, width: number) => {
+  const buckets = dayOfWeekTokens(report)
+  const total = buckets.reduce((sum, value) => sum + value, 0)
+  const max = Math.max(0, ...buckets)
+  const barWidth = Math.max(6, width - 14)
+  return [
+    title("Day-of-week · share of total tokens", enabled),
+    ...["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label, index) => {
+      const filled = max <= 0 ? 0 : Math.round((buckets[index] / max) * barWidth)
+      return `${label} ${color("▇".repeat(filled), index >= 5 ? "mauve" : "lavender", enabled)}${" ".repeat(Math.max(0, barWidth - filled))} ${padStartVisible(percent(buckets[index], total), 6)}`
+    }),
+  ]
+}
+
+const renderDailyActivitySection = (report: StatsReport, options: StatsRenderOptions, mode: ReturnType<typeof layoutModeFor>, width: number) => {
+  const calendarWidth = width < 100 ? width : mode === "wide" ? Math.floor((width - 10) / 3) : Math.floor((width - 4) / 2)
+  const sideWidth = mode === "wide" ? Math.max(24, calendarWidth) : Math.max(24, width < 100 ? width : width - 4 - calendarWidth)
+  const calendar = renderCalendarActivity(report, calendarWidth)
+  const hour = renderHourOfDayStrip(report, sideWidth)
+  const dow = renderDayOfWeekShare(report, useColor(options.color), sideWidth)
+  if (width < 100) return [...calendar, "", ...hour, "", ...dow]
+  if (mode === "wide") return renderThreeColumn(calendar, hour, dow, 5, width)
+  return renderTwoColumn(calendar, [...hour, "", ...dow], 4, width, 0.5)
+}
+
+// Token components are no longer stacked in the dashboard. Each component uses a
+// one-series line chart, so low-share output/cache-write data keeps its shape.
+const orderedTokenParts = (report: StatsReport) =>
+  (["cacheRead", "input", "cacheWrite", "output"] as const).flatMap((id) => {
+    const part = report.tokenPartSeries.find((item) => item.id === id)
+    if (!part) return []
+    return [{ ...part, label: id === "output" ? "Output" : part.label }]
+  })
+
+const renderTokenComponentSmallChart = (part: ReturnType<typeof orderedTokenParts>[number], report: StatsReport, options: StatsRenderOptions, width: number) => {
+  const meta = {
+    cacheRead: { color: "yellow", mark: "▓" },
+    input: { color: "blue", mark: "░" },
+    cacheWrite: { color: "purple", mark: "▒" },
+    output: { color: "green", mark: "▎" },
+  }[part.id] as { color: ChartColor; mark: string }
+  const peak = Math.max(0, ...part.points.map((point) => point.value))
+  const avg = safeDivide(part.total, Math.max(1, part.points.length))
+  const fullTitle = `${meta.mark} ${part.label} ${formatNumber(part.total)} ${percent(part.total, report.total.tokens.total)} · peak ${formatNumber(peak)}/d · avg ${formatNumber(avg)}/d`
+  const compactTitle = `${meta.mark} ${part.label} ${formatNumber(part.total)} ${percent(part.total, report.total.tokens.total)}`
+  return renderRoundedLineChart({
+    title: visibleLength(fullTitle) <= width ? fullTitle : compactTitle,
+    series: [{ id: part.id, label: part.label, color: meta.color, mark: meta.mark, total: part.total, points: part.points.map((point) => ({ x: point.day, y: point.value, label: point.label, value: point.value })) }],
+    color: options.color,
+    metric: "tokens",
+    width: chartPlotWidth(width),
+    height: 8,
+    points: false,
+    legend: false,
+  })
+}
+
+const renderTokenComponentsSmallMultiples = (report: StatsReport, options: StatsRenderOptions, halfWidth: number, width: number) => {
+  const charts = orderedTokenParts(report).map((part) => renderTokenComponentSmallChart(part, report, options, width < 100 ? width : halfWidth))
+  if (charts.length === 0) return [muted("No token component data", useColor(options.color))]
+  if (width < 100) return charts.flatMap((chart) => [...chart, ""]).slice(0, -1)
+  return [
+    ...(charts.length >= 2 ? renderTwoColumn(charts[0], charts[1], 5, width, 0.5) : charts[0]),
+    ...(charts.length >= 4 ? ["", ...renderTwoColumn(charts[2], charts[3], 5, width, 0.5)] : charts[2] ? ["", ...charts[2]] : []),
+  ]
+}
+
+const median = (values: number[]) => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)] ?? 0
+}
+
+const renderCostHealthSubchart = (titleText: string, id: string, colorName: ChartColor, points: ReturnType<typeof dailyCostPoints>, width: number, metric: "tokens" | "cost", options: StatsRenderOptions, summary: string, yRange?: { min: number; max: number }) => [
+  ...renderRoundedLineChart({ title: titleText, series: [dailySeries(points, colorName, id)], color: options.color, metric, width: chartPlotWidth(width), height: 7, points: false, legend: false, yMin: yRange?.min, yMax: yRange?.max }),
+  muted(summary, useColor(options.color)),
+]
+
+// Wide terminals get the three health charts side-by-side. Medium terminals put
+// Error before Cache, then give Cache the released full-width row for clarity.
+const renderCostHealthSection = (report: StatsReport, options: StatsRenderOptions, mode: ReturnType<typeof layoutModeFor>, width: number, halfWidth: number, thirdWidth: number) => {
+  const costPeak = [...report.daily].sort((a, b) => b.cost - a.cost)[0]
+  const cacheRates = dailyCacheHitPoints(report).map((point) => point.value).filter((value) => value > 0)
+  const errorPeak = dailyErrorRatePoints(report).sort((a, b) => b.value - a.value)[0]
+  const errorAvg = safeDivide(report.total.errors + report.total.aborted, report.total.requests) * 100
+  const pairWidth = width < 100 ? Math.max(38, width - 4) : mode === "wide" ? thirdWidth : halfWidth
+  const dailyCost = renderCostHealthSubchart("Daily cost ($/day)", "cost", "pink", dailyCostPoints(report), pairWidth, "cost", options, costPeak ? `peak ${money(costPeak.cost)} on ${costPeak.label} · median ${money(median(report.daily.map((day) => day.cost)))}` : "no cost activity")
+  const cacheRange = cacheRates.length ? { min: Math.max(0, Math.floor(Math.min(...cacheRates) / 10) * 10), max: Math.min(100, Math.ceil(Math.max(...cacheRates) / 10) * 10) } : undefined
+  const cacheHit = renderCostHealthSubchart("Cache hit rate (%)", "cache", "yellow", dailyCacheHitPoints(report), mode === "wide" ? thirdWidth : Math.max(38, width - 4), "tokens", options, cacheRates.length ? `range ${Math.min(...cacheRates).toFixed(1)}% → ${Math.max(...cacheRates).toFixed(1)}% · ${Math.max(...cacheRates) - Math.min(...cacheRates) < 10 ? "stable" : "variable"}` : "no cache activity", cacheRange)
+  const errorRate = renderCostHealthSubchart("Error rate (errors per 100 req)", "errors", "red", dailyErrorRatePoints(report), pairWidth, "tokens", options, errorPeak && errorPeak.value > 0 ? `spike ${errorPeak.value.toFixed(1)}% on ${errorPeak.label} · avg ${errorAvg.toFixed(1)}%` : "no errors recorded")
+  if (mode === "wide") return renderThreeColumn(dailyCost, cacheHit, errorRate, 5, width)
+  if (width < 100) return [...dailyCost, "", ...errorRate, "", ...cacheHit]
+  return [...renderTwoColumn(dailyCost, errorRate, 5, width, 0.5), "", ...cacheHit]
+}
+
+const renderTopModelsLollipop = (report: StatsReport, options: StatsRenderOptions, width: number) => {
+  const enabled = useColor(options.color)
+  const models = topGroups(report.models, { ...options, limit: options.limit ?? 6, sort: "tokens" })
+  if (models.length === 0) return [muted("No model data in range", enabled)]
+  const max = Math.max(0, ...models.map((model) => model.tokens.total))
+  const labelWidth = Math.max(16, Math.min(30, Math.max(...models.map((model) => visibleLength(model.label))) + 1))
+  const barWidth = Math.max(12, width - labelWidth - 43)
+  return [
+    muted(`${" ".repeat(labelWidth)} │ tokens${" ".repeat(Math.max(1, barWidth - 6))} │ share  │ cost`, enabled),
+    ...models.map((model, index) => {
+      const filled = Math.max(1, Math.round(safeDivide(model.tokens.total, max) * Math.max(1, barWidth - 10)))
+      return fitPlain(`${padEndVisible(clipVisible(model.label, labelWidth), labelWidth)} │${color("●" + "━".repeat(Math.max(0, filled - 1)), activityColors[index % activityColors.length], enabled)} ${padEndVisible(formatNumber(model.tokens.total), Math.max(1, barWidth - filled))} │ ${padStartVisible(percent(model.tokens.total, report.total.tokens.total), 6)} │ ${padStartVisible(money(model.cost), 8)}`, width)
+    }),
+  ]
+}
+
+const renderTopProvidersStack = (report: StatsReport, options: StatsRenderOptions, width: number) => {
+  const enabled = useColor(options.color)
+  const providers = sortGroups(report.providers, "tokens")
+  if (providers.length === 0) return [muted("No provider data in range", enabled)]
+  const barWidth = Math.max(20, width - 2)
+  const colors = ["yellow", "green", "blue", "purple", "cyan", "pink"] as const
+  const chars = ["▓", "█", "░", "▒", "▓", "▒"]
+  const top = providers.slice(0, 6)
+  const otherTokens = providers.slice(6).reduce((sum, provider) => sum + provider.tokens.total, 0)
+  const pieces = [
+    ...top.map((provider) => ({ label: provider.label, tokens: provider.tokens.total, cost: provider.cost })),
+    ...(otherTokens > 0 ? [{ label: "other", tokens: otherTokens, cost: providers.slice(6).reduce((sum, provider) => sum + provider.cost, 0) }] : []),
+  ].map((provider, index) => ({ provider, color: colors[index % colors.length], char: chars[index] ?? "█" }))
+  const baseSizes = pieces.map((piece) => Math.max(1, Math.floor(safeDivide(piece.provider.tokens, report.total.tokens.total) * barWidth)))
+  const sizes = baseSizes.map((size, index) => index === baseSizes.length - 1 ? Math.max(1, size + barWidth - baseSizes.reduce((sum, item) => sum + item, 0)) : size)
+  const bar = pieces.map((piece, index) => color(piece.char.repeat(Math.max(1, sizes[index] ?? 1)), piece.color, enabled)).join("")
+  const pctLine = pieces.map((piece, index) => padEndVisible(percent(piece.provider.tokens, report.total.tokens.total), Math.max(visibleLength(percent(piece.provider.tokens, report.total.tokens.total)) + 1, sizes[index] ?? 1))).join("")
+  const itemsPerRow = width >= 110 ? 3 : 2
+  const legendGap = width >= 110 ? 6 : 4
+  const colWidth = Math.min(38, Math.floor((width - legendGap * (itemsPerRow - 1)) / itemsPerRow))
+  return [fitPlain(bar, barWidth), muted(fitPlain(pctLine, barWidth), enabled), "", ...pieces.map((piece) => {
+    const labelWidth = Math.max(8, colWidth - 20)
+    return `${color(piece.char, piece.color, enabled)} ${padEndVisible(color(clipVisible(piece.provider.label, labelWidth), "white", enabled, true), labelWidth)} ${padStartVisible(formatNumber(piece.provider.tokens), 7)} ${padStartVisible(money(piece.provider.cost), 8)}`
+  }).reduce<string[]>((rows, item, index) => {
+    if (index % itemsPerRow === 0) rows.push("")
+    rows[rows.length - 1] += `${index % itemsPerRow === 0 ? "" : " ".repeat(legendGap)}${padEndVisible(item, colWidth)}`
+    return rows
+  }, [])]
+}
+
+const sessionPercentile = (report: StatsReport, q: number) => {
+  const sorted = report.sessions.map((session) => session.tokens.total).sort((a, b) => a - b)
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] ?? 0
+}
+
+const renderSessionDistribution = (report: StatsReport, options: StatsRenderOptions, width: number) => {
+  const enabled = useColor(options.color)
+  const buckets = [
+    { label: "<100K", min: 0, max: 100_000 },
+    { label: "100K-1M", min: 100_000, max: 1_000_000 },
+    { label: "1M-5M", min: 1_000_000, max: 5_000_000 },
+    { label: "5M-50M", min: 5_000_000, max: 50_000_000 },
+    { label: ">50M", min: 50_000_000, max: Number.POSITIVE_INFINITY },
+  ]
+  const counts = buckets.map((bucket) => report.sessions.filter((session) => session.tokens.total >= bucket.min && session.tokens.total < bucket.max).length)
+  const max = Math.max(1, ...counts)
+  const total = Math.max(1, counts.reduce((sum, count) => sum + count, 0))
+  const barWidth = Math.max(12, width - 26)
+  const topTokens = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total)
+  const top2 = topTokens.slice(0, 2).reduce((sum, session) => sum + session.tokens.total, 0)
+  const top10 = topTokens.slice(0, 10).reduce((sum, session) => sum + session.tokens.total, 0)
+  return [
+    title(`Session size distribution (${report.sessions.length} sessions)`, enabled),
+    ...buckets.map((bucket, index) => `${padStartVisible(bucket.label, 8)} ${metricBar(counts[index], max, barWidth, enabled, (["muted", "lavender", "tealSoft", "mauve", "amberSoft"] as const)[index] ?? "lavender")} ${padStartVisible(String(counts[index]), 4)} ${padStartVisible(percent(counts[index], total), 6)}`),
+    "",
+    muted(`Percentiles   p50 ${formatNumber(sessionPercentile(report, 0.5))} · p90 ${formatNumber(sessionPercentile(report, 0.9))} · p99 ${formatNumber(sessionPercentile(report, 0.99))}`, enabled),
+    muted(`Heavy-tail   top 2 ⇒ ${percent(top2, report.total.tokens.total)} of tokens · top 10 ⇒ ${percent(top10, report.total.tokens.total)}`, enabled),
+  ]
+}
+
+const renderTopSessionsList = (report: StatsReport, options: StatsRenderOptions, width: number) => {
+  const enabled = useColor(options.color)
+  const sessions = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost).slice(0, options.limit ?? 5)
+  const max = Math.max(0, ...sessions.map((session) => session.tokens.total))
+  const barWidth = Math.max(18, width - 14)
+  return [
+    title("Top sessions by tokens", enabled),
+    ...sessions.flatMap((session, index) => [
+      `#${index + 1} ${padEndVisible(color(clipVisible(session.title || session.id, Math.max(20, width - 28)), "white", enabled, true), Math.max(20, width - 28))} ${padStartVisible(money(session.cost), 8)} ${padStartVisible(formatNumber(session.tokens.total), 8)} tok`,
+      `   ${metricBar(session.tokens.total, max, barWidth, enabled, "blue")} ${padStartVisible(percent(session.tokens.total, max), 5)}`,
+      `   ${muted(`${session.models.slice(0, 2).join(" · ") || "?"} · ${formatNumber(session.requests)} req · ${avgDuration(session.durationMs, session.requests)} avg`, enabled)}`,
+      "",
+    ]),
+  ]
+}
+
+const renderInsightsCallout = (report: StatsReport, options: StatsRenderOptions) => {
+  const errorTotal = report.total.errors + report.total.aborted
+  const errorRate = safeDivide(errorTotal, report.total.requests) * 100
+  const top2 = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total).slice(0, 2).reduce((sum, session) => sum + session.tokens.total, 0)
+  const cachePct = safeDivide(report.total.tokens.cache.read, report.total.tokens.total) * 100
+  const compact = statsContentWidth() < 100
+  return renderCallout({
+    title: "💡  Suggested next steps",
+    body: compact
+      ? [
+          errorTotal > 0 ? `▸ ${formatNumber(errorTotal)} failed/aborted req (${errorRate.toFixed(1)}%).` : "▸ No failed or aborted requests.",
+          errorTotal > 0 ? "  → opencode stats insights --wasted" : "  → keep watching error-rate trend.",
+          `▸ Top 2 sessions: ${percent(top2, report.total.tokens.total)} of tokens.`,
+          `▸ Cache hit: ${cachePct.toFixed(1)}%; review prompt reuse.`,
+        ].join("\n")
+      : [
+          errorTotal > 0 ? `▸ ${formatNumber(errorTotal)} failed/aborted requests (${errorRate.toFixed(1)}% rate).` : "▸ No failed or aborted requests in this range.",
+          errorTotal > 0 ? "  → run  opencode stats insights --wasted   to surface root causes." : "  → keep watching the error-rate chart for regressions.",
+          `▸ Top 2 sessions account for ${percent(top2, report.total.tokens.total)} of all tokens; consider splitting long sessions.`,
+          `▸ Cache hit rate is ${cachePct.toFixed(1)}%; further gains likely require prompt restructuring.`,
+        ].join("\n"),
+    color: options.color,
+    accent: "purple",
+  })
+}
+
 export function renderStatsHeader(report: StatsReport, options: StatsRenderOptions, active: string) {
   return renderRichHeader(report, options, active)
 }
 
 export function renderDashboard(report: StatsReport, options: StatsRenderOptions = {}) {
   const enabled = useColor(options.color)
-  const dashboardSessions = [...report.sessions]
-    .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
-    .slice(0, 5)
-  const maxSessionTokens = Math.max(0, ...dashboardSessions.map((session) => session.tokens.total))
-  const cacheReadPct = percent(report.total.tokens.cache.read, report.total.tokens.total)
-  const inputPct = percent(report.total.tokens.input, report.total.tokens.total)
-  const outputPct = percent(report.total.tokens.output + report.total.tokens.reasoning, report.total.tokens.total)
-  const dashboardTopTable = (titleText: string, labelHeader: string, groups: UsageGroup[], series: UsageSeries[], labelCap: number) => {
-    const rows = topGroups(groups, { ...options, limit: options.limit ?? 6, sort: "tokens" })
-    const seriesByID = new Map(series.map((item) => [item.id, item]))
-    const metricRows = rows.map((group) => [money(group.cost), formatNumber(group.tokens.total), formatNumber(group.assistantCalls), percent(group.tokens.total, report.total.tokens.total)])
-    const metricWidths = ["cost", "tokens", "calls", "share"].map((header, index) => Math.max(visibleLength(header), ...metricRows.map((row) => visibleLength(row[index] ?? ""))))
-    const metricWidth = metricWidths.reduce((sum, width) => sum + width, 0)
-    const labelNatural = Math.max(visibleLength(labelHeader), ...rows.map((group) => visibleLength(group.label)))
-    // Keep the old ledger + sparkline data in one row. Trend is the elastic column:
-    // fixed metrics stay readable, labels keep a floor, and very narrow terminals drop trend.
-    const labelFloor = Math.max(visibleLength(labelHeader), Math.min(labelNatural, labelHeader === "model" ? 18 : 16))
-    const trendRoom = statsContentWidth() - metricWidth - 15 - labelFloor
-    const trendWidth = trendRoom < 6 ? 0 : Math.min(24, trendRoom)
-    const labelWidth = Math.max(visibleLength(labelHeader), Math.min(labelCap, labelNatural, statsContentWidth() - metricWidth - (trendWidth ? 15 + trendWidth : 12)))
-    return renderComparisonTable({
-      title: titleText,
-      headers: trendWidth ? [labelHeader, "cost", "tokens", "calls", "share", "trend"] : [labelHeader, "cost", "tokens", "calls", "share"],
-      rows: rows.map((group, index) => [
-        truncateVisible(group.label, labelWidth),
-        ...(metricRows[index] ?? []),
-        ...(trendWidth ? [sparkline(seriesByID.get(group.id)?.points.map((point) => point.tokens.total) ?? [], trendWidth, enabled, activityColors[index % activityColors.length])] : []),
-      ]),
-      color: options.color,
-    })
-  }
+  const totalWidth = terminalContentWidth()
+  const mode = layoutModeFor(totalWidth)
+  const gap = 5
+  const halfWidth = Math.max(30, Math.floor((totalWidth - gap) / 2))
+  const thirdWidth = Math.max(28, Math.floor((totalWidth - gap * 2) / 3))
+  const sessionLeftWidth = Math.max(30, Math.floor((totalWidth - gap) * 0.42))
+  const sessionRightWidth = Math.max(30, totalWidth - gap - sessionLeftWidth)
+
+  // The dashboard is intentionally section-first. Each block owns one question,
+  // while timeline/breakdown/sessions keep their existing detailed renderers.
   const lines = [
-    ...renderRichHeader(report, options, "dashboard"),
-    ...renderTwoColumn(
-      renderRoundedLineChart({
-        title: "Token components",
-        series: tokenComponentLineSeries(report),
-        color: options.color,
-        metric: "tokens",
-        width: halfChartWidth(),
-        height: 12,
-      }),
-      renderRoundedLineChart({
-        title: "Model mix over time",
-        series: seriesFromUsage(report.modelSeries, "tokens", 5),
-        color: options.color,
-        metric: "tokens",
-        width: halfChartWidth(),
-        height: 12,
-      }),
-      5,
-    ),
+    ...renderDashboardHeader(report, options, totalWidth),
+    renderSectionDivider("Daily activity", enabled, totalWidth),
     "",
-    ...dashboardTopTable("Top models", "model", report.models, report.modelSeries, 28),
+    ...renderDailyActivitySection(report, options, mode, totalWidth),
     "",
-    ...dashboardTopTable("Top providers", "provider", report.providers, report.providerSeries, 26),
+    renderSectionDivider("Token components · small multiples, each chart auto-normalized to its own peak", enabled, totalWidth),
     "",
-    // Three-column: token composition + snapshot + top session
-    ...renderTwoColumn(
-      [
-        ...renderPercentStack({ title: "Token composition", rows: tokenPartRows(report), color: options.color, width: halfChartWidth() }),
-        "",
-        ...renderComparisonTable({
-          title: "Token ledger",
-          headers: ["kind", "tokens", "share"],
-          rows: [
-            ["input", formatNumber(report.total.tokens.input), inputPct],
-            ["output", formatNumber(report.total.tokens.output + report.total.tokens.reasoning), outputPct],
-            ["cache read", formatNumber(report.total.tokens.cache.read), cacheReadPct],
-            ["cache write", formatNumber(report.total.tokens.cache.write), percent(report.total.tokens.cache.write, report.total.tokens.total)],
-          ],
-          color: options.color,
-        }),
-      ],
-      renderComparisonTable({
-        title: "Usage snapshot",
-        headers: ["metric", "value"],
-        rows: [
-          ["cost total", money(report.total.cost)],
-          ["cost / day", money(safeDivide(report.total.cost, report.days))],
-          ["cost / request", money(safeDivide(report.total.cost, report.total.requests))],
-          ["tokens total", formatNumber(report.total.tokens.total)],
-          ["tokens / session", formatNumber(report.tokensPerSession)],
-          ["median session", formatNumber(report.medianTokensPerSession)],
-          ["cache share", cacheShare(report.total.tokens)],
-          ["cache read", cacheReadPct],
-          ["requests", formatNumber(report.total.requests)],
-          ["assistant calls", formatNumber(report.total.assistantCalls)],
-          ["sessions w/ usage", `${report.sessionsWithUsage} / ${report.totalSessions}`],
-          ["avg duration", avgDuration(report.total.durationMs, report.total.requests)],
-          ["failed / aborted", formatNumber(report.total.errors + report.total.aborted)],
-          ["tools used", formatNumber(report.totalTools)],
-          ["top tool", report.toolUsage[0] ? `${report.toolUsage[0].id} (${formatNumber(report.toolUsage[0].count)})` : "—"],
-        ],
-        color: options.color,
-      }),
-      5,
-    ),
+    ...renderTokenComponentsSmallMultiples(report, options, halfWidth, totalWidth),
     "",
-    // Top sessions inline
-    title("Top sessions by tokens", enabled),
-    ...dashboardSessions.flatMap((session, index) => {
-      const bar = metricBar(session.tokens.total, maxSessionTokens, 36, enabled, "blue")
-      return [
-        `${padStartVisible(String(index + 1), 2)} ${fitVisible(color(session.title || session.id, "white", enabled, true), 42)} ${padStartVisible(money(session.cost), 9)} ${padStartVisible(formatNumber(session.tokens.total), 8)} tok`,
-        `   ${bar} ${muted(`${session.models.slice(0, 2).join(", ")} · ${formatNumber(session.requests)} req · ${avgDuration(session.durationMs, session.requests)} avg`, enabled)}`,
-      ]
-    }),
+    renderSectionDivider("Cost & health trends", enabled, totalWidth),
     "",
-    ...renderCallout({
-      title: "Next question",
-      body: dashboardCallout(report),
-      color: options.color,
-      accent: "purple",
-    }),
+    ...renderCostHealthSection(report, options, mode, totalWidth, halfWidth, thirdWidth),
+    "",
+    renderSectionDivider("Top models · by token volume", enabled, totalWidth),
+    "",
+    ...renderTopModelsLollipop(report, options, totalWidth),
+    "",
+    renderSectionDivider("Top providers · share of total tokens", enabled, totalWidth),
+    "",
+    ...renderTopProvidersStack(report, options, totalWidth),
+    "",
+    renderSectionDivider("Sessions", enabled, totalWidth),
+    "",
+    ...(mode === "wide"
+      ? renderTwoColumn(renderSessionDistribution(report, options, sessionLeftWidth), renderTopSessionsList(report, options, sessionRightWidth), gap, totalWidth, sessionLeftWidth / Math.max(1, totalWidth - gap))
+      : [...renderSessionDistribution(report, options, totalWidth - 4), "", ...renderTopSessionsList(report, options, totalWidth - 4)]),
+    "",
+    renderSectionDivider("Insights", enabled, totalWidth),
+    "",
+    ...renderInsightsCallout(report, options),
   ]
   return panel(lines, enabled)
 }

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { SessionID } from "../../src/session/schema"
 import type { InputComponentTotals, StatsReport, TokenTotals, UsageTotals } from "../../src/cli/cmd/stats/data"
 import { renderBreakdown, renderDashboard, renderSessions } from "../../src/cli/cmd/stats/render"
-import { fitVisible, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
+import { fitVisible, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
 
 const day = 86_400_000
 const start = Date.UTC(2026, 3, 27)
@@ -214,18 +214,78 @@ describe("stats render width", () => {
     }
   })
 
-  test("folds dashboard activity sparklines into responsive top tables", () => {
+  test("renders dashboard as the new responsive sectioned overview", () => {
     withColumns(120, () => {
       const output = renderDashboard(report(), { color: "never" })
-      expect(output).toContain("share │ trend")
-      expect(output).not.toContain("Model activity rows")
-      expect(output).not.toContain("Provider trend rows")
+      expect(output).toContain("━━━ Daily activity")
+      expect(output).toContain("Calendar · cell intensity = daily tokens")
+      expect(output).toContain("Mon Tue Wed Thu Fri Sat Sun")
+      expect(output).toContain("legend  · =0")
+      expect(output).toContain("Token components · small multiples")
+      expect(output).toContain("Cost & health trends")
+      expect(output).toContain("Top models · by token volume")
+      expect(output).toContain("Top providers · share of total tokens")
+      expect(output).toContain("━━━ Sessions")
+      expect(output).toContain("━━━ Insights")
+      expect(output.indexOf("Error rate (errors per 100 req)")).toBeLessThan(output.indexOf("Cache hit rate (%)"))
+      expect(output).not.toContain("Cumulative spend")
+      expect(output).not.toContain("Why small multiples")
+      expect(output).not.toContain("Model mix over time")
+      expect(new Set(output.split("\n").map(visibleLength))).toEqual(new Set([118]))
+    })
+  })
+
+  test("renders dashboard token components as auto-normalized small multiples", () => {
+    withColumns(160, () => {
+      const output = renderDashboard(report(), { color: "never" })
+      expect(output).toContain("Cache Read")
+      expect(output).toContain("Input")
+      expect(output).toContain("Cache Write")
+      expect(output).toContain("Output")
+      expect(output.indexOf("Cache hit rate (%)")).toBeLessThan(output.indexOf("Error rate (errors per 100 req)"))
+      expect(output).not.toContain("■ Cache Read · ■ Input · ■ Cache Write · ■ Output")
+      expect(output).not.toContain("● cost")
+      expect(output).not.toContain("● cache")
+      expect(output).not.toContain("● errors")
+      expect(output.split("\n").some((line) => ["▓ Cache Read", "░ Input", "▒ Cache Write", "▎ Output"].includes(line.trim()))).toBe(false)
+      expect(new Set(output.split("\n").map(visibleLength))).toEqual(new Set([158]))
+    })
+  })
+
+  test("does not truncate dashboard rows with ellipses", () => {
+    for (const columns of [80, 120, 160]) {
+      withColumns(columns, () => {
+        expect(renderDashboard(report(), { color: "never" })).not.toContain("…")
+      })
+    }
+  })
+
+  test("keeps calendar monochrome while spacing provider legend columns", () => {
+    withColumns(80, () => {
+      const lines = renderDashboard(report(), { color: "always" }).split("\n")
+      const start = lines.findIndex((line) => stripAnsi(line).includes("Calendar · cell intensity"))
+      const end = lines.findIndex((line, index) => index > start && stripAnsi(line).includes("Hour-of-day"))
+      expect(lines.slice(start, end).join("\n")).not.toContain("\x1b[38;2")
+
+      const hourStart = end
+      const hourEnd = lines.findIndex((line, index) => index > hourStart && stripAnsi(line).includes("Day-of-week"))
+      expect(lines.slice(hourStart, hourEnd).join("\n")).not.toContain("\x1b[38;2")
     })
 
-    withColumns(58, () => {
+    withColumns(160, () => {
       const output = renderDashboard(report(), { color: "never" })
-      expect(output).not.toContain("share │ trend")
-      expect(new Set(output.split("\n").map(visibleLength))).toEqual(new Set([56]))
+      expect(output).toContain("DaXiao Codex")
+      expect(output).toMatch(/DaXiao Codex.* {4,}█ 本地提供商/)
+    })
+  })
+
+  test("uses differentiated session distribution colors", () => {
+    withColumns(160, () => {
+      const lines = renderDashboard(report(), { color: "always" }).split("\n")
+      const start = lines.findIndex((line) => stripAnsi(line).includes("Session size distribution"))
+      const bucketLines = lines.slice(start, start + 8).filter((line) => /<100K|100K-1M|1M-5M|5M-50M|>50M/.test(stripAnsi(line)))
+      const colors = new Set(bucketLines.flatMap((line) => Array.from(line.matchAll(/\x1b\[38;2;[^m]+m/g), (match) => match[0])))
+      expect(colors.size).toBeGreaterThan(1)
     })
   })
 

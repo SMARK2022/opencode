@@ -92,21 +92,21 @@ type RenderContext = {
 }
 
 const palette: Record<ChartColor, string> = {
-  axis: fg(132, 105, 137),
-  muted: fg(123, 105, 130),
-  title: fg(232, 230, 234),
-  subtitle: fg(170, 145, 176),
-  blue: fg(74, 185, 235),
-  cyan: fg(76, 215, 220),
-  green: fg(82, 208, 132),
-  yellow: fg(232, 196, 82),
-  orange: fg(232, 145, 76),
-  purple: fg(184, 116, 230),
-  pink: fg(235, 118, 178),
-  red: fg(238, 106, 114),
-  white: fg(230, 230, 230),
-  panel: bg(24, 8, 28),
-  grid: fg(72, 46, 76),
+  axis: fg(146, 110, 154),
+  muted: fg(158, 130, 170),
+  title: fg(246, 241, 248),
+  subtitle: fg(198, 171, 207),
+  blue: fg(78, 198, 224),
+  cyan: fg(98, 226, 218),
+  green: fg(95, 216, 139),
+  yellow: fg(238, 203, 83),
+  orange: fg(236, 145, 70),
+  purple: fg(196, 123, 232),
+  pink: fg(239, 119, 178),
+  red: fg(246, 111, 125),
+  white: fg(248, 244, 250),
+  panel: bg(19, 6, 24),
+  grid: fg(74, 45, 82),
 }
 
 const chartColors: ChartColor[] = ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"]
@@ -407,11 +407,11 @@ const stepPath = (points: { x: number; y: number }[]) => {
 const compactPoints = (points: { x: number; y: number }[]) =>
   points.filter((point, index) => index === 0 || !samePoint(point, points[index - 1]))
 
-const drawOrthogonalPolyline = (canvas: ChartCanvas, points: { x: number; y: number }[], style: ChartStyle) => {
+const drawOrthogonalPolyline = (canvas: ChartCanvas, points: { x: number; y: number }[], style: ChartStyle, singlePointChar = "●") => {
   const path = stepPath(compactPoints(points))
   if (path.length === 0) return
   if (path.length === 1) {
-    canvas.put(path[0].x, path[0].y, "●", style, style.priority + 3)
+    canvas.put(path[0].x, path[0].y, singlePointChar, style, style.priority + 3)
     return
   }
   const masks = new Map<string, { x: number; y: number; mask: number }>()
@@ -442,11 +442,17 @@ const labelTicks = (labels: string[], width: number) => {
   return line.join("")
 }
 
-const axisLabels = (max: number, height: number, formatter: (value: number) => string) =>
-  range(height).map((index) => formatter(max * (1 - index / Math.max(1, height - 1))))
+const axisLabels = (min: number, max: number, height: number, formatter: (value: number) => string) =>
+  range(height).map((index) => formatter(max - (max - min) * (index / Math.max(1, height - 1))))
 
 const withYAxis = (plotLines: string[], max: number, formatter: (value: number) => string, ctx: RenderContext) => {
-  const labels = axisLabels(max, plotLines.length, formatter)
+  const labels = axisLabels(0, max, plotLines.length, formatter)
+  const width = Math.max(5, ...labels.map(visibleLength))
+  return plotLines.map((line, index) => `${paint(padStartVisible(labels[index], width), "muted", ctx)} ${line}`)
+}
+
+const withYAxisRange = (plotLines: string[], bounds: Bounds, formatter: (value: number) => string, ctx: RenderContext) => {
+  const labels = axisLabels(bounds.minY, bounds.maxY, plotLines.length, formatter)
   const width = Math.max(5, ...labels.map(visibleLength))
   return plotLines.map((line, index) => `${paint(padStartVisible(labels[index], width), "muted", ctx)} ${line}`)
 }
@@ -475,13 +481,18 @@ export const seriesFromUsage = (series: UsageSeries[], metric: "tokens" | "cost"
   }))
 
 export const layersFromTokenParts = (parts: TokenPartSeries[]): ChartLayer[] =>
-  parts.map((part, index) => ({
-    id: part.id,
-    label: part.label,
-    color: chartColors[index % chartColors.length],
-    values: part.points.map((point) => point.value),
-    total: part.total,
-  }))
+  // Token stacks read bottom-to-top in this order. Output is last so even a
+  // tiny response-token slice can survive overlap as the visible top band.
+  ([
+    { id: "cacheRead", label: "Cache Read", color: "yellow" },
+    { id: "input", label: "Input", color: "blue" },
+    { id: "cacheWrite", label: "Cache Write", color: "purple" },
+    { id: "output", label: "Output", color: "green" },
+  ] as const).flatMap((layer) => {
+    const part = parts.find((item) => item.id === layer.id)
+    if (!part) return []
+    return [{ ...layer, values: part.points.map((point) => point.value), total: part.total }]
+  })
 
 export const dailySeries = (points: { day: number; label: string; value: number }[], color: ChartColor, label: string): ChartSeries => ({
   id: label,
@@ -499,14 +510,24 @@ export function renderRoundedLineChart(input: {
   height?: number
   color?: ColorMode
   metric?: "tokens" | "cost"
+  formatter?: (value: number) => string
+  yMin?: number
+  yMax?: number
+  points?: boolean
+  legend?: boolean
 }) {
   const ctx = renderContext(input.color)
   const width = input.width ?? 64
   const height = input.height ?? 12
-  const formatter = metricFormatter(input.metric ?? "tokens")
+  const formatter = input.formatter ?? metricFormatter(input.metric ?? "tokens")
   const nonEmpty = input.series.filter((item) => item.points.some((point) => point.y > 0))
   if (nonEmpty.length === 0) return [paint(input.title, "title", ctx, true), paint("No line data for this range.", "muted", ctx)]
-  const bounds = boundsForSeries(nonEmpty)
+  const rawBounds = boundsForSeries(nonEmpty)
+  const bounds = {
+    ...rawBounds,
+    minY: input.yMin ?? rawBounds.minY,
+    maxY: Math.max(input.yMax ?? rawBounds.maxY, (input.yMin ?? rawBounds.minY) + 1),
+  }
   const plotLeft = width > 1 ? 1 : 0
   const plotWidth = Math.max(1, width - plotLeft)
   const plotHeight = Math.max(1, height - 1)
@@ -518,15 +539,15 @@ export function renderRoundedLineChart(input: {
   nonEmpty.forEach((item, index) => {
     const style: ChartStyle = { color: item.color, priority: 30 + index }
     const mapped = item.points.map((point) => ({ x: plotLeft + xMap(point.x, bounds, plotWidth), y: yMap(point.y, bounds, plotHeight) }))
-    drawOrthogonalPolyline(canvas, mapped, style)
-    mapped.forEach((point) => canvas.put(point.x, point.y, item.mark ?? chartMarks[index % chartMarks.length], style, style.priority + 5))
+    drawOrthogonalPolyline(canvas, mapped, style, input.points === false ? "─" : "●")
+    if (input.points !== false) mapped.forEach((point) => canvas.put(point.x, point.y, item.mark ?? chartMarks[index % chartMarks.length], style, style.priority + 5))
   })
   const labels = nonEmpty[0]?.points.map((point) => point.label ?? dateLabel(point.x)) ?? []
   return [
     paint(input.title, "title", ctx, true),
-    ...withYAxis(canvas.render(ctx), bounds.maxY, formatter, ctx),
+    ...withYAxisRange(canvas.render(ctx), bounds, formatter, ctx),
     `${" ".repeat(7)}${paint(labelTicks(labels, width), "muted", ctx)}`,
-    legend(nonEmpty, ctx),
+    ...(input.legend === false ? [] : [legend(nonEmpty, ctx)]),
   ]
 }
 
@@ -538,6 +559,7 @@ export function renderStackedAreaChart(input: {
   height?: number
   color?: ColorMode
   formatter?: (value: number) => string
+  bars?: boolean
 }) {
   const ctx = renderContext(input.color)
   const width = input.width ?? 64
@@ -545,20 +567,27 @@ export function renderStackedAreaChart(input: {
   const layers = input.layers.filter((layer) => layer.values.some((value) => value > 0))
   if (layers.length === 0) return [paint(input.title, "title", ctx, true), paint("No stacked data for this range.", "muted", ctx)]
   const maxLength = Math.max(...layers.map((layer) => layer.values.length), 0)
-  const columns = range(width).map((index) => {
-    const sourceIndex = maxLength <= 1 ? 0 : Math.round((index / Math.max(1, width - 1)) * (maxLength - 1))
-    return layers.map((layer) => layer.values[sourceIndex] ?? 0)
-  })
-  const maxTotal = niceMax(Math.max(...columns.map((column) => column.reduce((acc, value) => acc + value, 0)), 1))
+  // `bars` keeps one sampled day per drawn column. The default area mode still
+  // interpolates across every x-cell for timeline charts that want continuous bands.
+  const sourceIndexes = input.bars
+    ? evenlySpaced(Math.min(maxLength, Math.max(1, Math.floor((width + 1) / 2))), maxLength - 1)
+    : range(width).map((index) => maxLength <= 1 ? 0 : Math.round((index / Math.max(1, width - 1)) * (maxLength - 1)))
+  const columns = sourceIndexes.map((sourceIndex, index) => ({
+    x: input.bars && sourceIndexes.length > 1 ? Math.round((index / (sourceIndexes.length - 1)) * (width - 1)) : index,
+    values: layers.map((layer) => layer.values[sourceIndex] ?? 0),
+  }))
+  const maxTotal = niceMax(Math.max(...columns.map((column) => column.values.reduce((acc, value) => acc + value, 0)), 1))
   const canvas = new ChartCanvas(width, height)
-  columns.forEach((column, x) => {
+  columns.forEach((column) => {
     let base = 0
-    column.forEach((value, layerIndex) => {
+    column.values.forEach((value, layerIndex) => {
       const top = base + value
       const y1 = yMap(base, { minX: 0, maxX: width - 1, minY: 0, maxY: maxTotal }, height)
       const y2 = yMap(top, { minX: 0, maxX: width - 1, minY: 0, maxY: maxTotal }, height)
+      // Inclusive fill gives every non-zero slice at least one cell; later
+      // layers intentionally win overlaps so tiny Output remains visible on top.
       for (const y of range(Math.abs(y1 - y2) + 1).map((offset) => Math.min(y1, y2) + offset)) {
-        canvas.put(x, y, "█", { color: layers[layerIndex].color, priority: 10 + layerIndex })
+        canvas.put(column.x, y, "█", { color: layers[layerIndex].color, priority: 10 + layerIndex })
       }
       base = top
     })
@@ -837,7 +866,9 @@ export function renderCallout(input: { title: string; body: string; color?: Colo
   return [
     `${paint("╭", accent, ctx)}${paint("─".repeat(width), "grid", ctx)}${paint("╮", accent, ctx)}`,
     `${paint("│", accent, ctx)} ${fitVisible(paint(input.title, "title", ctx, true), innerWidth)} ${paint("│", accent, ctx)}`,
-    `${paint("│", accent, ctx)} ${fitVisible(paint(input.body, "subtitle", ctx), innerWidth)} ${paint("│", accent, ctx)}`,
+    // Body can be a multi-line recommendation list. Split here so callers do
+    // not leak raw newlines into panel rows and break fixed-width rendering.
+    ...input.body.split("\n").map((line) => `${paint("│", accent, ctx)} ${fitVisible(paint(line, "subtitle", ctx), innerWidth)} ${paint("│", accent, ctx)}`),
     `${paint("╰", accent, ctx)}${paint("─".repeat(width), "grid", ctx)}${paint("╯", accent, ctx)}`,
   ]
 }
