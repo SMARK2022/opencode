@@ -21,6 +21,16 @@ const promptSource = readFileSync(
   "utf-8",
 )
 
+const blockToolSource = sessionSource.slice(
+  sessionSource.indexOf("function BlockTool("),
+  sessionSource.indexOf("function Shell("),
+)
+
+const shellSource = sessionSource.slice(
+  sessionSource.indexOf("function Shell("),
+  sessionSource.indexOf("function DiffView("),
+)
+
 describe("Session route integration points", () => {
   describe("scrollbar", () => {
     test("imports drawSmoothScrollbar", () => {
@@ -100,6 +110,25 @@ describe("Session route integration points", () => {
       expect(sessionSource).toContain("totalLines")
       expect(sessionSource).toContain("preview")
       expect(sessionSource).toContain("canCollapse")
+    })
+
+    test("BlockTool uses one vertical spacing strategy", () => {
+      expect(blockToolSource).toContain("marginTop={1}")
+      expect(blockToolSource).not.toContain("gap={1}")
+    })
+
+    test("BlockTool can collapse long wrapped single-line content", () => {
+      expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
+      expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
+      expect(blockToolSource).toContain("totalChars?: number")
+      expect(blockToolSource).toContain("charThreshold")
+      expect(blockToolSource).toContain("(props.totalChars ?? 0) > charThreshold()")
+    })
+
+    test("Shell counts command and output characters for collapse", () => {
+      expect(shellSource).toContain("shellPreviewText")
+      expect(shellSource).toContain("totalChars={shellPreviewText().length}")
+      expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
     })
 
     test("Edit tool shows diff stats in title", () => {
