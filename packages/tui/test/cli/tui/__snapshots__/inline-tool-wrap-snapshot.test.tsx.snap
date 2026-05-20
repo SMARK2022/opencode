@@ -57,7 +57,8 @@ exports[`TUI inline tool wrapping keeps separation after a padded user message 1
 `;
 
 exports[`TUI inline tool wrapping separates after a multi-line task row 1`] = `
-"   ✱ Grep "Task" (2 matches)
+"
+   ✱ Grep "Task" (2 matches)
 
    ⠙ Explore Task — Inspect active task spacing
 
@@ -68,7 +69,8 @@ exports[`TUI inline tool wrapping separates after a multi-line task row 1`] = `
 `;
 
 exports[`TUI inline tool wrapping separates a task row from a preceding inline detail 1`] = `
-"   → Read src/cli/cmd/tui/routes/session/index.tsx
+"
+   → Read src/cli/cmd/tui/routes/session/index.tsx
    ↳ Loaded src/cli/cmd/tui/routes/session/tools.tsx
 
    ✓ Explore Task — Inspect active task spacing
