@@ -1065,6 +1065,67 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "stores pending input estimate on summary assistant before streaming",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const msg = yield* createUserMessage(session.id, "hello")
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      const prepared = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const fiber = yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
+        .pipe(
+          withCompaction({
+            llm: Layer.succeed(LLM.Service, LLM.Service.of({
+              stream: (input) => Stream.unwrap(
+                (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
+                  Effect.andThen(Deferred.succeed(prepared, undefined)),
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.as(Stream.concat(
+                    Stream.make(LLMEvent.stepStart({ index: 0 })),
+                    reply("summary")(input),
+                  )),
+                ),
+              ),
+            })),
+          }),
+          Effect.forkChild,
+        )
+      // 准备回调提交后仍阻塞首个流事件，数据库快照必须已包含摘要请求的估算。
+      yield* Deferred.await(prepared).pipe(Effect.timeout("5 seconds"))
+      const snapshot = yield* Effect.gen(function* () {
+        const pending = (yield* ssn.messages({ sessionID: session.id })).find((item) => item.info.role === "assistant" && item.info.summary)
+        if (!pending || pending.info.role !== "assistant" || !pending.info.inputEstimate) return yield* Effect.die("Missing pending summary estimate")
+        const estimate = pending.info.inputEstimate
+        expect(estimate.input).toBeGreaterThan(0)
+        expect(estimate.bodyChars).toBeGreaterThan(0)
+        expect(estimate.inputBreakdown?.messages.total).toBeGreaterThan(0)
+        // provisional 快照只供展示；确认 tokens 和账本不能提前计入估算。
+        expect(pending.info.tokens.input).toBe(0)
+        expect(estimate.confirmed).toBe(false)
+        return estimate
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)))
+      yield* Fiber.join(fiber)
+      const summary = (yield* ssn.messages({ sessionID: session.id })).find((item) => item.info.role === "assistant" && item.info.summary)
+      if (!summary || summary.info.role !== "assistant") return yield* Effect.die("Missing completed summary")
+      // 流式部件沿同一准备快照交接，不能恢复旧inputChars/inputBreakdown可变旁路。
+      expect(summary.parts.find((part) => part.type === "step-start")).toMatchObject({
+        inputChars: snapshot.bodyChars,
+        inputTokens: snapshot.input,
+        inputBreakdown: snapshot.inputBreakdown,
+      })
+      expect(summary.parts.find((part) => part.type === "step-finish")).toMatchObject({ inputChars: snapshot.bodyChars, inputBreakdown: snapshot.inputBreakdown })
+      expect(summary.info.inputEstimate).toMatchObject({ ...snapshot, confirmed: true })
+      expect(summary.info.tokens.input).toBe(1)
+      // 同一次provider确认只结算一次，pending展示不得增加摘要账单。
+      const ledger = yield* SessionRequestUsage.Service
+      expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({
+        source: "system_compaction", assistantCount: 1, stepCount: 1, tokens: { input: 1, output: 1, total: 2 },
+      })
+    }),
+  )
+
+  itCompaction.instance(
     "marks summary message as errored on compact result",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
