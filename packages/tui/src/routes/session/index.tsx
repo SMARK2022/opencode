@@ -75,9 +75,10 @@ import { useVscodeNotebookToolView } from "./notebook-tool"
 // #154：pending/streaming 判定抽到 util，便于单测与去重
 import {
   assistantTurnDuration,
-  hasStreamingAssistant,
   pendingAssistantIndex,
+  shouldCullSessionViewport,
   shouldRefreshStaleBusyStatus,
+  // 裁剪判定收敛到 util：V1 主视口与 helper 单测共用同一语义；流式判定随 streamingActive 一并移交 helper。
 } from "../../util/session-pending"
 import type {
   AssistantMessage,
@@ -264,8 +265,12 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-  // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
-  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
+  // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+  // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
+  const viewportCulling = createMemo(() =>
+    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+  )
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
@@ -507,6 +512,10 @@ export function Session() {
     lastMaxScrollTop = maxScrollTop
     // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
     if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
+    // 在既有跟随完成后读取真实粘底状态，延后写信号避免改变当前布局帧。
+    const stuckToBottom = scroll.scrollTop >= maxScrollTop - 1
+    if (stuckToBottom === untrack(viewportStuckToBottom)) return
+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
   }
 
   event.on("session.status", (evt) => {
@@ -1312,8 +1321,8 @@ export function Session() {
                 ref={(r) => (scroll = r)}
                 // #212：由原生 renderAfter 在布局后跟随增长，无需 part 长度信号。
                 renderAfter={syncSessionViewportStuckToBottom}
-                // #135：流式时禁用 viewportCulling，避免裁剪抖动
-                viewportCulling={!streamingActive()}
+                // #458：粘底流式仍裁剪；滚入历史时保留屏外块测量，renderAfter 同步粘底信号
+                viewportCulling={viewportCulling()}
                 viewportOptions={{
                   // #144：滚动条占位，避免消息贴到 scrollbar 轨道
                   paddingRight: showScrollbar() ? 1 : 0,

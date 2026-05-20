@@ -4,6 +4,32 @@ export function hasStreamingAssistant(messages: Message[]) {
   return messages.some((message) => message.role === "assistant" && !message.time.completed)
 }
 
+// #458：视口裁剪判定接受宽化消息形状——V2 调试视图与 V1 主视口共用同一语义。
+type SessionViewportMessage = {
+  role?: string
+  type?: string
+  time: {
+    created: number
+    completed?: number
+  }
+}
+
+type SessionViewportState = {
+  stuckToBottom?: boolean
+}
+
+export function shouldCullSessionViewport(
+  messages: readonly SessionViewportMessage[],
+  state: SessionViewportState = {},
+) {
+  // 保持 sticky-bottom 流式热路径裁剪，但用户滚入历史时让屏外流式代码块继续测量。
+  if (!messages.some(isStreamingViewportAssistant)) return true
+  return state.stuckToBottom ?? true
+}
+
+function isStreamingViewportAssistant(message: SessionViewportMessage) {
+  return (message.role ?? message.type) === "assistant" && !message.time.completed
+}
 export function pendingAssistantIndex(messages: Message[], status: SessionStatus | undefined) {
   // 会话空闲时不查找待处理消息，避免不必要的重渲染
   if (!status || status.type === "idle") return undefined
