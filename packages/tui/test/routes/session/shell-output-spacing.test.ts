@@ -48,4 +48,12 @@ describe("Session Shell output spacing", () => {
     expect(shellSource).toContain("collapseToolOutput(shellPreviewText(), 20,")
     expect(shellSource).toContain("previewText(shellPreviewText(), maxLines, maxChars())")
   })
+
+  // #458：继承源 session-integration 断言——scrollbox 视口裁剪由 helper 与粘底信号驱动
+  test("scrollbox uses session viewport culling helper", () => {
+    expect(sessionSource).toContain("shouldCullSessionViewport")
+    expect(sessionSource).toContain("stuckToBottom: viewportStuckToBottom()")
+    expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
+    expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
+  })
 })

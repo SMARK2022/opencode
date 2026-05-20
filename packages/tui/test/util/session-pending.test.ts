@@ -7,6 +7,7 @@ import {
   hasStreamingAssistant,
   pendingAssistantIndex,
   shouldRefreshStaleBusyStatus,
+  shouldCullSessionViewport,
 } from "../../src/util/session-pending"
 
 const user = (id: string, created: number): UserMessage => ({
@@ -178,5 +179,18 @@ describe("activeTurnPair", () => {
 
   test("returns undefined when there are no messages", () => {
     expect(activeTurnPair([])).toBeUndefined()
+  })
+
+  // #458：视口裁剪三态——流式+默认粘底裁剪；流式+离底不裁；完成后恒裁
+  test("keeps session viewport culling enabled while an assistant message streams", () => {
+    expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
+  })
+
+  test("pauses session viewport culling while streaming away from sticky bottom", () => {
+    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(false)
+  })
+
+  test("keeps session viewport culling enabled after the assistant message completes", () => {
+    expect(shouldCullSessionViewport([assistant("done", 2)])).toBe(true)
   })
 })

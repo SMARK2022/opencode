@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { createSignal, untrack } from "solid-js"
 import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
@@ -19,10 +20,15 @@ async function fixture() {
     stickyScroll: true,
     stickyStart: "bottom",
   })
+  // 使用生产信号契约，回调同时验证跟随和裁剪，不在测试中重写位置算法。
+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
   scroll.renderAfter = new Function(
     "scroll",
+    "untrack",
+    "viewportStuckToBottom",
+    "setViewportStuckToBottom",
     `let lastMaxScrollTop = 0\n${callback}\nreturn syncSessionViewportStuckToBottom`,
-  )(scroll) as () => void
+  )(scroll, untrack, viewportStuckToBottom, setViewportStuckToBottom) as () => void
   app.renderer.root.add(scroll)
   const message = new BoxRenderable(app.renderer, { flexShrink: 0 })
   const text = new TextRenderable(app.renderer, {
@@ -31,12 +37,12 @@ async function fixture() {
   })
   message.add(text)
   scroll.add(message)
-  return { app, scroll, text }
+  return { app, scroll, text, viewportStuckToBottom }
 }
 
 describe("session viewport streaming bottom follow (#212)", () => {
   test.each([0, 1, 3])("streaming layout respects a %s-row bottom gap", async (gap) => {
-    const { app, scroll, text } = await fixture()
+    const { app, scroll, text, viewportStuckToBottom } = await fixture()
     try {
       // #212：用真实 renderOnce 推进原生回绕、滚动范围刷新和后续绘制。
       for (let frame = 0; frame < 4; frame++) await app.renderOnce()
@@ -52,6 +58,7 @@ describe("session viewport streaming bottom follow (#212)", () => {
       await app.renderOnce()
       await app.renderOnce()
       expect(scroll.scrollTop).toBe(previous - gap)
+      expect(viewportStuckToBottom()).toBe(gap <= 1)
       if (gap > 0) expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
 
       // #212：同一文本节点追加 delta，实际换行增高，不靠新增节点或手工改高度。
@@ -61,10 +68,12 @@ describe("session viewport streaming bottom follow (#212)", () => {
       expect(scroll.getChildren()).toHaveLength(1)
 
       if (gap > 1) {
+        expect(viewportStuckToBottom()).toBe(false)
         expect(scroll.scrollTop).toBe(previous - gap)
         expect(app.captureCharFrame()).not.toContain("NEW_BOTTOM")
         return
       }
+      expect(viewportStuckToBottom()).toBe(true)
       expect(scroll.scrollTop).toBeGreaterThan(previous)
       expect(scroll.scrollTop).toBe(scroll.scrollHeight - scroll.viewport.height)
       expect(app.captureCharFrame()).toContain("NEW_BOTTOM")
