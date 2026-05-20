@@ -214,6 +214,21 @@ describe("stats render width", () => {
     }
   })
 
+  test("folds dashboard activity sparklines into responsive top tables", () => {
+    withColumns(120, () => {
+      const output = renderDashboard(report(), { color: "never" })
+      expect(output).toContain("share │ trend")
+      expect(output).not.toContain("Model activity rows")
+      expect(output).not.toContain("Provider trend rows")
+    })
+
+    withColumns(58, () => {
+      const output = renderDashboard(report(), { color: "never" })
+      expect(output).not.toContain("share │ trend")
+      expect(new Set(output.split("\n").map(visibleLength))).toEqual(new Set([56]))
+    })
+  })
+
   test("keeps breakdown rank bars from being double-truncated", () => {
     withColumns(140, () => {
       const toolOutput = renderBreakdown(report(), { color: "never", by: "tool" })

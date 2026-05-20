@@ -22,6 +22,7 @@ import {
   padStartVisible,
   statsContentWidth,
   truncateVisible,
+  visibleLength,
   type ChartColor,
   type ChartLayer,
   type ChartSeries,
@@ -407,6 +408,30 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
   const cacheReadPct = percent(report.total.tokens.cache.read, report.total.tokens.total)
   const inputPct = percent(report.total.tokens.input, report.total.tokens.total)
   const outputPct = percent(report.total.tokens.output + report.total.tokens.reasoning, report.total.tokens.total)
+  const dashboardTopTable = (titleText: string, labelHeader: string, groups: UsageGroup[], series: UsageSeries[], labelCap: number) => {
+    const rows = topGroups(groups, { ...options, limit: options.limit ?? 6, sort: "tokens" })
+    const seriesByID = new Map(series.map((item) => [item.id, item]))
+    const metricRows = rows.map((group) => [money(group.cost), formatNumber(group.tokens.total), formatNumber(group.assistantCalls), percent(group.tokens.total, report.total.tokens.total)])
+    const metricWidths = ["cost", "tokens", "calls", "share"].map((header, index) => Math.max(visibleLength(header), ...metricRows.map((row) => visibleLength(row[index] ?? ""))))
+    const metricWidth = metricWidths.reduce((sum, width) => sum + width, 0)
+    const labelNatural = Math.max(visibleLength(labelHeader), ...rows.map((group) => visibleLength(group.label)))
+    // Keep the old ledger + sparkline data in one row. Trend is the elastic column:
+    // fixed metrics stay readable, labels keep a floor, and very narrow terminals drop trend.
+    const labelFloor = Math.max(visibleLength(labelHeader), Math.min(labelNatural, labelHeader === "model" ? 18 : 16))
+    const trendRoom = statsContentWidth() - metricWidth - 15 - labelFloor
+    const trendWidth = trendRoom < 6 ? 0 : Math.min(24, trendRoom)
+    const labelWidth = Math.max(visibleLength(labelHeader), Math.min(labelCap, labelNatural, statsContentWidth() - metricWidth - (trendWidth ? 15 + trendWidth : 12)))
+    return renderComparisonTable({
+      title: titleText,
+      headers: trendWidth ? [labelHeader, "cost", "tokens", "calls", "share", "trend"] : [labelHeader, "cost", "tokens", "calls", "share"],
+      rows: rows.map((group, index) => [
+        truncateVisible(group.label, labelWidth),
+        ...(metricRows[index] ?? []),
+        ...(trendWidth ? [sparkline(seriesByID.get(group.id)?.points.map((point) => point.tokens.total) ?? [], trendWidth, enabled, activityColors[index % activityColors.length])] : []),
+      ]),
+      color: options.color,
+    })
+  }
   const lines = [
     ...renderRichHeader(report, options, "dashboard"),
     ...renderTwoColumn(
@@ -429,40 +454,9 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
       5,
     ),
     "",
-    // Two-column: top models + top providers with richer data
-    ...renderTwoColumn(
-      renderComparisonTable({
-        title: "Top models",
-        headers: ["model", "cost", "tokens", "calls", "share"],
-        rows: topGroups(report.models, { ...options, limit: options.limit ?? 6, sort: "tokens" }).map((model) => [
-          truncateVisible(model.label, 20),
-          money(model.cost),
-          formatNumber(model.tokens.total),
-          formatNumber(model.assistantCalls),
-          percent(model.tokens.total, report.total.tokens.total),
-        ]),
-        color: options.color,
-      }),
-      renderComparisonTable({
-        title: "Top providers",
-        headers: ["provider", "cost", "tokens", "calls", "share"],
-        rows: topGroups(report.providers, { ...options, limit: options.limit ?? 6, sort: "tokens" }).map((provider) => [
-          truncateVisible(provider.label, 18),
-          money(provider.cost),
-          formatNumber(provider.tokens.total),
-          formatNumber(provider.assistantCalls),
-          percent(provider.tokens.total, report.total.tokens.total),
-        ]),
-        color: options.color,
-      }),
-      5,
-    ),
+    ...dashboardTopTable("Top models", "model", report.models, report.modelSeries, 28),
     "",
-    ...renderTwoColumn(
-      activityRows("Model activity rows", report.modelSeries, "tokens", 6, enabled),
-      activityRows("Provider trend rows", report.providerSeries, "tokens", 6, enabled),
-      5,
-    ),
+    ...dashboardTopTable("Top providers", "provider", report.providers, report.providerSeries, 26),
     "",
     // Three-column: token composition + snapshot + top session
     ...renderTwoColumn(
