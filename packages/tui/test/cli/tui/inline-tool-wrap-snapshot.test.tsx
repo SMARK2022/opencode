@@ -357,7 +357,10 @@ describe("TUI inline tool wrapping", () => {
     const compiler = require("@babel/core") as {
       transformSync(source: string, options: Record<string, unknown>): { code?: string } | null
     }
-    const compiled = compiler.transformSync(functions.join("\n"), {
+    // 编译实际模块常量，不能在 fixture 另写一套字符预算。
+    const budget = source.match(/^const DEFAULT_BLOCK_CHAR_THRESHOLD = \d+$/m)?.[0]
+    expect(budget).toBeDefined()
+    const compiled = compiler.transformSync([budget, ...functions].join("\n"), {
       filename: "session-review-fixture.tsx",
       configFile: false,
       babelrc: false,
@@ -546,6 +549,32 @@ describe("TUI inline tool wrapping", () => {
       expect(context).not.toContain("<bash_high_signal_excerpt>")
       expect(navigation).toEqual([])
       shell.renderer.destroy()
+      // 空输出的大内联命令必须可展开；真实组件的点击不能只由字符串断言代替。
+      await renderFrame(
+        () => <production.Shell input={{ command: `echo ${"x".repeat(1100)} TAIL` }} metadata={{ output: "" }} part={{ tool: "shell", state: { status: "completed" } }} />,
+        { width: 72, height: 32 },
+      )
+      const longShell = testSetup!
+      const collapsedCommand = longShell.captureCharFrame()
+      expect(collapsedCommand).toContain("Click to expand")
+      expect(collapsedCommand).not.toContain("TAIL")
+      const commandPoint = findVisibleText(collapsedCommand.split("\n"), "$ echo")
+      expect(commandPoint).toBeDefined()
+      longShell.renderer.clearSelection()
+      await longShell.mockMouse.moveTo(commandPoint!.x + 1, commandPoint!.y)
+      await longShell.renderOnce()
+      await longShell.mockMouse.click(commandPoint!.x + 1, commandPoint!.y)
+      await longShell.renderOnce()
+      await longShell.renderOnce()
+      expect(longShell.captureCharFrame().replace(/[┃\s]/g, "")).toContain("TAIL")
+      expect(longShell.captureCharFrame()).toContain("Click to collapse")
+      longShell.renderer.clearSelection()
+      await longShell.mockMouse.click(commandPoint!.x + 1, commandPoint!.y)
+      await longShell.renderOnce()
+      await longShell.renderOnce()
+      expect(longShell.captureCharFrame()).not.toContain("TAIL")
+      expect(longShell.captureCharFrame()).toContain("Click to expand")
+      longShell.renderer.destroy()
     }
     let scroll: ScrollBoxRenderable | undefined
     // 窄屏加载生产 UserMessage，断言真实外框高度和回绕边框，而非复制一个 box。
