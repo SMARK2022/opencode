@@ -345,3 +345,108 @@ describe("sparkline aggregation (#181)", () => {
     expect(sparkline([1, 2, 3], 6).length).toBe(6)
   })
 })
+
+describe("stats dashboard sectioned overview (#182)", () => {
+  const report = {
+    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 2, totalTools: 0, days: 2,
+    dateRange: { earliest: 0, latest: 2 },
+    total: { tokens: { input: 100, output: 40, reasoning: 0, cache: { read: 50, write: 10 }, total: 200 }, cost: 2, requests: 10, assistantCalls: 10, errors: 2, aborted: 1 },
+    models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 2, assistantCalls: 2, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
+    providers: [{ id: "p1", label: "provider-one", tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 }, cost: 1.5, requests: 3, assistantCalls: 3, errors: 0, aborted: 0, sessions: 2, providers: [], models: [] }],
+    agents: [], sources: [], statuses: [], projects: [],
+    daily: [
+      { day: 1, label: "d1", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 0 },
+      { day: 2, label: "d2", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 1 },
+    ],
+    modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+    tokenPartSeries: [
+      { id: "input", label: "Input", points: [{ day: 1, label: "a", value: 10 }, { day: 2, label: "b", value: 90 }], total: 100 },
+      { id: "output", label: "Output", points: [{ day: 1, label: "a", value: 5 }, { day: 2, label: "b", value: 35 }], total: 40 },
+      { id: "cacheRead", label: "Cache Read", points: [{ day: 1, label: "a", value: 20 }, { day: 2, label: "b", value: 30 }], total: 50 },
+      { id: "cacheWrite", label: "Cache Write", points: [{ day: 1, label: "a", value: 4 }, { day: 2, label: "b", value: 6 }], total: 10 },
+    ],
+    sessions: [
+      { id: "s1" as any, title: "big", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 27, 3), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 80, output: 40, reasoning: 0, cache: { read: 0, write: 0 }, total: 120000 }, cost: 1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
+      { id: "s2" as any, title: "tiny", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 28, 15), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 7 }, cost: 0.1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
+    ],
+    toolUsage: [], toolSeries: [], modelProviderTokens: [], tokensPerSession: 15, medianTokensPerSession: 15,
+  } as unknown as StatsReport
+
+  test("renders sections, trends and session distribution", () => {
+    // #182：分区标题、趋势、分桶与失败率必须出现
+    const text = renderDashboard(report as any, { limit: 5 })
+    expect(text).toContain("Daily activity")
+    expect(text).toContain("Token components")
+    expect(text).toMatch(/Input[^\n]*total=100 peak=90/)
+    expect(text).toContain("Cost & health")
+    expect(text).toContain("Session size distribution")
+    expect(text).toContain("p90=120.0K p99=120.0K")
+    expect(text).toContain("top-10=")
+    expect(text).toContain("Top sessions by tokens")
+    expect(text).toContain("big")
+    expect(text).toMatch(/cost trend/)
+    expect(text).toMatch(/cache-hit trend/)
+    // #182：日失败率趋势必须存在
+    expect(text).toMatch(/error-rate trend/)
+    expect(text).toMatch(/Input\s+[\u2581-\u2588]+/)
+    expect(text).toContain("Cache hit (%): 25")
+    expect(text).not.toContain("Model activity rows")
+    for (const columns of [58, 80]) {
+      const previous = process.stdout.columns
+      Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns })
+      try {
+        const lines = renderDashboard({ ...report, tokenPartSeries: [{ id: "output", label: "Output + Reasoning", total: 1_000_000, points: [{ day: 1, label: "d1", value: 1_000_000 }] }] }).split("\n")
+        const index = lines.findIndex((line) => line.includes("Output + Reasoning"))
+        expect(index).toBeGreaterThanOrEqual(0)
+        expect(lines[index].length).toBeLessThanOrEqual(columns)
+        expect(lines[index + 1].length).toBeLessThanOrEqual(columns)
+        expect(lines.slice(index, index + 2).join(" ")).toContain("total=1.0M peak=1.0M")
+      } finally {
+        Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
+      }
+    }
+  })
+
+  test("keeps cross-day session tokens on local usage weekdays", () => {
+    // #182：同一会话周一、周二各用 100 token，周二续聊不能搬走周一用量
+    const monday = new Date(2026, 3, 27).getTime()
+    const tuesday = new Date(2026, 3, 28).getTime()
+    // 此用例检查日期和权重，固定窄屏使独立行断言不受宽屏多列排版影响。
+    const text = (() => {
+      const width = process.stdout.columns
+      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
+      try { return renderDashboard({
+      ...report,
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      dateRange: { earliest: monday, latest: tuesday },
+      daily: [
+        { ...report.daily[0], day: monday, label: "04-27" },
+        { ...report.daily[1], day: tuesday, label: "04-28" },
+      ],
+      sessions: [{ ...report.sessions[0], ...report.total, requests: 100, created: monday, updated: new Date(2026, 3, 28, 9).getTime() }, { ...report.sessions[1], requests: 1, updated: new Date(2026, 3, 28, 15).getTime() }],
+      }) } finally {
+        Object.defineProperty(process.stdout, "columns", { configurable: true, value: width })
+      }
+    })()
+    const lines = text.split("\n")
+    const start = lines.indexOf("Day of week share")
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(lines.slice(start + 1, start + 8).map((line) => Number(line.split(" ").at(-1)))).toEqual([100, 100, 0, 0, 0, 0, 0])
+    // 日历必须能定位周起点，小时图必须按本地请求量而非会话数计权。
+    const calendar = lines.indexOf("Calendar activity")
+    expect(lines[calendar + 1]).toContain("M T W T F S S")
+    expect(lines[calendar + 2]).toContain("04-27")
+    const hour = lines[lines.indexOf("Hour of day") + 1]
+    expect(hour?.[11]).toBe("█")
+    expect(hour?.[17]).toBe("·")
+  })
+
+  test("abort and error rate comes from report totals", () => {
+    // #182：3 次失败/10 次请求 => 30%
+    const text = renderDashboard(report as any, { limit: 5 })
+    expect(text).toContain("Abort & error rate (%): 30")
+    expect(text).not.toContain("Abort & error rate (%): n/a")
+    expect(text).toMatch(/Failed\/aborted requests: 3 \(30%\)/)
+  })
+})

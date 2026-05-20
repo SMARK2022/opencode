@@ -1,4 +1,5 @@
 
+import { renderTwoColumn, renderThreeColumn } from "./stats-charts"
 import { renderCompositionDonut, renderPercentStack, renderStreamStackChart, renderWaterfall, renderHistogram } from "./stats-charts"
 import type { StatsReport } from "./stats-data"
 import { emptyComponents } from "./stats-data"
@@ -256,23 +257,206 @@ const dashboardTopTable = (
   return lines
 }
 
-export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) => {
-  // #181：顶表吸收 activity/trend，不再并排 Top models|providers + 独立 activity 区
-    // #181：models 与 providers 纵向堆叠，不再 two-column
-  const body = [
-    ...header(report, "stats dashboard"),
-        // #181：models 表绑定 modelSeries 趋势
-    // #176：失败/中止请求存在时置顶提示（#176 契约在 #181 顶表重写后保留）
-    ...(report.total.errors + report.total.aborted > 0 ? [`requests failed=${report.total.errors} aborted=${report.total.aborted}`] : []),
-    ...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total),
-    "",
-        // #181：providers 表绑定 providerSeries 趋势
-    ...dashboardTopTable("Top providers", report.providers, report.providerSeries, options, "provider", report.total.tokens.total),
-    ...renderCallout("daily", "recent"),
-    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
+
+// #182：节标题分隔，便于扫读
+const renderSectionDivider = (title: string, subtitle?: string) => {
+  const line = `── ${title} ${"─".repeat(Math.max(2, 24 - title.length))}`
+  return subtitle ? [line, `   ${subtitle}`] : [line]
+}
+
+// #182：简易 DOW 份额条（Mon-Sun）
+const renderDayOfWeekShare = (report: StatsReport) => {
+  // #182：按用量发生的本地星期归属，续聊不能搬移此前 token
+  const dow = Array.from({ length: 7 }, () => 0)
+  for (const day of report.daily) {
+    const d = new Date(day.day).getDay()
+    const idx = d === 0 ? 6 : d - 1
+    dow[idx] += day.tokens.total
+  }
+  const max = Math.max(1, ...dow)
+  const names = ["M", "T", "W", "T", "F", "S", "S"]
+  return [
+    "Day of week share",
+    ...names.map((n, i) => `  ${n} ${"█".repeat(Math.max(1, Math.round((dow[i] / max) * 10)))} ${dow[i]}`),
   ]
-    // #181：整页一次 join，保持段间空行
-  return body.join("\n")
+}
+
+// #182：小时活跃粗条
+const renderHourOfDayStrip = (report: StatsReport) => {
+  // #182：24 小时活跃
+  const hours = Array.from({ length: 24 }, () => 0)
+  for (const s of report.sessions) {
+    hours[new Date(s.updated).getHours()] += Math.max(1, s.requests)
+  }
+  const max = Math.max(1, ...hours)
+  const glyphs = hours.map((h) => "·░▒▓█"[Math.min(4, Math.round((h / max) * 4))]).join("")
+  return ["Hour of day", `  ${glyphs}`, "  00  04  08  12  16  20"]
+}
+
+// #182：日历强度
+const renderCalendarActivity = (report: StatsReport) => {
+  // 按本地星期分周显示，长历史不扩成一条无日期的超宽字符带。
+  const max = Math.max(1, ...report.daily.map((day) => day.tokens.total))
+  const rows = ["Calendar activity", "          M T W T F S S"]
+  let week: string[] = []
+  let label = ""
+  for (const day of report.daily) {
+    const weekday = (new Date(day.day).getDay() + 6) % 7
+    if (weekday === 0 && week.length) {
+      rows.push(`  ${label} ${week.join(" ")}`)
+      week = []
+    }
+    if (!week.length) { label = day.label; week = Array(weekday).fill(" ") }
+    week.push("·░▒▓█"[Math.min(4, Math.round((day.tokens.total / max) * 4))])
+  }
+  if (week.length) rows.push(`  ${label} ${week.join(" ")}`)
+  return [...rows, "  · low  █ high"]
+}
+
+// #182：token 组件小多图
+const renderTokenComponentsSmallMultiples = (report: StatsReport, options: StatsRenderOptions) => {
+  // #182：tokenPartSeries 主路径画 tip sparkline 小多图；仅全空时回退 totals 条
+  const parts = report.tokenPartSeries ?? []
+  const lines = ["Token components", "  each series auto-normalized to its own peak"]
+  if (parts.length === 0) {
+    const t = report.total.tokens
+    const rows = [
+      { label: "Input", value: t.input },
+      { label: "Output", value: t.output },
+      { label: "Cache Read", value: t.cache.read },
+      { label: "Cache Write", value: t.cache.write },
+    ]
+    return [...lines, ...renderRankBars({ rows })]
+  }
+  const contentWidth = statsContentWidth()
+  for (const part of parts) {
+    // #182：点列为空时用 total 单点序列
+    const values = part.points.map((p) => p.value)
+    const peak = Math.max(0, ...(values.length ? values : [part.total]))
+    // 为真实标签和紧凑数值留出空间；窄屏分两行，避免截断组件名或数量级。
+    const label = `  ${part.label.padEnd(12)}`
+    const summary = `total=${formatNumber(part.total)} peak=${formatNumber(peak)}`
+    const available = contentWidth - visibleLength(label) - visibleLength(summary) - 3
+    const width = Math.min(40, Math.max(1, available >= 8 ? available : contentWidth - visibleLength(label) - 1))
+    const bar = sparkline(values.length ? values : [part.total], width)
+    lines.push(...(available >= 8 ? [`${label} ${bar}  ${summary}`] : [`${label} ${bar}`, `    ${summary}`]))
+  }
+  return lines
+}
+
+// #182：成本与健康（含日趋势 sparkline）
+// #182：单一指标口径：失败率与 cache hit 都从 report.total 派生
+const failureRate = (report: StatsReport) => {
+  const failed = report.total.errors + report.total.aborted
+  const reqs = report.total.requests
+  // #182：无请求时不编造比率
+  return { failed, rate: reqs > 0 ? Math.round((failed / reqs) * 1000) / 10 : 0, hasRequests: reqs > 0 }
+}
+
+// #182：cache hit 源公式 cache.read / tokens.total * 100
+const cacheHitRate = (report: StatsReport) => {
+  const total = report.total.tokens.total
+  return total > 0 ? Math.round((report.total.tokens.cache.read / total) * 1000) / 10 : 0
+}
+
+const renderCostHealthSection = (report: StatsReport) => {
+  const lines = ["Cost & health"]
+  const costs = report.daily.map((d) => d.cost)
+  lines.push(`  daily cost peak: ${money(Math.max(0, ...costs, 0))}`)
+  lines.push(`  total cost: ${money(report.total.cost)}`)
+  // #182：日成本趋势 sparkline（tip 文本）
+  const w = Math.max(12, Math.min(40, statsContentWidth() - 20))
+  lines.push(`  cost trend ${sparkline(costs.length ? costs : [0], w)}`)
+  // #182：日 cache-hit 序列用源公式 read/total
+  const hitSeries = report.daily.map((d) => (d.tokens.total > 0 ? (d.tokens.cache.read / d.tokens.total) * 100 : 0))
+  lines.push(`  cache-hit trend ${sparkline(hitSeries.length ? hitSeries : [0], w)}`)
+  // #182：日失败率序列，回答“何时出错”
+  const errSeries = report.daily.map((d) => (d.requests > 0 ? ((d.errors + d.aborted) / d.requests) * 100 : 0))
+  lines.push(`  error-rate trend ${sparkline(errSeries.length ? errSeries : [0], w)}`)
+  const failure = failureRate(report)
+  // #182：无请求时才 n/a，禁止有数据时写死 n/a
+  lines.push(failure.hasRequests ? `  Abort & error rate (%): ${failure.rate}` : "  Abort & error rate (%): n/a")
+  lines.push(`  Cache hit (%): ${cacheHitRate(report)}`)
+  return lines
+}
+
+// #182：用 statuses/sessions/cache 生成可行动建议
+const renderInsightsCallout = (report: StatsReport) => {
+  // #182：insights 复用 failureRate/cacheHitRate，避免同指标多处派生
+  const top = report.models[0]
+  const failure = failureRate(report)
+  const sorted = [...report.sessions].sort((x, y) => y.tokens.total - x.tokens.total)
+  const top2 = sorted.slice(0, 2).reduce((acc, s) => acc + s.tokens.total, 0)
+  const share = report.total.tokens.total > 0 ? Math.round((top2 / report.total.tokens.total) * 100) : 0
+  const body = [
+    top ? `Top model ${top.label || top.id} leads tokens.` : "No model usage yet.",
+    failure.failed > 0
+      ? `Failed/aborted requests: ${failure.failed} (${failure.rate}%). Inspect stats timeline for bursts.`
+      : "No failed/aborted requests in window.",
+    share > 0 ? `Top-2 sessions hold ~${share}% of tokens; use stats sessions for outliers.` : "Session concentration unavailable.",
+    `Cache hit ~${cacheHitRate(report)}%. Review provider mix if cost spikes.`,
+  ]
+  return ["Insights", ...body.map((l) => `  ${l}`)]
+}
+
+export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) => {
+  // #182：分区仪表盘：activity / tokens / cost / tops / sessions / insights
+  const lines: string[] = [...header(report, "stats dashboard")]
+  lines.push(...renderSectionDivider("Daily activity"))
+  // 宽屏复用现有多列布局；窄屏保留完整内容，避免固定分栏裁掉日期。
+  const activity = [renderCalendarActivity(report), renderHourOfDayStrip(report), renderDayOfWeekShare(report)]
+  lines.push(...(statsContentWidth() >= 90 ? renderThreeColumn(activity[0], activity[1], activity[2]) : statsContentWidth() >= 64 ? renderTwoColumn(activity[0], [...activity[1], ...activity[2]]) : activity.flat()))
+  lines.push("")
+  lines.push(...renderSectionDivider("Token components", "auto-normalized small multiples"))
+  // #182：组件小多图区
+  lines.push(...renderTokenComponentsSmallMultiples(report, options))
+  lines.push("")
+  lines.push(...renderSectionDivider("Cost & health"))
+  // #182：成本健康区（含日趋势 + statuses 失败率）
+  lines.push(...renderCostHealthSection(report))
+  lines.push("")
+  lines.push(...renderSectionDivider("Top models"))
+  lines.push(...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total))
+  lines.push("")
+  lines.push(...renderSectionDivider("Top providers"))
+  lines.push(...dashboardTopTable("Top providers", report.providers, report.providerSeries, options, "provider", report.total.tokens.total))
+  lines.push("")
+  lines.push(...renderSectionDivider("Sessions"))
+  lines.push(`  sessions with usage: ${report.sessionsWithUsage}`)
+  lines.push(`  median tokens/session: ${report.medianTokensPerSession}`)
+  // #182：会话体量分桶 + top list（tip 文本条）
+  {
+    // #182：分桶边界服务重尾会话扫读
+    const buckets = [
+      { label: "<100K", lo: 0, hi: 100_000 },
+      { label: "100K-1M", lo: 100_000, hi: 1_000_000 },
+      { label: "1M-10M", lo: 1_000_000, hi: 10_000_000 },
+      { label: ">10M", lo: 10_000_000, hi: Number.POSITIVE_INFINITY },
+    ]
+    const counts = buckets.map((b) => report.sessions.filter((s) => s.tokens.total >= b.lo && s.tokens.total < b.hi).length)
+    lines.push("  Session size distribution")
+    for (let i = 0; i < buckets.length; i++) {
+      const bar = "█".repeat(Math.min(20, counts[i]))
+      lines.push(`  ${buckets[i].label.padEnd(8)} ${bar} ${counts[i]}`)
+    }
+    const sorted = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total).slice(0, options.limit ?? 5)
+    // 分位数使用完整会话样本，榜单 limit 不能改变长尾统计。
+    const volumes = report.sessions.map((session) => session.tokens.total).sort((a, b) => a - b)
+    const quantile = (q: number) => formatNumber(volumes[Math.min(volumes.length - 1, Math.floor(volumes.length * q))] ?? 0)
+    const share = (count: number) => (100 * volumes.slice(-count).reduce((sum, value) => sum + value, 0) / Math.max(1, report.total.tokens.total)).toFixed(1)
+    lines.push(`  p50=${formatNumber(report.medianTokensPerSession)} p90=${quantile(0.9)} p99=${quantile(0.99)}`)
+    lines.push(`  Heavy-tail top-2=${share(2)}% top-10=${share(10)}%`)
+    lines.push("  Top sessions by tokens")
+    for (const s of sorted) {
+      lines.push(`  ${(s.title || s.id).slice(0, 24).padEnd(24)} ${s.tokens.total}`)
+    }
+  }
+  lines.push("")
+  lines.push(...renderSectionDivider("Insights"))
+  // #182：多行 insights，避免单行挤爆
+  lines.push(...renderInsightsCallout(report))
+  // #182：分区完成后一次性输出
+  return lines.join("\n")
 }
 
 
