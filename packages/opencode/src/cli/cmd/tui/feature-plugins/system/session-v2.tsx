@@ -670,7 +670,7 @@ function InlineTool(props: {
         if (!parent) return
         const previous = parent.getChildren()[parent.getChildren().indexOf(el) - 1]
         if (!previous) {
-          setMargin(0)
+          setMargin(1)
           return
         }
         if (previous.id.startsWith("text")) setMargin(1)

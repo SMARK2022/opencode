@@ -1555,10 +1555,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       borderColor={theme.backgroundElement}
       flexShrink={0}
       renderAfter={function (this: BoxRenderable, buffer: OptimizedBuffer) {
-        const x = Math.max(0, this.screenX)
-        const y = Math.max(0, this.screenY)
-        if (x >= buffer.width || y >= buffer.height) return
-        buffer.fillRect(x, y, 1, 1, theme.background)
+        if (this.screenX < 0 || this.screenY < 0) return
+        if (this.screenX >= buffer.width || this.screenY >= buffer.height) return
+        buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)
       }}
     >
       <For each={props.parts}>
@@ -1975,7 +1974,7 @@ function InlineTool(props: {
         const index = children.indexOf(el)
         const previous = children[index - 1]
         if (!previous) {
-          setMargin(0)
+          setMargin(1)
           return
         }
         if (previous.height > 1 || previous.id.startsWith("text-")) {
