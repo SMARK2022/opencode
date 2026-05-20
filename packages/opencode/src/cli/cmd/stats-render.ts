@@ -5,34 +5,24 @@ import { emptyComponents } from "./stats-data"
 // #174：render 再导出 formatNumber 方便调用
 import { formatNumber } from "../format"
 import {
-// #174：heatmap 页 cost 密度
   dailyCostPoints,
-// #174：timeline 用 dailySeries 生成折线
   dailySeries,
-// #174：heatmap 页 token 密度
   dailyTokenPoints,
-// #174：fitVisible 保证列对齐
   fitVisible,
-// #174：timeline 附加 token 分层堆叠
   layersFromTokenParts,
-// #174：矩阵只读报告交叉强度，不发起 select
   modelProviderMatrix,
-// #174：paint 按 TTY 着色
   paint,
-// #174：callout 分隔页面区块
   renderCallout,
   renderEmptyState,
-// #174：密度：只读报告生成终端行，不写库
   renderHeatmap,
   renderMatrix,
-// #174：条长相对本页最大值缩放，最大为 0 时不除零
   renderRankBars,
-// #174：折线：只读报告生成终端行，不写库
   renderRoundedLineChart,
-// #174：堆叠：只读报告生成终端行，不写库
   renderStackedAreaChart,
-// #174：宽度取终端列夹逼值，避免负宽或过宽
   statsContentWidth,
+  sparkline,
+  visibleLength,
+  truncateVisible,
 } from "./stats-charts"
 
 // #174：ColorMode 仅 auto/always/never
@@ -183,23 +173,109 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
       }
     }
   }
+    // #181：只返回本表行，由 dashboard 负责段间距
   return lines.join("\n")
 }
 
-export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) =>
-  [
+
+// #181：金额短格式
+// #181：仪表盘顶表金额短显示
+const money = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return "$0"
+  if (value >= 10) return `$${value.toFixed(0)}`
+  if (value >= 1) return `$${value.toFixed(2)}`
+  return `$${value.toFixed(4)}`
+}
+
+// #181：把 UsageGroup 列表收成 top-N 行
+// #181：limit 后的分组投影，供顶表复用
+const dashboardTopRows = (groups: StatsReport["models"], limit: number) =>
+  topGroups(groups, { limit, sort: "tokens" }).map((g) => ({
+    id: g.id,
+    label: g.label || g.id,
+    tokens: g.tokens.total,
+    cost: g.cost,
+    calls: g.assistantCalls,
+  }))
+
+// #181：响应式顶表：指标固定，趋势列随终端宽度伸缩/折叠
+// #181：单列顶表：指标+可选 trend，替代双栏+activity
+const dashboardTopTable = (
+  title: string,
+  groups: StatsReport["models"],
+  series: StatsReport["modelSeries"],
+  options: StatsRenderOptions,
+  kind: "model" | "provider",
+  // #181：share 分母用全局 total.tokens.total，禁止 top-N 重归一化
+  globalTokenTotal: number,
+) => {
+    // #181：内容宽取自 tip charts 统一口径
+  const content = statsContentWidth()
+    // #181：空表仍保留标题，避免布局塌陷误判
+  const rows = dashboardTopRows(groups, options.limit ?? 5)
+  if (rows.length === 0) return [`▸ ${title}`, "  (empty)"]
+    // #181：share 分母至少为 1，避免 NaN%
+  const totalTokens = Math.max(1, globalTokenTotal)
+    // #181：model 标签地板更宽，provider 稍窄
+  const labelFloor = kind === "model" ? 18 : 16
+    // #181：标签上限防止挤掉指标列
+  const labelCap = kind === "model" ? 28 : 26
+  // metrics 形如 " $12  1.2M  3  40% " 约 28 列预算
+  // #181：右侧指标列预算，剩余给 label/trend
+  const metricsBudget = 28
+    // #181：先扣指标与 gutter 再谈 trend
+  const trendRoom = content - metricsBudget - 15 - labelFloor
+  // #181：小于 6 列不画 trend，避免碎裂
+    // #181：trend 要么够 6 列要么为 0
+  const trendWidth = trendRoom < 6 ? 0 : Math.min(24, trendRoom)
+  // #181：label 在 floor/cap 间吃掉剩余宽度
+  const labelWidth = Math.max(labelFloor, Math.min(labelCap, content - metricsBudget - 15 - trendWidth))
+  const lines = [`▸ ${title}`]
+    // #181：宽屏表头带 share│trend，窄屏去掉 trend
+  const head =
+    trendWidth > 0
+      ? `  ${fitVisible("name", labelWidth)} ${fitVisible("cost", 8)} ${fitVisible("tokens", 8)} ${fitVisible("calls", 5)} share │ trend`
+      : `  ${fitVisible("name", labelWidth)} ${fitVisible("cost", 8)} ${fitVisible("tokens", 8)} ${fitVisible("calls", 5)} share`
+  lines.push(head)
+  for (const row of rows) {
+    // #181：share 相对本表 tokens 合计
+    const share = `${Math.round((row.tokens / totalTokens) * 100)}%`
+    // #181：按 id 对齐 series 点列
+    const seriesPoints = series.find((s) => s.id === row.id)?.points ?? []
+    const values = seriesPoints.map((p) => p.tokens.total)
+        // #181：无点列时 sparkline 返回空串
+    const trend = trendWidth > 0 ? sparkline(values, trendWidth) : ""
+        // #181：标签按显示列截断，保留 CJK 语义
+    const label = truncateVisible(row.label, labelWidth)
+        // #181：行体固定指标槽位，便于扫读对齐
+    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(formatNumber(row.tokens), 8)} ${fitVisible(formatNumber(row.calls), 5)} ${fitVisible(share, 5)}`
+        // #181：trend 用 │ 与 share 分隔
+    lines.push(trendWidth > 0 ? `${base} │ ${trend}` : base)
+  }
+  // #181：禁止再单独挂 Model/Provider activity rows
+  return lines
+}
+
+export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) => {
+  // #181：顶表吸收 activity/trend，不再并排 Top models|providers + 独立 activity 区
+    // #181：models 与 providers 纵向堆叠，不再 two-column
+  const body = [
     ...header(report, "stats dashboard"),
-    // #176：失败/中止请求存在时置顶提示，与 usage 表 errors/aborted 同源
+        // #181：models 表绑定 modelSeries 趋势
+    // #176：失败/中止请求存在时置顶提示（#176 契约在 #181 顶表重写后保留）
     ...(report.total.errors + report.total.aborted > 0 ? [`requests failed=${report.total.errors} aborted=${report.total.aborted}`] : []),
-    ...renderCallout("models", `top ${Math.min(5, report.models.length)}`),
-    ...renderRankBars({
-      rows: limitRows(report.models, options.limit ?? 5).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
-    }),
+    ...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total),
+    "",
+        // #181：providers 表绑定 providerSeries 趋势
+    ...dashboardTopTable("Top providers", report.providers, report.providerSeries, options, "provider", report.total.tokens.total),
     ...renderCallout("daily", "recent"),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
-  ].join("\n")
+  ]
+    // #181：整页一次 join，保持段间空行
+  return body.join("\n")
+}
 
-// #174：overview 含消息/工具与工具榜
+
 export const renderOverview = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
     ...header(report, "stats overview"),
