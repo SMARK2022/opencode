@@ -112,7 +112,7 @@ describe("Session route integration points", () => {
       expect(sessionSource).toContain("threshold")
       expect(sessionSource).toContain("totalLines")
       expect(sessionSource).toContain("preview")
-      expect(sessionSource).toContain("canCollapse")
+      expect(sessionSource).toContain("collapsible")
     })
 
     test("BlockTool uses one vertical spacing strategy", () => {
@@ -126,6 +126,11 @@ describe("Session route integration points", () => {
       expect(blockToolSource).toContain("totalChars?: number")
       expect(blockToolSource).toContain("charThreshold")
       expect(blockToolSource).toContain("(props.totalChars ?? 0) > charThreshold()")
+    })
+
+    test("BlockTool decides collapse eligibility before mounting previews", () => {
+      expect(blockToolSource).toContain("const collapsible = createMemo")
+      expect(blockToolSource).not.toContain("setCanCollapse")
     })
 
     test("Shell counts command and output characters for collapse", () => {

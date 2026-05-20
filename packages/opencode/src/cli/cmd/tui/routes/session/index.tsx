@@ -2031,18 +2031,19 @@ function BlockTool(props: {
   const previewLines = createMemo(() => props.maxLines ?? 10)
   const threshold = createMemo(() => props.threshold ?? 20)
   const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
-  const [canCollapse, setCanCollapse] = createSignal(false)
-  createEffect(() => {
-    if (canCollapse()) return
-    if (previewLines() <= 0) return
+  const collapsible = createMemo(() => {
+    if (previewLines() <= 0) return false
     // OpenTUI wraps very long single lines at terminal width, so newline counts
     // alone miss commands such as `bun --eval "...large inline script..."` that
     // occupy many visual rows.  Keep the historic line threshold, but also
     // collapse blocks whose command/output text exceeds the preview char budget.
-    if ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()) setCanCollapse(true)
+    // This must be synchronous for the first render. Using an effect here lets
+    // large edit/write diffs mount once before the preview replaces them, which
+    // still pays the full DiffRenderable/tree-sitter cost on the hot path.
+    return (props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()
   })
   const [expanded, setExpanded] = createSignal(false)
-  const collapsed = createMemo(() => canCollapse() && !expanded())
+  const collapsed = createMemo(() => collapsible() && !expanded())
   // BlockTool spacing is intentionally owned by the section wrappers below.
   // The body, expand affordance, and error rows each use marginTop={1}; adding
   // a root gap would stack with those margins and render two blank rows around
@@ -2058,7 +2059,7 @@ function BlockTool(props: {
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
-      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
+      onMouseOver={() => (props.onClick || props.onRightClick || collapsible()) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: TuiMouseEvent) => {
         if (renderer.getSelection()?.getSelectedText()) return
@@ -2069,7 +2070,7 @@ function BlockTool(props: {
           props.onRightClick()
           return
         }
-        if (canCollapse()) setExpanded((prev) => !prev)
+        if (collapsible()) setExpanded((prev) => !prev)
         props.onClick?.()
       }}
     >
@@ -2093,7 +2094,7 @@ function BlockTool(props: {
           {props.children}
         </Show>
       </box>
-      <Show when={canCollapse()}>
+      <Show when={collapsible()}>
         <box marginTop={1}>
           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
         </box>
