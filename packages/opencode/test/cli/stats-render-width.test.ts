@@ -196,6 +196,12 @@ const withColumns = (columns: number, run: () => void) => {
   }
 }
 
+const calendarRows = (output: string) =>
+  output
+    .split("\n")
+    .map(stripAnsi)
+    .filter((line) => /^\s+\d{1,2}\s+[·░▒▓█]/.test(line))
+
 describe("stats render width", () => {
   test("counts CJK text by terminal display columns", () => {
     expect(visibleLength("中文abc")).toBe(7)
@@ -219,15 +225,17 @@ describe("stats render width", () => {
       const output = renderDashboard(report(), { color: "never" })
       expect(output).toContain("━━━ Daily activity")
       expect(output).toContain("Calendar · cell intensity = daily tokens")
-      expect(output).toContain("Mon Tue Wed Thu Fri Sat Sun")
+      expect(output).toMatch(/M\s+T\s+W\s+T\s+F\s+S\s+S/)
       expect(output).toContain("legend  · =0")
-      expect(output).toContain("Token components · small multiples")
+      expect(output).toContain("Token components")
+      expect(output).toContain("Each panel auto-normalizes")
       expect(output).toContain("Cost & health trends")
       expect(output).toContain("Top models · by token volume")
       expect(output).toContain("Top providers · share of total tokens")
       expect(output).toContain("━━━ Sessions")
       expect(output).toContain("━━━ Insights")
-      expect(output.indexOf("Error rate (errors per 100 req)")).toBeLessThan(output.indexOf("Cache hit rate (%)"))
+      expect(output.indexOf("Abort & error rate")).toBeLessThan(output.indexOf("Cache hit rate (%)"))
+      expect(output).not.toContain("Error rate (errors per 100 req)")
       expect(output).not.toContain("Cumulative spend")
       expect(output).not.toContain("Why small multiples")
       expect(output).not.toContain("Model mix over time")
@@ -242,7 +250,8 @@ describe("stats render width", () => {
       expect(output).toContain("Input")
       expect(output).toContain("Cache Write")
       expect(output).toContain("Output")
-      expect(output.indexOf("Cache hit rate (%)")).toBeLessThan(output.indexOf("Error rate (errors per 100 req)"))
+      expect(output.indexOf("Cache hit rate (%)")).toBeLessThan(output.indexOf("Abort & error rate"))
+      expect(output).toContain("per-call")
       expect(output).not.toContain("■ Cache Read · ■ Input · ■ Cache Write · ■ Output")
       expect(output).not.toContain("● cost")
       expect(output).not.toContain("● cache")
@@ -258,6 +267,32 @@ describe("stats render width", () => {
         expect(renderDashboard(report(), { color: "never" })).not.toContain("…")
       })
     }
+  })
+
+  test("keeps chart grids and stable date labels", () => {
+    withColumns(160, () => {
+      const output = renderDashboard(report(), { color: "never" })
+      expect(output).toContain("┄")
+      expect(output).toContain("04-27")
+      expect(output).not.toContain("5月")
+      expect(output).not.toContain("$0.000")
+    })
+  })
+
+  test("keeps calendar cells adaptive and hour strip uncompressed", () => {
+    withColumns(160, () => {
+      expect(calendarRows(renderDashboard(report(), { color: "never" })).join("\n")).toMatch(/[░▒▓█]{2}/)
+    })
+
+    withColumns(40, () => {
+      expect(calendarRows(renderDashboard(report(), { color: "never" })).join("\n")).not.toMatch(/[░▒▓█]{2}/)
+    })
+
+    withColumns(80, () => {
+      const lines = renderDashboard(report(), { color: "never" }).split("\n").map(stripAnsi)
+      const header = lines.findIndex((line) => line.includes("00  04  08  12  16  20"))
+      expect(lines[header + 1].trim()).toHaveLength(24)
+    })
   })
 
   test("keeps calendar monochrome while spacing provider legend columns", () => {

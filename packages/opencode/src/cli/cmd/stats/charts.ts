@@ -226,6 +226,28 @@ const niceMax = (value: number) => {
   return step * base
 }
 
+/** Round a rough step to a human-friendly interval: 1/2/5 × 10^n */
+const niceStep = (rough: number): number => {
+  if (rough <= 0) return 1
+  const exp = Math.floor(Math.log10(rough))
+  const f = rough / Math.pow(10, exp)
+  if (f < 1.5) return Math.pow(10, exp)
+  if (f < 3) return 2 * Math.pow(10, exp)
+  if (f < 7) return 5 * Math.pow(10, exp)
+  return Math.pow(10, exp + 1)
+}
+
+/** Compute nice Y-axis tick values for a given data range */
+const niceTicks = (min: number, max: number, targetCount = 5): number[] => {
+  if (max <= min) return [min, min + 1]
+  const step = niceStep((max - min) / Math.max(1, targetCount - 1))
+  const niceMin = Math.floor(min / step) * step
+  const niceMaxVal = Math.ceil(max / step) * step
+  const ticks: number[] = []
+  for (let v = niceMin; v <= niceMaxVal + step / 2; v += step) ticks.push(v)
+  return ticks.length >= 2 ? ticks : [min, max]
+}
+
 const range = (count: number) => Array.from({ length: Math.max(0, count) }, (_, index) => index)
 
 const evenlySpaced = (count: number, max: number) => {
@@ -233,13 +255,17 @@ const evenlySpaced = (count: number, max: number) => {
   return range(count).map((index) => Math.round((index / (count - 1)) * max))
 }
 
-const dateLabel = (time: number) => new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+const dateLabel = (time: number) => {
+  const date = new Date(time)
+  return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`
+}
 
 const money = (value: number) => {
-  if (!Number.isFinite(value)) return "$0"
-  if (value >= 100) return `$${value.toFixed(0)}`
-  if (value >= 10) return `$${value.toFixed(1)}`
-  return `$${value.toFixed(3)}`
+  if (!Number.isFinite(value) || value <= 0) return "$0"
+  if (value >= 1000) return `$${(value / 1000).toFixed(1)}K`
+  if (value >= 10) return `$${Math.round(value)}`
+  if (value >= 1) return `$${value.toFixed(1)}`
+  return `$${value.toFixed(2)}`
 }
 
 class ChartCanvas {
@@ -532,21 +558,39 @@ export function renderRoundedLineChart(input: {
   const plotWidth = Math.max(1, width - plotLeft)
   const plotHeight = Math.max(1, height - 1)
   const canvas = new ChartCanvas(width, height)
+  // The grid stays low-priority so axes and data paths overwrite it cleanly.
   canvas.grid(5, 4)
   canvas.vertical(0, 0, height - 1, "│", axisStyle)
   canvas.horizontal(0, width - 1, height - 1, "─", axisStyle)
-  canvas.put(0, height - 1, "╰", axisStyle)
+  canvas.put(0, height - 1, "└", axisStyle)
   nonEmpty.forEach((item, index) => {
     const style: ChartStyle = { color: item.color, priority: 30 + index }
     const mapped = item.points.map((point) => ({ x: plotLeft + xMap(point.x, bounds, plotWidth), y: yMap(point.y, bounds, plotHeight) }))
     drawOrthogonalPolyline(canvas, mapped, style, input.points === false ? "─" : "●")
     if (input.points !== false) mapped.forEach((point) => canvas.put(point.x, point.y, item.mark ?? chartMarks[index % chartMarks.length], style, style.priority + 5))
   })
-  const labels = nonEmpty[0]?.points.map((point) => point.label ?? dateLabel(point.x)) ?? []
+  // X-axis labels come from timestamps, not locale/user labels, so dashboard
+  // charts stay stable across CJK and English terminals.
+  const labels = nonEmpty[0]?.points.map((point) => dateLabel(point.x)) ?? []
+  // Build Y-axis using nice ticks so labels are human-friendly round numbers
+  const ticks = niceTicks(bounds.minY, bounds.maxY, Math.max(3, Math.min(6, plotHeight)))
+  const tickNiceMax = ticks[ticks.length - 1] ?? bounds.maxY
+  const tickNiceMin = ticks[0] ?? bounds.minY
+  const yAxisLines = canvas.render(ctx).map((line, rowIndex) => {
+    // Map row index back to a data value, then find the nearest tick
+    const rowValue = tickNiceMax - (tickNiceMax - tickNiceMin) * (rowIndex / Math.max(1, plotHeight - 1))
+    const nearestTick = ticks.reduce((best, t) => Math.abs(t - rowValue) < Math.abs(best - rowValue) ? t : best, ticks[0] ?? 0)
+    const rowFrac = (tickNiceMax - rowValue) / Math.max(1, tickNiceMax - tickNiceMin)
+    const tickFrac = (tickNiceMax - nearestTick) / Math.max(1, tickNiceMax - tickNiceMin)
+    const label = Math.abs(rowFrac - tickFrac) < 0.5 / plotHeight ? formatter(nearestTick) : ""
+    return label
+  })
+  const yAxisWidth = Math.max(5, ...yAxisLines.map(visibleLength))
+  const renderedLines = canvas.render(ctx).map((line, index) => `${paint(padStartVisible(yAxisLines[index] ?? "", yAxisWidth), "muted", ctx)} ${line}`)
   return [
     paint(input.title, "title", ctx, true),
-    ...withYAxisRange(canvas.render(ctx), bounds, formatter, ctx),
-    `${" ".repeat(7)}${paint(labelTicks(labels, width), "muted", ctx)}`,
+    ...renderedLines,
+    `${" ".repeat(yAxisWidth + 1)}${paint(labelTicks(labels, width), "muted", ctx)}`,
     ...(input.legend === false ? [] : [legend(nonEmpty, ctx)]),
   ]
 }

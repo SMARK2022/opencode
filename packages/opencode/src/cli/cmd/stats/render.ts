@@ -98,6 +98,11 @@ const dateRange = (report: StatsReport) => {
   return `${new Date(report.dateRange.earliest).toLocaleDateString()} - ${new Date(report.dateRange.latest).toLocaleDateString()}`
 }
 
+const shortDate = (time: number) => {
+  const date = new Date(time)
+  return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`
+}
+
 const money = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return "—"
   if (value >= 100) return `$${value.toFixed(0)}`
@@ -135,19 +140,19 @@ const terminalContentWidth = () => statsContentWidth()
 const layoutModeFor = (width: number) => width >= 130 ? "wide" : "medium"
 const chartPlotWidth = (availableWidth: number) => Math.max(12, availableWidth - 8)
 
-const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => item.label)
+const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => shortDate(item.day))
 
 const dailyTokenPoints = (report: StatsReport) =>
-  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total }))
+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.tokens.total }))
 
 const dailyCostPoints = (report: StatsReport) =>
-  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.cost }))
+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.cost }))
 
 const dailyCacheHitPoints = (report: StatsReport) =>
-  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total > 0 ? (item.tokens.cache.read / item.tokens.total) * 100 : 0 }))
+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.tokens.total > 0 ? (item.tokens.cache.read / item.tokens.total) * 100 : 0 }))
 
 const dailyErrorRatePoints = (report: StatsReport) =>
-  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.requests > 0 ? ((item.errors + item.aborted) / item.requests) * 100 : 0 }))
+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.requests > 0 ? ((item.errors + item.aborted) / item.requests) * 100 : 0 }))
 
 const groupRows = (groups: UsageGroup[], metric: "tokens" | "cost", limit: number) =>
   groups.slice(0, limit).map((group, index) => ({
@@ -427,9 +432,11 @@ const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) =>
 // Dashboard helpers stay local to this file because they compose existing chart
 // primitives rather than adding new public chart types. The public surface stays
 // `renderDashboard(report, options)`, which is what the tests exercise.
-const renderSectionDivider = (label: string, enabled: boolean, width: number) => {
-  const head = `━━━ ${clipVisible(label, Math.max(8, width - 8))} `
-  return color(`${head}${"━".repeat(Math.max(3, width - visibleLength(head)))}`, "border", enabled)
+const renderSectionDivider = (label: string, enabled: boolean, width: number, subtitle?: string) => {
+  const maxLabel = Math.min(visibleLength(label), 40)
+  const head = `━━━ ${clipVisible(label, maxLabel)} `
+  const divider = color(`${head}${"─".repeat(Math.max(3, width - visibleLength(head)))}`, "border", enabled)
+  return subtitle ? [divider, muted(`  ${subtitle}`, enabled)] : [divider]
 }
 
 const tokenIntensity = (value: number): { char: string; color: keyof typeof theme } => {
@@ -473,21 +480,22 @@ const dayOfWeekTokens = (report: StatsReport) =>
 
 const renderHourOfDayStrip = (report: StatsReport, width: number) => {
   const buckets = hourActivity(report)
-  const paired = Array.from({ length: 12 }, (_, index) => (buckets[index * 2] ?? 0) + (buckets[index * 2 + 1] ?? 0))
   const nonZero = buckets.map((value, hour) => ({ value, hour })).filter((item) => item.value > 0)
-  const peak = nonZero.sort((a, b) => b.value - a.value)[0]
-  const quiet = nonZero.sort((a, b) => a.value - b.value)[0]
-  const legend = ["legend  · =0    ░ <50    ▒ <150", "        ▓ <300    █ ≥300"]
+  const peak = [...nonZero].sort((a, b) => b.value - a.value)[0]
+  const quiet = [...nonZero].sort((a, b) => a.value - b.value)[0]
+  // 24 chars, one per hour — no compression
+  const dataLine = buckets.map((value) => plainIntensityGlyph(requestIntensity(value))).join("")
+  const legendLine = "· =0  ░ <50  ▒ <150  ▓ <300  █ ≥300"
   return [
     "Hour-of-day · avg requests per hour",
     "",
-    rangeLabels(0, 22, 2).join(" "),
-    paired.map((value) => plainIntensityGlyph(requestIntensity(value))).join("  "),
+    "00  04  08  12  16  20",
+    dataLine,
     "",
     peak ? `peak  ${String(peak.hour).padStart(2, "0")}:00 — ${formatNumber(peak.value)} req` : "no hourly activity",
     quiet ? `quiet ${String(quiet.hour).padStart(2, "0")}:00 — ${formatNumber(quiet.value)} req` : "",
     "",
-    ...(width < 60 ? legend : [legend.join("    ")]),
+    `legend  ${legendLine}`,
   ]
 }
 
@@ -508,23 +516,23 @@ const renderCalendarActivity = (report: StatsReport, width: number) => {
   const last = report.daily.at(-1)?.day ?? first
   const start = first - ((new Date(first).getUTCDay() + 6) % 7) * 86_400_000
   const weeks = Math.max(1, Math.ceil((last - start + 86_400_000) / (7 * 86_400_000)))
-  const legend = [
-    `${plainIntensityGlyph(tokenIntensity(1), 2)} <50M`,
-    `${plainIntensityGlyph(tokenIntensity(50_000_000), 2)} 50-150M`,
-    `${plainIntensityGlyph(tokenIntensity(150_000_000), 2)} 150-250M`,
-    `${plainIntensityGlyph(tokenIntensity(250_000_000), 2)} >250M`,
-  ]
+  // Calendar cells remain adaptive: narrow columns use one glyph, wider columns
+  // use two glyphs while keeping weekday headers on the same fixed grid.
+  const glyphWidth = width >= 42 ? 2 : 1
+  const cellWidth = glyphWidth + 2
+  const cell = (tokens: number) => fitPlain(` ${plainIntensityGlyph(tokenIntensity(tokens), glyphWidth)}`, cellWidth)
+  const legendLine = `░ <50M   ▒ 50-150M   ▓ 150-250M   █ >250M`
   return [
     "Calendar · cell intensity = daily tokens",
     "",
-    `      ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => fitPlain(label, 3)).join(" ")}`,
+    `     ${["M", "T", "W", "T", "F", "S", "S"].map((d) => fitPlain(` ${d}`, cellWidth)).join("")}`,
     ...Array.from({ length: weeks }, (_, week) => {
       const weekStart = start + week * 7 * 86_400_000
-      const cells = Array.from({ length: 7 }, (_, day) => padEndVisible(plainIntensityGlyph(tokenIntensity(byDay.get(weekStart + day * 86_400_000) ?? 0), 2), 3)).join(" ")
-      return `${padStartVisible(String(isoWeek(weekStart)), 4)}  ${cells}`
+      const cells = Array.from({ length: 7 }, (_, day) => cell(byDay.get(weekStart + day * 86_400_000) ?? 0)).join("")
+      return `${padStartVisible(String(isoWeek(weekStart)), 4)} ${cells}`
     }),
     "",
-    ...(width < 54 ? [`${legend[0]}     ${legend[1]}`, `${legend[2]}     ${legend[3]}`] : [legend.join("     ")]),
+    legendLine,
   ]
 }
 
@@ -615,10 +623,10 @@ const renderCostHealthSection = (report: StatsReport, options: StatsRenderOption
   const errorPeak = dailyErrorRatePoints(report).sort((a, b) => b.value - a.value)[0]
   const errorAvg = safeDivide(report.total.errors + report.total.aborted, report.total.requests) * 100
   const pairWidth = width < 100 ? Math.max(38, width - 4) : mode === "wide" ? thirdWidth : halfWidth
-  const dailyCost = renderCostHealthSubchart("Daily cost ($/day)", "cost", "pink", dailyCostPoints(report), pairWidth, "cost", options, costPeak ? `peak ${money(costPeak.cost)} on ${costPeak.label} · median ${money(median(report.daily.map((day) => day.cost)))}` : "no cost activity")
+  const dailyCost = renderCostHealthSubchart("Daily cost ($/day)", "cost", "pink", dailyCostPoints(report), pairWidth, "cost", options, costPeak ? `peak ${money(costPeak.cost)} on ${shortDate(costPeak.day)} · median ${money(median(report.daily.map((day) => day.cost)))}` : "no cost activity")
   const cacheRange = cacheRates.length ? { min: Math.max(0, Math.floor(Math.min(...cacheRates) / 10) * 10), max: Math.min(100, Math.ceil(Math.max(...cacheRates) / 10) * 10) } : undefined
   const cacheHit = renderCostHealthSubchart("Cache hit rate (%)", "cache", "yellow", dailyCacheHitPoints(report), mode === "wide" ? thirdWidth : Math.max(38, width - 4), "tokens", options, cacheRates.length ? `range ${Math.min(...cacheRates).toFixed(1)}% → ${Math.max(...cacheRates).toFixed(1)}% · ${Math.max(...cacheRates) - Math.min(...cacheRates) < 10 ? "stable" : "variable"}` : "no cache activity", cacheRange)
-  const errorRate = renderCostHealthSubchart("Error rate (errors per 100 req)", "errors", "red", dailyErrorRatePoints(report), pairWidth, "tokens", options, errorPeak && errorPeak.value > 0 ? `spike ${errorPeak.value.toFixed(1)}% on ${errorPeak.label} · avg ${errorAvg.toFixed(1)}%` : "no errors recorded")
+  const errorRate = renderCostHealthSubchart("Abort & error rate (%)", "errors", "red", dailyErrorRatePoints(report), pairWidth, "tokens", options, errorPeak && errorPeak.value > 0 ? `spike ${errorPeak.value.toFixed(1)}% on ${shortDate(errorPeak.day)} · avg ${errorAvg.toFixed(1)}%` : "no errors recorded")
   if (mode === "wide") return renderThreeColumn(dailyCost, cacheHit, errorRate, 5, width)
   if (width < 100) return [...dailyCost, "", ...errorRate, "", ...cacheHit]
   return [...renderTwoColumn(dailyCost, errorRate, 5, width, 0.5), "", ...cacheHit]
@@ -630,12 +638,14 @@ const renderTopModelsLollipop = (report: StatsReport, options: StatsRenderOption
   if (models.length === 0) return [muted("No model data in range", enabled)]
   const max = Math.max(0, ...models.map((model) => model.tokens.total))
   const labelWidth = Math.max(16, Math.min(30, Math.max(...models.map((model) => visibleLength(model.label))) + 1))
-  const barWidth = Math.max(12, width - labelWidth - 43)
+  const perCallWidth = 9
+  const barWidth = Math.max(12, width - labelWidth - 43 - perCallWidth - 3)
   return [
-    muted(`${" ".repeat(labelWidth)} │ tokens${" ".repeat(Math.max(1, barWidth - 6))} │ share  │ cost`, enabled),
+    muted(`${" ".repeat(labelWidth)} │ tokens${" ".repeat(Math.max(1, barWidth - 6))} │ share  │ cost     │ per-call`, enabled),
     ...models.map((model, index) => {
       const filled = Math.max(1, Math.round(safeDivide(model.tokens.total, max) * Math.max(1, barWidth - 10)))
-      return fitPlain(`${padEndVisible(clipVisible(model.label, labelWidth), labelWidth)} │${color("●" + "━".repeat(Math.max(0, filled - 1)), activityColors[index % activityColors.length], enabled)} ${padEndVisible(formatNumber(model.tokens.total), Math.max(1, barWidth - filled))} │ ${padStartVisible(percent(model.tokens.total, report.total.tokens.total), 6)} │ ${padStartVisible(money(model.cost), 8)}`, width)
+      const perCall = `${formatNumber(safeDivide(model.tokens.total, model.assistantCalls))}/c`
+      return fitPlain(`${padEndVisible(clipVisible(model.label, labelWidth), labelWidth)} │${color("●" + "━".repeat(Math.max(0, filled - 1)), activityColors[index % activityColors.length], enabled)} ${padEndVisible(formatNumber(model.tokens.total), Math.max(1, barWidth - filled))} │ ${padStartVisible(percent(model.tokens.total, report.total.tokens.total), 6)} │ ${padStartVisible(money(model.cost), 8)} │ ${padStartVisible(perCall, perCallWidth)}`, width)
     }),
   ]
 }
@@ -760,33 +770,33 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
   // while timeline/breakdown/sessions keep their existing detailed renderers.
   const lines = [
     ...renderDashboardHeader(report, options, totalWidth),
-    renderSectionDivider("Daily activity", enabled, totalWidth),
+    ...renderSectionDivider("Daily activity", enabled, totalWidth),
     "",
     ...renderDailyActivitySection(report, options, mode, totalWidth),
     "",
-    renderSectionDivider("Token components · small multiples, each chart auto-normalized to its own peak", enabled, totalWidth),
+    ...renderSectionDivider("Token components", enabled, totalWidth, "Each panel auto-normalizes to its own peak."),
     "",
     ...renderTokenComponentsSmallMultiples(report, options, halfWidth, totalWidth),
     "",
-    renderSectionDivider("Cost & health trends", enabled, totalWidth),
+    ...renderSectionDivider("Cost & health trends", enabled, totalWidth),
     "",
     ...renderCostHealthSection(report, options, mode, totalWidth, halfWidth, thirdWidth),
     "",
-    renderSectionDivider("Top models · by token volume", enabled, totalWidth),
+    ...renderSectionDivider("Top models · by token volume", enabled, totalWidth),
     "",
     ...renderTopModelsLollipop(report, options, totalWidth),
     "",
-    renderSectionDivider("Top providers · share of total tokens", enabled, totalWidth),
+    ...renderSectionDivider("Top providers · share of total tokens", enabled, totalWidth),
     "",
     ...renderTopProvidersStack(report, options, totalWidth),
     "",
-    renderSectionDivider("Sessions", enabled, totalWidth),
+    ...renderSectionDivider("Sessions", enabled, totalWidth),
     "",
     ...(mode === "wide"
       ? renderTwoColumn(renderSessionDistribution(report, options, sessionLeftWidth), renderTopSessionsList(report, options, sessionRightWidth), gap, totalWidth, sessionLeftWidth / Math.max(1, totalWidth - gap))
       : [...renderSessionDistribution(report, options, totalWidth - 4), "", ...renderTopSessionsList(report, options, totalWidth - 4)]),
     "",
-    renderSectionDivider("Insights", enabled, totalWidth),
+    ...renderSectionDivider("Insights", enabled, totalWidth),
     "",
     ...renderInsightsCallout(report, options),
   ]
