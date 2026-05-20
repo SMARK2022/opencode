@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
-import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "../../../../src/cli/cmd/tui/util/session-pending"
+import {
+  hasStreamingAssistant,
+  pendingAssistantID,
+  shouldCullSessionViewport,
+  shouldRefreshStaleBusyStatus,
+} from "../../../../src/cli/cmd/tui/util/session-pending"
 
 const assistant = (id: string, completed?: number): AssistantMessage => ({
   id,
@@ -30,5 +35,17 @@ describe("session pending helpers", () => {
     expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "busy" })).toBe(true)
     expect(shouldRefreshStaleBusyStatus([assistant("open")], { type: "busy" })).toBe(false)
     expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "idle" })).toBe(false)
+  })
+
+  test("keeps session viewport culling enabled while an assistant message streams", () => {
+    expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
+  })
+
+  test("pauses session viewport culling while streaming away from sticky bottom", () => {
+    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(false)
+  })
+
+  test("keeps session viewport culling enabled after the assistant message completes", () => {
+    expect(shouldCullSessionViewport([assistant("done", 2)])).toBe(true)
   })
 })

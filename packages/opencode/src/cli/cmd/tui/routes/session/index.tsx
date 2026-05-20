@@ -106,7 +106,7 @@ import { PathFormatterProvider, usePathFormatter } from "../../context/path-form
 // [local-smark] Local TUI features
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
 import { previewDiff } from "@tui/util/preview-diff"
-import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
+import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
 import { ConnectionError } from "../../util/connection-error"
 import { ContextUsagePanel } from "./context-usage"
 
@@ -230,7 +230,10 @@ export function Session() {
     const status = sync.data.session_status?.[route.sessionID]
     return pendingAssistantID(messages(), status)
   })
-  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+  const viewportCulling = createMemo(() =>
+    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+  )
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
@@ -383,6 +386,13 @@ export function Session() {
   const command = useCommandPalette()
   const dialog = useDialog()
   const renderer = useRenderer()
+
+  function syncSessionViewportStuckToBottom() {
+    if (!scroll || scroll.isDestroyed) return
+    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+    if (stuckToBottom === untrack(viewportStuckToBottom)) return
+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
+  }
 
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
@@ -1190,7 +1200,8 @@ export function Session() {
             <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
-                viewportCulling={!streamingActive()}
+                viewportCulling={viewportCulling()}
+                renderAfter={syncSessionViewportStuckToBottom}
                 viewportOptions={{
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}

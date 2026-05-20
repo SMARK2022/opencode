@@ -1,13 +1,14 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { InternalTuiPlugin } from "../../plugin/internal"
 import { useSyncV2 } from "@tui/context/sync-v2"
+import { shouldCullSessionViewport } from "@tui/util/session-pending"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
 import { useTheme } from "@tui/context/theme"
 import { useLocal } from "@tui/context/local"
 import { reasoningTitle, useThinkingMode } from "@tui/context/thinking"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
-import { TextAttributes, type BoxRenderable, type SyntaxStyle } from "@opentui/core"
+import { TextAttributes, type BoxRenderable, type ScrollBoxRenderable, type SyntaxStyle } from "@opentui/core"
 // [local-smark] Flag needed for markdown experimental check
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { useBindings } from "../../keymap"
@@ -31,7 +32,7 @@ import type {
   ToolFileContent,
   ToolTextContent,
 } from "@opencode-ai/sdk/v2"
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack } from "solid-js"
 
 const id = "internal:session-v2-debug"
 const route = "session.v2.messages"
@@ -50,9 +51,17 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
   const messages = createMemo(() => sync.data.messages[props.sessionID] ?? [])
   const renderedMessages = createMemo(() => messages().toReversed())
   const lastAssistant = createMemo(() => renderedMessages().findLast((message) => message.type === "assistant"))
-  const streamingActive = createMemo(() =>
-    messages().some((message) => message.type === "assistant" && !message.time.completed),
+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+  const viewportCulling = createMemo(() =>
+    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
   )
+  let scroll: ScrollBoxRenderable | undefined
+  function syncSessionViewportStuckToBottom() {
+    if (!scroll || scroll.isDestroyed) return
+    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+    if (stuckToBottom === untrack(viewportStuckToBottom)) return
+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
+  }
   const lastUserCreated = (index: number) =>
     renderedMessages()
       .slice(0, index)
@@ -80,7 +89,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
           <scrollbox
-            viewportCulling={!streamingActive()}
+            ref={(r) => (scroll = r)}
+            viewportCulling={viewportCulling()}
+            renderAfter={syncSessionViewportStuckToBottom}
             viewportOptions={{ paddingRight: 0 }}
             verticalScrollbarOptions={{ visible: false }}
             stickyScroll={true}

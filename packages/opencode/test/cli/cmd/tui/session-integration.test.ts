@@ -45,8 +45,11 @@ describe("Session route integration points", () => {
       expect(sessionSource).toContain('"scrollbar_enabled"')
     })
 
-    test("scrollbox has viewportCulling tied to streamingActive", () => {
-      expect(sessionSource).toContain("viewportCulling={!streamingActive()}")
+    test("scrollbox uses session viewport culling helper", () => {
+      expect(sessionSource).toContain("shouldCullSessionViewport")
+      expect(sessionSource).toContain("stuckToBottom: viewportStuckToBottom()")
+      expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
+      expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
     })
 
     test("scrollbox has contentOptions paddingRight for scrollbar", () => {
