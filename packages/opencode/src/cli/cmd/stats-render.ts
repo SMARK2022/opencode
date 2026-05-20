@@ -182,7 +182,9 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
 // #181：金额短格式
 // #181：仪表盘顶表金额短显示
 const money = (value: number) => {
+  // #183：紧凑金额，拒绝噪声小数
   if (!Number.isFinite(value) || value <= 0) return "$0"
+  if (value >= 1000) return `$${(value / 1000).toFixed(1)}K`
   if (value >= 10) return `$${value.toFixed(0)}`
   if (value >= 1) return `$${value.toFixed(2)}`
   return `$${value.toFixed(4)}`
@@ -223,34 +225,51 @@ const dashboardTopTable = (
   const labelCap = kind === "model" ? 28 : 26
   // metrics 形如 " $12  1.2M  3  40% " 约 28 列预算
   // #181：右侧指标列预算，剩余给 label/trend
-  const metricsBudget = 28
+  // #183：含 per-call 时指标槽更宽
+  const metricsBudget = kind === "model" ? 36 : 28
     // #181：先扣指标与 gutter 再谈 trend
   const trendRoom = content - metricsBudget - 15 - labelFloor
   // #181：小于 6 列不画 trend，避免碎裂
     // #181：trend 要么够 6 列要么为 0
   const trendWidth = trendRoom < 6 ? 0 : Math.min(24, trendRoom)
   // #181：label 在 floor/cap 间吃掉剩余宽度
-  const labelWidth = Math.max(labelFloor, Math.min(labelCap, content - metricsBudget - 15 - trendWidth))
+  // 指标槽宽含空格与缩进；窄屏优先缩标签，保留 per-call 和数量级。
+  const labelWidth = Math.max(1, Math.min(labelCap, content - (kind === "model" ? 41 : 32) - (trendWidth > 0 ? trendWidth + 3 : 0)))
   const lines = [`▸ ${title}`]
     // #181：宽屏表头带 share│trend，窄屏去掉 trend
-  const head =
-    trendWidth > 0
-      ? `  ${fitVisible("name", labelWidth)} ${fitVisible("cost", 8)} ${fitVisible("tokens", 8)} ${fitVisible("calls", 5)} share │ trend`
-      : `  ${fitVisible("name", labelWidth)} ${fitVisible("cost", 8)} ${fitVisible("tokens", 8)} ${fitVisible("calls", 5)} share`
+  // #183：model 顶表增加 per-call 列（tokens/calls）
+  const headCols = [
+    fitVisible("name", labelWidth),
+    fitVisible("cost", 8),
+    fitVisible("tokens", 8),
+    fitVisible("calls", 5),
+  ]
+  if (kind === "model") headCols.push(fitVisible("per-call", 8))
+  headCols.push("share")
+  const head = `  ${headCols.join(" ")}${trendWidth > 0 ? " │ trend" : ""}`
   lines.push(head)
   for (const row of rows) {
-    // #181：share 相对本表 tokens 合计
+    // #181：share 用全局 total.tokens.total
     const share = `${Math.round((row.tokens / totalTokens) * 100)}%`
     // #181：按 id 对齐 series 点列
     const seriesPoints = series.find((s) => s.id === row.id)?.points ?? []
     const values = seriesPoints.map((p) => p.tokens.total)
-        // #181：无点列时 sparkline 返回空串
+    // #181：无点列时 sparkline 返回空串
     const trend = trendWidth > 0 ? sparkline(values, trendWidth) : ""
-        // #181：标签按显示列截断，保留 CJK 语义
+    // #181：标签按显示列截断，保留 CJK 语义
     const label = truncateVisible(row.label, labelWidth)
-        // #181：行体固定指标槽位，便于扫读对齐
-    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(formatNumber(row.tokens), 8)} ${fitVisible(formatNumber(row.calls), 5)} ${fitVisible(share, 5)}`
-        // #181：trend 用 │ 与 share 分隔
+    // #183：per-call = tokens/assistantCalls，便于单次调用效率扫读
+    const perCall = row.calls > 0 ? Math.round(row.tokens / row.calls) : 0
+    const cols = [
+      fitVisible(label, labelWidth),
+      fitVisible(money(row.cost), 8),
+      fitVisible(formatNumber(row.tokens), 8),
+      fitVisible(formatNumber(row.calls), 5),
+    ]
+    if (kind === "model") cols.push(fitVisible(formatNumber(perCall), 8))
+    cols.push(fitVisible(share, 5))
+    const base = `  ${cols.join(" ")}`
+    // #181：trend 用 │ 与 share 分隔
     lines.push(trendWidth > 0 ? `${base} │ ${trend}` : base)
   }
   // #181：禁止再单独挂 Model/Provider activity rows

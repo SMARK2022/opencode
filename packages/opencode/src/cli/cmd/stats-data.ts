@@ -352,8 +352,14 @@ const dayStart = (time: number) => {
 }
 
 // #174：dateLabel 供轴标签
-const dateLabel = (time: number) =>
-  new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+// #183：与 dayStart 同用本地日界，MM-DD 避免 locale 月名撑列
+export const dateLabel = (time: number) => {
+  // #183：本地月日两位零填充（禁止 getUTC*，否则非 UTC 时区日前移）
+  const d = new Date(time)
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  return `${mm}-${dd}`
+}
 
 // #176：稠密日轴：窗口内逐日生成零基桶，保证空闲日连续
 const buildDayBuckets = (start: number, end: number) => {

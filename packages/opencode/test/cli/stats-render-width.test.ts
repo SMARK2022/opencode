@@ -450,3 +450,46 @@ describe("stats dashboard sectioned overview (#182)", () => {
     expect(text).toMatch(/Failed\/aborted requests: 3 \(30%\)/)
   })
 })
+
+describe("stats humanized labels (#183)", () => {
+  test("production dateLabel uses local MM-DD without locale month glyphs", async () => {
+    // #183：必须 import 生产 dateLabel，禁止测试内克隆实现
+    const { dateLabel } = await import("../../src/cli/cmd/stats-data")
+    const localMidnight = new Date(2026, 3, 27, 0, 0, 0, 0).getTime()
+    expect(dateLabel(localMidnight)).toBe("04-27")
+    expect(dateLabel(localMidnight)).not.toMatch(/月/)
+    // #183：与 dayStart 本地日界一致：当日 15:00 仍标 04-27
+    const afternoon = new Date(2026, 3, 27, 15, 0, 0, 0).getTime()
+    expect(dateLabel(afternoon)).toBe("04-27")
+  })
+
+  test("top models table includes per-call column", () => {
+    // #183：人性化顶表含 per-call
+    const report = {
+      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
+      dateRange: { earliest: 0, latest: 1 },
+      total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
+      models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
+      providers: [], agents: [], sources: [], statuses: [], projects: [],
+      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
+      tokensPerSession: 25, medianTokensPerSession: 25,
+    } as unknown as StatsReport
+    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
+    const large = renderDashboard({ ...report, models: report.models.map((model) => ({ ...model, tokens: { ...model.tokens, total: 1_000_000_000 } })) }, { limit: 5 })
+    expect(large).toContain("1.0B")
+    expect(large).toContain("200.0M")
+    // 在真实 58 列输入下检查表头和数据行，而不是只断言趋势列隐藏。
+    const previous = process.stdout.columns
+    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
+    try {
+      const lines = renderDashboard(report, { limit: 5 }).split("\n")
+      const start = lines.indexOf("▸ Top models")
+      expect(start).toBeGreaterThanOrEqual(0)
+      expect(lines[start + 1].length).toBeLessThanOrEqual(58)
+      expect(lines[start + 2].length).toBeLessThanOrEqual(58)
+    } finally {
+      Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
+    }
+  })
+})
