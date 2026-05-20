@@ -5,6 +5,7 @@ import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
 import { Token } from "@/util/token"
+import { AttachmentToken } from "@/util/attachment-token"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionProcessor } from "./processor"
 import { Agent } from "@/agent/agent"
@@ -433,6 +434,32 @@ export const layer = Layer.effect(
         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
       })
       const ctx = yield* InstanceState.context
+      const compactionMessages = [
+        ...modelMessages,
+        {
+          role: "user" as const,
+          content: [{ type: "text" as const, text: nextPrompt }],
+        },
+      ]
+      const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(compactionMessages)
+      const rawMessagesText = JSON.stringify(compactionMessages)
+      const estimatedInput = Token.estimate(messageEstimate.text) + messageEstimate.attachments.tokens
+      const inputBreakdown = {
+        system: 0,
+        instructions: 0,
+        skills: 0,
+        tools: 0,
+        messages: {
+          userText: nextPrompt.length,
+          assistantText: Math.max(0, messageEstimate.textChars - nextPrompt.length),
+          reasoning: 0,
+          toolInput: 0,
+          toolOutput: 0,
+          attachments: messageEstimate.attachments.rawChars,
+          total: rawMessagesText.length,
+        },
+        ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
+      }
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
         role: "assistant",
@@ -449,10 +476,18 @@ export const layer = Layer.effect(
         cost: 0,
         tokens: {
           output: 0,
-          input: 0,
+          // The compaction request is uploaded through SessionProcessor directly,
+          // bypassing prompt.ts where normal assistant requests get their pending
+          // input snapshot.  Seed the same estimate here so the TUI does not show
+          // 0 tokens while the summary request is streaming; finish-step replaces
+          // this with provider-confirmed usage once the model responds.
+          input: estimatedInput,
           reasoning: 0,
           cache: { read: 0, write: 0 },
         },
+        inputChars: rawMessagesText.length,
+        inputTokens: estimatedInput,
+        inputBreakdown,
         modelID: model.id,
         providerID: model.providerID,
         time: {
@@ -465,19 +500,19 @@ export const layer = Layer.effect(
         sessionID: input.sessionID,
         model,
       })
+      // SessionProcessor copies these fields into step-start/step-finish parts.
+      // Without this handoff, the assistant message has a pending estimate but
+      // the streaming parts still look empty, which makes live context accounting
+      // flicker back to zero during manual or automatic compaction.
+      processor.inputChars = rawMessagesText.length
+      processor.inputBreakdown = inputBreakdown
       const result = yield* processor.process({
         user: userMessage,
         agent,
         sessionID: input.sessionID,
         tools: {},
         system: [],
-        messages: [
-          ...modelMessages,
-          {
-            role: "user",
-            content: [{ type: "text", text: nextPrompt }],
-          },
-        ],
+        messages: compactionMessages,
         model,
       })
 

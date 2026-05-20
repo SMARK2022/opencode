@@ -106,7 +106,7 @@ import { PathFormatterProvider, usePathFormatter } from "../../context/path-form
 // [local-smark] Local TUI features
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
 import { previewDiff } from "@tui/util/preview-diff"
-import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
+import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
 import { ConnectionError } from "../../util/connection-error"
 import { ContextUsagePanel } from "./context-usage"
 
@@ -230,7 +230,10 @@ export function Session() {
     const status = sync.data.session_status?.[route.sessionID]
     return pendingAssistantID(messages(), status)
   })
-  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
+  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+  const viewportCulling = createMemo(() =>
+    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
+  )
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
@@ -383,6 +386,13 @@ export function Session() {
   const command = useCommandPalette()
   const dialog = useDialog()
   const renderer = useRenderer()
+
+  function syncSessionViewportStuckToBottom() {
+    if (!scroll || scroll.isDestroyed) return
+    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+    if (stuckToBottom === untrack(viewportStuckToBottom)) return
+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
+  }
 
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
@@ -1190,7 +1200,8 @@ export function Session() {
             <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
-                viewportCulling={!streamingActive()}
+                viewportCulling={viewportCulling()}
+                renderAfter={syncSessionViewportStuckToBottom}
                 viewportOptions={{
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}
@@ -1544,10 +1555,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       borderColor={theme.backgroundElement}
       flexShrink={0}
       renderAfter={function (this: BoxRenderable, buffer: OptimizedBuffer) {
-        const x = Math.max(0, this.screenX)
-        const y = Math.max(0, this.screenY)
-        if (x >= buffer.width || y >= buffer.height) return
-        buffer.fillRect(x, y, 1, 1, theme.background)
+        if (this.screenX < 0 || this.screenY < 0) return
+        if (this.screenX >= buffer.width || this.screenY >= buffer.height) return
+        buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)
       }}
     >
       <For each={props.parts}>
@@ -1859,10 +1869,16 @@ type ToolProps<T> = {
   part: ToolPart
 }
 
-function previewText(input: string, maxLines: number) {
+const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
+
+function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
   const lines = input.split("\n")
-  if (lines.length <= maxLines) return input
-  return [...lines.slice(0, maxLines), "…"].join("\n")
+  const lineLimited = lines.length > maxLines
+  const text = lineLimited ? lines.slice(0, maxLines).join("\n") : input
+  const charLimited = text.length > maxChars
+  if (!lineLimited && !charLimited) return input
+  const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
+  return preview ? [preview, "…"].join("\n") : "…"
 }
 function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
@@ -1884,6 +1900,7 @@ function GenericTool(props: ToolProps<any>) {
           maxLines={10}
           threshold={20}
           totalLines={output().split("\n").length}
+          totalChars={output().length}
           preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
         >
         <text fg={theme.text}>{output()}</text>
@@ -1957,7 +1974,7 @@ function InlineTool(props: {
         const index = children.indexOf(el)
         const previous = children[index - 1]
         if (!previous) {
-          setMargin(0)
+          setMargin(1)
           return
         }
         if (previous.height > 1 || previous.id.startsWith("text-")) {
@@ -1997,6 +2014,8 @@ function BlockTool(props: {
   maxLines?: number
   threshold?: number
   totalLines?: number
+  totalChars?: number
+  charThreshold?: number
   preview?: JSX.Element
 }) {
   const { theme } = useTheme()
@@ -2010,13 +2029,25 @@ function BlockTool(props: {
   })
   const previewLines = createMemo(() => props.maxLines ?? 10)
   const threshold = createMemo(() => props.threshold ?? 20)
-  const [canCollapse, setCanCollapse] = createSignal(false)
-  createEffect(() => {
-    if (canCollapse()) return
-    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) setCanCollapse(true)
+  const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
+  const collapsible = createMemo(() => {
+    if (previewLines() <= 0) return false
+    // OpenTUI wraps very long single lines at terminal width, so newline counts
+    // alone miss commands such as `bun --eval "...large inline script..."` that
+    // occupy many visual rows.  Keep the historic line threshold, but also
+    // collapse blocks whose command/output text exceeds the preview char budget.
+    // This must be synchronous for the first render. Using an effect here lets
+    // large edit/write diffs mount once before the preview replaces them, which
+    // still pays the full DiffRenderable/tree-sitter cost on the hot path.
+    return (props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()
   })
   const [expanded, setExpanded] = createSignal(false)
-  const collapsed = createMemo(() => canCollapse() && !expanded())
+  const collapsed = createMemo(() => collapsible() && !expanded())
+  // BlockTool spacing is intentionally owned by the section wrappers below.
+  // The body, expand affordance, and error rows each use marginTop={1}; adding
+  // a root gap would stack with those margins and render two blank rows around
+  // shell/edit/patch/write content. Keep this matching the pre-preview layout
+  // while preserving the body wrapper needed for collapsed maxHeight clipping.
   return (
     <box
       border={["left"]}
@@ -2024,11 +2055,10 @@ function BlockTool(props: {
       paddingBottom={1}
       paddingLeft={2}
       marginTop={1}
-      gap={1}
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
-      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
+      onMouseOver={() => (props.onClick || props.onRightClick || collapsible()) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: TuiMouseEvent) => {
         if (renderer.getSelection()?.getSelectedText()) return
@@ -2039,7 +2069,7 @@ function BlockTool(props: {
           props.onRightClick()
           return
         }
-        if (canCollapse()) setExpanded((prev) => !prev)
+        if (collapsible()) setExpanded((prev) => !prev)
         props.onClick?.()
       }}
     >
@@ -2063,7 +2093,7 @@ function BlockTool(props: {
           {props.children}
         </Show>
       </box>
-      <Show when={canCollapse()}>
+      <Show when={collapsible()}>
         <box marginTop={1}>
           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
         </box>
@@ -2086,6 +2116,10 @@ function Shell(props: ToolProps<typeof ShellTool>) {
   const output = createMemo(() => {
     const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
     return stripAnsi(text?.trim() ?? "")
+  })
+  const shellPreviewText = createMemo(() => {
+    if (!output()) return `$ ${props.input.command ?? ""}`
+    return [`$ ${props.input.command ?? ""}`, "", output()].join("\n")
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2116,18 +2150,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
           spinner={isRunning()}
           maxLines={isRunning() || showContextOutput() ? 0 : 10}
           threshold={20}
-          totalLines={1 + output().split("\n").length}
+          totalLines={shellPreviewText().split("\n").length}
+          totalChars={shellPreviewText().length}
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
-          preview={
-            <box gap={1}>
-              <text fg={theme.text}>$ {props.input.command}</text>
-              <Show when={output()}>
-                <text fg={theme.text}>{previewText(output(), 10)}</text>
-              </Show>
-            </box>
-          }
+          preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
         >
           <box gap={1}>
             <text fg={theme.text}>$ {props.input.command}</text>
@@ -2217,6 +2245,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
           maxLines={10}
           threshold={20}
           totalLines={diffStats().total}
+          totalChars={diff()!.length}
           preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
         >
           <box gap={1} flexDirection="column">
@@ -2232,6 +2261,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
           maxLines={10}
           threshold={20}
           totalLines={code().split("\n").length}
+          totalChars={code().length}
           preview={
             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
               <code
@@ -2447,6 +2477,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
           maxLines={10}
           threshold={20}
           totalLines={stats().total}
+          totalChars={diffContent().length}
           preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
         >
           <box gap={1} flexDirection="column">
@@ -2502,6 +2533,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                 maxLines={10}
                 threshold={20}
                 totalLines={(file.patch ?? "").split("\n").length}
+                totalChars={(file.patch ?? "").length}
                 preview={
                   <Show
                     when={file.type !== "delete"}

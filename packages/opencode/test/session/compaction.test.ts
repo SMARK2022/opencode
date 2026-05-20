@@ -875,6 +875,33 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  it.instance(
+    "stores pending input estimate on summary assistant before streaming",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const msg = yield* createUserMessage(session.id, "hello")
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+
+      yield* SessionCompaction.use.process({
+        parentID: msg.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: false,
+      })
+
+      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
+        (item) => item.info.role === "assistant" && item.info.summary,
+      )
+
+      expect(summary?.info.role).toBe("assistant")
+      if (summary?.info.role !== "assistant") return
+      expect(summary.info.inputTokens).toBeGreaterThan(0)
+      expect(summary.info.inputChars).toBeGreaterThan(0)
+      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
+    }),
+  )
+
   itCompaction.instance(
     "marks summary message as errored on compact result",
     Effect.gen(function* () {

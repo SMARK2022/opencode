@@ -21,6 +21,36 @@ const promptSource = readFileSync(
   "utf-8",
 )
 
+const blockToolSource = sessionSource.slice(
+  sessionSource.indexOf("function BlockTool("),
+  sessionSource.indexOf("function Shell("),
+)
+
+const assistantMessageSource = sessionSource.slice(
+  sessionSource.indexOf("function AssistantMessage("),
+  sessionSource.indexOf("const PART_MAPPING"),
+)
+
+const inlineToolSource = sessionSource.slice(
+  sessionSource.indexOf("function InlineTool("),
+  sessionSource.indexOf("function BlockTool("),
+)
+
+const shellSource = sessionSource.slice(
+  sessionSource.indexOf("function Shell("),
+  sessionSource.indexOf("function DiffView("),
+)
+
+const sessionV2Source = readFileSync(
+  path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/feature-plugins/system/session-v2.tsx"),
+  "utf-8",
+)
+
+const sessionV2InlineToolSource = sessionV2Source.slice(
+  sessionV2Source.indexOf("function InlineTool("),
+  sessionV2Source.indexOf("function BlockTool("),
+)
+
 describe("Session route integration points", () => {
   describe("scrollbar", () => {
     test("imports drawSmoothScrollbar", () => {
@@ -35,8 +65,11 @@ describe("Session route integration points", () => {
       expect(sessionSource).toContain('"scrollbar_enabled"')
     })
 
-    test("scrollbox has viewportCulling tied to streamingActive", () => {
-      expect(sessionSource).toContain("viewportCulling={!streamingActive()}")
+    test("scrollbox uses session viewport culling helper", () => {
+      expect(sessionSource).toContain("shouldCullSessionViewport")
+      expect(sessionSource).toContain("stuckToBottom: viewportStuckToBottom()")
+      expect(sessionSource).toContain("viewportCulling={viewportCulling()}")
+      expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
     })
 
     test("scrollbox has contentOptions paddingRight for scrollbar", () => {
@@ -52,8 +85,14 @@ describe("Session route integration points", () => {
     })
 
     test("AssistantMessage wraps parts in a bordered box with renderAfter", () => {
-      expect(sessionSource).toContain("renderAfter={function")
-      expect(sessionSource).toContain("buffer.fillRect(x, y, 1, 1, theme.background)")
+      expect(assistantMessageSource).toContain("renderAfter={function")
+      expect(assistantMessageSource).toContain("if (this.screenX < 0 || this.screenY < 0) return")
+      expect(assistantMessageSource).toContain("buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)")
+    })
+
+    test("InlineTool gives first tool part message-level top spacing", () => {
+      expect(inlineToolSource).toMatch(/if \(!previous\) \{\s*setMargin\(1\)\s*return\s*\}/)
+      expect(sessionV2InlineToolSource).toMatch(/if \(!previous\) \{\s*setMargin\(1\)\s*return\s*\}/)
     })
   })
 
@@ -99,7 +138,31 @@ describe("Session route integration points", () => {
       expect(sessionSource).toContain("threshold")
       expect(sessionSource).toContain("totalLines")
       expect(sessionSource).toContain("preview")
-      expect(sessionSource).toContain("canCollapse")
+      expect(sessionSource).toContain("collapsible")
+    })
+
+    test("BlockTool uses one vertical spacing strategy", () => {
+      expect(blockToolSource).toContain("marginTop={1}")
+      expect(blockToolSource).not.toContain("gap={1}")
+    })
+
+    test("BlockTool can collapse long wrapped single-line content", () => {
+      expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
+      expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
+      expect(blockToolSource).toContain("totalChars?: number")
+      expect(blockToolSource).toContain("charThreshold")
+      expect(blockToolSource).toContain("(props.totalChars ?? 0) > charThreshold()")
+    })
+
+    test("BlockTool decides collapse eligibility before mounting previews", () => {
+      expect(blockToolSource).toContain("const collapsible = createMemo")
+      expect(blockToolSource).not.toContain("setCanCollapse")
+    })
+
+    test("Shell counts command and output characters for collapse", () => {
+      expect(shellSource).toContain("shellPreviewText")
+      expect(shellSource).toContain("totalChars={shellPreviewText().length}")
+      expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
     })
 
     test("Edit tool shows diff stats in title", () => {
