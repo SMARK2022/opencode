@@ -119,6 +119,36 @@ export const paint = (text: string, color?: ChartColor, _ctx?: unknown, bold?: b
   const pref = (bold ? BOLD : "") + (color ? COLORS[color] || "" : "")
   return pref ? pref + text + RESET : text
 }
+
+// #181：序列 sparkline，窄宽时由调用方关闭
+// #181：宽表趋势列用的迷你柱序
+export const sparkline = (values: number[], width: number) => {
+  if (width <= 0 || values.length === 0) return ""
+  // #181：8 阶块字符，低值也不留白
+  const glyphs = "▁▂▃▄▅▆▇█"
+  const safe = values.map((v) => (Number.isFinite(v) ? v : 0))
+  // #181：全 0 序列仍可出平底 sparkline
+  const max = Math.max(1, ...safe)
+  const buckets: number[] = []
+  if (safe.length <= width) {
+    // #181：点数不足时逐点绘制，右侧重复末值稳定列宽
+    buckets.push(...safe)
+    while (buckets.length < width) buckets.push(safe.at(-1) ?? 0)
+  } else {
+    // #181：超采样按桶取峰值聚合，禁止步进丢点导致尖峰消失
+    for (let i = 0; i < width; i++) {
+      const lo = Math.floor((i * safe.length) / width)
+      const hi = Math.max(lo + 1, Math.floor(((i + 1) * safe.length) / width))
+      buckets.push(Math.max(...safe.slice(lo, hi)))
+    }
+  }
+  // #181：输出纯字符，不含 ANSI
+  return buckets
+    .slice(0, width)
+    .map((v) => glyphs[Math.min(glyphs.length - 1, Math.max(0, Math.round((v / max) * (glyphs.length - 1))))])
+    .join("")
+}
+
 // #174：renderContext 一次缓存宽度与颜色模式
 export const renderContext = (color?: string) => ({
   color: color === "never" || (color !== "always" && !process.stdout.isTTY) ? "never" : color || "auto",
