@@ -259,6 +259,8 @@ describe("TUI inline tool wrapping", () => {
       ),
       { width: 40, height: 8 },
     )
+    // 首个工具真实占一行消息顶距，组内紧排和跨消息分隔仍由下面的断言验证。
+    expect(frame.split("\n")[0]).toBe("")
     expect(frame).toMatch(/A1\n[^\n]*A2\n\n[^\n]*B1\n[^\n]*B2/)
   })
 
@@ -314,7 +316,7 @@ describe("TUI inline tool wrapping", () => {
       ),
       { width: 72, height: 4 },
     )
-    expect(frame.split("\n").map((line) => line.trim())).toEqual(["~ Writing command", "auto review"])
+    expect(frame.split("\n").map((line) => line.trim())).toEqual(["", "~ Writing command", "auto review"])
 
     setComplete(true)
     await testSetup!.renderOnce()

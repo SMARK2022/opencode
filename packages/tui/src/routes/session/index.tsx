@@ -2554,6 +2554,8 @@ export function InlineToolRow(props: {
       ref={(el: BoxRenderable) => {
         if (props.separate) alwaysSeparate.add(el)
         setPreLayoutSiblingMargin(el, (previous) => {
+          // #460：无前驱兄弟时承接消息级顶距——首个工具 part 与文本气泡基线一致。
+          if (!previous) return 1
           return props.separate ||
             (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))
             ? 1

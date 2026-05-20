@@ -66,4 +66,14 @@ describe("Session Shell output spacing", () => {
     expect(blockToolSource).toContain("createSignal(!collapsed())")
     expect(blockToolSource).not.toContain("setCanCollapse")
   })
+
+  // #460：首个工具 part 需要消息级顶距——无前驱兄弟时 margin=1（与文本气泡基线一致）
+  test("InlineTool gives first tool part message-level top spacing", () => {
+    const start = sessionSource.indexOf("function InlineToolRow(")
+    const end = sessionSource.indexOf("function BlockTool(")
+    const inlineToolSource = sessionSource.slice(start, end)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(inlineToolSource).toContain('if (!previous) return 1')
+  })
 })
