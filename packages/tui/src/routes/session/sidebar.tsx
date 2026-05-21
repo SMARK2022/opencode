@@ -1,4 +1,5 @@
 import { useProject } from "../../context/project"
+import { SESSION_SIDEBAR_WIDTH } from "./layout"
 import { useSync } from "../../context/sync"
 import { createMemo, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
@@ -27,7 +28,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     <Show when={session()}>
       <box
         backgroundColor={theme.backgroundPanel}
-        width={42}
+        width={SESSION_SIDEBAR_WIDTH}
         height="100%"
         paddingTop={1}
         paddingBottom={1}
