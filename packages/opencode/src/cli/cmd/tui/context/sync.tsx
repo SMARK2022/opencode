@@ -17,6 +17,7 @@ import type {
   ProviderListResponse,
   ProviderAuthMethod,
   VcsInfo,
+  EventMessagePartDelta,
 } from "@opencode-ai/sdk/v2"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "@tui/context/project"
@@ -27,7 +28,7 @@ import { createSimpleContext } from "./helper"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, onCleanup, onMount } from "solid-js"
 import * as Log from "@opencode-ai/core/util/log"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
 import { useKV } from "./kv"
@@ -117,6 +118,87 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // [local-smark] daemon multi-instance workspace tracking
     let syncedWorkspace = project.workspace.current()
     let connectedOnce = false
+    let pendingPartDeltas: EventMessagePartDelta[] = []
+    let pendingPartDeltaTimer: Timer | undefined
+
+    function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
+      // Only adjacent deltas for the same Solid store cell are safe to merge.
+      // The public SDK/useEvent stream still receives every event individually;
+      // this coalescing happens after routing, inside SyncProvider's private
+      // store reducer, so plugins and non-rendering consumers keep raw event
+      // count/id semantics while the TUI avoids per-fragment reactive churn.
+      return (
+        previous.properties.sessionID === next.properties.sessionID &&
+        previous.properties.messageID === next.properties.messageID &&
+        previous.properties.partID === next.properties.partID &&
+        previous.properties.field === next.properties.field
+      )
+    }
+
+    function coalescePartDeltas(events: readonly EventMessagePartDelta[]) {
+      const result: EventMessagePartDelta[] = []
+      for (const event of events) {
+        const previous = result.at(-1)
+        if (!previous || !targetsSamePartDelta(previous, event)) {
+          result.push(event)
+          continue
+        }
+        // Preserve the first event id because the merged item occupies that
+        // original store-update slot; only the text payload changes.  Later
+        // boundaries such as part.updated still force a flush before they run.
+        result[result.length - 1] = {
+          ...previous,
+          properties: {
+            ...previous.properties,
+            delta: previous.properties.delta + event.properties.delta,
+          },
+        }
+      }
+      return result
+    }
+
+    function applyPartDelta(event: EventMessagePartDelta) {
+      const parts = store.part[event.properties.messageID]
+      if (!parts) return
+      const result = Binary.search(parts, event.properties.partID, (p) => p.id)
+      if (!result.found) return
+      setStore(
+        "part",
+        event.properties.messageID,
+        produce((draft) => {
+          const part = draft[result.index]
+          if (part.type === "tool" && part.state.status === "pending" && event.properties.field === "raw") {
+            part.state.raw += event.properties.delta
+            return
+          }
+          const field = event.properties.field as keyof typeof part
+          const existing = part[field] as string | undefined
+          ;(part[field] as string) = (existing ?? "") + event.properties.delta
+        }),
+      )
+    }
+
+    function flushPartDeltas() {
+      if (pendingPartDeltaTimer) {
+        clearTimeout(pendingPartDeltaTimer)
+        pendingPartDeltaTimer = undefined
+      }
+      if (pendingPartDeltas.length === 0) return
+      const events = coalescePartDeltas(pendingPartDeltas)
+      pendingPartDeltas = []
+      batch(() => {
+        for (const event of events) applyPartDelta(event)
+      })
+    }
+
+    function enqueuePartDelta(event: EventMessagePartDelta) {
+      pendingPartDeltas.push(event)
+      if (pendingPartDeltaTimer) return
+      // Match the SDK frame queue: a short 16ms window keeps streaming feedback
+      // interactive while collapsing the tiny provider chunks that were forcing
+      // tokenAccounting/context memos to recompute thousands of times per tool.
+      pendingPartDeltaTimer = setTimeout(flushPartDeltas, 16)
+    }
 
     function sessionListQuery(): { directory?: string; scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
@@ -140,6 +222,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     }
 
     event.subscribe((event, { workspace }) => {
+      if (event.type !== "message.part.delta") flushPartDeltas()
       switch (event.type) {
         case "server.connected":
           if (!connectedOnce) {
@@ -374,24 +457,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.delta": {
-          const parts = store.part[event.properties.messageID]
-          if (!parts) break
-          const result = Binary.search(parts, event.properties.partID, (p) => p.id)
-          if (!result.found) break
-          setStore(
-            "part",
-            event.properties.messageID,
-            produce((draft) => {
-              const part = draft[result.index]
-              if (part.type === "tool" && part.state.status === "pending" && event.properties.field === "raw") {
-                part.state.raw += event.properties.delta
-                return
-              }
-              const field = event.properties.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field] as string) = (existing ?? "") + event.properties.delta
-            }),
-          )
+          enqueuePartDelta(event)
           break
         }
 
@@ -423,6 +489,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
       }
+    })
+
+    onCleanup(() => {
+      if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
+      pendingPartDeltas = []
     })
 
     const exit = useExit()
