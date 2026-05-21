@@ -225,6 +225,26 @@ async function renderFrame(component: () => JSX.Element, options: { width: numbe
 }
 
 describe("TUI inline tool wrapping", () => {
+  test("separates assistant groups without separating tools inside one group", async () => {
+    // 使用生产行和实际布局，空组不能吞掉边界或给同组工具增加空行。
+    const frame = await renderFrame(
+      () => (
+        <box flexDirection="column" width={40}>
+          <For each={["A", "", "B"]}>{(label) => (
+            <box flexDirection="column" ref={(el: BoxRenderable) => layoutGroups.add(el)}>
+              <Show when={label}>
+                <InlineToolRow icon="→" complete={true} pending="">{label}1</InlineToolRow>
+                <InlineToolRow icon="→" complete={true} pending="">{label}2</InlineToolRow>
+              </Show>
+            </box>
+          )}</For>
+        </box>
+      ),
+      { width: 40, height: 8 },
+    )
+    expect(frame).toMatch(/A1\n[^\n]*A2\n\n[^\n]*B1\n[^\n]*B2/)
+  })
+
   test("falls back for unknown tool names", () => {
     expect(toolDisplay("bash")).toBe("bash")
     expect(toolDisplay("plugin_tool")).toBe("generic")
