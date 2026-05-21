@@ -1,3 +1,4 @@
+// 成功后的确认性复读可省略；失败恢复和未读范围仍可正常读取。
 import { Effect, Option, Schema, Scope, Stream } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as path from "path"

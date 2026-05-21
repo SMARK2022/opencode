@@ -175,7 +175,7 @@ describe("ReadTool", () => {
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
 
-      expect(yield* toolDefinitions(registry)).toMatchObject([{ name: "read" }])
+      expect(yield* toolDefinitions(registry)).toMatchObject([{ name: "read", description: expect.stringContaining("After a successful edit, write, or apply_patch, skip re-reading the file to confirm—the tool errors if it didn't work.") }])
       expect(yield* toolDefinitions(registry, [{ action: "read", resource: "*", effect: "deny" }])).toEqual([])
       expect(
         yield* executeTool(registry, {
