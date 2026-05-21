@@ -59,9 +59,9 @@ describe("pending tool input parser (#187)", () => {
     expect(parser.stats()).toBeUndefined()
   })
 
-  test("formatPendingCounts uses - then + order for #187 UI", () => {
-    // #187：与 PendingStats 初始顺序一致（#189 会改为 +N -M）
-    expect(formatPendingCounts({ fileCount: 1, added: 1, removed: 2 })).toBe(" -2 +1")
+  test("formatPendingCounts uses + then - order for #189 UI", () => {
+    // #189：+N -M 顺序
+    expect(formatPendingCounts({ fileCount: 1, added: 1, removed: 2 })).toBe(" +1 -2")
     expect(formatPendingPathLabel("src/space file.ts", 1)).toBe("src/space file.ts")
   })
 
@@ -77,7 +77,7 @@ describe("pending tool input parser (#187)", () => {
     )
     const stats = parser.stats()
     const headline = `Edit ${formatPendingPathLabel(stats?.filePath, stats?.fileCount ?? 0)}${formatPendingCounts(stats)}`
-    expect(headline).toBe("Edit src/space file.ts -2 +1")
+    expect(headline).toBe("Edit src/space file.ts +1 -2")
   })
 
   test("apply_patch multi-file headline uses fileCount when path absent", () => {
@@ -93,6 +93,13 @@ describe("pending tool input parser (#187)", () => {
     expect(headline.startsWith("Patch ")).toBe(true)
     expect(formatPendingCounts(stats).length).toBeGreaterThan(0)
   })
+})
+
+
+test("progress interval is 50ms after #189", async () => {
+  // #189：跟手刷新间隔
+  const { PENDING_TOOL_INPUT_PROGRESS_INTERVAL } = await import("../../../src/routes/session/pending-tool-input")
+  expect(PENDING_TOOL_INPUT_PROGRESS_INTERVAL).toBe(50)
 })
 
 describe("pending tool input stats pipeline (#187)", () => {

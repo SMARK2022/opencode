@@ -10,13 +10,13 @@ export type PendingToolInputStats = {
   removed: number
 }
 
-// #187：UI 文案纯函数；本 patch 先 - 后 +（#189 再调换为 +N -M）
+// #189：UI 文案纯函数改为先 + 后 -，锁定 +N -M
 export function formatPendingCounts(stats: PendingToolInputStats | undefined) {
   if (!stats) return ""
   let out = ""
-  // #187：removed 在前，对齐最初 PendingStats 扫读
-  if (stats.removed) out += ` -${stats.removed}`
+  // #189：added 优先，与 PendingStats 及 frame 期望一致
   if (stats.added) out += ` +${stats.added}`
+  if (stats.removed) out += ` -${stats.removed}`
   return out
 }
 
@@ -28,7 +28,8 @@ export function formatPendingPathLabel(filePath: string | undefined, fileCount: 
 }
 
 // #187：pending 统计刷新间隔；过密会跟手抖，过疏会丢进度感
-export const PENDING_TOOL_INPUT_PROGRESS_INTERVAL = 200
+// #189：从 200 降到 50，跟手流式 raw
+export const PENDING_TOOL_INPUT_PROGRESS_INTERVAL = 50
 
 // #187：按 tool 名选择流式 JSON 字段扫描器；未知 tool 空实现
 export function createPendingToolInputParser(tool: string) {
