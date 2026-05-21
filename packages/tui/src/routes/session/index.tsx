@@ -14,6 +14,7 @@ import {
   untrack,
   useContext,
 } from "solid-js"
+import { sessionMessageContentWidth } from "./layout"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
@@ -322,7 +323,15 @@ export function Session() {
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const sidebarInLayout = createMemo(() => sidebarVisible() && wide())
+  // #184：可读宽按 docked 侧栏与滚动条精确扣减
+  const messageContentWidth = createMemo(() =>
+    sessionMessageContentWidth({
+      terminalWidth: dimensions().width,
+      sidebarInLayout: sidebarInLayout(),
+      scrollbarEnabled: showScrollbar(),
+    }),
+  )
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -1206,7 +1215,7 @@ export function Session() {
       <context.Provider
         value={{
           get width() {
-            return contentWidth()
+            return messageContentWidth()
           },
           sessionID: route.sessionID,
           conceal,
