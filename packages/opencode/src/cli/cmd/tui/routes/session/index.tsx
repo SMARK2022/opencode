@@ -1964,11 +1964,11 @@ function PendingStats(props: { stats: PendingToolInputStats | undefined }) {
   const { theme } = useTheme()
   return (
     <>
-      <Show when={props.stats?.removed}>
-        <span style={{ fg: theme.diffRemoved }}> -{props.stats!.removed}</span>
-      </Show>
       <Show when={props.stats?.added}>
         <span style={{ fg: theme.diffAdded }}> +{props.stats!.added}</span>
+      </Show>
+      <Show when={props.stats?.removed}>
+        <span style={{ fg: theme.diffRemoved }}> -{props.stats!.removed}</span>
       </Show>
     </>
   )

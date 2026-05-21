@@ -127,8 +127,8 @@ test("pending edit tool shows streamed deletion and addition counts", async () =
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts -2 +1")))
-      expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("-2 +1")
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts +1 -2")))
+      expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("+1 -2")
     },
   )
 })
@@ -182,8 +182,8 @@ test("pending apply_patch tool summarizes streamed multi-file changes", async ()
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patch 2 files -1 +3")))
-      expect(frame[findRow(frame, "Patch 2 files")]).toContain("-1 +3")
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patch 2 files +3 -1")))
+      expect(frame[findRow(frame, "Patch 2 files")]).toContain("+3 -1")
     },
   )
 })
@@ -228,10 +228,10 @@ test("pending tool line counts update from streamed raw deltas", async () => {
 
       await Bun.sleep(50)
       await app.renderOnce()
-      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src/live.ts -2 +1"))).toBe(false)
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src/live.ts +1 -2"))).toBe(false)
 
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/live.ts -2 +1")))
-      expect(frame[findRow(frame, "Edit src/live.ts")]).toContain("-2 +1")
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/live.ts +1 -2")))
+      expect(frame[findRow(frame, "Edit src/live.ts")]).toContain("+1 -2")
     },
   )
 })

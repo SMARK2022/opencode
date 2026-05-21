@@ -166,7 +166,12 @@ export function Prompt(props: PromptProps) {
   const paletteShortcut = useCommandShortcut("command.palette.show")
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
-  const showCumulative = createMemo(() => dimensions().width > 120)
+  // The bottom-right token meter shares space with prompt chrome and can be
+  // squeezed by the session sidebar even when the terminal itself is wide.
+  // Measure the prompt root after flex layout has run and compact only when the
+  // actual prompt allocation is narrow, instead of keying off terminal columns.
+  const [promptWidth, setPromptWidth] = createSignal(dimensions().width)
+  const showCumulative = createMemo(() => promptWidth() > 100)
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -225,6 +230,16 @@ export function Prompt(props: PromptProps) {
   function showWarpNotice(name: string) {
     setWarpNotice(`Warped to ${name}`)
     setTimeout(() => setWarpNotice(undefined), 4000)
+  }
+
+  function syncPromptWidth(this: BoxRenderable) {
+    // OpenTUI resolves percentage widths and sidebar flex allocation during the
+    // render pass. `renderBefore` gives us the final prompt box width for this
+    // frame, so the compact token display tracks transient layout pressure from
+    // sidebars/plugins without threading session-layout state into Prompt.
+    const width = Math.max(1, this.width)
+    if (width === untrack(promptWidth)) return
+    setPromptWidth(width)
   }
 
   async function createWorkspace(selection: Extract<WorkspaceSelection, { type: "new" }>) {
@@ -1593,7 +1608,7 @@ export function Prompt(props: PromptProps) {
         agentStyleId={agentStyleId}
         promptPartTypeId={() => promptPartTypeId}
       />
-      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false}>
+      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} renderBefore={syncPromptWidth}>
         <box
           border={["left"]}
           borderColor={borderHighlight()}
@@ -1887,7 +1902,7 @@ export function Prompt(props: PromptProps) {
                             <Show
                               when={showCumulative()}
                               fallback={
-                                // width <= 120: ↑↓ combined arrow, context + cost only
+                                // prompt width <= 100: ↑↓ combined arrow, context + cost only
                                 <text fg={theme.textMuted} wrapMode="none">
                                   <span style={{ fg: usageFlow().input || usageFlow().output ? theme.text : theme.textMuted }}>↑↓</span>
                                   {item().context ? ` ${item().context}` : ""}

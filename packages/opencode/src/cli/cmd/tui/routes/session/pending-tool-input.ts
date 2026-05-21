@@ -5,7 +5,7 @@ export type PendingToolInputStats = {
   removed: number
 }
 
-export const PENDING_TOOL_INPUT_PROGRESS_INTERVAL = 200
+export const PENDING_TOOL_INPUT_PROGRESS_INTERVAL = 50
 
 export function createPendingToolInputParser(tool: string) {
   if (tool === "apply_patch") return createApplyPatchInputParser()
