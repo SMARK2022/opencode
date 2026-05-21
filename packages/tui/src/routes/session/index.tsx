@@ -15,6 +15,24 @@ import {
   useContext,
 } from "solid-js"
 import { sessionMessageContentWidth } from "./layout"
+
+// #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
+export const isVisibleAssistantPart = (
+  part: { type?: string; text?: string; state?: { status?: string } },
+  opts: { showDetails: boolean; showThinking: boolean },
+) => {
+  // #185：text 仅非空可见
+  if (part.type === "text") return Boolean((part.text ?? "").trim())
+  // #185：reasoning 受 thinking 开关约束
+  if (part.type === "reasoning") return opts.showThinking && Boolean((part.text ?? "").trim())
+  if (part.type === "tool") {
+    // #185：详情关闭时隐藏已完成工具
+    if (!opts.showDetails && part.state?.status === "completed") return false
+    return true
+  }
+  return true
+}
+
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
@@ -1568,7 +1586,12 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         // 加密占位不算可见正文，否则空完成消息仍会露出 footer。
         return part.text.replace("[REDACTED]", "").trim().length > 0
       }
-      if (part.type === "tool") return true
+      // #185：工具是否计入 visibleParts 与 shouldHide 同口径
+      if (part.type === "tool")
+        return isVisibleAssistantPart(
+          { type: "tool", state: part.state },
+          { showDetails: ctx.showDetails(), showThinking: true },
+        )
       return false
     })
   })
@@ -1881,9 +1904,12 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   // Hide tool if showDetails is false and tool completed successfully
   const shouldHide = createMemo(() => {
+    // #185：与 isVisibleAssistantPart 同口径（详情关+completed 隐藏）
     if (ctx.showDetails()) return false
-    if (props.part.state.status !== "completed") return false
-    return true
+    return !isVisibleAssistantPart(
+      { type: "tool", state: props.part.state },
+      { showDetails: ctx.showDetails(), showThinking: true },
+    )
   })
 
   const toolprops = {
