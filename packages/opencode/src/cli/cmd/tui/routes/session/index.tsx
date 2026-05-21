@@ -73,6 +73,7 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { sessionMessageContentWidth } from "./layout"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
@@ -261,8 +262,15 @@ export function Session() {
     if (sidebar() === "auto" && wide()) return true
     return false
   })
+  const sidebarInLayout = createMemo(() => sidebarVisible() && wide())
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const messageContentWidth = createMemo(() =>
+    sessionMessageContentWidth({
+      terminalWidth: dimensions().width,
+      sidebarInLayout: sidebarInLayout(),
+      scrollbarEnabled: showScrollbar(),
+    }),
+  )
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -1180,7 +1188,7 @@ export function Session() {
       <context.Provider
         value={{
           get width() {
-            return contentWidth()
+            return messageContentWidth()
           },
           sessionID: route.sessionID,
           conceal,
