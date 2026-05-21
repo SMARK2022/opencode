@@ -3,7 +3,7 @@ import { expect, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
-import type { AssistantMessage, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, GlobalEvent, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
 import { onCleanup } from "solid-js"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
@@ -27,7 +27,7 @@ import { Session } from "../../../../src/cli/cmd/tui/routes/session"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
-import { createFetch, directory, eventSource, json } from "./sync-fixture"
+import { createEventSource, createFetch, directory, json } from "./sync-fixture"
 
 const sessionID = "ses_render"
 
@@ -109,10 +109,137 @@ test("assistant first visible part ignores hidden completed tool parts", async (
   )
 })
 
+test("pending edit tool shows streamed deletion and addition counts", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_pending_edit", 1)],
+    {
+      msg_pending_edit: [
+        pendingToolPart(
+          "part_edit",
+          "msg_pending_edit",
+          "edit",
+          JSON.stringify({
+            oldString: 'first "quoted" line\nsecond \\ path line\n',
+            filePath: "src/space file.ts",
+            newString: 'replacement "quoted" line\n',
+          }),
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts -2 +1")))
+      expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("-2 +1")
+    },
+  )
+})
+
+test("pending edit tool reports deletions before the JSON input is complete", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_pending_edit_partial", 1)],
+    {
+      msg_pending_edit_partial: [
+        pendingToolPart(
+          "part_edit_partial",
+          "msg_pending_edit_partial",
+          "edit",
+          '{"filePath":"src/partial.ts","oldString":"one\\ntwo',
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/partial.ts -2")))
+      const row = frame[findRow(frame, "Edit src/partial.ts")]
+
+      expect(row).toContain("-2")
+      expect(row).not.toContain("+1")
+    },
+  )
+})
+
+test("pending apply_patch tool summarizes streamed multi-file changes", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_pending_patch", 1)],
+    {
+      msg_pending_patch: [
+        pendingToolPart(
+          "part_patch",
+          "msg_pending_patch",
+          "apply_patch",
+          JSON.stringify({
+            patchText: [
+              "*** Begin Patch",
+              "*** Update File: src/a.ts",
+              "@@",
+              "-old",
+              "+new",
+              "*** Add File: src/b.ts",
+              "+one",
+              "+two",
+              "*** End Patch",
+            ].join("\n"),
+          }),
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patch 2 files -1 +3")))
+      expect(frame[findRow(frame, "Patch 2 files")]).toContain("-1 +3")
+    },
+  )
+})
+
+test("pending write tool shows streamed addition counts", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_pending_write", 1)],
+    {
+      msg_pending_write: [
+        pendingToolPart(
+          "part_write",
+          "msg_pending_write",
+          "write",
+          JSON.stringify({ filePath: "src/new file.ts", content: "one\ntwo\n" }),
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src/new file.ts +2")))
+      expect(frame[findRow(frame, "Write src/new file.ts")]).toContain("+2")
+    },
+  )
+})
+
+test("pending tool line counts update from streamed raw deltas", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_live_delta", 1)],
+    {
+      msg_live_delta: [pendingToolPart("part_live_delta", "msg_live_delta", "edit", "")],
+    },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing edit...")))
+
+      emit(
+        partDeltaEvent(
+          "evt_live_delta",
+          "msg_live_delta",
+          "part_live_delta",
+          JSON.stringify({ filePath: "src/live.ts", oldString: "one\ntwo", newString: "three\n" }),
+        ),
+      )
+
+      await Bun.sleep(50)
+      await app.renderOnce()
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src/live.ts -2 +1"))).toBe(false)
+
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/live.ts -2 +1")))
+      expect(frame[findRow(frame, "Edit src/live.ts")]).toContain("-2 +1")
+    },
+  )
+})
+
 async function withRenderedSession(
   messages: AssistantMessage[],
   parts: Record<string, Part[]>,
-  run: (app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
+  run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
   kv: Record<string, unknown> = {},
 ) {
   const previous = Global.Path.state
@@ -132,17 +259,22 @@ async function withRenderedSession(
     return undefined
   })
 
-  const app = await testRender(() => <SessionHarness fetch={calls.fetch} />, { width: 80, height: 16, footerHeight: 0 })
+  const events = createEventSource()
+  const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
+    width: 80,
+    height: 16,
+    footerHeight: 0,
+  })
 
   try {
-    await run(app)
+    await run(app, events.emit)
   } finally {
     app.renderer.destroy()
     Global.Path.state = previous
   }
 }
 
-function SessionHarness(props: { fetch: typeof globalThis.fetch }) {
+function SessionHarness(props: { fetch: typeof globalThis.fetch; events: ReturnType<typeof createEventSource>["source"] }) {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
@@ -159,7 +291,7 @@ function SessionHarness(props: { fetch: typeof globalThis.fetch }) {
                   <SDKProvider
                     url="http://test"
                     directory={directory}
-                    testTransport={{ fetch: props.fetch, events: eventSource() }}
+                    testTransport={{ fetch: props.fetch, events: props.events }}
                   >
                     <ProjectProvider>
                       <SyncProvider>
@@ -273,4 +405,32 @@ function completedToolPart(id: string, messageID: string, tool: string, input: R
       time: { start: 1, end: 2 },
     },
   } satisfies Extract<Part, { type: "tool" }>
+}
+
+function pendingToolPart(id: string, messageID: string, tool: string, raw: string) {
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "tool",
+    callID: id,
+    tool,
+    state: {
+      status: "pending",
+      input: {},
+      raw,
+    },
+  } satisfies Extract<Part, { type: "tool" }>
+}
+
+function partDeltaEvent(id: string, messageID: string, partID: string, delta: string): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id,
+      type: "message.part.delta",
+      properties: { sessionID, messageID, partID, field: "raw", delta },
+    },
+  }
 }

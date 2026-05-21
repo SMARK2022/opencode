@@ -110,6 +110,11 @@ import { previewDiff } from "@tui/util/preview-diff"
 import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
 import { ConnectionError } from "../../util/connection-error"
 import { ContextUsagePanel } from "./context-usage"
+import {
+  createPendingToolInputParser,
+  PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
+  type PendingToolInputStats,
+} from "./pending-tool-input"
 
 addDefaultParsers(parsers.parsers)
 
@@ -1912,6 +1917,66 @@ function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_C
   const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
   return preview ? [preview, "…"].join("\n") : "…"
 }
+
+function createPendingToolInputStats(part: () => ToolPart) {
+  const [stats, setStats] = createSignal<PendingToolInputStats>()
+  let parser = createPendingToolInputParser(part().tool)
+  let key = ""
+  let consumed = 0
+  let timer: Timer | undefined
+
+  function flush() {
+    timer = undefined
+    setStats(parser.stats())
+  }
+
+  createEffect(() => {
+    const current = part()
+    const raw = current.state.status === "pending" ? current.state.raw : ""
+    const nextKey = `${current.id}:${current.tool}`
+    if (nextKey !== key || raw.length < consumed) {
+      if (timer) clearTimeout(timer)
+      timer = undefined
+      parser = createPendingToolInputParser(current.tool)
+      key = nextKey
+      consumed = 0
+      setStats(undefined)
+    }
+    const delta = raw.slice(consumed)
+    consumed = raw.length
+    if (!delta) return
+
+    parser.push(delta)
+    // This stays behind the TUI render boundary: raw SDK events and persisted
+    // parts keep their original cadence while large streamed tool inputs only
+    // refresh the tiny line-count preview at human-visible speed.
+    if (!timer) timer = setTimeout(flush, PENDING_TOOL_INPUT_PROGRESS_INTERVAL)
+  })
+
+  onCleanup(() => {
+    if (timer) clearTimeout(timer)
+  })
+
+  return stats
+}
+
+function PendingStats(props: { stats: PendingToolInputStats | undefined }) {
+  const { theme } = useTheme()
+  return (
+    <>
+      <Show when={props.stats?.removed}>
+        <span style={{ fg: theme.diffRemoved }}> -{props.stats!.removed}</span>
+      </Show>
+      <Show when={props.stats?.added}>
+        <span style={{ fg: theme.diffAdded }}> +{props.stats!.added}</span>
+      </Show>
+    </>
+  )
+}
+
+function pendingPath(pathFormatter: ReturnType<typeof usePathFormatter>, filePath?: string) {
+  return filePath ? pathFormatter.format(filePath) : undefined
+}
 function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
   const ctx = use()
@@ -1945,7 +2010,7 @@ function InlineTool(props: {
   icon: string
   iconColor?: RGBA
   complete: any
-  pending: string
+  pending: JSX.Element
   spinner?: boolean
   children: JSX.Element
   part: ToolPart
@@ -2252,6 +2317,18 @@ function Write(props: ToolProps<typeof WriteTool>) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  const pendingStats = createPendingToolInputStats(() => props.part)
+  const pending = createMemo(() => {
+    const stats = pendingStats()
+    const filePath = pendingPath(pathFormatter, stats?.filePath)
+    if (!filePath && !stats?.added) return "Preparing write..."
+    return (
+      <>
+        Write<Show when={filePath}> {filePath}</Show>
+        <PendingStats stats={stats} />
+      </>
+    )
+  })
   const code = createMemo(() => {
     if (!props.input.content) return ""
     return props.input.content
@@ -2322,7 +2399,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing write..." complete={props.input.filePath} part={props.part}>
+        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
           Write {pathFormatter.format(props.input.filePath)}
         </InlineTool>
       </Match>
@@ -2486,6 +2563,18 @@ function Task(props: ToolProps<typeof TaskTool>) {
 function Edit(props: ToolProps<typeof EditTool>) {
   const ctx = use()
   const pathFormatter = usePathFormatter()
+  const pendingStats = createPendingToolInputStats(() => props.part)
+  const pending = createMemo(() => {
+    const stats = pendingStats()
+    const filePath = pendingPath(pathFormatter, stats?.filePath)
+    if (!filePath && !stats?.added && !stats?.removed) return "Preparing edit..."
+    return (
+      <>
+        Edit<Show when={filePath}> {filePath}</Show>
+        <PendingStats stats={stats} />
+      </>
+    )
+  })
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2520,7 +2609,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing edit..." complete={props.input.filePath} part={props.part}>
+        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
           Edit {pathFormatter.format(props.input.filePath)} {input({ replaceAll: props.input.replaceAll })}
         </InlineTool>
       </Match>
@@ -2532,6 +2621,20 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   const ctx = use()
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
+  const pendingStats = createPendingToolInputStats(() => props.part)
+  const pending = createMemo(() => {
+    const stats = pendingStats()
+    if (!stats) return "Preparing patch..."
+    const filePath = pendingPath(pathFormatter, stats.filePath)
+    return (
+      <>
+        Patch <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
+          {filePath}
+        </Show>
+        <PendingStats stats={stats} />
+      </>
+    )
+  })
 
   const files = createMemo(() => props.metadata.files ?? [])
 
@@ -2598,7 +2701,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
           </For>
       </Match>
       <Match when={true}>
-        <InlineTool icon="%" pending="Preparing patch..." complete={false} part={props.part}>
+        <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>
           Patch
         </InlineTool>
       </Match>
