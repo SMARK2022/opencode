@@ -1318,6 +1318,7 @@ export function Session() {
                       </Match>
                       <Match when={message.role === "assistant"}>
                         <AssistantMessage
+                          index={index()}
                           last={lastAssistant()?.id === message.id}
                           message={message as AssistantMessage}
                           parts={sync.data.part[message.id] ?? []}
@@ -1518,7 +1519,15 @@ function UserMessage(props: {
   )
 }
 
-function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
+// AssistantMessage owns spacing between messages so its outer left border can
+// stay continuous for all rows that belong to the same message. Tool renderers
+// still need one bit of part-level context: false means "first visible part in
+// this message, do not add an internal top gap", true means "separate this tool
+// from a previous non-tool part", and undefined leaves InlineTool's legacy
+// sibling measurement in charge for consecutive tools and external call sites.
+const ToolPartTopMargin = createContext<() => boolean | undefined>(() => undefined)
+
+function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean; index: number }) {
   const ctx = use()
   const local = useLocal()
   const { theme } = useTheme()
@@ -1526,20 +1535,24 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
 
+  const visiblePartIDs = createMemo(() => {
+    return props.parts.flatMap((part) => {
+      if (part.type === "text") return part.text.trim().length > 0 ? [part.id] : []
+      if (part.type === "reasoning") {
+        if (!ctx.showThinking()) return []
+        return part.text.replace("[REDACTED]", "").trim().length > 0 ? [part.id] : []
+      }
+      if (part.type === "tool") {
+        if (!ctx.showDetails() && part.state.status === "completed") return []
+        return [part.id]
+      }
+      return []
+    })
+  })
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
-  const visibleParts = createMemo(() => {
-    return props.parts.some((part) => {
-      if (part.type === "text") return part.text.trim().length > 0
-      if (part.type === "reasoning") {
-        if (!ctx.showThinking()) return false
-        return part.text.replace("[REDACTED]", "").trim().length > 0
-      }
-      if (part.type === "tool") return true
-      return false
-    })
-  })
+  const visibleParts = createMemo(() => visiblePartIDs().length > 0)
   const footerVisible = createMemo(() => {
     if (!visibleParts() && !props.message.error) return false
     return final() || props.message.error?.name === "MessageAbortedError"
@@ -1562,23 +1575,34 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={theme.backgroundElement}
       flexShrink={0}
-      renderAfter={function (this: BoxRenderable, buffer: OptimizedBuffer) {
-        if (this.screenX < 0 || this.screenY < 0) return
-        if (this.screenX >= buffer.width || this.screenY >= buffer.height) return
-        buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)
-      }}
+      // Message-level gap: this row is outside the message border. Internal
+      // part gaps remain inside the border, so multi-part messages draw a
+      // continuous left edge while adjacent messages have a visible break.
+      marginTop={props.index === 0 ? 0 : 1}
     >
       <For each={props.parts}>
         {(part, index) => {
           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
+          const visibleIndex = createMemo(() => visiblePartIDs().indexOf(part.id))
+          // First visible part starts immediately under the message border;
+          // only later visible parts get an internal separator row.
+          const partTopMargin = createMemo(() => visibleIndex() > 0)
+          const toolTopMargin = createMemo(() => {
+            if (visibleIndex() <= 0) return false
+            const previous = props.parts.find((item) => item.id === visiblePartIDs()[visibleIndex() - 1])
+            return previous?.type === "tool" ? undefined : true
+          })
           return (
             <Show when={component()}>
-              <Dynamic
-                last={index() === props.parts.length - 1}
-                component={component()}
-                part={part as any}
-                message={props.message}
-              />
+              <ToolPartTopMargin.Provider value={toolTopMargin}>
+                <Dynamic
+                  last={index() === props.parts.length - 1}
+                  topMargin={partTopMargin()}
+                  component={component()}
+                  part={part as any}
+                  message={props.message}
+                />
+              </ToolPartTopMargin.Provider>
             </Show>
           )
         }}
@@ -1641,7 +1665,7 @@ const PART_MAPPING = {
   reasoning: ReasoningPart,
 }
 
-function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
+function ReasoningPart(props: { last: boolean; topMargin: boolean; part: ReasoningPart; message: AssistantMessage }) {
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
@@ -1668,7 +1692,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
       <box
         id={"text-" + props.part.id}
         paddingLeft={2}
-        marginTop={1}
+        marginTop={props.topMargin ? 1 : 0}
         flexDirection="column"
         border={["left"]}
         customBorderChars={SplitBorder.customBorderChars}
@@ -1724,7 +1748,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   )
 }
 
-function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
+function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; message: AssistantMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const streaming = createMemo(() => !props.message.time.completed)
@@ -1732,7 +1756,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   const completedKey = createMemo(() => `${ctx.width}\u0000${content()}`)
   return (
     <Show when={content()}>
-      <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box id={"text-" + props.part.id} paddingLeft={3} marginTop={props.topMargin ? 1 : 0} flexShrink={0}>
         <Switch>
           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
             <Show keyed when={completedKey()}>
@@ -1928,6 +1952,7 @@ function InlineTool(props: {
   onClick?: () => void
 }) {
   const [margin, setMargin] = createSignal(0)
+  const toolTopMargin = useContext(ToolPartTopMargin)
   const { theme } = useTheme()
   const ctx = use()
   const sync = useSync()
@@ -1959,7 +1984,7 @@ function InlineTool(props: {
 
   return (
     <box
-      marginTop={margin()}
+      marginTop={toolTopMargin() === undefined ? margin() : toolTopMargin() ? 1 : 0}
       paddingLeft={3}
       overflow="hidden"
       onMouseOver={() => props.onClick && setHover(true)}
@@ -1982,7 +2007,6 @@ function InlineTool(props: {
         const index = children.indexOf(el)
         const previous = children[index - 1]
         if (!previous) {
-          setMargin(1)
           return
         }
         if (previous.height > 1 || previous.id.startsWith("text-")) {
@@ -2028,6 +2052,7 @@ function BlockTool(props: {
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
+  const toolTopMargin = useContext(ToolPartTopMargin)
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
   const background = createMemo(() => {
@@ -2062,7 +2087,7 @@ function BlockTool(props: {
       paddingTop={1}
       paddingBottom={1}
       paddingLeft={2}
-      marginTop={1}
+      marginTop={toolTopMargin() === false ? 0 : 1}
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}

@@ -26,29 +26,9 @@ const blockToolSource = sessionSource.slice(
   sessionSource.indexOf("function Shell("),
 )
 
-const assistantMessageSource = sessionSource.slice(
-  sessionSource.indexOf("function AssistantMessage("),
-  sessionSource.indexOf("const PART_MAPPING"),
-)
-
-const inlineToolSource = sessionSource.slice(
-  sessionSource.indexOf("function InlineTool("),
-  sessionSource.indexOf("function BlockTool("),
-)
-
 const shellSource = sessionSource.slice(
   sessionSource.indexOf("function Shell("),
   sessionSource.indexOf("function DiffView("),
-)
-
-const sessionV2Source = readFileSync(
-  path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/feature-plugins/system/session-v2.tsx"),
-  "utf-8",
-)
-
-const sessionV2InlineToolSource = sessionV2Source.slice(
-  sessionV2Source.indexOf("function InlineTool("),
-  sessionV2Source.indexOf("function BlockTool("),
 )
 
 describe("Session route integration points", () => {
@@ -82,17 +62,6 @@ describe("Session route integration points", () => {
     test("UserMessage has flexShrink={0} on outer border box", () => {
       // The user message border box should have flexShrink to prevent collapse
       expect(sessionSource).toMatch(/borderColor={color\(\)}\s*\n\s*customBorderChars.*\n\s*marginTop.*\n\s*flexShrink={0}/)
-    })
-
-    test("AssistantMessage wraps parts in a bordered box with renderAfter", () => {
-      expect(assistantMessageSource).toContain("renderAfter={function")
-      expect(assistantMessageSource).toContain("if (this.screenX < 0 || this.screenY < 0) return")
-      expect(assistantMessageSource).toContain("buffer.fillRect(this.screenX, this.screenY, 1, 1, theme.background)")
-    })
-
-    test("InlineTool gives first tool part message-level top spacing", () => {
-      expect(inlineToolSource).toMatch(/if \(!previous\) \{\s*setMargin\(1\)\s*return\s*\}/)
-      expect(sessionV2InlineToolSource).toMatch(/if \(!previous\) \{\s*setMargin\(1\)\s*return\s*\}/)
     })
   })
 

@@ -1,0 +1,276 @@
+/** @jsxImportSource @opentui/solid */
+import { expect, test } from "bun:test"
+import { Global } from "@opencode-ai/core/global"
+import { testRender, useRenderer } from "@opentui/solid"
+import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+import type { AssistantMessage, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
+import { onCleanup } from "solid-js"
+import { tmpdir } from "../../../fixture/fixture"
+import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
+import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
+import { CommandPaletteProvider } from "../../../../src/cli/cmd/tui/context/command-palette"
+import { EditorContextProvider } from "../../../../src/cli/cmd/tui/context/editor"
+import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
+import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
+import { LocalProvider } from "../../../../src/cli/cmd/tui/context/local"
+import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
+import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
+import { RouteProvider } from "../../../../src/cli/cmd/tui/context/route"
+import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
+import { SyncProvider } from "../../../../src/cli/cmd/tui/context/sync"
+import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
+import { TuiConfigProvider } from "../../../../src/cli/cmd/tui/context/tui-config"
+import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
+import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
+import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/prompt/stash"
+import { Session } from "../../../../src/cli/cmd/tui/routes/session"
+import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
+import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
+import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
+import { createFetch, directory, eventSource, json } from "./sync-fixture"
+
+const sessionID = "ses_render"
+
+test("assistant inline tool messages are separated outside the message border", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_one", 1), assistantMessage("msg_two", 3)],
+    {
+      msg_one: [completedToolPart("part_read", "msg_one", "read", { filePath: "alpha.ts" })],
+      msg_two: [completedToolPart("part_grep", "msg_two", "grep", { pattern: "needle" })],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Grep \"needle\"")))
+      const read = findRow(frame, "Read alpha.ts")
+
+      expect(frame[read]).toMatch(/^┃\s+→ Read alpha\.ts/)
+      expect(frame[read + 1]?.startsWith("┃")).toBe(false)
+      expect(frame[read + 2]).toMatch(/^┃\s+✱ Grep "needle"/)
+    },
+  )
+})
+
+test("assistant internal part spacing keeps the same message border continuous", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_parts", 1)],
+    {
+      msg_parts: [
+        textPart("part_text", "msg_parts", "Thinking"),
+        completedToolPart("part_read", "msg_parts", "read", { filePath: "alpha.ts" }),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) => lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
+      )
+      const thinking = findRow(frame, "Thinking")
+
+      expect(frame[thinking]).toMatch(/^┃\s+Thinking/)
+      expect(frame[thinking + 1]?.startsWith("┃")).toBe(true)
+      expect(frame[thinking + 2]).toMatch(/^┃\s+→ Read alpha\.ts/)
+    },
+  )
+})
+
+test("assistant first visible part does not inherit top spacing from hidden parts", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_hidden", 1)],
+    {
+      msg_hidden: [textPart("part_empty", "msg_hidden", "   "), textPart("part_visible", "msg_hidden", "First visible")],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("First visible")))
+      const visible = findRow(frame, "First visible")
+
+      expect(frame[visible]).toMatch(/^┃\s+First visible/)
+      expect(frame[visible - 1]?.startsWith("┃")).toBe(false)
+    },
+  )
+})
+
+test("assistant first visible part ignores hidden completed tool parts", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_hidden_tool", 1)],
+    {
+      msg_hidden_tool: [
+        completedToolPart("part_hidden_tool", "msg_hidden_tool", "read", { filePath: "hidden.ts" }),
+        textPart("part_visible", "msg_hidden_tool", "After hidden tool"),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("After hidden tool")))
+      const visible = findRow(frame, "After hidden tool")
+
+      expect(frame.some((line) => line.includes("Read hidden.ts"))).toBe(false)
+      expect(frame[visible]).toMatch(/^┃\s+After hidden tool/)
+      expect(frame[visible - 1]?.startsWith("┃")).toBe(false)
+    },
+    { tool_details_visibility: false },
+  )
+})
+
+async function withRenderedSession(
+  messages: AssistantMessage[],
+  parts: Record<string, Part[]>,
+  run: (app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
+  kv: Record<string, unknown> = {},
+) {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
+
+  const info = sessionInfo()
+  const calls = createFetch((url) => {
+    if (url.pathname === "/session") return json([info])
+    if (url.pathname === `/session/${sessionID}`) return json(info)
+    if (url.pathname === `/session/${sessionID}/message`) {
+      return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
+    }
+    if (url.pathname === `/session/${sessionID}/todo`) return json([])
+    if (url.pathname === `/session/${sessionID}/diff`) return json([])
+    return undefined
+  })
+
+  const app = await testRender(() => <SessionHarness fetch={calls.fetch} />, { width: 80, height: 16, footerHeight: 0 })
+
+  try {
+    await run(app)
+  } finally {
+    app.renderer.destroy()
+    Global.Path.state = previous
+  }
+}
+
+function SessionHarness(props: { fetch: typeof globalThis.fetch }) {
+  const renderer = useRenderer()
+  const config = createTuiResolvedConfig()
+  const keymap = createDefaultOpenTuiKeymap(renderer)
+  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
+
+  return (
+    <OpencodeKeymapProvider keymap={keymap}>
+      <ArgsProvider>
+        <ExitProvider>
+          <KVProvider>
+            <ToastProvider>
+              <RouteProvider initialRoute={{ type: "session", sessionID }}>
+                <TuiConfigProvider config={config}>
+                  <SDKProvider
+                    url="http://test"
+                    directory={directory}
+                    testTransport={{ fetch: props.fetch, events: eventSource() }}
+                  >
+                    <ProjectProvider>
+                      <SyncProvider>
+                        <ThemeProvider mode="dark">
+                          <LocalProvider>
+                            <PromptStashProvider>
+                              <DialogProvider>
+                                <CommandPaletteProvider>
+                                  <FrecencyProvider>
+                                    <PromptHistoryProvider>
+                                      <PromptRefProvider>
+                                        <EditorContextProvider>
+                                          <Session />
+                                        </EditorContextProvider>
+                                      </PromptRefProvider>
+                                    </PromptHistoryProvider>
+                                  </FrecencyProvider>
+                                </CommandPaletteProvider>
+                              </DialogProvider>
+                            </PromptStashProvider>
+                          </LocalProvider>
+                        </ThemeProvider>
+                      </SyncProvider>
+                    </ProjectProvider>
+                  </SDKProvider>
+                </TuiConfigProvider>
+              </RouteProvider>
+            </ToastProvider>
+          </KVProvider>
+        </ExitProvider>
+      </ArgsProvider>
+    </OpencodeKeymapProvider>
+  )
+}
+
+async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (lines: string[]) => boolean) {
+  const start = Date.now()
+
+  for (;;) {
+    await app.renderOnce()
+    const frame = rows(app.captureCharFrame())
+    if (predicate(frame)) return frame
+    if (Date.now() - start > 2_000) throw new Error(`timed out waiting for frame:\n${frame.join("\n")}`)
+    await Bun.sleep(10)
+  }
+}
+
+function rows(frame: string) {
+  return frame.split("\n").map((line) => line.replace(/\s*█$/, "").trimEnd().trimStart())
+}
+
+function findRow(frame: string[], text: string) {
+  const index = frame.findIndex((line) => line.includes(text))
+  if (index < 0) throw new Error(`missing row ${JSON.stringify(text)}:\n${frame.join("\n")}`)
+  return index
+}
+
+function sessionInfo() {
+  return {
+    id: sessionID,
+    slug: "render",
+    projectID: "proj_test",
+    directory,
+    title: "render",
+    version: "1.0.0",
+    time: { created: 1, updated: 1 },
+  } satisfies SessionInfo
+}
+
+function assistantMessage(id: string, created: number) {
+  return {
+    id,
+    sessionID,
+    role: "assistant",
+    time: { created, completed: created + 1 },
+    parentID: "msg_user",
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  } satisfies AssistantMessage
+}
+
+function textPart(id: string, messageID: string, text: string) {
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "text",
+    text,
+  } satisfies Extract<Part, { type: "text" }>
+}
+
+function completedToolPart(id: string, messageID: string, tool: string, input: Record<string, unknown>) {
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "tool",
+    callID: id,
+    tool,
+    state: {
+      status: "completed",
+      input,
+      output: "",
+      title: tool,
+      metadata: {},
+      time: { start: 1, end: 2 },
+    },
+  } satisfies Extract<Part, { type: "tool" }>
+}
