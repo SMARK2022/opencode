@@ -19,6 +19,7 @@ import type {
   VcsInfo,
   SnapshotFileDiff,
   ConsoleState,
+  EventMessagePartDelta,
 } from "@opencode-ai/sdk/v2"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "./project"
@@ -28,7 +29,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { SessionPath } from "@opencode-ai/core/session/path"
 // #132：会话 path 规范化
@@ -152,6 +153,99 @@ export const {
     const fullSyncedSessions = new Set<string>()
     // #132：区分首次 connected 与重连
     let connectedOnce = false
+    // #186：同一 part/field 的相邻 delta 在 16ms 窗内合并，压低 Solid store 抖动
+    // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
+    let pendingPartDeltas: EventMessagePartDelta[] = []
+    let pendingPartDeltaTimer: Timer | undefined
+
+    function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
+      // #186：仅同 session/message/part/field 的相邻 delta 可合并；公共事件流仍逐条投递
+      // #186：field 不同（如 text vs raw）必须分桶，防止串写
+      return (
+        previous.properties.sessionID === next.properties.sessionID &&
+        previous.properties.messageID === next.properties.messageID &&
+        previous.properties.partID === next.properties.partID &&
+        previous.properties.field === next.properties.field
+      )
+    }
+
+    function coalescePartDeltas(events: readonly EventMessagePartDelta[]) {
+      // #186：线性扫一遍，只合并“相邻且同 key”的片段，跨 part 不合并
+      const result: EventMessagePartDelta[] = []
+      for (const event of events) {
+        const previous = result.at(-1)
+        if (!previous || !targetsSamePartDelta(previous, event)) {
+          // #186：边界切换：开启新桶，保留事件顺序语义
+          result.push(event)
+          continue
+        }
+        // #186：保留首条 id，只拼接 delta 文本；part.updated 等边界会先 flush
+        // #186：后到事件的 id 丢弃不影响 store，只服务合并槽位
+        result[result.length - 1] = {
+          ...previous,
+          properties: {
+            ...previous.properties,
+            delta: previous.properties.delta + event.properties.delta,
+          },
+        }
+      }
+      return result
+    }
+
+    function applyPartDelta(event: EventMessagePartDelta) {
+      // #186：orphan delta（part 尚未入 store）直接丢弃，与 hydration 竞态测试一致
+      const parts = store.part[event.properties.messageID]
+      if (!parts) return
+      const result = search(parts, event.properties.partID, (p) => p.id)
+      // #186：找不到 part 时不创建空壳，避免伪造 tool/text
+      if (!result.found) return
+      // 合并后的实际写入仍须标记 hydration 冲突，避免旧 HTTP 快照覆盖实时内容。
+      // 此标记不创建 orphan，也不改变 pending raw 的嵌套状态契约。
+      touchPart(event.properties.sessionID, event.properties.partID)
+      setStore(
+        "part",
+        event.properties.messageID,
+        produce((draft) => {
+          const part = draft[result.index]
+          // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
+          if (event.properties.field === "raw") {
+            if (part.type === "tool" && part.state.status === "pending")
+              part.state.raw += event.properties.delta
+            // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
+            return
+          }
+          const field = event.properties.field as keyof typeof part
+          const existing = part[field] as string | undefined
+          ;(part[field] as string) = (existing ?? "") + event.properties.delta
+        }),
+      )
+    }
+
+    function flushPartDeltas() {
+      // #186：先清 timer 再消费队列，防止重入二次调度
+      if (pendingPartDeltaTimer) {
+        clearTimeout(pendingPartDeltaTimer)
+        pendingPartDeltaTimer = undefined
+      }
+      if (pendingPartDeltas.length === 0) return
+      // #186：取出快照后立刻清空，后续 enqueue 进入新窗
+      const events = coalescePartDeltas(pendingPartDeltas)
+      pendingPartDeltas = []
+      // #186：同帧 batch 写入，避免 N 次独立 store 通知
+      // #186：顺序仍按 coalesce 结果，跨 part 交替时保持到达序
+      batch(() => {
+        for (const event of events) applyPartDelta(event)
+      })
+    }
+
+    function enqueuePartDelta(event: EventMessagePartDelta) {
+      // #186：只入队不立刻写 store，把高频 token 片段留给 coalesce
+      pendingPartDeltas.push(event)
+      if (pendingPartDeltaTimer) return
+      // #186：16ms 对齐一帧；超时或非 delta 边界都会 flush
+      pendingPartDeltaTimer = setTimeout(flushPartDeltas, 16)
+    }
+
     // 同一挂起期间的 force 共用尾随刷新，不把重连次数变成整页请求队列。
     const queuedSyncs = new Map<string, Promise<void>>()
     const syncingSessions = new Map<string, Promise<void>>()
@@ -270,6 +364,9 @@ export const {
     }
 
     event.subscribe((event, { directory, workspace }) => {
+      // #186：非 delta 事件前强制 flush，保证 part.updated / vcs 等看到完整文本
+      // #186：delta 自身不 flush，继续积攒同一 16ms 窗口
+      if (event.type !== "message.part.delta") flushPartDeltas()
       switch (event.type) {
         case "server.instance.disposed":
           void bootstrap()
@@ -547,28 +644,9 @@ export const {
         }
 
         case "message.part.delta": {
-          const parts = store.part[event.properties.messageID]
-          if (!parts) break
-          const result = search(parts, event.properties.partID, (part) => part.id)
-          if (!result.found) break
-          touchPart(event.properties.sessionID, event.properties.partID)
-          setStore(
-            "part",
-            event.properties.messageID,
-            produce((draft) => {
-              const part = draft[result.index]
-              // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
-              if (event.properties.field === "raw") {
-                if (part.type === "tool" && part.state.status === "pending")
-                  part.state.raw += event.properties.delta
-                // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
-                return
-              }
-              const field = event.properties.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field] as string) = (existing ?? "") + event.properties.delta
-            }),
-          )
+          // #186：进入队列合并，applyPartDelta 内仍走 #157 raw 路径
+          // #186：此处禁止直接 setStore，否则绕过 coalesce 失去批处理收益
+          enqueuePartDelta(event)
           break
         }
 
@@ -601,6 +679,13 @@ export const {
           break
         }
       }
+    })
+
+    onCleanup(() => {
+      // #186：卸载时丢弃未 flush 队列，避免定时器写已销毁 store
+      // #186：不在 cleanup 里 flush——组件已拆，UI 不再需要最后一帧
+      if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
+      pendingPartDeltas = []
     })
 
     const exit = useExit()
@@ -771,6 +856,8 @@ export const {
             queuedSyncs.set(sessionID, task)
             return task
           }
+          // 请求开始前结清旧窗；之后到达的片段才属于本次 hydration tracker。
+          flushPartDeltas()
           const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
           hydratingSessions.set(sessionID, tracker)
           const task = (async () => {
@@ -784,6 +871,8 @@ export const {
               sdk.client.session.status({ workspace: project.workspace.current() })
                 .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
             ])
+            // 先应用排队片段并标记 touched，再让快照仲裁，避免同一文本被追加两次。
+            flushPartDeltas()
             setStore(
               produce((draft) => {
                 const match = search(draft.session, sessionID, (s) => s.id)
