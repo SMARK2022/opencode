@@ -256,6 +256,27 @@ describe("TUI inline tool wrapping", () => {
     expect(frame).not.toContain("Preparing patch")
   })
 
+  test("pending fallback renders string pending with tilde prefix", async () => {
+    // #187：string pending 走单一 text 节点，complete 前保留 ~ 占位（B-01 修复）
+    const frame = await renderFrame(() => <InlineToolRow icon="←" complete={false} pending="Preparing write…">Write src/a.ts</InlineToolRow>, { width: 60, height: 3 })
+    expect(frame).toContain("~ Preparing write…")
+    // #187：pending 态 label 未就绪，仅 ~ 占位（complete/failed 分支才显示 label）
+  })
+
+  test("pending fallback renders JSX stats fragment directly", async () => {
+    // #187：使用生产工具的裸文本/span 形态，不能让测试自带 text 父节点掩盖容器错误。
+    const frame = await renderFrame(
+      () => (
+        <InlineToolRow icon="←" complete={false} pending={<>Edit src/b.ts<span> -2</span><span> +1</span></>}>
+          Edit src/b.ts
+        </InlineToolRow>
+      ),
+      { width: 60, height: 3 },
+    )
+    expect(frame).toContain("-2 +1")
+    // #187：pending 态 label 未就绪；JSX 片段与 ~ 前缀同行渲染
+  })
+
   test("preserves useful completed copy when a tool fails", async () => {
     const frame = await renderFrame(() => <FailedCompleteToolFixture />, { width: 72, height: 3 })
     expect(frame).toContain("Read src/index.ts")
