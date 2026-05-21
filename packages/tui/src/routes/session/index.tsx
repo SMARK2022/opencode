@@ -57,6 +57,12 @@ import { Prompt, type PromptRef } from "../../component/prompt"
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
 import { ConnectionError } from "../../util/connection-error"
 import { previewDiff } from "../../util/preview-diff"
+import {
+  // #187：formatPendingCounts/formatPendingPathLabel 仅供测试消费，不在生产 index 导入
+  createPendingToolInputParser,
+  PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
+  type PendingToolInputStats,
+} from "./pending-tool-input"
 // #154：pending/streaming 判定抽到 util，便于单测与去重
 import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
 import type {
@@ -2041,12 +2047,72 @@ function GenericTool(props: ToolProps) {
   )
 }
 
+
+// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats；导出供行为测试直接驱动
+export function createPendingToolInputStats(part: () => ToolPart) {
+  const [stats, setStats] = createSignal<PendingToolInputStats>()
+  let parser = createPendingToolInputParser(part().tool)
+  let key = ""
+  let consumed = 0
+  let timer: Timer | undefined
+  function flush() {
+    timer = undefined
+    // #187：只在 tick 边界读 stats，避免每个 delta 触发渲染
+    setStats(parser.stats())
+  }
+  createEffect(() => {
+    const current = part()
+    const raw = current.state.status === "pending" ? current.state.raw : ""
+    const nextKey = `${current.id}:${current.tool}`
+    if (nextKey !== key || raw.length < consumed) {
+      // #187：换 part/tool 或 raw 回退时重置解析器
+      if (timer) clearTimeout(timer)
+      timer = undefined
+      parser = createPendingToolInputParser(current.tool)
+      key = nextKey
+      consumed = 0
+      setStats(undefined)
+    }
+    const delta = raw.slice(consumed)
+    consumed = raw.length
+    if (!delta) return
+    // #187：只 push 增量，不重放全文
+    parser.push(delta)
+    if (!timer) timer = setTimeout(flush, PENDING_TOOL_INPUT_PROGRESS_INTERVAL)
+  })
+  onCleanup(() => {
+    if (timer) clearTimeout(timer)
+  })
+  return stats
+}
+
+function PendingStats(props: { stats: PendingToolInputStats | undefined }) {
+  const { theme } = useTheme()
+  return (
+    <>
+      <Show when={props.stats?.removed}>
+        <span style={{ fg: theme.diffRemoved }}> -{props.stats!.removed}</span>
+      </Show>
+      <Show when={props.stats?.added}>
+        <span style={{ fg: theme.diffAdded }}> +{props.stats!.added}</span>
+      </Show>
+    </>
+  )
+}
+
+// #187：有路径则相对化，空路径留给 Preparing 占位
+function pendingPath(pathFormatter: ReturnType<typeof usePathFormatter>, filePath?: string) {
+  if (!filePath) return undefined
+  return pathFormatter.format(filePath)
+}
+
 function InlineTool(props: {
   icon: string
   iconColor?: RGBA
   color?: RGBA
   complete: unknown
-  pending: string
+  // #187：pending 支持字符串或流式统计 JSX
+  pending: JSX.Element
   failure?: string
   spinner?: boolean
   separate?: boolean
@@ -2129,7 +2195,8 @@ export function InlineToolRow(props: {
   error?: string
   errorExpanded?: boolean
   complete: unknown
-  pending: string
+  // #187：与 InlineTool 同口径，允许 pending 统计片段
+  pending: JSX.Element
   failure?: string
   spinner?: boolean
   separate?: boolean
@@ -2161,6 +2228,7 @@ export function InlineToolRow(props: {
         <Match when={true}>
           <Show
             fallback={
+              // #187：真实 pending 包含裸文本与有色 span，必须由 text 父节点承载。
               <text
                 paddingLeft={3}
                 fg={props.color}
@@ -2421,6 +2489,21 @@ function Write(props: ToolProps) {
   const ctx = use()
   // 两代输入采用不同字段名，展示使用实际调用路径，不改写模型输入。
   const filepath = createMemo(() => stringValue(props.input.filePath) ?? stringValue(props.input.path))
+  // #187：流式 raw → 路径/+行 统计
+  const writePendingStats = createPendingToolInputStats(() => props.part)
+  // #187：无路径且无 added 时回落 Preparing write...
+  const writePending = createMemo(() => {
+    const stats = writePendingStats()
+    const filePath = pendingPath(pathFormatter, stats?.filePath)
+    if (!filePath && !stats?.added) return "Preparing write…"
+    return (
+      <>
+        Write
+        <Show when={filePath}> {filePath}</Show>
+        <PendingStats stats={stats} />
+      </>
+    )
+  })
   // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
   const [expanded, setExpanded] = createSignal(false)
   const code = createMemo(() => {
@@ -2507,7 +2590,7 @@ function Write(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing write…" complete={filepath()} part={props.part}>
+        <InlineTool icon="←" pending={writePending()} complete={filepath()} part={props.part}>
           Write {pathFormatter.format(filepath())}
         </InlineTool>
       </Match>
@@ -2772,6 +2855,21 @@ function Edit(props: ToolProps) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  // #187：流式 raw → 路径/+- 行统计
+  const editPendingStats = createPendingToolInputStats(() => props.part)
+  // #187：无路径且无 +/- 时回落 Preparing edit...
+  const editPending = createMemo(() => {
+    const stats = editPendingStats()
+    const filePath = pendingPath(pathFormatter, stats?.filePath)
+    if (!filePath && !stats?.added && !stats?.removed) return "Preparing edit…"
+    return (
+      <>
+        Edit
+        <Show when={filePath}> {filePath}</Show>
+        <PendingStats stats={stats} />
+      </>
+    )
+  })
   // diff 内容展开/收缩：超过 20 行时默认收缩，避免长 diff 占满终端
   const [expanded, setExpanded] = createSignal(false)
 
@@ -2815,7 +2913,7 @@ function Edit(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing edit…" complete={stringValue(props.input.filePath)} part={props.part}>
+        <InlineTool icon="←" pending={editPending()} complete={stringValue(props.input.filePath)} part={props.part}>
           Edit {pathFormatter.format(stringValue(props.input.filePath))} {input({ replaceAll: props.input.replaceAll })}
         </InlineTool>
       </Match>
@@ -2827,6 +2925,23 @@ function ApplyPatch(props: ToolProps) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  // #187：流式 patchText → 文件数与 +/- 
+  const patchPendingStats = createPendingToolInputStats(() => props.part)
+  // #187：stats 空回落 Preparing patch...；多文件用 fileCount
+  const patchPending = createMemo(() => {
+    const stats = patchPendingStats()
+    if (!stats) return "Preparing patch…"
+    const filePath = pendingPath(pathFormatter, stats.filePath)
+    return (
+      <>
+        Patch{" "}
+        <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
+          {filePath}
+        </Show>
+        <PendingStats stats={stats} />
+      </>
+    )
+  })
 
   const files = createMemo(() => parseApplyPatchFiles(props.metadata.files))
 
@@ -2898,7 +3013,7 @@ function ApplyPatch(props: ToolProps) {
         </For>
       </Match>
       <Match when={true}>
-        <InlineTool icon="%" pending="Preparing patch…" failure="Patch failed" complete={false} part={props.part}>
+        <InlineTool icon="%" pending={patchPending()} failure="Patch failed" complete={false} part={props.part}>
           Patch
         </InlineTool>
       </Match>
