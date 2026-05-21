@@ -10,7 +10,7 @@ import {
   type Renderable,
 } from "@opentui/core"
 import type { CommandContext } from "@opentui/keymap"
-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match, untrack } from "solid-js"
 import { registerOpencodeSpinner } from "../register-spinner"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -173,7 +173,10 @@ export function Prompt(props: PromptProps) {
   const exit = useExit()
   const dimensions = useTerminalDimensions()
   // #109：窄终端隐藏累计 token 括号
-  const showCumulative = createMemo(() => dimensions().width > 120)
+  // #189：改按 prompt 实际分配宽度，侧栏挤压时即使终端很宽也要紧凑
+  const [promptWidth, setPromptWidth] = createSignal(dimensions().width)
+  // #189：阈值 100 列（相对终端 120 更贴近 prompt 槽）
+  const showCumulative = createMemo(() => promptWidth() > 100)
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -1419,9 +1422,17 @@ export function Prompt(props: PromptProps) {
   const maxHeight = createMemo(() => tuiConfig.prompt?.max_height ?? Math.max(6, Math.floor(dimensions().height / 3)))
   const moveLabelWidth = createMemo(() => Math.max(12, Math.min(44, dimensions().width - 48)))
 
+  function syncPromptWidth(this: BoxRenderable) {
+    // #189：renderBefore 读取 flex 后最终宽度，避免只看终端列数
+    // #189：宽度未变则跳过 setStore，减少无意义重渲染
+    const width = Math.max(1, this.width)
+    if (width === untrack(promptWidth)) return
+    setPromptWidth(width)
+  }
+
   return (
     <>
-      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
+      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%" renderBefore={syncPromptWidth}>
         <box
           width="100%"
           border={["left"]}
