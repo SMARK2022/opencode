@@ -23,6 +23,7 @@ import { createSimpleContext } from "./helper"
 import { useSDK } from "./sdk"
 import { useEvent } from "./event"
 import { createSignal, onCleanup, onMount } from "solid-js"
+import { createDataEventQueue } from "./data-deltas"
 
 type LocationData = {
   agent?: AgentV2Info[]
@@ -402,9 +403,11 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       }
     }
 
+    // 原生显示投影也按帧合并；事件总线仍向其他消费者逐条交付。
+    const deltas = createDataEventQueue(handleEvent)
     onMount(() => {
       const unsub = events.subscribe((event, metadata) => {
-        handleEvent({
+        deltas.push({
           ...event,
           data: event.properties,
           location: { directory: metadata.directory, workspaceID: metadata.workspace },
@@ -427,7 +430,10 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
             return store.session.message[sessionID]
           },
           async refresh(sessionID: string) {
+            // HTTP 替换前后都结清当前窗，不把旧 delta 追加到包含它的完整快照。
+            deltas.flush()
             const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
+            deltas.flush()
             setStore("session", "message", sessionID, result.data.data)
           },
         },

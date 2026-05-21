@@ -4,8 +4,8 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { tmpdir } from "../../../fixture/fixture"
-import { mount, wait } from "./sync-fixture"
-import type { GlobalEvent } from "@opencode-ai/sdk/v2"
+import { directory, mount, wait, worktree } from "./sync-fixture"
+import type { AssistantMessage, GlobalEvent, ToolPart } from "@opencode-ai/sdk/v2"
 
 function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
@@ -109,6 +109,131 @@ describe("tui sync", () => {
       await wait(() => sync.data.vcs?.branch === "feature")
 
       expect(sync.data.vcs?.branch).toBe("feature")
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+})
+
+function assistantMessage(): AssistantMessage {
+  return {
+    id: "msg_1",
+    sessionID: "ses_1",
+    role: "assistant",
+    time: { created: 1 },
+    parentID: "user_1",
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "general",
+    path: { cwd: directory, root: worktree },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+}
+
+function pendingToolPart(id = "part_1", callID = "call_1"): ToolPart {
+  return {
+    id,
+    sessionID: "ses_1",
+    messageID: "msg_1",
+    type: "tool",
+    callID,
+    tool: "apply_patch",
+    state: { status: "pending", input: {}, raw: "" },
+  }
+}
+
+function messageEvent(info: AssistantMessage): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: { id: "evt_message", type: "message.updated", properties: { sessionID: info.sessionID, info } },
+  }
+}
+
+function partEvent(part: ToolPart): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: { id: "evt_part", type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: 1 } },
+  }
+}
+
+function deltaEvent(id: string, delta: string, partID = "part_1"): GlobalEvent {
+  // #186：测试事件工厂：field 固定 raw，覆盖 pending tool 路径
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id,
+      type: "message.part.delta",
+      properties: { sessionID: "ses_1", messageID: "msg_1", partID, field: "raw", delta },
+    },
+  }
+}
+
+describe("tui sync part delta coalesce (#186)", () => {
+  test("applies queued streaming part deltas to the sync store", async () => {
+    // #186：同 part raw 多段 delta 合并后仍得到完整文本
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, emit, sync } = await mount(undefined, tmp.path)
+
+    try {
+      emit(messageEvent(assistantMessage()))
+      emit(partEvent(pendingToolPart()))
+      await wait(() => sync.data.part.msg_1?.[0]?.id === "part_1")
+
+      // #186：三段相邻 delta，合并后应为 "hello world"
+      emit(deltaEvent("delta_1", "hel"))
+      emit(deltaEvent("delta_2", "lo"))
+      emit(deltaEvent("delta_3", " world"))
+
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" &&
+          sync.data.part.msg_1[0].state.status === "pending" &&
+          sync.data.part.msg_1[0].state.raw === "hello world",
+      )
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "hello world" } })
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("flushes queued part deltas before non-delta event boundaries", async () => {
+    // #186：vcs 等非 delta 边界会先 flush，两 part 各自文本完整
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, emit, project, sync } = await mount(undefined, tmp.path)
+
+    try {
+      project.workspace.set("ws_a")
+      emit(messageEvent(assistantMessage()))
+      emit(partEvent(pendingToolPart()))
+      emit(partEvent(pendingToolPart("part_2", "call_2")))
+      await wait(() => sync.data.part.msg_1?.length === 2)
+
+      // #186：交替 part 的 delta 不能跨 part 粘连；vcs 触发边界 flush
+      emit(deltaEvent("delta_1", "a"))
+      emit(deltaEvent("delta_2", "b", "part_2"))
+      emit(deltaEvent("delta_3", "c"))
+      emit(branchEvent("flush", "ws_a"))
+
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" &&
+          sync.data.part.msg_1[0].state.status === "pending" &&
+          sync.data.part.msg_1[0].state.raw === "ac" &&
+          sync.data.part.msg_1[1]?.type === "tool" &&
+          sync.data.part.msg_1[1].state.status === "pending" &&
+          sync.data.part.msg_1[1].state.raw === "b" &&
+          sync.data.vcs?.branch === "flush",
+      )
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "ac" } })
+      expect(sync.data.part.msg_1?.[1]).toMatchObject({ state: { raw: "b" } })
+      expect(sync.data.vcs?.branch).toBe("flush")
     } finally {
       app.renderer.destroy()
     }
