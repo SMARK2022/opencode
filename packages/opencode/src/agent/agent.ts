@@ -12,6 +12,7 @@ import { ProviderTransform } from "@/provider/transform"
 import PROMPT_GENERATE from "./generate.txt"
 import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
+import PROMPT_PERMISSION_REVIEWER from "./prompt/permission-reviewer.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 import { Permission } from "@/permission"
@@ -81,6 +82,9 @@ export interface Interface {
 }
 
 type State = Omit<Interface, "generate">
+
+// #200：保留代理名集合——permission-reviewer 的安全不变量不可被用户配置放宽
+const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -236,6 +240,24 @@ const layer = Layer.effect(
             mode: "subagent",
             native: true,
           },
+          // #200：隐藏原生 reviewer——全工具 deny 仅放行 decision 工具，
+          // #200：即使意外暴露也无法执行请求命令或变更项目状态
+          // #200：description 明确 must not execute，约束 reviewer 只产出判断不执行动作
+          "permission-reviewer": {
+            name: "permission-reviewer",
+            description: `Isolated reviewer for auto permission prompt decisions. It returns structured allow/deny judgments and must not execute the requested action itself.`,
+            // #200："*": deny 盖过 defaults/user，decision 工具是唯一白名单出口
+            permission: Permission.fromConfig({
+              "*": "deny",
+              permission_review_decision: "allow",
+            }),
+            prompt: PROMPT_PERMISSION_REVIEWER,
+            options: {},
+            // #200：mode subagent + hidden true——仅可被内部协议调用，不在 UI/默认列表出现
+            mode: "subagent",
+            hidden: true,
+            native: true,
+          },
           explore: {
             name: "explore",
             permission: Permission.merge(
@@ -308,6 +330,9 @@ const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
+          // #200：reserved 名直接跳过配置合并，防止用户覆盖隐藏标志、
+          // #200：权限白名单或工具集，维持 reviewer 的安全不变量
+          if (RESERVED_AGENT_NAMES.has(key)) continue
           if (value.disable) {
             delete agents[key]
             continue
@@ -330,7 +355,8 @@ const layer = Layer.effect(
           item.mode = value.mode ?? item.mode
           item.color = value.color ?? item.color
           item.hidden = value.hidden ?? item.hidden
-          item.name = value.name ?? item.name
+          // #200：禁止通过 value.name 把 reserved 名偷换到其他代理，阻断冒名路由
+          if (value.name && !RESERVED_AGENT_NAMES.has(value.name)) item.name = value.name
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))

@@ -184,6 +184,8 @@ describe("tool.task", () => {
         const second = yield* get()
 
         expect(first).toBe(second)
+        // #200：hidden 代理不出现在子代理描述列表，防止模型探测保留协议代理
+        expect(first).not.toContain("permission-reviewer")
 
         const alpha = first.indexOf("- alpha: Alpha agent")
         const explore = first.indexOf("- explore:")
@@ -428,6 +430,84 @@ describe("tool.task", () => {
         },
       })
     }),
+  )
+
+  it.instance("execute rejects hidden subagents even when permission checks are bypassed", () =>
+    Effect.gen(function* () {
+      // #200：bypassAgentCheck 跳过用户审批，但 hidden/保留名仍不可被模型调用
+      // #200：Cause.squash 提取失败原因，验证错误信息包含 Agent type is not available
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "review permission",
+            prompt: "approve this command",
+            subagent_type: "permission-reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps(), bypassAgentCheck: true },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause)
+        expect(error instanceof Error ? error.message : String(error)).toContain("Agent type is not available")
+      }
+    }),
+  )
+
+  it.instance(
+    "execute rejects permission reviewer even if project config unhides it",
+    () =>
+      Effect.gen(function* () {
+        // #200：项目配置 unhide + "*": allow 仍被保留名检查拒绝，安全不变量优先于配置
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const exit = yield* def
+          .execute(
+            {
+              description: "review permission",
+              prompt: "approve this command",
+              subagent_type: "permission-reviewer",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps(), bypassAgentCheck: true },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+      }),
+    {
+      config: {
+        agent: {
+          "permission-reviewer": {
+            mode: "primary",
+            hidden: false,
+            permission: { "*": "allow" },
+          },
+        },
+      },
+    },
   )
 
   it.instance("execute cancels child session when abort signal fires", () =>
