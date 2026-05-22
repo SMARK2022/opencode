@@ -6,7 +6,7 @@ import { SplitBorder } from "@tui/component/border"
 // [local-smark] UserMessage type needed for token accounting
 import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util/locale"
-import { tokenAccounting } from "../../util/token-accounting"
+import { tokenAccounting } from "@/token/accounting"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandPalette } from "../../context/command-palette"

@@ -4,8 +4,7 @@ import * as Session from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
-import { Token } from "@/util/token"
-import { AttachmentToken } from "@/util/attachment-token"
+import { TokenEstimate } from "@/token/estimate"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionProcessor } from "./processor"
 import { Agent } from "@/agent/agent"
@@ -252,7 +251,12 @@ export const layer = Layer.effect(
       model: Provider.Model
     }) {
       const msgs = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
-      return Token.estimate(JSON.stringify(msgs))
+      // Tail-retention budgeting intentionally remains a raw-size heuristic:
+      // existing compaction behaviour treats large media-bearing turns as too
+      // expensive to keep verbatim even though the final summary upload strips
+      // media to placeholders. Only the actual request snapshot below uses the
+      // provider-learned/media-aware estimator.
+      return TokenEstimate.estimateText(JSON.stringify(msgs))
     })
 
     const select = Effect.fn("SessionCompaction.select")(function* (input: {
@@ -334,7 +338,10 @@ export const layer = Layer.effect(
           if (part.state.status !== "completed") continue
           if (PRUNE_PROTECTED_TOOLS.includes(part.tool)) continue
           if (part.state.time.compacted) break loop
-          const estimate = Token.estimate(part.state.output)
+          // Prune only needs a coarse size proxy for old tool outputs; it still
+          // uses the token primitive rather than upload history because pruning is
+          // a local retention heuristic, not a provider request estimate.
+          const estimate = TokenEstimate.estimateText(part.state.output)
           total += estimate
           if (total <= PRUNE_PROTECT) continue
           pruned += estimate
@@ -441,9 +448,18 @@ export const layer = Layer.effect(
           content: [{ type: "text" as const, text: nextPrompt }],
         },
       ]
-      const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(compactionMessages)
+      const messageEstimate = TokenEstimate.sanitizeModelMessages(compactionMessages)
       const rawMessagesText = JSON.stringify(compactionMessages)
-      const estimatedInput = Token.estimate(messageEstimate.text) + messageEstimate.attachments.tokens
+      // Summary assistants bypass prompt.ts, so compaction must seed the same
+      // daemon-side upload snapshot here. Reusing TokenEstimate keeps media
+      // handling, legacy-attachment filtering, and learned input density identical
+      // to normal prompts before TUI or stats consumers read the message.
+      const estimatedInput = TokenEstimate.estimateUploadInput({
+        text: messageEstimate.text,
+        attachments: messageEstimate.attachments,
+        history,
+        model,
+      }).inputTokens
       const inputBreakdown = {
         system: 0,
         instructions: 0,

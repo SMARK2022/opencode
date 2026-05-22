@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { tokenAccounting } from "@/cli/cmd/tui/util/token-accounting"
+import { tokenAccounting } from "@/token/accounting"
 
 /** 精简的 part 工厂函数，减少测试噪音 */
 function assistantMsg(id: string, parentID: string, tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }, completed?: number) {
@@ -90,10 +90,11 @@ describe("tokenAccounting", () => {
       userMsg("1"),
       assistantMsg("2", "1", undefined, 10),
     ]
-    // inputChars=1000, inputTokens=100+5+5=110 → ratio ≈ 1000/110 ≈ 9.09
+    // Shared input learning clamps unusually high densities so one old sample
+    // cannot make TUI pending estimates diverge from daemon upload estimates.
     const getParts = (_id: string) => [stepFinish(100, 200, 0, 5, 5, 1000)]
     const acc = tokenAccounting(msgs, getParts)
-    expect(acc.ratio.input).toBeCloseTo(9.09, 1)
+    expect(acc.ratio.input).toBe(8)
     // output: text part chars / output tokens (200)
     // If there are text parts between step-start and step-finish
   })

@@ -7,7 +7,7 @@
  * - UsageInfo: 消费端显示用的轻量类型
  */
 
-import { AttachmentToken } from "@/util/attachment-token"
+import { TokenEstimate } from "@/token/estimate"
 
 /** 消费端（sidebar / prompt footer / subagent footer）显示用的轻量类型 */
 export type UsageInfo = {
@@ -21,7 +21,7 @@ export type UsageInfo = {
 
 /** data URL 的 token 估算：图片按像素密度，PDF 按字节密度，其余按通用 tokenizer */
 export function estimateDataUrlInputTokens(url: string, mime: string) {
-  return AttachmentToken.estimateAttachment({ url, mime }).tokens
+  return TokenEstimate.estimateAttachment({ url, mime }).tokens
 }
 
 /** 从 provider 列表查 model 的 context window limit */

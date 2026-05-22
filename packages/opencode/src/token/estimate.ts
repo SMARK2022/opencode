@@ -1,4 +1,54 @@
-import { Token } from "./token"
+/**
+ * TokenEstimate is the single upload-estimation boundary. Callers hand it the
+ * exact text that will be sent to the provider after media sanitization plus the
+ * historical session messages that contain provider-confirmed step-finish usage;
+ * UI and stats code should consume the persisted snapshot instead of calling it.
+ */
+const DEFAULT_CHARS_PER_TOKEN = 4
+// Bounds are intentionally wider than the legacy 3..4 natural-language range:
+// upload bodies include JSON wrappers, code, tool output, and cached prefixes.
+// The upper cap still rejects old image/base64 legacy samples that can appear as
+// 20+ chars/token when they lack media metadata.
+const MIN_CHARS_PER_TOKEN = 2
+const MAX_CHARS_PER_TOKEN = 8
+// Keep the estimator responsive to recent context composition while still using
+// enough confirmed input text to smooth out a single tiny or anomalous request.
+const INPUT_CHARS_HISTORY_LIMIT = 100_000
+
+type HistoryModel = { providerID?: string; id?: string; modelID?: string }
+
+type HistoryMessage = {
+  info?: { role: string; providerID?: string; modelID?: string }
+  role?: string
+  providerID?: string
+  modelID?: string
+  parts: ReadonlyArray<HistoryPart>
+}
+
+type HistoryPart = {
+  type: string
+  inputChars?: number
+  inputBreakdown?: {
+    messages?: { attachments?: number }
+    media?: AttachmentTokenEstimate
+  }
+  tokens?: { input: number; cache: { read: number; write: number } }
+}
+
+type LearnedInputRatio = {
+  charsPerToken: number
+  /** Indicates whether the estimate came from the same provider/model first pass or the broader session fallback. */
+  source: "model-history" | "session-history"
+}
+
+export type UploadInputEstimate = {
+  inputTokens: number
+  textTokens: number
+  attachmentTokens: number
+  charsPerToken: number
+  /** Exposes why a pending estimate changed so callers can debug without re-running the learning logic. */
+  source: "model-history" | "session-history" | "default"
+}
 
 export type AttachmentInput = {
   type?: "file" | "media" | "image"
@@ -38,7 +88,11 @@ type PayloadInfo = {
   mime?: string
 }
 
-function emptyEstimate(): AttachmentTokenEstimate {
+export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) {
+  return Math.max(0, Math.round((input || "").length / charsPerToken))
+}
+
+export function emptyAttachmentEstimate(): AttachmentTokenEstimate {
   return { tokens: 0, rawChars: 0, textChars: 0, count: 0, imageTokens: 0, pdfTokens: 0, otherTokens: 0 }
 }
 
@@ -93,7 +147,7 @@ function placeholder(input: { mime: string; filename?: string }) {
 
 export function estimateAttachment(input: AttachmentInput): AttachmentTokenEstimate {
   const payload = payloadInfo(input)
-  if (!payload?.payload) return emptyEstimate()
+  if (!payload?.payload) return emptyAttachmentEstimate()
 
   const mime = input.mime ?? input.mediaType ?? payload.mime ?? "application/octet-stream"
   const text = placeholder({ mime, filename: input.filename })
@@ -101,7 +155,7 @@ export function estimateAttachment(input: AttachmentInput): AttachmentTokenEstim
     ? Math.max(1, Math.min(1600, Math.round(payload.payload.length / 750)))
     : mime === "application/pdf"
       ? Math.max(1, Math.round(payload.payload.length / 1100))
-      : Math.max(1, Token.estimate(payload.payload))
+      : Math.max(1, estimateText(payload.payload))
 
   return {
     tokens,
@@ -121,11 +175,11 @@ function sanitize(value: unknown): { value: unknown; attachments: AttachmentToke
         const next = sanitize(item)
         return { value: [...acc.value, next.value], attachments: addEstimate(acc.attachments, next.attachments) }
       },
-      { value: [] as unknown[], attachments: emptyEstimate() },
+      { value: [] as unknown[], attachments: emptyAttachmentEstimate() },
     )
   }
 
-  if (!isRecord(value)) return { value, attachments: emptyEstimate() }
+  if (!isRecord(value)) return { value, attachments: emptyAttachmentEstimate() }
 
   const attachment = attachmentFromRecord(value)
   if (attachment) {
@@ -141,7 +195,7 @@ function sanitize(value: unknown): { value: unknown; attachments: AttachmentToke
         attachments: addEstimate(acc.attachments, next.attachments),
       }
     },
-    { value: {} as Record<string, unknown>, attachments: emptyEstimate() },
+    { value: {} as Record<string, unknown>, attachments: emptyAttachmentEstimate() },
   )
 }
 
@@ -177,7 +231,7 @@ function sanitizeAttachmentRecord(value: Record<string, unknown>, input: Attachm
   return value
 }
 
-export function sanitizeModelMessagesForTokenEstimate(messages: unknown): SanitizedTextEstimate {
+export function sanitizeModelMessages(messages: unknown): SanitizedTextEstimate {
   const result = sanitize(messages)
   const text = JSON.stringify(result.value)
   return {
@@ -189,4 +243,88 @@ export function sanitizeModelMessagesForTokenEstimate(messages: unknown): Saniti
   }
 }
 
-export * as AttachmentToken from "./attachment-token"
+export function learnInputCharsPerToken(input: {
+  messages: ReadonlyArray<HistoryMessage>
+  model?: HistoryModel
+}): LearnedInputRatio | undefined {
+  const modelRatio = collectInputRatio(input.messages, input.model, true)
+  if (modelRatio) return { charsPerToken: modelRatio, source: "model-history" }
+  const sessionRatio = collectInputRatio(input.messages, input.model, false)
+  if (sessionRatio) return { charsPerToken: sessionRatio, source: "session-history" }
+  return undefined
+}
+
+export function estimateUploadInput(input: {
+  text: string
+  attachments: AttachmentTokenEstimate
+  history: ReadonlyArray<HistoryMessage>
+  model?: HistoryModel
+}): UploadInputEstimate {
+  // Text and media are estimated separately because providers bill uploaded
+  // images/PDFs by modality-specific rules while the surrounding JSON/text is
+  // best predicted from prior confirmed input-token usage.
+  const learned = learnInputCharsPerToken({ messages: input.history, model: input.model })
+  const charsPerToken = learned?.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN
+  const textTokens = estimateText(input.text, charsPerToken)
+  return {
+    inputTokens: textTokens + input.attachments.tokens,
+    textTokens,
+    attachmentTokens: input.attachments.tokens,
+    charsPerToken,
+    source: learned?.source ?? "default",
+  }
+}
+
+function clampCharsPerToken(value: number) {
+  // Input prompts include JSON envelopes, code, tool results, and provider-specific
+  // cached prefixes. The wider 2..8 band keeps legacy anomalies from dominating
+  // while still allowing the estimator to learn the 6+ chars/token density seen in
+  // real Codex upload contexts.
+  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
+}
+
+function collectInputRatio(messages: ReadonlyArray<HistoryMessage>, model: HistoryModel | undefined, modelOnly: boolean) {
+  let historyInputTokens = 0
+  let historyInputChars = 0
+  for (let i = messages.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
+    const message = messages[i]
+    if ((message.info?.role ?? message.role) !== "assistant") continue
+    if (modelOnly && !sameModel(message, model)) continue
+    for (let j = message.parts.length - 1; j >= 0; j--) {
+      const sample = inputRatioSample(message.parts[j])
+      if (!sample) continue
+      historyInputChars += sample.chars
+      historyInputTokens += sample.tokens
+    }
+  }
+  if (historyInputTokens <= 0 || historyInputChars <= 500) return undefined
+  return clampCharsPerToken(historyInputChars / historyInputTokens)
+}
+
+function sameModel(message: HistoryMessage, model: HistoryModel | undefined) {
+  if (!model?.providerID) return false
+  const modelID = model.id ?? model.modelID
+  if (!modelID) return false
+  return (message.info?.providerID ?? message.providerID) === model.providerID && (message.info?.modelID ?? message.modelID) === modelID
+}
+
+function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
+  if (part.type !== "step-finish") return undefined
+  const chars = part.inputChars
+  if (!chars || chars < 100) return undefined
+  const confirmedTokens = (part.tokens?.input ?? 0) + (part.tokens?.cache.read ?? 0) + (part.tokens?.cache.write ?? 0)
+  if (confirmedTokens <= 0) return undefined
+  const media = part.inputBreakdown?.media
+  if (media) {
+    const textChars = Math.max(0, chars - media.rawChars + media.textChars)
+    const textTokens = Math.max(0, confirmedTokens - media.tokens)
+    return textChars > 0 && textTokens > 0 ? { chars: textChars, tokens: textTokens } : undefined
+  }
+  // Older snapshots only recorded raw attachment character counts. Treating those
+  // data URLs as text makes image-heavy turns look like 20+ chars/token and poisons
+  // future estimates, so they are excluded from ratio learning entirely.
+  if ((part.inputBreakdown?.messages?.attachments ?? 0) > 0) return undefined
+  return { chars, tokens: confirmedTokens }
+}
+
+export * as TokenEstimate from "./estimate"

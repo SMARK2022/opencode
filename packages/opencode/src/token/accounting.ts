@@ -1,5 +1,5 @@
 /**
- * token-accounting.ts — 统一 token 统计入口
+ * accounting.ts — 统一 token 统计入口
  *
  * 设计原则：
  * - 一个函数 `tokenAccounting()`，一个类型 `TokenAccounting`
@@ -13,8 +13,10 @@
  * 这不是"估计"，是按字符占比精确分配已确认 token 总量。
  */
 
-import { AttachmentToken } from "@/util/attachment-token"
+import { TokenEstimate } from "./estimate"
 
+// UI accounting only uses this when neither daemon estimates nor confirmed
+// provider samples exist yet; source upload estimates live in TokenEstimate.
 const DEFAULT_RATIO = 4
 
 // ─── 类型 ────────────────────────────────────────────────────────────────────
@@ -74,6 +76,8 @@ type Msg = {
   id: string
   role: string
   parentID?: string
+  providerID?: string
+  modelID?: string
   cost?: number
   tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
   time?: { created?: number; completed?: number }
@@ -112,8 +116,6 @@ export function tokenAccounting(
   // ── 2. 一次遍历 ──
   const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
   const confirmedRequest = { input: 0, output: 0, cost: 0 }
-  let ratioChars = 0
-  let ratioTokens = 0
   let outputCharsTotal = 0
   let outputTokensTotal = 0
   let latestAssistant: Msg | undefined
@@ -141,19 +143,6 @@ export function tokenAccounting(
         confirmedRequest.input += p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
         confirmedRequest.output += p.tokens.output + p.tokens.reasoning
         confirmedRequest.cost += p.cost ?? 0
-      }
-
-      // input ratio 校准
-      const chars = p.inputChars as number | undefined
-      if (chars && chars >= 100) {
-        const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
-        if (tok > 0) {
-          const bd = p.inputBreakdown as { messages?: { attachments?: number }, media?: { rawChars: number; textChars: number } } | undefined
-          ratioChars += bd?.media
-            ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
-            : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-          ratioTokens += tok
-        }
       }
 
       // output ratio 校准
@@ -192,7 +181,12 @@ export function tokenAccounting(
   }
 
   // ── 3. ratio ──
-  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
+  // Keep TUI fallback math aligned with daemon upload estimates. This is only
+  // used for pending tool-result/output tails; persisted assistant.inputTokens
+  // remains the source of truth for full request uploads.
+  const inputRatio = TokenEstimate.learnInputCharsPerToken({
+    messages: messages.map((msg) => ({ role: msg.role, providerID: msg.providerID, modelID: msg.modelID, parts: getParts(msg.id) })),
+  })?.charsPerToken ?? DEFAULT_RATIO
   const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
 
   // ── 4. step（基于 latest assistant）───────────────────────────────
@@ -245,7 +239,7 @@ export function tokenAccounting(
     if (p.state?.status === "completed") {
       pendingToolResultChars += (p.state.output?.length ?? 0)
       for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
-        pendingAttachTokens += AttachmentToken.estimateAttachment(att).tokens
+        pendingAttachTokens += TokenEstimate.estimateAttachment(att).tokens
       }
     }
     if (p.state?.status === "error") {
@@ -366,3 +360,5 @@ export function tokenAccounting(
     ratio: { input: inputRatio, output: outputRatio },
   }
 }
+
+export * as TokenAccounting from "./accounting"

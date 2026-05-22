@@ -8,7 +8,7 @@ import { Image } from "@/image/image"
 import { Agent } from "../../src/agent/agent"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction } from "../../src/session/compaction"
-import { Token } from "@/util/token"
+import { TokenEstimate } from "@/token/estimate"
 import * as Log from "@opencode-ai/core/util/log"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
@@ -126,6 +126,21 @@ function createAssistantMessage(sessionID: SessionID, parentID: MessageID, root:
       parentID,
       time: { created: Date.now() },
       finish: "end_turn",
+    }),
+  )
+}
+
+function addStepFinish(sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) {
+  return SessionNs.Service.use((ssn) =>
+    ssn.updatePart({
+      id: PartID.ascending(),
+      messageID,
+      sessionID,
+      type: "step-finish",
+      reason: "stop",
+      cost: 0,
+      tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      inputChars,
     }),
   )
 }
@@ -902,6 +917,36 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  it.instance(
+    "summary assistant pending input estimate uses confirmed upload density",
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const historical = yield* createUserMessage(session.id, "historical context")
+      const historicalReply = yield* createAssistantMessage(session.id, historical.id, test.directory)
+      yield* addStepFinish(session.id, historicalReply.id, 80_000, 10_000)
+      const msg = yield* createUserMessage(session.id, "compact this session")
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+
+      yield* SessionCompaction.use.process({
+        parentID: msg.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: false,
+      })
+
+      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
+        (item) => item.info.role === "assistant" && item.info.summary,
+      )
+
+      expect(summary?.info.role).toBe("assistant")
+      if (summary?.info.role !== "assistant") return
+      expect(summary.info.inputChars).toBeGreaterThan(0)
+      expect(summary.info.inputTokens).toBeLessThan(Math.round((summary.info.inputChars ?? 0) / 6))
+    }),
+  )
+
   itCompaction.instance(
     "marks summary message as errored on compact result",
     Effect.gen(function* () {
@@ -1552,19 +1597,19 @@ describe("session.compaction.process", () => {
   )
 })
 
-describe("util.token.estimate", () => {
+describe("TokenEstimate.estimateText", () => {
   test("estimates tokens from text (4 chars per token)", () => {
     const text = "x".repeat(4000)
-    expect(Token.estimate(text)).toBe(1000)
+    expect(TokenEstimate.estimateText(text)).toBe(1000)
   })
 
   test("estimates tokens from larger text", () => {
     const text = "y".repeat(20_000)
-    expect(Token.estimate(text)).toBe(5000)
+    expect(TokenEstimate.estimateText(text)).toBe(5000)
   })
 
   test("returns 0 for empty string", () => {
-    expect(Token.estimate("")).toBe(0)
+    expect(TokenEstimate.estimateText("")).toBe(0)
   })
 })
 

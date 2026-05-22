@@ -5,7 +5,7 @@ import type { InternalTuiPlugin } from "../../plugin/internal"
 import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
-import { tokenAccounting } from "../../util/token-accounting"
+import { tokenAccounting } from "@/token/accounting"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { useLocal } from "@tui/context/local"
 

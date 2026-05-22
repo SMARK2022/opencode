@@ -42,7 +42,7 @@ import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websear
 import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
 import { usable as overflowUsable } from "@/session/overflow"
 import { estimateDataUrlInputTokens } from "./token-estimate"
-import { tokenAccounting } from "./token-accounting"
+import { tokenAccounting } from "@/token/accounting"
 
 type WithParts = {
   info: Message

@@ -65,8 +65,7 @@ import * as DateTime from "effect/DateTime"
 import { eq } from "@/storage/db"
 import * as Database from "@/storage/db"
 import { SessionTable } from "./session.sql"
-import { Token } from "@/util/token"
-import { AttachmentToken } from "@/util/attachment-token"
+import { TokenEstimate } from "@/token/estimate"
 import { usable } from "./overflow"
 
 
@@ -88,9 +87,6 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 const log = Log.create({ service: "session.prompt" })
 const elog = EffectLogger.create({ service: "session.prompt" })
-const INPUT_CHARS_HISTORY_LIMIT = 100_000
-const MIN_CHARS_PER_TOKEN = 3
-const MAX_CHARS_PER_TOKEN = 4
 const DECIDE_PROMPT = `<system-reminder>
 Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
 Use the available conversation context to produce a decisive recommendation or implementation plan.
@@ -149,45 +145,6 @@ function sanitizeDecideMessages(messages: MessageV2.WithParts[]) {
       return part
     }),
   }))
-}
-
-function clampCharsPerToken(value: number) {
-  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
-}
-
-function charsPerToken(messages: MessageV2.WithParts[]) {
-  // Estimate against the current session's real provider accounting instead of a
-  // fixed global ratio.  The samples come from prior daemon-built request bodies
-  // (inputChars) paired with provider-confirmed input/cache tokens.  Clamp the
-  // ratio to a conservative natural-language/code range so one provider anomaly
-  // or cache-reporting quirk cannot make future preflight checks wildly optimistic
-  // or pessimistic.
-  let historyInputTokens = 0
-  let historyInputChars = 0
-  for (let i = messages.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
-    const msg = messages[i]
-    if (msg.info.role !== "assistant") continue
-    for (let j = msg.parts.length - 1; j >= 0; j--) {
-      const part = msg.parts[j]
-      if (part.type !== "step-finish") continue
-      const chars = part.inputChars
-      if (!chars || chars < 100) continue
-      const tokens = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
-      if (tokens <= 0) continue
-      historyInputChars += part.inputBreakdown?.media
-        ? Math.max(0, chars - part.inputBreakdown.media.rawChars + part.inputBreakdown.media.textChars)
-        : Math.max(0, chars - (part.inputBreakdown?.messages.attachments ?? 0))
-      historyInputTokens += tokens
-    }
-  }
-
-  if (historyInputTokens <= 0 || historyInputChars <= 500) return undefined
-  return clampCharsPerToken(historyInputChars / historyInputTokens)
-}
-
-function estimateInputTokens(text: string, messages: MessageV2.WithParts[]) {
-  const ratio = charsPerToken(messages)
-  return ratio ? Math.round(text.length / ratio) : Token.estimate(text)
 }
 
 type ReferencePromptMetadata = {
@@ -1908,7 +1865,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       for (const [position, start] of starts.entries()) {
         const candidate = sanitized.slice(start)
         const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
-        const ratio = estimateInputTokens([input.systemText, JSON.stringify(modelMessages)].join("\n"), candidate) / limit
+        const messageEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
+        // Decide mode trims conversation history before a provider request is
+        // built, so it must use the same upload estimator as the normal prompt
+        // path; otherwise long cached/tool-heavy contexts can be selected against
+        // the legacy /4 fallback and overflow unexpectedly.
+        const ratio = TokenEstimate.estimateUploadInput({
+          text: [input.systemText, messageEstimate.text].join("\n"),
+          attachments: messageEstimate.attachments,
+          history: candidate,
+          model: input.model,
+        }).inputTokens / limit
         if (ratio >= DECIDE_MAX) return fallback ?? candidate
 
         fallback = candidate
@@ -2113,7 +2080,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
             // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
-            const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(messages)
+            const messageEstimate = TokenEstimate.sanitizeModelMessages(messages)
             const messagesText = messageEstimate.text
             const rawMessagesText = JSON.stringify(messages)
             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
@@ -2186,7 +2153,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               },
               ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
             }
-            const estimatedInput = estimateInputTokens(inputText, requestMsgs) + messageEstimate.attachments.tokens
+            // Upload estimates are centralized in TokenEstimate so normal prompts
+            // and compaction requests learn from the same provider-confirmed input
+            // history. This keeps TUI consumers on a single daemon snapshot instead
+            // of re-estimating long contexts downstream.
+            const estimatedInput = TokenEstimate.estimateUploadInput({
+              text: inputText,
+              attachments: messageEstimate.attachments,
+              history: requestMsgs,
+              model,
+            }).inputTokens
             // Preflight compaction must judge the request we are about to send,
             // not the last finished assistant's historical usage.  After compaction,
             // retained tail messages can carry huge pre-compaction token counts even
