@@ -20,6 +20,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { PermissionPrecheck } from "@/permission/precheck"
 import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decoding"
 // #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
 
@@ -296,7 +297,7 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
   return yield* Effect.promise(() => Shell.parse(command, ps))
 })
 
-const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string }) {
+const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string }) {
   if (scan.dirs.size > 0) {
     const directories = Array.from(scan.dirs)
     const globs = directories.map((dir) => {
@@ -320,8 +321,12 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
     permission: ShellID.ToolID,
     patterns: Array.from(scan.patterns),
     always: Array.from(scan.always),
+    // 审查使用原始命令与实际 cwd；展示用 patterns 可能被拆分或重排，不作为执行证据。
     metadata: {
+      action_kind: "shell",
       command: input.command,
+      cwd: input.cwd,
+      shell: input.shell,
     },
   })
 })
@@ -441,7 +446,9 @@ export const ShellTool = Tool.define(
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
           // 仍保留完整请求 pattern，只撤销危险写操作的自动前缀建议。
-          if (!riskyGit(tokens)) scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          const always = BashArity.prefix(tokens)
+          // #197：高风险 git 写操作与宽泛 wrapper 前缀不自动加入 always-allow
+          if (!riskyGit(tokens) && PermissionPrecheck.canAlwaysAllowPrefix(always)) scan.always.add(always.join(" ") + " *")
         }
       }
 
@@ -724,7 +731,7 @@ export const ShellTool = Tool.define(
                   if (compatibility) throw new Error(compatibility)
                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
-                  yield* ask(ctx, scan, params)
+                  yield* ask(ctx, scan, { command: params.command, cwd, shell: name })
                 }),
               )
 

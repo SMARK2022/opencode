@@ -467,6 +467,81 @@ describe("tool.shell permissions", () => {
       ),
     )
   }
+  // #197：验证 bash 权限元数据包含 shell action 证据——action_kind、command、cwd、shell 均须存在
+  each("includes shell action evidence in bash permission metadata", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          yield* run(
+            {
+              command: "git status",
+            },
+            capture(requests),
+          )
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.metadata).toMatchObject({
+            action_kind: "shell",
+            command: "git status",
+            cwd: tmp,
+          })
+          expect(typeof bashReq!.metadata.shell).toBe("string")
+        }),
+      )
+    }),
+  )
+
+each("does not suggest broad wrapper prefixes for always-allow prompts", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const err = new Error("stop after permission")
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          expect(
+            yield* fail(
+              {
+                command: "bash -lc 'git status'",
+              },
+              capture(requests, err),
+            ),
+          ).toMatchObject({ message: err.message })
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.always).not.toContain("bash *")
+          expect(bashReq!.always).not.toContain("bash -lc *")
+        }),
+      )
+    }),
+  )
+each("does not suggest broad git branch prefixes for always-allow prompts", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const err = new Error("stop after permission")
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          expect(
+            yield* fail(
+              {
+                command: "git branch -D feature/review",
+              },
+              capture(requests, err),
+            ),
+          ).toMatchObject({ message: err.message })
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.always).not.toContain("git branch *")
+        }),
+      )
+    }),
+  )
+
 
   each("asks for external_directory permission for wildcard external paths", () =>
     runIn(
