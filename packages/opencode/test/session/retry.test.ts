@@ -221,6 +221,17 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
   })
 
+  test("does not retry statusless API errors when isRetryable is false", () => {
+    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+      new MessageV2.APIError({
+        message: "Invalid provider output",
+        isRetryable: false,
+      }).toObject(),
+    )
+
+    expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+  })
+
   test("retries ZlibError decompression failures", () => {
     const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
       new MessageV2.APIError({
@@ -417,5 +428,103 @@ describe("session.message-v2.fromError", () => {
     expect(SessionRetry.retryable(result, retryProvider)).toEqual({
       message: "An error occurred while processing your request.",
     })
+  })
+
+  test("converts SSE read timeouts to retryable APIError", () => {
+    const result = MessageV2.fromError(
+      Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }),
+      { providerID },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "SSE read timed out" })
+  })
+
+  test("converts transient socket and DNS failures to retryable APIError", () => {
+    for (const code of ["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE"]) {
+      const result = MessageV2.fromError(Object.assign(new Error(`${code} while connecting`), { code }), {
+        providerID,
+      })
+
+      expect(MessageV2.APIError.isInstance(result)).toBe(true)
+      if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+      expect(result.data.isRetryable).toBe(true)
+      expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: `${code} while connecting` })
+    }
+  })
+
+  test("converts wrapped connection resets to retryable APIError", () => {
+    const result = MessageV2.fromError(
+      Object.assign(new TypeError("terminated"), {
+        cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+      }),
+      { providerID },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket closed" })
+  })
+
+  test("converts provider timeout aborts to retryable APIError", () => {
+    const result = MessageV2.fromError(new DOMException("The operation timed out.", "TimeoutError"), {
+      providerID,
+    })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "The operation timed out." })
+  })
+
+  test("converts TLS certificate failures to retryable APIError", () => {
+    for (const error of [
+      Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }),
+      Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+      }),
+    ]) {
+      const result = MessageV2.fromError(error, { providerID })
+
+      expect(MessageV2.APIError.isInstance(result)).toBe(true)
+      if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+      expect(result.data.isRetryable).toBe(true)
+      expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: error.message })
+    }
+  })
+
+  test("keeps user aborts non-retryable", () => {
+    const result = MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
+      providerID,
+      aborted: true,
+    })
+
+    expect(MessageV2.AbortedError.isInstance(result)).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
+  })
+
+  test("does not convert ordinary errors to retryable APIError", () => {
+    const result = MessageV2.fromError(new Error("Invalid request body"), { providerID })
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(false)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
+  })
+
+  test("unwraps AI SDK retry errors before deciding retryability", () => {
+    const result = MessageV2.fromError(
+      Object.assign(new Error("Failed after retries"), {
+        name: "AI_RetryError",
+        lastError: Object.assign(new Error("fetch failed"), { code: "ETIMEDOUT" }),
+      }),
+      { providerID },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "fetch failed" })
   })
 })

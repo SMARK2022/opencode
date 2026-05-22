@@ -35,6 +35,34 @@ interface FetchDecompressionError extends Error {
   path: string
 }
 
+// Keep this transport-only: provider/status errors and invalid payloads must
+// continue through their existing non-retryable branches to avoid replaying
+// requests that are deterministic failures or may already have consumed quota.
+const TRANSIENT_TRANSPORT_CODES = new Set([
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ConnectionClosed",
+  "ConnectionRefused",
+  "FailedToOpenSocket",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_ABORTED",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "SSE_READ_TIMEOUT",
+])
+
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
 
@@ -1176,6 +1204,23 @@ export function fromError(
   e: unknown,
   ctx: { providerID: ProviderID; aborted?: boolean },
 ): NonNullable<Assistant["error"]> {
+  if (!ctx.aborted) {
+    const retried = retryErrorCause(e)
+    if (retried) return fromError(retried, ctx)
+
+    const transport = APICallError.isInstance(e) ? undefined : transportError(e)
+    if (transport) {
+      return new APIError(
+        {
+          message: transport.message,
+          isRetryable: true,
+          metadata: transport.metadata,
+        },
+        { cause: e },
+      ).toObject()
+    }
+  }
+
   switch (true) {
     case e instanceof DOMException && e.name === "AbortError":
       return new AbortedError(
@@ -1277,6 +1322,77 @@ export function fromError(
       } catch {}
       return new NamedError.Unknown({ message: JSON.stringify(e) }, { cause: e }).toObject()
   }
+}
+
+type ErrorLike = {
+  name?: unknown
+  message?: unknown
+  code?: unknown
+  syscall?: unknown
+  cause?: unknown
+  lastError?: unknown
+  errors?: unknown
+}
+
+function errorLike(value: unknown): ErrorLike | undefined {
+  if (value instanceof Error) return value as ErrorLike
+  if (typeof value === "object" && value !== null) return value as ErrorLike
+  return undefined
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined
+}
+
+function retryErrorCause(value: unknown) {
+  const error = errorLike(value)
+  if (!error) return undefined
+  if (stringValue(error.name) !== "AI_RetryError") return undefined
+  if (error.lastError !== undefined && error.lastError !== value) return error.lastError
+  if (!Array.isArray(error.errors)) return undefined
+  const last = error.errors.at(-1)
+  return last === value ? undefined : last
+}
+
+function transportError(value: unknown, depth = 0): { message: string; metadata: Record<string, string> } | undefined {
+  const error = errorLike(value)
+  if (!error) return undefined
+
+  const code = stringValue(error.code)
+  const name = stringValue(error.name)
+  const message = errorMessage(value)
+  const syscall = stringValue(error.syscall)
+  const retryCode = code
+    ? code === "ECONNRESET" && depth > 0
+      ? code
+      : TRANSIENT_TRANSPORT_CODES.has(code)
+        ? code
+        : undefined
+    : name === "TimeoutError"
+      ? "TimeoutError"
+      : message === "SSE read timed out"
+        ? "SSE_READ_TIMEOUT"
+        : undefined
+  const retryable =
+    retryCode !== undefined ||
+    message === "fetch failed" ||
+    message === "failed to fetch" ||
+    message.startsWith("Cannot connect to API:")
+
+  if (retryable) {
+    return {
+      message,
+      metadata: {
+        message,
+        ...(retryCode ? { code: retryCode } : {}),
+        ...(name ? { name } : {}),
+        ...(syscall ? { syscall } : {}),
+      },
+    }
+  }
+
+  if (depth >= 2 || error.cause === undefined || error.cause === value) return undefined
+  return transportError(error.cause, depth + 1)
 }
 
 export * as MessageV2 from "./message-v2"
