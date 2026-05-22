@@ -50,6 +50,8 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     enterprise: info.enterprise,
     username: info.username,
     permissions: permissions(info.permission, info.tools),
+    approvals_reviewer: info.permission?.approvals_reviewer,
+    auto_review: info.permission?.auto_review,
     agents: agents(info),
     snapshots: info.snapshot,
     watcher: info.watcher,
@@ -87,12 +89,17 @@ function permissions(info?: ConfigPermissionV1.Info, tools?: Readonly<Record<str
     effect: enabled ? ("allow" as const) : ("deny" as const),
   }))
   for (const [action, rule] of Object.entries(info ?? {})) {
+    // #196：跳过非 rule 的 control 字段（approvals_reviewer/auto_review），
+    // #196：它们是 reviewer 配置而非 permission rule，不应进入迁移规则。
+    if (action === "approvals_reviewer" || action === "auto_review") continue
     if (!rule) continue
     if (typeof rule === "string") {
-      rules.push({ action, resource: "*", effect: rule })
+      // 保留四态原值及最后匹配顺序，控制字段已在上方排除。
+      if (rule === "allow" || rule === "deny" || rule === "ask" || rule === "auto") rules.push({ action, resource: "*", effect: rule })
       continue
     }
-    rules.push(...Object.entries(rule).map(([resource, effect]) => ({ action, resource, effect })))
+    // #196：pattern 映射沿用同一 action 转换，agent 权限也经过该迁移入口。
+    rules.push(...Object.entries(rule).flatMap(([resource, effect]): typeof rules => effect === "allow" || effect === "deny" || effect === "ask" || effect === "auto" ? [{ action, resource, effect }] : []))
   }
   return rules.length ? rules : undefined
 }

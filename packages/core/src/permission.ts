@@ -158,7 +158,8 @@ const layer = Layer.effect(
       if (denied(input, rules)) return { effect: "deny" as const, rules }
       const all = [...rules, ...(yield* savedRules())]
       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
-      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
+      // 后续自动裁决接线前保留人工审批，不能把尚未解析的 auto 当成 allow。
+      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") || effects.includes("auto") ? "ask" : "allow"
       return { effect, rules: all }
     })
 

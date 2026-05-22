@@ -11,6 +11,7 @@ import { Location } from "./location"
 import { Policy } from "./policy"
 import { AbsolutePath } from "./schema"
 import { ConfigAgent } from "./config/agent"
+import { ConfigAutoReview } from "./config/auto-review"
 import { ConfigAttachments } from "./config/attachments"
 import { ConfigCompaction } from "./config/compaction"
 import { ConfigCommand } from "./config/command"
@@ -65,6 +66,8 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   permissions: Permission.Ruleset.pipe(Schema.optional).annotate({
     description: "Ordered tool permission rules applied to agent tool use",
   }),
+  approvals_reviewer: ConfigAutoReview.ApprovalsReviewer.pipe(Schema.optional),
+  auto_review: ConfigAutoReview.Info.pipe(Schema.optional),
   agents: Schema.Record(Schema.String, ConfigAgent.Info).pipe(Schema.optional).annotate({
     description: "Named built-in agent overrides and custom agent definitions",
   }),
