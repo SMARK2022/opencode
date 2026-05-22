@@ -22,6 +22,7 @@ import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
 import { Question } from "@/question"
 import { Permission } from "@/permission"
+import { PermissionReviewer } from "@/permission/reviewer/service"
 import { Todo } from "@/session/todo"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
@@ -81,6 +82,10 @@ export const AppLayer = Layer.mergeAll(
   Skill.defaultLayer,
   Discovery.defaultLayer,
   Question.defaultLayer,
+  // The reviewer needs Session only to read a bounded transcript projection. We
+  // provide that dependency at AppLayer instead of inside reviewer.defaultLayer
+  // to avoid a module initialization cycle with Session importing Permission.
+  PermissionReviewer.defaultLayer.pipe(Layer.provide(Session.defaultLayer)),
   Permission.defaultLayer,
   Todo.defaultLayer,
   Session.defaultLayer,

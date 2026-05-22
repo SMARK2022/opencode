@@ -1,5 +1,6 @@
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
+import { Config } from "@/config/config"
 import { ConfigPermission } from "@/config/permission"
 import { InstanceState } from "@/effect/instance-state"
 import { ProjectID } from "@/project/schema"
@@ -13,10 +14,15 @@ import { Deferred, Effect, Layer, Schema, Context } from "effect"
 import os from "os"
 import { evaluate as evalRule } from "./evaluate"
 import { PermissionID } from "./schema"
+import { PermissionAuto } from "./auto"
+import { PermissionReviewer } from "./reviewer/service"
+import { PermissionSessionCache } from "./cache/session-cache"
+import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
+import * as Option from "effect/Option"
 
 const log = Log.create({ service: "permission" })
 
-export const Action = Schema.Literals(["allow", "deny", "ask"]).annotate({ identifier: "PermissionAction" })
+export const Action = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({ identifier: "PermissionAction" })
 export type Action = Schema.Schema.Type<typeof Action>
 
 export const Rule = Schema.Struct({
@@ -70,6 +76,26 @@ export const Event = {
       reply: Reply,
     }),
   ),
+  // Review events are observational only. Permission decisions still resolve via
+  // `ask`/errors below so existing callers do not need to subscribe to these new
+  // event types to preserve behavior.
+  ReviewCompleted: BusEvent.define(
+    "permission.review.completed",
+    Schema.Struct({
+      sessionID: SessionID,
+      reviewID: Schema.String,
+      outcome: Schema.Literals(["allow", "deny"]),
+      rationale: Schema.String,
+    }),
+  ),
+  ReviewFailed: BusEvent.define(
+    "permission.review.failed",
+    Schema.Struct({ sessionID: SessionID, reviewID: Schema.String, reason: Schema.String }),
+  ),
+  CircuitBroken: BusEvent.define(
+    "permission.review.circuit_broken",
+    Schema.Struct({ sessionID: SessionID, consecutive: Schema.Number, recent: Schema.Number }),
+  ),
 }
 
 export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("PermissionRejectedError", {}) {
@@ -94,7 +120,19 @@ export class DeniedError extends Schema.TaggedErrorClass<DeniedError>()("Permiss
   }
 }
 
-export type Error = DeniedError | RejectedError | CorrectedError
+export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()("PermissionAutoDeniedError", {
+  reason: Schema.String,
+}) {
+  override get message() {
+    // Keep denial feedback non-actionable from a bypass perspective. The agent
+    // may choose a safer implementation or ask the user for explicit approval,
+    // but the message must not encourage shell wrappers, generated scripts, MCP
+    // detours, or alternate tools for the same rejected outcome.
+    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds. Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.`
+  }
+}
+
+export type Error = DeniedError | AutoDeniedError | RejectedError | CorrectedError
 
 export const AskInput = Schema.Struct({
   ...Request.fields,
@@ -162,7 +200,13 @@ export const layer = Layer.effect(
       const { approved, pending } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
+      let needsAuto = false
+      const autoPatterns: string[] = []
 
+      // Evaluate every requested pattern before taking action. Static deny keeps
+      // highest precedence, while mixed auto/ask requests preserve both gates:
+      // auto can reject critical payloads, but reviewer allow cannot bypass a
+      // separate user approval requirement.
       for (const pattern of request.patterns) {
         const rule = evaluate(request.permission, pattern, ruleset, approved)
         log.info("evaluated", { permission: request.permission, pattern, action: rule })
@@ -172,7 +216,90 @@ export const layer = Layer.effect(
           })
         }
         if (rule.action === "allow") continue
+        if (rule.action === "auto") {
+          needsAuto = true
+          autoPatterns.push(pattern)
+          continue
+        }
         needsAsk = true
+      }
+
+      if (needsAuto) {
+        // All auto-review collaborators are optional at this layer. That keeps
+        // older tests/runtimes using Permission.layer working; missing reviewer
+        // or explicit fallback returns to the normal pending permission path.
+        const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
+        const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
+        const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
+        const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
+        const strict = config ? (yield* config.get()).permission?.auto_review?.strict === true : false
+        // Auto review/cache must operate only on the patterns that matched an
+        // `auto` rule. The original request may also contain ask-controlled
+        // patterns; caching those before the user replies would turn a rejected
+        // mixed request into a future silent allow if rules change later.
+        const autoRequest = { ...request, patterns: autoPatterns }
+        if (cache && (yield* cache.has(autoRequest))) {
+          // Session cache only satisfies the auto-controlled portion. If another
+          // pattern still needs ask, continue into the user prompt below instead
+          // of returning early. A cache hit is still an auto non-denial, so reset
+          // the advisory denial circuit just like a fresh precheck/reviewer allow.
+          if (circuit) yield* circuit.recordNonDenial(request.sessionID)
+          if (!needsAsk) return
+        } else {
+          const decision = yield* PermissionAuto.evaluate({ ...autoRequest, strict }, reviewer)
+          log.info("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
+          if (decision.action === "allow") {
+            if (circuit) yield* circuit.recordNonDenial(request.sessionID)
+            if (decision.source === "reviewer") {
+              const reviewID = "reviewID" in decision ? decision.reviewID : undefined
+              if (reviewID) {
+                // Reviewer allow is auditable and cacheable, but it is not a user
+                // approval. Record it before any fast return so the pure-auto path
+                // has the same cache/circuit/audit behavior as mixed auto+ask.
+                yield* bus.publish(Event.ReviewCompleted, {
+                  sessionID: request.sessionID,
+                  reviewID,
+                  outcome: "allow",
+                  rationale: decision.reason,
+                })
+              }
+              if (cache) yield* cache.put(autoRequest, "allow")
+            }
+            if (!needsAsk) return
+          }
+          if (decision.action === "deny") {
+            if (decision.source === "reviewer" && circuit) {
+              const reviewID = "reviewID" in decision ? decision.reviewID : undefined
+              if (reviewID) {
+                yield* bus.publish(Event.ReviewCompleted, {
+                  sessionID: request.sessionID,
+                  reviewID,
+                  outcome: "deny",
+                  rationale: decision.reason,
+                })
+              } else {
+                yield* bus.publish(Event.ReviewFailed, {
+                  sessionID: request.sessionID,
+                  reviewID: "unknown",
+                  reason: decision.reason,
+                })
+              }
+              const action = yield* circuit.recordDenial(request.sessionID)
+              if (action.kind === "interrupt") {
+                // Circuit state is advisory for now: the event gives the UI a
+                // chance to interrupt or explain repeated denials without
+                // changing this call's fail-closed outcome.
+                yield* bus.publish(Event.CircuitBroken, {
+                  sessionID: request.sessionID,
+                  consecutive: action.consecutive,
+                  recent: action.recent,
+                })
+              }
+            }
+            return yield* new AutoDeniedError({ reason: decision.reason })
+          }
+          if (decision.action === "ask") needsAsk = true
+        }
       }
 
       if (!needsAsk) return
@@ -263,6 +390,9 @@ export const layer = Layer.effect(
 )
 
 function expand(pattern: string): string {
+  // Permission config historically accepts home-relative patterns. Keep this
+  // expansion local to config-to-rules conversion so runtime command patterns
+  // are not rewritten after the user has already approved them.
   if (pattern.startsWith("~/")) return os.homedir() + pattern.slice(1)
   if (pattern === "~") return os.homedir()
   if (pattern.startsWith("$HOME/")) return os.homedir() + pattern.slice(5)
@@ -273,15 +403,36 @@ function expand(pattern: string): string {
 export function fromConfig(permission: ConfigPermission.Info) {
   const ruleset: Ruleset = []
   for (const [key, value] of Object.entries(permission)) {
-    if (typeof value === "string") {
+    // `approvals_reviewer` and `auto_review` are controls for the auto pipeline,
+    // not permission names. Treating them as rules would leak config metadata
+    // into the evaluator and could accidentally authorize a tool named after a
+    // config key.
+    if (key === "approvals_reviewer" || key === "auto_review") continue
+    if (isAction(value)) {
       ruleset.push({ permission: key, action: value, pattern: "*" })
       continue
     }
+    if (!isPermissionObject(value)) continue
     ruleset.push(
-      ...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
+      ...Object.entries(value).flatMap(([pattern, action]) =>
+        isAction(action) ? [{ permission: key, pattern: expand(pattern), action }] : [],
+      ),
     )
   }
   return ruleset
+}
+
+function isAction(input: unknown): input is Action {
+  // Guard dynamically parsed config before flattening. The schema is permissive
+  // enough to hold auto-review control objects, so runtime conversion must only
+  // emit actual permission actions.
+  return input === "ask" || input === "allow" || input === "deny" || input === "auto"
+}
+
+function isPermissionObject(input: unknown): input is Record<string, Action> {
+  // Arrays and auto_review objects are not permission pattern maps. Each nested
+  // value is checked by isAction before a rule is emitted.
+  return Boolean(input && typeof input === "object" && !Array.isArray(input))
 }
 
 export function merge(...rulesets: Ruleset[]): Ruleset {
@@ -316,6 +467,13 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
   return result
 }
 
-export const defaultLayer = layer.pipe(Layer.provide(Bus.layer))
+export const defaultLayer = layer.pipe(
+  Layer.provide(Bus.layer),
+  // Cache/circuit are local permission concerns, so the default layer can provide
+  // them without requiring the provider-backed reviewer. The reviewer stays
+  // optional to avoid a dependency cycle in unit tests and small runtimes.
+  Layer.provide(PermissionSessionCache.defaultLayer),
+  Layer.provide(PermissionCircuitBreaker.defaultLayer),
+)
 
 export * as Permission from "."
