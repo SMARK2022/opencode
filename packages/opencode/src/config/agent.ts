@@ -45,6 +45,10 @@ const AgentSchema = Schema.StructWithRest(
       description: "Maximum number of agentic iterations before forcing text-only response",
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
+    // Agent permissions are tool rules only. Auto-review controls are global
+    // permission-pipeline settings today; if they appear in agent frontmatter,
+    // StructWithRest preserves them under options instead of pretending the
+    // runtime reviewer honors per-agent policy/model overrides.
     permission: Schema.optional(ConfigPermission.Info),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
@@ -93,7 +97,7 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
   globalThis.Object.assign(permission, agent.permission)
 
   const steps = agent.steps ?? agent.maxSteps
-  return { ...agent, options, permission, ...(steps !== undefined ? { steps } : {}) }
+  return { ...agent, options, permission: permission as Schema.Schema.Type<typeof ConfigPermission.Info>, ...(steps !== undefined ? { steps } : {}) }
 }
 
 export const Info = AgentSchema.pipe(

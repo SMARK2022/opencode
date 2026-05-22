@@ -862,6 +862,38 @@ Ordered permissions`,
   })
 })
 
+test("agent markdown auto-review controls stay options instead of permission rules", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      const agentDir = path.join(dir, ".opencode", "agent")
+      await fs.mkdir(agentDir, { recursive: true })
+
+      await Filesystem.write(
+        path.join(agentDir, "reviewed.md"),
+        `---
+permission:
+  bash: auto
+approvals_reviewer: auto_review
+auto_review:
+  fallback: user
+---
+Reviewed permissions`,
+      )
+    },
+  })
+  await withTestInstance({
+    directory: tmp.path,
+    fn: async (ctx) => {
+      const config = await load(ctx)
+      expect(config.agent?.reviewed?.permission).toEqual({ bash: "auto" })
+      expect(config.agent?.reviewed?.options).toMatchObject({
+        approvals_reviewer: "auto_review",
+        auto_review: { fallback: "user" },
+      })
+    },
+  })
+})
+
 test("loads agents from .opencode/agents (plural)", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
@@ -1779,6 +1811,51 @@ test("config parser preserves permission order while rejecting unknown top-level
   } catch (err) {
     const error = err as { data?: { issues?: Array<{ code?: string; keys?: string[]; path?: string[] }> } }
     expect(error.data?.issues?.[0]).toMatchObject({ code: "unrecognized_keys", keys: ["invalid_field"], path: [] })
+  }
+})
+
+test("config parser accepts permission auto review controls", () => {
+  // This covers the schema boundary rather than Permission.fromConfig: the
+  // auto_review object contains numbers/booleans that must not be parsed as
+  // arbitrary permission action values.
+  const config = ConfigParse.schema(
+    Config.Info,
+    {
+      permission: {
+        bash: "auto",
+        approvals_reviewer: "auto_review",
+        auto_review: {
+          strict: true,
+          fallback: "user",
+          policy: "Deny unrequested pushes.",
+          max_consecutive_denials: 1,
+          max_recent_denials: 2,
+          recent_denial_window: 3,
+        },
+      },
+    },
+    "test",
+  )
+
+  expect(config.permission?.bash).toBe("auto")
+  expect(config.permission?.approvals_reviewer).toBe("auto_review")
+  expect(config.permission?.auto_review?.max_consecutive_denials).toBe(1)
+})
+
+test("config parser rejects unsupported approval_policy control", () => {
+  for (const approval_policy of ["on_request", { fallback: "user" }]) {
+    expect(() =>
+      ConfigParse.schema(
+        Config.Info,
+        {
+          permission: {
+            bash: "auto",
+            approval_policy,
+          },
+        },
+        "test",
+      ),
+    ).toThrow()
   }
 })
 

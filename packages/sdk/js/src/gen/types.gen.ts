@@ -972,6 +972,41 @@ export type KeybindsConfig = {
   terminal_title_toggle?: string
 }
 
+export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
+
+export type ApprovalsReviewer = "user" | "auto_review"
+
+export type AutoReviewConfig = {
+  model?: string
+  timeout_ms?: number
+  policy_path?: string
+  policy?: string
+  fallback?: "deny" | "user"
+  strict?: boolean
+  max_consecutive_denials?: number
+  max_recent_denials?: number
+  recent_denial_window?: number
+}
+
+export type PermissionObjectConfig = {
+  [key: string]: PermissionActionConfig
+}
+
+export type PermissionRuleConfig = PermissionActionConfig | PermissionObjectConfig
+
+export type PermissionConfig =
+  | PermissionActionConfig
+  | {
+      edit?: PermissionRuleConfig
+      bash?: PermissionRuleConfig
+      webfetch?: PermissionActionConfig
+      doom_loop?: PermissionActionConfig
+      external_directory?: PermissionRuleConfig
+      approvals_reviewer?: ApprovalsReviewer
+      auto_review?: AutoReviewConfig
+      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
+    }
+
 export type AgentConfig = {
   model?: string
   temperature?: number
@@ -994,17 +1029,7 @@ export type AgentConfig = {
    * Maximum number of agentic iterations before forcing text-only response
    */
   maxSteps?: number
-  permission?: {
-    edit?: "ask" | "allow" | "deny"
-    bash?:
-      | ("ask" | "allow" | "deny")
-      | {
-          [key: string]: "ask" | "allow" | "deny"
-        }
-    webfetch?: "ask" | "allow" | "deny"
-    doom_loop?: "ask" | "allow" | "deny"
-    external_directory?: "ask" | "allow" | "deny"
-  }
+  permission?: PermissionConfig
   [key: string]:
     | unknown
     | string
@@ -1015,17 +1040,7 @@ export type AgentConfig = {
     | boolean
     | ("subagent" | "primary" | "all")
     | number
-    | {
-        edit?: "ask" | "allow" | "deny"
-        bash?:
-          | ("ask" | "allow" | "deny")
-          | {
-              [key: string]: "ask" | "allow" | "deny"
-            }
-        webfetch?: "ask" | "allow" | "deny"
-        doom_loop?: "ask" | "allow" | "deny"
-        external_directory?: "ask" | "allow" | "deny"
-      }
+    | PermissionConfig
     | undefined
 }
 
@@ -1323,17 +1338,7 @@ export type Config = {
    */
   instructions?: Array<string>
   layout?: LayoutConfig
-  permission?: {
-    edit?: "ask" | "allow" | "deny"
-    bash?:
-      | ("ask" | "allow" | "deny")
-      | {
-          [key: string]: "ask" | "allow" | "deny"
-        }
-    webfetch?: "ask" | "allow" | "deny"
-    doom_loop?: "ask" | "allow" | "deny"
-    external_directory?: "ask" | "allow" | "deny"
-  }
+  permission?: PermissionConfig
   tools?: {
     [key: string]: boolean
   }
@@ -1591,13 +1596,13 @@ export type Agent = {
   temperature?: number
   color?: string
   permission: {
-    edit: "ask" | "allow" | "deny"
+    edit: "ask" | "allow" | "deny" | "auto"
     bash: {
-      [key: string]: "ask" | "allow" | "deny"
+      [key: string]: "ask" | "allow" | "deny" | "auto"
     }
-    webfetch?: "ask" | "allow" | "deny"
-    doom_loop?: "ask" | "allow" | "deny"
-    external_directory?: "ask" | "allow" | "deny"
+    webfetch?: "ask" | "allow" | "deny" | "auto"
+    doom_loop?: "ask" | "allow" | "deny" | "auto"
+    external_directory?: "ask" | "allow" | "deny" | "auto"
   }
   model?: {
     modelID: string

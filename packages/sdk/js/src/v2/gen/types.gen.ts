@@ -718,7 +718,7 @@ export type Part =
   | RetryPart
   | CompactionPart
 
-export type PermissionAction = "allow" | "deny" | "ask"
+export type PermissionAction = "allow" | "deny" | "ask" | "auto"
 
 export type PermissionRule = {
   permission: string
@@ -934,7 +934,21 @@ export type ReferenceConfig = {
   [key: string]: ReferenceConfigEntry
 }
 
-export type PermissionActionConfig = "ask" | "allow" | "deny"
+export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
+
+export type ApprovalsReviewer = "user" | "auto_review"
+
+export type AutoReviewConfig = {
+  model?: string
+  timeout_ms?: number
+  policy_path?: string
+  policy?: string
+  fallback?: "deny" | "user"
+  strict?: boolean
+  max_consecutive_denials?: number
+  max_recent_denials?: number
+  recent_denial_window?: number
+}
 
 export type PermissionObjectConfig = {
   [key: string]: PermissionActionConfig
@@ -962,7 +976,9 @@ export type PermissionConfig =
       lsp?: PermissionRuleConfig
       doom_loop?: PermissionActionConfig
       skill?: PermissionRuleConfig
-      [key: string]: PermissionRuleConfig | PermissionActionConfig | undefined
+      approvals_reviewer?: ApprovalsReviewer
+      auto_review?: AutoReviewConfig
+      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
     }
 
 export type AgentConfig = {
