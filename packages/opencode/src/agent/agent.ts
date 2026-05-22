@@ -9,6 +9,7 @@ import { ProviderTransform } from "@/provider/transform"
 import PROMPT_GENERATE from "./generate.txt"
 import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
+import PROMPT_PERMISSION_REVIEWER from "./prompt/permission-reviewer.txt"
 import PROMPT_SCOUT from "./prompt/scout.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
@@ -76,6 +77,8 @@ export interface Interface {
 }
 
 type State = Omit<Interface, "generate">
+
+const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -231,6 +234,23 @@ export const layer = Layer.effect(
             mode: "subagent",
             native: true,
           },
+          "permission-reviewer": {
+            name: "permission-reviewer",
+            description: `Isolated reviewer for auto permission prompt decisions. It returns structured allow/deny judgments and must not execute the requested action itself.`,
+            // Hidden native reviewer is a reserved internal agent. Its permissions
+            // deny every normal tool and allow only the no-side-effect decision
+            // tool, so even accidental exposure cannot execute the requested
+            // command or mutate project state.
+            permission: Permission.fromConfig({
+              "*": "deny",
+              permission_review_decision: "allow",
+            }),
+            prompt: PROMPT_PERMISSION_REVIEWER,
+            options: {},
+            mode: "subagent",
+            hidden: true,
+            native: true,
+          },
           ...(flags.experimentalScout
             ? {
                 scout: {
@@ -310,6 +330,10 @@ export const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
+          // Reserved internal agents carry security invariants that user config
+          // must not relax. In particular, `permission-reviewer` must remain
+          // hidden and limited to its no-side-effect decision tool.
+          if (RESERVED_AGENT_NAMES.has(key)) continue
           if (value.disable) {
             delete agents[key]
             continue
@@ -332,7 +356,7 @@ export const layer = Layer.effect(
           item.mode = value.mode ?? item.mode
           item.color = value.color ?? item.color
           item.hidden = value.hidden ?? item.hidden
-          item.name = value.name ?? item.name
+          if (value.name && !RESERVED_AGENT_NAMES.has(value.name)) item.name = value.name
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))

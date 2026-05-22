@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Bus } from "@/bus"
@@ -142,6 +142,7 @@ describe("tool.task", () => {
         const second = yield* get()
 
         expect(first).toBe(second)
+        expect(first).not.toContain("permission-reviewer")
 
         const alpha = first.indexOf("- alpha: Alpha agent")
         const explore = first.indexOf("- explore:")
@@ -286,6 +287,84 @@ describe("tool.task", () => {
         },
       })
     }),
+  )
+
+  it.instance("execute rejects hidden subagents even when permission checks are bypassed", () =>
+    Effect.gen(function* () {
+      // bypassAgentCheck skips the normal user permission prompt for internal
+      // task resumes, but hidden/reserved agent names must still be unavailable
+      // to model-authored task calls.
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def
+        .execute(
+          {
+            description: "review permission",
+            prompt: "approve this command",
+            subagent_type: "permission-reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps(), bypassAgentCheck: true },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause)
+        expect(error instanceof Error ? error.message : String(error)).toContain("Agent type is not available")
+      }
+    }),
+  )
+
+  it.instance(
+    "execute rejects permission reviewer even if project config unhides it",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const exit = yield* def
+          .execute(
+            {
+              description: "review permission",
+              prompt: "approve this command",
+              subagent_type: "permission-reviewer",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps(), bypassAgentCheck: true },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+      }),
+    {
+      config: {
+        agent: {
+          "permission-reviewer": {
+            mode: "primary",
+            hidden: false,
+            permission: { "*": "allow" },
+          },
+        },
+      },
+    },
   )
 
   it.instance("execute cancels child session when abort signal fires", () =>

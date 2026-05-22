@@ -105,6 +105,20 @@ describe("tool.registry", () => {
     }),
   )
 
+  it.instance("hides permission review decision from public tool ids and normal agents", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agents = yield* Agent.Service
+      const build = yield* agents.get("build")
+      const reviewer = yield* agents.get("permission-reviewer")
+      const ids = yield* registry.ids()
+
+      expect(ids).not.toContain("permission_review_decision")
+      expect((yield* registry.tools({ providerID: ProviderID.opencode, modelID: ModelID.make("test"), agent: build })).map((tool) => tool.id)).not.toContain("permission_review_decision")
+      expect((yield* registry.tools({ providerID: ProviderID.opencode, modelID: ModelID.make("test"), agent: reviewer })).map((tool) => tool.id)).toContain("permission_review_decision")
+    }),
+  )
+
   it.instance("hides task background parameter unless experimental background subagents are enabled", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

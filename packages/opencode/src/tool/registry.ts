@@ -1,4 +1,5 @@
 import { PlanExitTool } from "./plan"
+import { PermissionReviewDecisionTool } from "./permission_review_decision"
 import { Session } from "@/session/session"
 import { QuestionTool } from "./question"
 import { ShellTool } from "./shell"
@@ -122,6 +123,7 @@ export const layer: Layer.Layer<
     const todo = yield* TodoWriteTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
+    const permissionReviewDecision = yield* PermissionReviewDecisionTool
     const webfetch = yield* WebFetchTool
     const websearch = yield* WebSearchTool
     const repoClone = yield* RepoCloneTool
@@ -237,6 +239,7 @@ export const layer: Layer.Layer<
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
+          permission_review_decision: Tool.init(permissionReviewDecision),
         })
 
         return {
@@ -258,6 +261,7 @@ export const layer: Layer.Layer<
             ...(flags.experimentalScout ? [tool.repo_clone, tool.repo_overview] : []),
             tool.skill,
             tool.patch,
+            tool.permission_review_decision,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],
@@ -273,7 +277,10 @@ export const layer: Layer.Layer<
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
-      return (yield* all()).map((tool) => tool.id)
+      // `permission_review_decision` is an internal reviewer protocol tool. Keep
+      // it registered so the hidden reviewer can receive it, but do not advertise
+      // it as a public tool id for permissions, plugins, or normal agents.
+      return (yield* all()).map((tool) => tool.id).filter((id) => id !== PermissionReviewDecisionTool.id)
     })
 
     const describeSkill = Effect.fn("ToolRegistry.describeSkill")(function* (agent: Agent.Info) {
@@ -296,7 +303,10 @@ export const layer: Layer.Layer<
     })
 
     const describeTask = Effect.fn("ToolRegistry.describeTask")(function* (agent: Agent.Info) {
-      const items = (yield* agents.list()).filter((item) => item.mode !== "primary")
+      // Hidden agents are implementation details, not subagent choices. Filtering
+      // here prevents prompt discovery; TaskTool also enforces the same boundary
+      // at execution time for hand-written or model-invented subagent names.
+      const items = (yield* agents.list()).filter((item) => item.mode !== "primary" && item.hidden !== true)
       const filtered = items.filter(
         (item) => Permission.evaluate("task", item.name, agent.permission).action !== "deny",
       )
@@ -311,10 +321,16 @@ export const layer: Layer.Layer<
     })
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      const internalReviewer = yield* agents.get("permission-reviewer")
       const filtered = (yield* all()).filter((tool) => {
         if (tool.id === WebSearchTool.id) {
           return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
         }
+
+        // Decision submission is only available inside the hidden reviewer. A
+        // normal agent must not be able to mint review metadata by calling this
+        // tool directly.
+        if (tool.id === PermissionReviewDecisionTool.id) return input.agent === internalReviewer
 
         const usePatch =
           input.modelID.includes("gpt-") && !input.modelID.includes("oss") && !input.modelID.includes("gpt-4")

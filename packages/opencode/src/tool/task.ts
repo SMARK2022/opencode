@@ -124,6 +124,23 @@ export const TaskTool = Tool.define(
         )
       }
 
+      const next = yield* agent.get(params.subagent_type)
+      if (!next) {
+        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
+      }
+      // `permission-reviewer` is a reserved protocol agent, not a user-callable
+      // subagent. Check the requested key as well as `hidden` so project config
+      // cannot unhide it and route normal task execution through the reviewer.
+      if (params.subagent_type === "permission-reviewer" && ctx.extra?.allowHiddenAgent !== true) {
+        return yield* Effect.fail(new Error(`Agent type is not available: ${params.subagent_type}`))
+      }
+      // `bypassAgentCheck` is used for internally materialized task parts, but it
+      // must not expose hidden implementation agents to normal task routing. A
+      // separate allowHiddenAgent flag would be required for a future internal path.
+      if (next.hidden === true && ctx.extra?.allowHiddenAgent !== true) {
+        return yield* Effect.fail(new Error(`Agent type is not available: ${params.subagent_type}`))
+      }
+
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
           permission: id,
@@ -134,11 +151,6 @@ export const TaskTool = Tool.define(
             subagent_type: params.subagent_type,
           },
         })
-      }
-
-      const next = yield* agent.get(params.subagent_type)
-      if (!next) {
-        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
       const taskID = params.task_id
