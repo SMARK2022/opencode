@@ -90,7 +90,7 @@ type Dependencies = {
   readonly db: Database.Interface["db"]
   readonly events: EventV2.Interface
   readonly llm: {
-    readonly stream: (request: LLMRequest) => Stream.Stream<LLMEvent, LLMError>
+    readonly stream: (request: LLMRequest, onPrepared?: (body: unknown) => Effect.Effect<void>) => Stream.Stream<LLMEvent, LLMError>
   }
   readonly config: readonly Config.Entry[]
 }
@@ -216,8 +216,10 @@ export const make = (dependencies: Dependencies) => {
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
     })
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    // 摘要也发送到同一模型，独立 input 上限不能只约束普通 turn 而放过摘要请求。
-    if (context !== undefined && context > 0 && Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
+    const samples = Token.inputHistory(input.entries.map((entry) => entry.message), input.model)
+    // 摘要上传也用同模型确认密度；tail选择仍保留原来的粗略大小启发式。
+    if (context !== undefined && context > 0 && Token.estimateRequest({ messages: [Message.user(summaryPrompt)] }, samples).input >
+      Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
     const messageID = SessionMessage.ID.create()
     const startedEventID = EventV2.ID.create()
     const terminalEventID = EventV2.ID.create()
@@ -239,14 +241,15 @@ export const make = (dependencies: Dependencies) => {
       // 只在真实 scope 退出启用短通知；运行时无摘要失败继续通知全部原 observer。
       yield* fail(Cause.hasInterrupts(exit.cause), String(Cause.squash(exit.cause)), true)
     }))
+    const modelRef = { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
+      ...(input.variant === undefined ? {} : { variant: input.variant }) }
     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
       reason,
       // Started 冻结真实调用的 variant；未选择时仍省略，不在 finish 时查询会话或猜默认值。
-      model: { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
-        ...(input.variant === undefined ? {} : { variant: input.variant }) },
+      model: modelRef,
     }, { id: startedEventID })
 
     const chunks: string[] = []
@@ -259,6 +262,14 @@ export const make = (dependencies: Dependencies) => {
           messages: [Message.user(summaryPrompt)],
           tools: [],
           generation: { maxTokens: summaryOutput },
+        }),
+        // 与普通上传复用真实compile回调，估算归压缩独立身份而不是当前用户输入。
+        (body) => Effect.gen(function* () {
+          yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
+            sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now, model: modelRef,
+            inputEstimate: { ...Token.estimateRequest(body, samples, []),
+              contextLimit: input.model.defaults?.limits?.context ?? input.model.route.defaults.limits?.context ?? 0 },
+          })
         }),
       )
       .pipe(
@@ -306,7 +317,8 @@ export const make = (dependencies: Dependencies) => {
       : usable
     if (
       // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
-      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }, []).input <=
+      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools },
+        Token.inputHistory(input.entries.map((entry) => entry.message), input.model)).input <=
       Math.min(usable, inputUsable)
     )
       return false

@@ -317,13 +317,7 @@ const layer = Layer.effect(
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()
       // ContextEpoch 仍决定 baseline 和历史选择，估算不另建历史或改变请求。
-      const samples = context.toReversed().flatMap((message) => {
-        // publisher 保存实际 provider/API model ID；边界只去除品牌，不换成 Session 的 catalog 别名。
-        if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
-          || !message.inputEstimate?.confirmed || !message.tokens) return []
-        return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
-          input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
-      })
+      const samples = Token.inputHistory(context, model)
       let inputEstimate: SessionMessage.InputEstimate | undefined
       // 只使用现有 provider step；不启动第二次 stream 或 advisory wake。
       const publisher = createLLMEventPublisher(events, {

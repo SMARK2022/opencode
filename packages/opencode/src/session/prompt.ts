@@ -59,7 +59,8 @@ import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 // #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
 import { usable } from "./overflow"
-import { Token } from "@opencode-ai/core/util/token"
+// #194：改用 TokenEstimate 统一上传估算
+import { TokenEstimate } from "@/token/estimate"
 
 // #159：decide 最近轮目标占用区间（相对 usable）
 // LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
@@ -1260,7 +1261,7 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 tip #140 tokenEstimate
+    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 #194 TokenEstimate
     const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
       messages: SessionV1.WithParts[]
       model: Provider.Model
@@ -1283,9 +1284,15 @@ const layer = Layer.effect(
       for (const [position, start] of starts.entries()) {
         const candidate = sanitized.slice(start)
         const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
-        // 不用 estimateInputTokens：tip 已历史校准，decide 窗口统一 Token.estimate
+        // #194：decide mode 用 estimateUploadInput——与 normal prompt 同一估算路径
+        const decideEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
         const ratio =
-          Token.estimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
+          TokenEstimate.estimateUploadInput({
+            text: [input.systemText, decideEstimate.text].join("\n"),
+            attachments: decideEstimate.attachments,
+            history: candidate,
+            model: input.model,
+          }).inputTokens / limit
         // 超满：退回上一个可容纳窗口
         if (ratio >= DECIDE_MAX) return fallback ?? candidate
 

@@ -235,8 +235,10 @@ export const toDecideMessages = (context: readonly SessionMessage.Message[], mod
   const starts = sanitized.flatMap((message, index) => message.type === "user" ? [index] : []).toReversed()
   let fallback: ReturnType<typeof toLLMMessages> | undefined
   for (const [position, start] of starts.entries()) {
-    const candidate = toLLMMessages(sanitized.slice(start), model)
-    const ratio = Token.estimate([system, JSON.stringify(candidate)].join("\n")) / limit
+    const window = sanitized.slice(start)
+    const candidate = toLLMMessages(window, model)
+    // decide的工具/媒体投影与窗口历史一同估算，不能在最后发送时才学习密度。
+    const ratio = Token.estimateRequest({ system, messages: candidate }, Token.inputHistory(window, model)).input / limit
     // 超满时回到最近可容纳的完整用户轮，而不是截断工具输入或输出。
     if (ratio >= 1) return fallback ?? candidate
     fallback = candidate

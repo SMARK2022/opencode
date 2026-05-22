@@ -43,6 +43,7 @@ import * as SessionRunnerLLM from "@opencode-ai/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { SessionCompaction } from "@opencode-ai/core/session/compaction"
+import { toDecideMessages } from "../src/session/runner/to-llm-message"
 import { SessionHistory } from "@opencode-ai/core/session/history"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
@@ -1406,6 +1407,17 @@ describe("SessionRunnerLLM", () => {
       expect(history.some((message) => message.type === "user" && message.text.startsWith("old-marker"))).toBe(true)
       expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "tool"))).toBe(true)
       expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "reasoning" && part.text === reasoning))).toBe(true)
+      const budgetModel = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 100_000, input: 80_000, output: 0 } }) })
+      const learned = history.map((message) => message.type === "user" && message.text.startsWith("old-marker")
+        ? { ...message, text: "old-marker " + "x".repeat(400_000) }
+        : message.type !== "assistant" ? message : {
+          ...message, inputEstimate: { bodyChars: 827_111, input: 128_159, confirmed: true },
+          tokens: { input: 128_159, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        })
+      // 同一400k历史在学习密度下可保留；清掉确认标记后才按默认/4收缩。
+      expect(JSON.stringify(toDecideMessages(learned, budgetModel, "system", 0))).toContain("old-marker")
+      expect(JSON.stringify(toDecideMessages(learned.map((message) => message.type !== "assistant" ? message
+        : { ...message, inputEstimate: undefined }), budgetModel, "system", 0))).not.toContain("old-marker")
     }),
   )
 
@@ -2025,12 +2037,22 @@ describe("SessionRunnerLLM", () => {
         const resolved = yield* SessionRunnerModel.resolve(info, selected)
         expect(resolved.route.defaults.limits?.input).toBe(limit)
         let streams = 0
+        let estimated: SessionMessage.InputEstimate | undefined
+        let compactRequestID: string | undefined
         const compaction = SessionCompaction.make({
           db: database.db, events,
           // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
-          llm: { stream: () => {
+          llm: { stream: (summaryRequest, onPrepared) => {
             streams++
-            return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
+            return Stream.unwrap(Effect.gen(function* () {
+              yield* (onPrepared?.({ messages: summaryRequest.messages }) ?? Effect.void)
+              const pending = yield* store.get(sessionID)
+              estimated = pending?.request?.inputEstimate
+              compactRequestID = pending?.request?.messageID
+              expect(estimated?.bodyChars).toBeGreaterThan(0)
+              expect(estimated?.confirmed).toBe(false)
+              return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
+            }))
           } },
           config: buffer === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({
             compaction: new ConfigCompaction.Info({ buffer }),
@@ -2046,6 +2068,20 @@ describe("SessionRunnerLLM", () => {
             { type: "text", text: "x".repeat(50_000) }, { type: "media", mediaType: "image/png", data: `data:image/png;base64,${"a".repeat(400_000)}` },
           ])] })
           expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: mediaRequest })).toBe(false)
+          const learnedEntries = entries.map((entry) => entry.message.type !== "assistant" ? entry : { ...entry, message: {
+            ...entry.message, model: { id: modelID, providerID },
+            inputEstimate: { bodyChars: 827_111, input: 128_159, confirmed: true },
+            tokens: { input: 128_159, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          } })
+          const learnedRequest = LLM.request({ model: resolved, messages: [Message.user("x".repeat(400_000))] })
+          // 实际压缩owner应在读取provider前使用确认密度；缺样本对照则触发一次摘要。
+          expect(yield* compaction.compactIfNeeded({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(false)
+          expect(streams).toBe(0)
+          expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
+          expect(streams).toBe(1)
+          expect(yield* compaction.compact({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
+          expect(estimated?.charsPerToken).toBeCloseTo(6.45, 1)
+          expect((yield* store.get(sessionID))?.request?.messageID).not.toBe(compactRequestID)
         }
         yield* registration.dispose
       }

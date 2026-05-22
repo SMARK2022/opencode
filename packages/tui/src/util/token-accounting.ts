@@ -137,12 +137,13 @@ export function tokenAccounting(
       if (chars && chars >= 100) {
         const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
         if (tok > 0) {
-          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number } } | undefined
+          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number; tokens: number } } | undefined
           // #175：校准剔除 media.raw，加回 text 占位
-          ratioChars += bd?.media
-            ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
-            : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-          ratioTokens += tok
+          // #194：旧附件样本排除，已知媒体量从确认分母扣除，不能稀释文本密度。
+          if (bd?.media || !bd?.messages?.attachments) {
+            ratioChars += bd?.media ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars) : chars
+            ratioTokens += Math.max(0, tok - (bd?.media?.tokens ?? 0))
+          }
         }
       }
 
@@ -194,9 +195,10 @@ export function tokenAccounting(
   }
 
   // ── 3. ratio ──
-  // #122：样本不足时回落 DEFAULT_RATIO，避免小样本失真
+  // #194：clamp 2..8——与 TokenEstimate.learnInputCharsPerToken 同口径，防极端样本失真
+  // #194：TUI 不能直接 import TokenEstimate（包边界），但 ratio 逻辑与 daemon 对齐
   const density = projection?.session?.request?.inputEstimate?.charsPerToken
-  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
+  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
   // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
   const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
   // 持久投影拥有完整请求确认值；输入密度与输出校准分别进入既有尾部 helper。

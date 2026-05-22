@@ -1,3 +1,4 @@
+import { TokenEstimate } from "@/token/estimate"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
@@ -802,8 +803,9 @@ const layer = Layer.effect(
               })
               // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
               const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
-              // 限制异常历史密度对预检的影响；无样本时现有估算器仍给出 /4。
-              const charsPerToken = Math.min(4, Math.max(3, estimate.charsPerToken ?? 4))
+              // #194：同模型优先、会话历史回退，普通与摘要请求都在真实 prepared 入口学习。
+              const charsPerToken = TokenEstimate.learnInputCharsPerToken({ messages: history, model: ctx.model })?.charsPerToken
+                ?? estimate.charsPerToken ?? 4
               ctx.assistantMessage.inputEstimate = {
                 ...estimate,
                 // clamp 只调整文本密度，媒体 token 固定追加一次，raw 字符只作展示基数。

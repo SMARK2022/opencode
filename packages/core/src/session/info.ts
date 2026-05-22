@@ -30,6 +30,16 @@ export const selection = {
       SELECT id, time_created, promoted_seq, 'native' AS kind, coalesce(promoted_seq, admitted_seq) AS position
       FROM session_input WHERE session_id = "session"."id"
       ORDER BY coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
+    ), active_compaction AS (
+      -- 复用压缩独立身份，仅在其真实生命周期内显示prepared估算，不冒用用户admission。
+      SELECT json_extract(e.data, '$.messageID') AS id, json_extract(e.data, '$.timestamp') AS time_created,
+        NULL AS promoted_seq, 'compaction' AS kind, e.seq AS position
+      FROM event e WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.compaction.started.1'
+        AND NOT EXISTS (
+          SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
+            AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = json_extract(e.data, '$.messageID')
+            AND terminal.type IN ('session.next.compaction.ended.1', 'session.next.compaction.failed.1'))
+      ORDER BY e.seq DESC LIMIT 1
     ), current_request AS (
       -- V1 首次用户写入与 native admission/promotion 共用 Session event 序列，修订不重新接管身份。
       -- 迁移清过 event/input/native message 而保留 V1 message；无事件的旧用户属于序列开始前。
@@ -39,7 +49,7 @@ export const selection = {
           ON e.aggregate_id = "session"."id" AND e.type = 'message.updated.1'
           AND json_extract(e.data, '$.info.id') = v.id AND json_extract(e.data, '$.info.role') = 'user'
         GROUP BY v.id
-        UNION ALL SELECT * FROM native_request)
+        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction)
       -- admission 或 promotion 决定最新身份；新 admission 等待时不能借用旧轮次。
       ORDER BY position DESC, time_created DESC, id DESC LIMIT 1
     ), assistants AS MATERIALIZED (
@@ -76,7 +86,7 @@ export const selection = {
       SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
     ), native_estimate AS (
       -- 复用 durable event 保存首包前估算；请求身份仍属于原 current_request。
-      SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind = 'native'
+      SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind IN ('native', 'compaction')
       WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.request.estimated.1'
         AND json_extract(e.data, '$.messageID') = r.id
         AND NOT EXISTS (SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
