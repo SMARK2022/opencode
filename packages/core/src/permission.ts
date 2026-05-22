@@ -187,7 +187,10 @@ const layer = Layer.effect(
       const tool = recorded?.sessionID === input.sessionID && recorded.message.type === "assistant"
         ? recorded.message.content.find((part) => part.type === "tool" && part.id === input.source?.callID) : undefined
       // 审查读取已经记录的工具输入，不提前读取尚未获准访问的目标文件。
-      const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata }
+      const selected = input.agent ?? (yield* sessions.get(input.sessionID))?.agent
+      const agent = yield* agents.resolve(selected)
+      // 身份来自实际权限owner选择，不依赖模型自行声称使用Auto。
+      const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata, agent: agent?.id }
       const key = JSON.stringify([input.action, resources, metadata, input.agent, all, options, Config.latest(entries, "approvals_reviewer")])
       const known = cache.get(input.sessionID) ?? new Set<string>()
       cache.set(input.sessionID, known)
@@ -202,7 +205,7 @@ const layer = Layer.effect(
         record(false)
         return { effect, rules: all }
       }
-      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict }, {
+      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
         review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
       })
       const sessionID = SessionID.make(input.sessionID)

@@ -1,4 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
@@ -63,9 +64,9 @@ export const layer = Layer.effect(
     const review: Interface["review"] = (input) => Effect.gen(function* () {
       const cfg = yield* config.get()
       const permission = cfg.permission
-      // #198：approvals_reviewer 非 auto_review 时 reviewer 已禁用——回退到用户审批
-      // #198：禁用检查在构建请求前——避免不必要地加载策略和 transcript
-      if (permission?.approvals_reviewer !== "auto_review") return yield* new ReviewerDisabled()
+      // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 Auto 隐式启用
+      if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
+      const autoReview = permission?.auto_review
 
       const run = Effect.gen(function* () {
         const request = new ReviewerRequest({
@@ -74,7 +75,7 @@ export const layer = Layer.effect(
           metadata: { ...input.metadata },
           precheck: input.precheck,
         })
-        const tenantPolicy = yield* loadTenantPolicy(permission.auto_review)
+        const tenantPolicy = yield* loadTenantPolicy(autoReview)
         // #198：transcript 从 session 消息提取——有 sessionID 时取最近 40 条，失败时返回空 transcript 而非中断
         // #198：transcript 失败不阻断审查——空 transcript 仍允许 reviewer 基于 planned action 和策略做决策
         const transcript = input.sessionID
@@ -91,10 +92,10 @@ export const layer = Layer.effect(
         })
         // #198：模型解析——配置了 auto_review.model 时用指定模型，否则用 default + small model 组合
         // #198：优先使用 small model——reviewer 不需高创造力，小模型更快更省成本且足以做安全判定
-        const model = permission.auto_review?.model
+        const model = autoReview?.model
           ? yield* provider.getModel(
-              Provider.parseModel(permission.auto_review.model).providerID,
-              Provider.parseModel(permission.auto_review.model).modelID,
+              Provider.parseModel(autoReview.model).providerID,
+              Provider.parseModel(autoReview.model).modelID,
             )
           : yield* Effect.gen(function* () {
               const current = yield* provider.defaultModel()
@@ -113,7 +114,7 @@ export const layer = Layer.effect(
           // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
           // #198：90 秒上限覆盖大多数 provider 响应——超过此时间通常表示 provider 故障而非正常审查
           Effect.timeoutOrElse({
-            duration: `${permission.auto_review?.timeout_ms ?? 90_000} millis`,
+            duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
             orElse: () => Effect.fail(new ReviewerTimedOut()),
           }),
           // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
@@ -133,7 +134,7 @@ export const layer = Layer.effect(
       // #198：Disabled 保持原样——服务禁用是配置决策，不应被 fallback 策略覆盖为其他错误类型
       return yield* run.pipe(
         Effect.catch((error: unknown) =>
-          permission.auto_review?.fallback === "user" && !(error instanceof ReviewerDisabled)
+          autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
             ? Effect.fail(new ReviewerFallbackToUser({ reason: errorMessage(error) }))
             : Effect.fail(error),
         ),
@@ -157,6 +158,14 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
 // #198：区分错误类型——reviewer 自身错误已有 _tag 标识，provider 错误需包装为 RunError
 function isReviewerError(error: unknown): error is Error {
   return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
+}
+
+// #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
+// #203：无全局配置时原生 Auto agent 隐式启用 reviewer；否则选 Auto 只会把 cautious 降级成普通 ask
+function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
+  if (permission?.approvals_reviewer === "user") return false
+  if (permission?.approvals_reviewer === "auto_review") return true
+  return metadata.agent === "Auto"
 }
 
 // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
@@ -189,6 +198,11 @@ export const defaultLayer = layer.pipe(
   Layer.provide(LayerNode.compile(Config.node)),
   Layer.provide(LayerNode.compile(Provider.node)),
 )
+
+// #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
+// #203：Layer.suspend 保留历史循环边界：Session 导入 Permission 类型，故 Session.defaultLayer
+// #203：不能在本模块初始化期间被解引用
+export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))))
 
 // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
 export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node] })

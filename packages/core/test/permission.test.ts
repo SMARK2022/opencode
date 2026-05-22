@@ -354,6 +354,20 @@ describe("PermissionV2", () => {
     const sessions = yield* SessionStore.Service
     const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
     // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
+    const agents = yield* AgentV2.Service
+    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("Auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
+    const automatic = assertion({ agent: AgentV2.ID.make("Auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
+    expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(1)
+    // 外部目录复用同一shell预检，不再为相同命令调用第二次模型。
+    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(1)
+    reviewSettings = new Config.Info({ approvals_reviewer: "user" })
+    const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
+    expect(user.effect).toBe("ask")
+    yield* service.reply({ requestID: user.id, reply: "once" })
+    reviewRequests.length = 0
+    reviewSettings = new Config.Info({})
     expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
     const pending = yield* service.ask(assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." } }))
     expect(pending.effect).toBe("ask")

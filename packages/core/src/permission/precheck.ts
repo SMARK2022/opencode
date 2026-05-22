@@ -31,9 +31,12 @@ const INTERPRETER_FLAGS = new Map([
   ["php", new Set(["-r"])],
   ["lua", new Set(["-e"])],
 ])
+// #203：拆分 SSH 私钥名/Windows home 模式，覆盖 id_dsa/id_ecdsa/*_sk 及 $env:USERPROFILE/%USERPROFILE% 路径
+const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
+const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
 // #202：敏感路径正则放宽——允许 ~ 之外的非空白前缀路径，使 /home/alice/.aws/credentials、$HOME 展开后的
 // #202：绝对路径也能被 raw 扫描命中；护栏而非密钥扫描器，需足够精确避免拦截普通项目文件
-const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|(?:~|[^\s|;]+)\/\.ssh\/[^\s|;]+|(?:~|[^\s|;]+)\/\.aws\/credentials|(?:~|[^\s|;]+)\/\.config\/gcloud\/[^\s|;]+|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|id_rsa|id_ed25519|[^\s|;]+\.pem|[^\s|;]+\.key)`
+const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
 // #202：敏感路径参数匹配——raw 扫描发生在 shell quote 移除之前，允许敏感路径外侧有一层引号，
 // #202：避免 `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断
 const SENSITIVE_PATH_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_PATTERN}["']?`
@@ -129,6 +132,11 @@ export function evaluate(input: {
 }): Decision {
   // #197：目前仅 bash 有足够语法证据支持确定性预检——其他工具直接回退到用户审批而非猜测无关参数模式
   // #202：非 bash 工具缺乏 shell 级语义证据，归为 general 而非 prompt，保持既有用户审批路径
+  // #203：shell 发起的 external_directory 不是独立工具动作，复用同一条命令的预审结果，
+  // #203：避免项目外路径先触发普通 ask 从而绕开 Auto agent 的 bash auto 路由
+  if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
+    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+  }
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 }
@@ -515,7 +523,7 @@ function cautiousRaw(command: string) {
   const normalized = command.replace(/\s+/g, " ").trim()
   if (
     new RegExp(
-      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
       "i",
     ).test(normalized)
   ) {
@@ -590,11 +598,12 @@ function cautiousGitSubcommand(tokens: string[]) {
   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
 }
 
-// #202：readsSensitivePath——读取或列出敏感文件不是立即外传（非 dangerous），但会把密钥内容暴露给 shell
-// #202：输出和模型上下文，所以从 safe/general 提升为 cautious，交 reviewer 判断是否确有授权
+// #203：读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
+// #203：dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
+// #203：所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权
 function readsSensitivePath(tokens: string[]) {
   const cmd = normalizeCommandName(tokens[0])
-  if (!["cat", "type", "get-content", "gc", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
+  if (!["cat", "type", "get-content", "gc", "get-childitem", "gci", "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
     return false
   }
   return hasSensitivePath(tokens)
@@ -714,8 +723,11 @@ function hasSensitivePath(tokens: string[]) {
       normalized === ".env" ||
       normalized.startsWith(".env.") ||
       normalized.includes("/.env") ||
+      normalized.endsWith("/.ssh") ||
       normalized.includes("/.ssh/") ||
       normalized === "~/.aws/credentials" ||
+      normalized === "~/.aws" ||
+      normalized.endsWith("/.aws") ||
       normalized.endsWith("/.aws/credentials") ||
       normalized.startsWith("~/.config/gcloud/") ||
       normalized.includes("/.config/gcloud/") ||
@@ -731,8 +743,16 @@ function hasSensitivePath(tokens: string[]) {
       normalized.endsWith("/credentials.json") ||
       normalized === "id_rsa" ||
       normalized.endsWith("/id_rsa") ||
+      normalized === "id_dsa" ||
+      normalized.endsWith("/id_dsa") ||
+      normalized === "id_ecdsa" ||
+      normalized.endsWith("/id_ecdsa") ||
       normalized === "id_ed25519" ||
       normalized.endsWith("/id_ed25519") ||
+      normalized === "id_ecdsa_sk" ||
+      normalized.endsWith("/id_ecdsa_sk") ||
+      normalized === "id_ed25519_sk" ||
+      normalized.endsWith("/id_ed25519_sk") ||
       normalized.endsWith(".pem") ||
       normalized.endsWith(".key")
     )

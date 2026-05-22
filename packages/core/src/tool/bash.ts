@@ -229,7 +229,7 @@ const layer = Layer.effectDiscard(
                   ...LocationMutation.externalDirectoryPermission(external),
                   sessionID: context.sessionID,
                   agent: context.agent,
-                  metadata: { command: input.command, cwd: target.canonical, shell },
+                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
                   source,
                 })
               const warnings = (yield* externalCommandDirectories(fs, input.command, target.canonical)).map(
@@ -242,7 +242,7 @@ const layer = Layer.effectDiscard(
                 save: [input.command],
                 sessionID: context.sessionID,
                 agent: context.agent,
-                metadata: { command: input.command, cwd: target.canonical, shell },
+                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
                 source,
               })
 

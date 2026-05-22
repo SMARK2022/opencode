@@ -104,6 +104,8 @@ const layer = Layer.effect(
       // #199：serviceOption 可选注入，使旧测试和小运行时缺少 reviewer 时仍能
       // #199：退回正常 ask 路径而非崩溃。
       if (needsAuto) {
+        // #203：协作者在 ask 时从运行时上下文解析——AppNodeBuilder 下 Permission.node 仅声明
+        // #203：cache/circuit 依赖，reviewer 与 config 作为可选协作者经 serviceOption 获取
         const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
         // #199：会话级缓存避免对同一 auto 请求重复调用 reviewer，但缓存键包含
         // #199：command/cwd/shell/filepath/diff 上下文，上下文变化即失效。
@@ -112,9 +114,10 @@ const layer = Layer.effect(
         // #199：但当前调用的 deny 结果不依赖熔断状态，熔断仅作为咨询性信号。
         const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
         const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
+        const permissionConfig = config ? (yield* config.get()).permission : undefined
         // #199：strict 模式禁用 precheck fast-path allow，强制所有 auto 请求经过
         // #199：reviewer；但 deny 仍由 precheck 保留，防止危险操作因 reviewer 缺失而放行。
-        const strict = config ? (yield* config.get()).permission?.auto_review?.strict === true : false
+        const strict = permissionConfig?.auto_review?.strict === true
         // #199：autoRequest 只包含 auto 控制的 pattern。若缓存 ask 控制的 pattern，
         // #199：用户回复前规则变更会使原本被拒绝的混合请求变成静默 allow。
         const autoRequest = { ...request, patterns: autoPatterns }
@@ -126,7 +129,10 @@ const layer = Layer.effect(
         } else {
           // #199：PermissionAuto.evaluate 按 precheck → fast-path allow → deny →
           // #199：reviewer → fail-closed 顺序裁决；strict 模式禁用 fast-path 但保留 deny。
-          const decision = yield* PermissionAuto.evaluate({ ...autoRequest, strict }, reviewer)
+          const decision = yield* PermissionAuto.evaluate(
+            { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
+            reviewer,
+          )
           yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
           if (decision.action === "allow") {
             if (circuit) yield* circuit.recordNonDenial(request.sessionID)
