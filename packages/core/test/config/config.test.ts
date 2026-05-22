@@ -53,6 +53,25 @@ const provider = {
 }
 
 describe("Config", () => {
+  it.effect("migrates auto permissions without dropping denies or agent configuration", () =>
+    Effect.sync(() => {
+      // 全局与 agent 均保留 auto，控制项独立迁移，静态拒绝不被覆盖。
+      for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
+        const legacy = Schema.decodeUnknownSync(ConfigV1.Info)({
+          model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
+        })
+        const info = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate(legacy))
+        expect(info.model).toBe("test/model")
+        expect(info.approvals_reviewer).toBe("auto_review")
+        expect(info.auto_review).toMatchObject({ strict: true, fallback: "user" })
+        for (const rules of [info.permissions, info.agents?.build.permissions]) {
+          expect(rules).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
+          expect(rules?.find(rule => rule.action === "bash")?.effect).toBe("auto")
+        }
+      }
+    }),
+  )
+
   it.effect("returns the latest defined scalar from priority-ordered documents", () =>
     Effect.sync(() => {
       const entries = [

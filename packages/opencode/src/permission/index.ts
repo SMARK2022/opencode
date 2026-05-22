@@ -187,14 +187,27 @@ export function fromConfig(permission: ConfigPermissionV1.Info) {
   const ruleset: PermissionV1.Rule[] = []
   for (const [key, value] of Object.entries(permission)) {
     if (typeof value === "string") {
+      // #196：approvals_reviewer 等控制串不是权限 action，仅四值进入 ruleset
+      if (value !== "allow" && value !== "deny" && value !== "ask" && value !== "auto") continue
       ruleset.push({ permission: key, action: value, pattern: "*" })
       continue
     }
+    // #196：auto_review 审批控制对象（值含 number/boolean）不是 pattern 映射
+    if (key === "auto_review") continue
     ruleset.push(
-      ...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
+      // #196：模式映射的值经谓词收窄为四值，auto_review 控制值不进 ruleset
+      // #196：value 是多形态 config union，entries 需按宽 record 取重载
+      ...Object.entries(value as Record<string, unknown>).flatMap(([pattern, action]) =>
+        isPermissionAction(action) ? [{ permission: key, pattern: expand(pattern), action }] : [],
+      ),
     )
   }
   return ruleset
+}
+
+// #196：config 层合法的控制串/控制值（auto_review 等）在 ruleset 层不合法，谓词统一收窄
+function isPermissionAction(value: unknown): value is PermissionV1.Action {
+  return value === "allow" || value === "deny" || value === "ask" || value === "auto"
 }
 
 export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {

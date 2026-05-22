@@ -35,6 +35,10 @@ const AgentSchema = Schema.StructWithRest(
       description: "Maximum number of agentic iterations before forcing text-only response",
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
+    // #196：Agent permissions 仅是 tool rules。Auto-review 控制是全局
+    // #196：permission-pipeline 设置；如果它们出现在 agent frontmatter 中，
+    // #196：StructWithRest 会将其保留在 options 下，而不是假装运行时 reviewer
+    // #196：会遵守 per-agent policy/model 覆盖。
     permission: Schema.optional(ConfigPermissionV1.Info),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
@@ -77,7 +81,7 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
   globalThis.Object.assign(permission, agent.permission)
 
   const steps = agent.steps ?? agent.maxSteps
-  return { ...agent, options, permission, ...(steps !== undefined ? { steps } : {}) }
+  return { ...agent, options, permission: permission as Schema.Schema.Type<typeof ConfigPermissionV1.Info>, ...(steps !== undefined ? { steps } : {}) }
 }
 
 export const Info = AgentSchema.pipe(

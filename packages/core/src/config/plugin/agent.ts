@@ -161,12 +161,13 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
   const body = markdown.content.trim()
   const legacy = Object.keys(markdown.data).some((key) => !agentKeys.has(key))
   const agent = Option.getOrUndefined(
-    legacy
+    // #196：两个分支返回的 Option 类型因 permission Info 变更而不同，断言统一
+    (legacy
       ? Option.map(
           decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all", propertyOrder: "original" }),
           ConfigMigrateV1.migrateAgent,
         )
-      : decodeAgent({ ...markdown.data, system: body }, { errors: "all", propertyOrder: "original" }),
+      : decodeAgent({ ...markdown.data, system: body }, { errors: "all", propertyOrder: "original" })) as Option.Option<ConfigAgentV1.Info>,
   )
   if (!agent) return
   const info = Option.getOrUndefined(

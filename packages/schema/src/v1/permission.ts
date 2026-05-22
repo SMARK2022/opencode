@@ -13,7 +13,9 @@ export const ID = Schema.String.check(Schema.isStartsWith("per")).pipe(
 )
 export type ID = typeof ID.Type
 
-export const Action = Schema.Literals(["allow", "deny", "ask"]).annotate({ identifier: "PermissionAction" })
+// #196：`auto` 参与 allow/ask/deny 的 last-match-wins 评估器；Permission service
+// #196：之后决定由 precheck、reviewer 还是用户审批处理匹配的请求。
+export const Action = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({ identifier: "PermissionAction" })
 export type Action = typeof Action.Type
 
 export const Rule = Schema.Struct({ permission: Schema.String, pattern: Schema.String, action: Action }).annotate({

@@ -971,6 +971,38 @@ Ordered permissions`,
     expect(Object.keys(config.agent?.ordered?.permission ?? {})).toEqual(["bash", "*", "edit"])
   }),
 )
+test("agent markdown auto-review controls stay options instead of permission rules", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      const agentDir = path.join(dir, ".opencode", "agent")
+      await fs.mkdir(agentDir, { recursive: true })
+
+      await Filesystem.write(
+        path.join(agentDir, "reviewed.md"),
+        `---
+permission:
+  bash: auto
+approvals_reviewer: auto_review
+auto_review:
+  fallback: user
+---
+Reviewed permissions`,
+      )
+    },
+  })
+  await withTestInstance({
+    directory: tmp.path,
+    fn: async (ctx) => {
+      const config = await load(ctx)
+      expect(config.agent?.reviewed?.permission).toEqual({ bash: "auto" })
+      expect(config.agent?.reviewed?.options).toMatchObject({
+        approvals_reviewer: "auto_review",
+        auto_review: { fallback: "user" },
+      })
+    },
+  })
+})
+
 
 it.instance("loads agents from .opencode/agents (plural)", () =>
   Effect.gen(function* () {
@@ -1535,6 +1567,53 @@ test("config parser preserves permission order while ignoring unknown top-level 
   expect(Object.keys(config.permission!)).toEqual(["bash", "*", "edit"])
   expect(config).not.toHaveProperty("plugins")
 })
+
+test("config parser accepts permission auto review controls", () => {
+  // #196：覆盖 schema 边界而非 Permission.fromConfig：auto_review 对象包含
+  // #196：number/boolean，不应被解析为任意 permission action 值。
+  const config = ConfigParse.schema(
+    ConfigV1.Info,
+    {
+      permission: {
+        bash: "auto",
+        approvals_reviewer: "auto_review",
+        auto_review: {
+          strict: true,
+          fallback: "user",
+          policy: "Deny unrequested pushes.",
+          max_consecutive_denials: 1,
+          max_recent_denials: 2,
+          recent_denial_window: 3,
+        },
+      },
+    },
+    "test",
+  )
+
+  expect(config.permission?.bash).toBe("auto")
+  expect(config.permission?.approvals_reviewer).toBe("auto_review")
+  expect(config.permission?.auto_review?.max_consecutive_denials).toBe(1)
+})
+
+test("config parser rejects unsupported approval_policy control", () => {
+  // #196：未声明的 control key（如 approval_policy）必须被 schema 拒绝，
+  // #196：而非静默接受后丢失。object 形态同样不应通过 rule 校验。
+  for (const approval_policy of ["on_request", { fallback: "user" }]) {
+    expect(() =>
+      ConfigParse.schema(
+        ConfigV1.Info,
+        {
+          permission: {
+            bash: "auto",
+            approval_policy,
+          },
+        },
+        "test",
+      ),
+    ).toThrow()
+  }
+})
+
 
 // MCP config merging tests
 
