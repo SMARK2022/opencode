@@ -359,7 +359,7 @@ describe("PermissionV2", () => {
     expect(pending.effect).toBe("ask")
     yield* service.reply({ requestID: pending.id, reply: "once" })
     expect(reviewRequests).toHaveLength(0)
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
     // 危险组合不等待模型，也不会产生可被用户误批准的 pending。
     const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)
     expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
@@ -394,14 +394,14 @@ describe("PermissionV2", () => {
     expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(5)
     malformed = true
-    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ fallback: "user" }) })
+    expect(yield* service.ask({ ...edit, metadata: { diff: "malformed" } })).toMatchObject({ effect: "deny" })
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "user" }) })
     const fallback = yield* service.ask(edit)
     expect(fallback.effect).toBe("ask")
     yield* service.reply({ requestID: fallback.id, reply: "reject" })
     malformed = false
     assessment = { ...assessment, outcome: "allow", risk_level: "critical" }
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
     expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
     assessment = { ...assessment, risk_level: "low" }
     // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。

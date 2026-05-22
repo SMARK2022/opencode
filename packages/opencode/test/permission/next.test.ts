@@ -992,24 +992,27 @@ reviewed.instance(
   { git: true },
 )
 
-// #199：验证 edit 的 diff 内容参与缓存键——相同路径不同 diff 需独立评估。
+// #202：edit/apply_patch 等非 shell auto 请求预审层级为 general，非 strict 下回退用户审批不调用 reviewer
 reviewed.instance(
-  "ask - reviewer cache key includes edit diff context",
+  "ask - auto routes non-shell general tools to user approval without reviewer load",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
-      const base = {
+      const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "edit",
         patterns: ["src/a.ts"],
         always: ["*"],
         ruleset: [{ permission: "edit", pattern: "*", action: "auto" as const }],
-      }
+        metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
+      }).pipe(Effect.forkScoped)
 
-      yield* ask({ ...base, metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" } })
-      yield* ask({ ...base, metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+other" } })
-
-      expect(reviewedCalls).toBe(2)
+      // #202：当前阶段只让 cautious 请求进入 LLM reviewer。edit 这类非 shell auto 请求
+      // #202：没有 bash 级语义证据，预审层级是 general，应保持用户审批路径，不消耗 reviewer 调用
+      expect(yield* waitForPending(1)).toHaveLength(1)
+      expect(reviewedCalls).toBe(0)
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
     }),
   { git: true },
 )
