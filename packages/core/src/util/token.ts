@@ -16,18 +16,32 @@ const CHARS_PER_TOKEN = 4
 
 export const estimate = (input: string) => Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
 
+export function inputHistory(messages: ReadonlyArray<SessionMessage.Message>, model: { provider: string; id: string }) {
+  // 三类请求预算共用runner已有的同API确认样本，不能用未结算估计或catalog别名校准。
+  return messages.toReversed().flatMap((message) => {
+    if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
+      || !message.inputEstimate?.confirmed || !message.tokens) return []
+    return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
+      input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
+  })
+}
+
 export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>) {
   const sample = history.reduce((sum, item) => {
     // 调用方筛选同 API 的确认样本；分子分母同时截止，零确认和不足100字符的样本不校准。
     if (sum.bodyChars >= 100_000 || !Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return sum
     // 媒体样本用占位字符替换 raw；文本密度不能把 base64 当普通正文。
     const media = item.inputBreakdown?.media
+    // #194：只有已知媒体 token 才能从确认输入中分离；旧附件样本不能校准文本密度。
+    const textInput = item.input - (media?.tokens ?? 0)
+    if (textInput <= 0 || (!media && (item.inputBreakdown?.messages.attachments ?? 0) > 0)) return sum
     return { bodyChars: sum.bodyChars + Math.max(0, media
       ? item.bodyChars - media.rawChars + media.textChars
-      : item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
+      : item.bodyChars), input: sum.input + textInput }
   }, { bodyChars: 0, input: 0 })
   // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
-  return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
+  // #194：实际上传可达到六字符以上的密度，统一2..8边界而不退回旧3..4。
+  return sample.bodyChars > 500 && sample.input > 0 ? Math.min(8, Math.max(2, sample.bodyChars / sample.input)) : CHARS_PER_TOKEN
 }
 
 export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>, sections?: ReadonlyArray<SystemSection>) {

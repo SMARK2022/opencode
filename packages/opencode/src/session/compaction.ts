@@ -5,7 +5,8 @@ import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
-import { Token } from "@/util/token"
+// #194：改用 TokenEstimate 统一上传估算
+import { TokenEstimate } from "@/token/estimate"
 import { SessionProcessor } from "./processor"
 import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
@@ -220,7 +221,8 @@ const layer = Layer.effect(
       model: Provider.Model
     }) {
       const msgs = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
-      return Token.estimate(JSON.stringify(msgs))
+      // #194：tail-retention 保持原始大小启发式
+      return TokenEstimate.estimateText(JSON.stringify(msgs))
     })
 
     const select = Effect.fn("SessionCompaction.select")(function* (input: {
@@ -299,7 +301,8 @@ const layer = Layer.effect(
           if (part.state.status !== "completed") continue
           if (PRUNE_PROTECTED_TOOLS.includes(part.tool)) continue
           if (part.state.time.compacted) break loop
-          const estimate = Token.estimate(part.state.output)
+          // #194：prune 用 estimateText 作粗略大小代理
+          const estimate = TokenEstimate.estimateText(part.state.output)
           total += estimate
           if (total <= PRUNE_PROTECT) continue
           pruned += estimate

@@ -21,8 +21,9 @@ test("calibrates input density with thresholds, cache-inclusive samples and a sh
   const inputBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
     messages: { userText: 1000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 99000, total: 100000 } }
   const history = [{ bodyChars: 100000, input: 400, inputBreakdown }]
-  expect(Token.charsPerTokenFromHistory(history)).toBe(2.5)
-  expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(2.5)
+  // #194：旧附件只有 raw 字符，缺媒体确认量时不能继续学习这个样本。
+  expect(Token.charsPerTokenFromHistory(history)).toBe(4)
+  expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(4)
   expect(Token.charsPerTokenFromHistory([{ ...history[0], inputBreakdown: { ...inputBreakdown, messages: { ...inputBreakdown.messages, attachments: 100000 } } }])).toBe(4)
 })
 

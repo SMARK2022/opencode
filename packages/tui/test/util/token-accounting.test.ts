@@ -56,7 +56,7 @@ describe("tokenAccounting", () => {
       a1: [stepFinish("sf1", { input: 100, output: 200, reasoning: 0, cache: { read: 5, write: 5 } }, 1000)],
     }
     const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
-    expect(acc.ratio.input).toBeGreaterThan(1)
+    expect(acc.ratio.input).toBe(8)
   })
 
   // #124：streaming 期间 step-start breakdown 可用
