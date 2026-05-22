@@ -47,10 +47,12 @@ const FILES = new Set([
   "chmod",
   "chown",
   "cat",
-  // Leave PowerShell aliases out for now. Common ones like cat/cp/mv/rm/mkdir
-  // already hit the entries above, and alias normalization should happen in one
-  // place later so we do not risk double-prompting.
+  // Only include PowerShell names that expose new path effects. Aliases already
+  // covered above stay there, while gci is needed so .ssh listings hit the same
+  // external-directory and bash gates as Get-ChildItem.
   "get-content",
+  "get-childitem",
+  "gci",
   "set-content",
   "add-content",
   "copy-item",
@@ -312,7 +314,16 @@ const ask = Effect.fn("ShellTool.ask")(function* (
       permission: "external_directory",
       patterns: globs,
       always: globs,
-      metadata: {},
+      // Auto 模式下，项目外路径访问不能先退回普通 ask；把同一次 shell
+      // 命令证据传给 permission 层，让 external_directory 能做 deterministic
+      // 预审，真正的 reviewer/user 决策仍由后续 bash 权限单点处理。
+      metadata: {
+        action_kind: "shell",
+        command: metadata.command,
+        cwd: metadata.cwd,
+        shell: metadata.shell,
+        agent: ctx.agent,
+      },
     })
   }
 
@@ -330,6 +341,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (
       command: metadata.command,
       cwd: metadata.cwd,
       shell: metadata.shell,
+      agent: ctx.agent,
     },
   })
 })

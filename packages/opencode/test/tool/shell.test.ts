@@ -3,6 +3,8 @@ import { Cause, Effect, Exit, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
+import * as fs from "node:fs/promises"
+import { Bus } from "@/bus"
 import { Config } from "@/config/config"
 import { Shell } from "../../src/shell/shell"
 import { ShellTool } from "../../src/tool/shell"
@@ -18,6 +20,8 @@ import { Plugin } from "../../src/plugin"
 import { testEffect } from "../lib/effect"
 import { Tool } from "@/tool/tool"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { PermissionReviewer } from "@/permission/reviewer/service"
+import { Permission as PermissionService } from "@/permission"
 
 const shellLayer = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
@@ -28,7 +32,29 @@ const shellLayer = Layer.mergeAll(
   Agent.defaultLayer,
   RuntimeFlags.defaultLayer,
 )
+let reviewedCalls = 0
+const shellReviewerLayer = Layer.succeed(
+  PermissionReviewer.Service,
+  PermissionReviewer.Service.of({
+    review: () =>
+      Effect.sync(() => {
+        reviewedCalls++
+        return {
+          action: "deny" as const,
+          reason: "reviewer rejected sensitive shell access",
+          reviewID: "review_shell_sensitive",
+          risk_level: "high" as const,
+          user_authorization: "unknown" as const,
+        }
+      }),
+  }),
+)
+const permissionShellLayer = Layer.mergeAll(
+  shellLayer,
+  PermissionService.layer.pipe(Layer.provide(Bus.layer), Layer.provide(shellReviewerLayer)),
+)
 const it = testEffect(shellLayer)
+const reviewed = testEffect(permissionShellLayer)
 type ShellTestServices =
   | (typeof shellLayer extends Layer.Layer<infer ROut, infer _E, infer _RIn> ? ROut : never)
   | Scope.Scope
@@ -413,6 +439,15 @@ describe("tool.shell permissions", () => {
         const extDirReq = requests.find((r) => r.permission === "external_directory")
         expect(extDirReq).toBeDefined()
         expect(extDirReq!.patterns).toContain(want)
+        // Auto 模式下 external_directory 需要使用同一次 shell 命令的证据进行
+        // deterministic precheck；否则项目外路径会先退回普通 ask，绕开 bash auto。
+        expect(extDirReq!.metadata).toMatchObject({
+          action_kind: "shell",
+          command: `cat ${file}`,
+          cwd: projectRoot,
+          agent: "build",
+        })
+        expect(typeof extDirReq!.metadata.shell).toBe("string")
       }),
     ),
   )
@@ -558,6 +593,146 @@ describe("tool.shell permissions", () => {
               expect(requests[0].patterns).toContain(glob(path.join(os.homedir(), ".ssh", "*")))
             }),
           ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`asks for bash permission after PowerShell SSH private key path gate [${item.label}]`, () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const fakeHome = yield* tmpdirScoped()
+            yield* Effect.promise(() => fs.mkdir(path.join(fakeHome, ".ssh"), { recursive: true }))
+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_rsa"), "fake private key"))
+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_ed25519"), "fake private key"))
+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_ecdsa"), "fake private key"))
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => {
+                const prev = process.env.USERPROFILE
+                process.env.USERPROFILE = fakeHome
+                return prev
+              }),
+              () =>
+                runIn(
+                  projectRoot,
+                  Effect.gen(function* () {
+                    const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+                    yield* run(
+                      {
+                        command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`,
+                        description: "Read SSH private keys",
+                      },
+                      capture(requests),
+                    )
+
+                    const extDirReq = requests.find((r) => r.permission === "external_directory")
+                    const bashReq = requests.find((r) => r.permission === "bash")
+                    expect(extDirReq).toBeDefined()
+                    expect(extDirReq!.metadata).toMatchObject({ action_kind: "shell", agent: "build" })
+                    expect(extDirReq!.patterns).toContain(glob(path.join(fakeHome, ".ssh", "*")))
+                    expect(bashReq).toBeDefined()
+                    expect(bashReq!.metadata).toMatchObject({ action_kind: "shell", agent: "build" })
+                    expect(bashReq!.patterns.some((pattern) => pattern.includes("id_rsa"))).toBe(true)
+                  }),
+                ),
+              (prev) =>
+                Effect.sync(() => {
+                  if (prev === undefined) delete process.env.USERPROFILE
+                  else process.env.USERPROFILE = prev
+                }),
+            )
+          }),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`asks for bash permission for PowerShell SSH directory listing [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              yield* run(
+                {
+                  command: String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`,
+                  description: "List SSH directory contents",
+                },
+                capture(requests),
+              )
+              const extDirReq = requests.find((r) => r.permission === "external_directory")
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(extDirReq).toBeDefined()
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns.some((pattern) => pattern.includes("Get-ChildItem"))).toBe(true)
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
+        withShell(
+          item,
+          Effect.gen(function* () {
+            const fakeHome = yield* tmpdirScoped()
+            yield* Effect.promise(() => fs.mkdir(path.join(fakeHome, ".ssh"), { recursive: true }))
+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_rsa"), "fake private key"))
+            const permission = yield* PermissionService.Service
+            const ruleset: PermissionService.Ruleset = [
+              { permission: "external_directory", pattern: "*", action: "auto" },
+              { permission: "bash", pattern: "*", action: "auto" },
+            ]
+
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() => {
+                const prev = process.env.USERPROFILE
+                process.env.USERPROFILE = fakeHome
+                reviewedCalls = 0
+                return prev
+              }),
+              () =>
+                runIn(
+                  projectRoot,
+                  Effect.gen(function* () {
+                    const err = yield* fail(
+                      {
+                        command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
+                        description: "Read SSH private key",
+                      },
+                      {
+                        ...ctx,
+                        agent: "Auto",
+                        ask: (req) =>
+                          permission.ask({
+                            ...req,
+                            sessionID: ctx.sessionID,
+                            metadata: { ...req.metadata, agent: "Auto" },
+                            ruleset,
+                          }).pipe(Effect.orDie),
+                      },
+                    ).pipe(
+                      Effect.timeoutOrElse({
+                        duration: "2 seconds",
+                        orElse: () => Effect.fail(new Error("timed out waiting for reviewer denial")),
+                      }),
+                    )
+
+                    expect(err).toBeInstanceOf(PermissionService.AutoDeniedError)
+                    expect(reviewedCalls).toBe(1)
+                    expect(yield* permission.list()).toHaveLength(0)
+                  }),
+                ),
+              (prev) =>
+                Effect.sync(() => {
+                  if (prev === undefined) delete process.env.USERPROFILE
+                  else process.env.USERPROFILE = prev
+                }),
+            )
+          }),
         ),
       )
     }

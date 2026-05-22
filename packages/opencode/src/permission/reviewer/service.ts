@@ -56,10 +56,8 @@ export const layer = Layer.effect(
     const review: Interface["review"] = (input) => Effect.gen(function* () {
       const cfg = yield* config.get()
       const permission = cfg.permission
-      // The reviewer is opt-in. When the config still names the user as reviewer,
-      // surface a typed disabled signal so PermissionAuto can route to the normal
-      // user prompt instead of treating the absence as an execution failure.
-      if (permission?.approvals_reviewer !== "auto_review") return yield* new ReviewerDisabled()
+      if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
+      const autoReview = permission?.auto_review
 
       const run = Effect.gen(function* () {
         const request = new ReviewerRequest({
@@ -68,7 +66,7 @@ export const layer = Layer.effect(
           metadata: { ...input.metadata },
           precheck: input.precheck,
         })
-        const tenantPolicy = yield* loadTenantPolicy(permission.auto_review)
+        const tenantPolicy = yield* loadTenantPolicy(autoReview)
         // Transcript collection is best-effort and bounded. Missing sessions or
         // storage issues should not block the permission path; the reviewer can
         // still decide from the planned action and policy, or deny via policy.
@@ -84,13 +82,13 @@ export const layer = Layer.effect(
           system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
           userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
         })
-        const model = permission.auto_review?.model
+        const model = autoReview?.model
           // User-specified reviewer models use the same provider/model parser as
           // normal agent config so aliases and provider validation stay in one
           // place. A bad model fails closed unless fallback=user is configured.
           ? yield* provider.getModel(
-              Provider.parseModel(permission.auto_review.model).providerID,
-              Provider.parseModel(permission.auto_review.model).modelID,
+              Provider.parseModel(autoReview.model).providerID,
+              Provider.parseModel(autoReview.model).modelID,
             )
           : yield* Effect.gen(function* () {
               const current = yield* provider.defaultModel()
@@ -111,7 +109,7 @@ export const layer = Layer.effect(
             // Timeout is a security boundary: if the reviewer cannot complete in
             // time, the tool call must not execute unless explicit user fallback
             // is configured below.
-            duration: `${permission.auto_review?.timeout_ms ?? 90_000} millis`,
+            duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
             orElse: () => Effect.fail(new ReviewerTimedOut()),
           }),
           Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
@@ -131,7 +129,7 @@ export const layer = Layer.effect(
           // `fallback: "user"` is deliberately narrow: disabled reviewer already
           // means normal user routing, while all other failures become an explicit
           // fallback signal for PermissionAuto. Default behavior is fail-closed.
-          permission.auto_review?.fallback === "user" && !(error instanceof ReviewerDisabled)
+          autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
             ? Effect.fail(new ReviewerFallbackToUser({ reason: errorMessage(error) }))
             : Effect.fail(error),
         ),
@@ -156,6 +154,15 @@ function isReviewerError(error: unknown): error is Error {
   // Preserve typed reviewer failures through the generateObject error mapping;
   // everything else is wrapped as ReviewerRunError for one fail-closed path.
   return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
+}
+
+function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
+  // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
+  // 没有全局配置时，原生 Auto agent 仍应隐式启用 reviewer；否则选择 Auto
+  // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
+  if (permission?.approvals_reviewer === "user") return false
+  if (permission?.approvals_reviewer === "auto_review") return true
+  return metadata.agent === "Auto"
 }
 
 function errorMessage(error: unknown) {
@@ -186,5 +193,11 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Config.defaultLayer),
   Layer.provide(Provider.defaultLayer),
 )
+
+// Permission.defaultLayer consumes this bundled reviewer layer before building
+// Permission.Service. `Layer.suspend` preserves the historical cycle boundary:
+// Session imports Permission types, so Session.defaultLayer must not be
+// dereferenced while this module is initializing.
+export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(Session.defaultLayer)))
 
 export * as PermissionReviewer from "./service"

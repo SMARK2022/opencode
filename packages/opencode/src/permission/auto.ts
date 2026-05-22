@@ -43,30 +43,63 @@ export interface Reviewer {
 }
 
 export function evaluate(
-  input: { permission: string; patterns: readonly string[]; metadata: Readonly<Record<string, unknown>>; strict?: boolean },
+  input: {
+    permission: string
+    patterns: readonly string[]
+    metadata: Readonly<Record<string, unknown>>
+    strict?: boolean
+    reviewerDisabled?: boolean
+  },
   reviewer?: Reviewer,
 ) {
   return Effect.gen(function* () {
     const precheck = PermissionPrecheck.evaluate(input)
+    const isShell = input.permission === "bash"
+    const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
     // [local-smark] auto 四级预审路由开始
-    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许，general
-    // 回到既有用户审批但不调用 reviewer，cautious 才进入 reviewer/user fallback，
-    // dangerous 直接拒绝。strict 是用户显式配置的例外，用来保留原本“低风险也审”
-    // 的能力，但默认路径不会让 general 占用 LLM。
+    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
+    // shell general 也直接允许，避免 Auto shell 回到人工确认；非 shell general
+    // 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是用户
+    // 显式配置的例外，用来保留原本“低风险也审”的能力。
+    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    if (isShellExternalDirectory) {
+      // shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性
+      // 预审，不能再单独调用 reviewer；否则一次 bash 操作会在 external_directory
+      // 和 bash 两个权限点重复消耗 LLM。非 dangerous 情况放行给后续 bash auto。
+      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
+    }
+    if (input.permission === "external_directory") {
+      // Auto agent 的 external_directory:auto 只是为了 shell 路径门禁能进入上面的
+      // shell-origin 分支。普通读写工具的项目外路径缺少 shell 命令证据，仍走既有
+      // 人工审批，避免把本轮 shell sandbox 修复扩大成全工具 reviewer 审批面。
+      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
+    }
     if (precheck.level === "safe" && !input.strict) {
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
-    if (precheck.level === "general" && !input.strict) {
-      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
+    if (precheck.level === "general" && isShell && !input.strict) {
+      // 当前开发测试期要求 Auto shell 不弹人工确认：无法精确判定但未命中
+      // dangerous/cautious 的命令先放行；非 shell general 继续走 reviewer。
+      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
     // [local-smark] auto 四级预审路由结束
 
     // Cautious is the default auto review boundary: deterministic precheck found
     // a visible risk that is neither harmless nor immediately forbidden, so a
-    // reviewer must explicitly return allow/deny. When no reviewer is wired yet,
-    // fall back to the existing user approval path.
-    if (!reviewer) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+    // reviewer must explicitly return allow/deny. Native Auto must not degrade
+    // back to a clickable user ask if reviewer wiring is missing; fail closed so
+    // sensitive shell output cannot be exposed by pressing Allow.
+    if (!reviewer) {
+      // Explicit user-review configuration is stronger than the native Auto
+      // fail-closed default. This preserves small/custom runtimes that construct
+      // Permission.layer without a reviewer service but intentionally keep user
+      // approval as the review boundary.
+      if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+      if (input.metadata.agent === "Auto") {
+        return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
+      }
+      return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+    }
 
     return yield* reviewer.review({
       ...input,

@@ -12,11 +12,10 @@ type RemoteResult = { action: "remote"; script?: string; reason: string } | { ac
 // [local-smark] 四级预审分层开始
 // Permission precheck 是 reviewer 之前的确定性分类器。这里不用 allow/prompt/deny
 // 表达执行结果，而是先给 shell 命令分层：safe 表示直接、只读、无敏感路径的
-// 无害命令；general 表示未知、动态、包装器或普通副作用，回到用户审批但不占用
-// LLM；cautious 表示删除、git 状态变更、远程传输、敏感读取等需要 reviewer 或
-// 用户明确判断的操作；dangerous 表示全盘/根目录删除、远程脚本直管道执行、凭据
-// 外传、反连 shell 等直接拒绝的操作。这个分层是降低 LLM 负载的边界：默认只有
-// cautious 才进入 auto reviewer，safe/general/dangerous 都不触发 LLM。
+// 无害命令；general 表示未知、动态、包装器或普通副作用，开发测试期 shell
+// general 会直接 allow，非 shell general 交给 reviewer；cautious 表示删除、
+// git 状态变更、远程传输、敏感读取等需要 reviewer 判断的操作；dangerous 表示
+// 全盘/根目录删除、远程脚本直管道执行、凭据外传、反连 shell 等直接拒绝的操作。
 // [local-smark] 四级预审分层结束
 
 // POSIX shell wrappers are treated as containers for another script. We inspect
@@ -54,7 +53,9 @@ const INTERPRETER_FLAGS = new Map([
 // path is visibly piped/uploaded to a network or remote target. This regex is a
 // guardrail, not a secret scanner: keep it specific enough to avoid blocking
 // ordinary project files while still catching common credentials and key names.
-const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|(?:~|[^\s|;]+)\/\.ssh\/[^\s|;]+|(?:~|[^\s|;]+)\/\.aws\/credentials|(?:~|[^\s|;]+)\/\.config\/gcloud\/[^\s|;]+|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|id_rsa|id_ed25519|[^\s|;]+\.pem|[^\s|;]+\.key)`
+const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
+const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
+const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
 // [local-smark] 敏感路径参数匹配开始
 // raw 扫描发生在 shell quote 被移除之前；允许敏感路径外侧有一层引号，避免
 // `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断。
@@ -163,6 +164,12 @@ export function evaluate(input: {
   // Only bash permission currently has enough syntactic evidence for precheck.
   // Other tools intentionally fall through to user approval instead of
   // guessing about unrelated argument schemas.
+  if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
+    // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
+    // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
+    // ask，从而绕开 Auto agent 的 bash auto 路由。
+    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+  }
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 }
@@ -486,7 +493,8 @@ function dangerousRaw(command: string) {
   }
   // [local-smark] Windows 保护目标危险扫描结束
   // Credential exfiltration is critical only when a sensitive read is visibly
-  // connected to a network transfer. Direct reads stay prompt-only in safeTokens.
+  // connected to a network transfer. Direct sensitive reads are handled below as
+  // cautious so Auto can route them to reviewer without treating them as exfil.
   if (
     new RegExp(
       String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,
@@ -535,7 +543,7 @@ function cautiousRaw(command: string) {
   // 本地敏感读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审。
   if (
     new RegExp(
-      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
       "i",
     ).test(normalized)
   ) {
@@ -601,11 +609,11 @@ function cautiousGitSubcommand(tokens: string[]) {
 
 function readsSensitivePath(tokens: string[]) {
   // [local-smark] 敏感读取谨慎分层开始
-  // 读取 .env、SSH key、云凭据等本地敏感文件不是立即外传，因此不是 dangerous；
-  // 但它会把密钥内容暴露给 shell 输出和模型上下文，所以从 safe 提升为 cautious，
-  // 交给 reviewer/user 判断是否确有用户授权。
+  // 读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
+  // dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
+  // 所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权。
   const cmd = normalizeCommandName(tokens[0])
-  if (!["cat", "type", "get-content", "gc", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
+  if (!["cat", "type", "get-content", "gc", "get-childitem", "gci", "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
     return false
   }
   return hasSensitivePath(tokens)
@@ -728,8 +736,11 @@ function hasSensitivePath(tokens: string[]) {
       normalized === ".env" ||
       normalized.startsWith(".env.") ||
       normalized.includes("/.env") ||
+      normalized.endsWith("/.ssh") ||
       normalized.includes("/.ssh/") ||
       normalized === "~/.aws/credentials" ||
+      normalized === "~/.aws" ||
+      normalized.endsWith("/.aws") ||
       normalized.endsWith("/.aws/credentials") ||
       normalized.startsWith("~/.config/gcloud/") ||
       normalized.includes("/.config/gcloud/") ||
@@ -745,8 +756,16 @@ function hasSensitivePath(tokens: string[]) {
       normalized.endsWith("/credentials.json") ||
       normalized === "id_rsa" ||
       normalized.endsWith("/id_rsa") ||
+      normalized === "id_dsa" ||
+      normalized.endsWith("/id_dsa") ||
+      normalized === "id_ecdsa" ||
+      normalized.endsWith("/id_ecdsa") ||
       normalized === "id_ed25519" ||
       normalized.endsWith("/id_ed25519") ||
+      normalized === "id_ecdsa_sk" ||
+      normalized.endsWith("/id_ecdsa_sk") ||
+      normalized === "id_ed25519_sk" ||
+      normalized.endsWith("/id_ed25519_sk") ||
       normalized.endsWith(".pem") ||
       normalized.endsWith(".key")
     )

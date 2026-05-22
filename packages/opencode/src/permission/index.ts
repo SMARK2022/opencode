@@ -173,6 +173,14 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+    // Capture optional collaborators when Permission.Service is constructed.
+    // Tool execution later re-enters Effect through EffectBridge with a captured
+    // context; resolving these services inside `ask` can miss reviewer layers
+    // that were privately provided to Permission.defaultLayer.
+    const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
+    const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
+    const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
+    const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
     const state = yield* InstanceState.make<State>(
       Effect.fn("Permission.state")(function* (ctx) {
         const row = Database.use((db) =>
@@ -228,11 +236,8 @@ export const layer = Layer.effect(
         // All auto-review collaborators are optional at this layer. That keeps
         // older tests/runtimes using Permission.layer working; missing reviewer
         // or explicit fallback returns to the normal pending permission path.
-        const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
-        const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
-        const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
-        const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
-        const strict = config ? (yield* config.get()).permission?.auto_review?.strict === true : false
+        const permissionConfig = config ? (yield* config.get()).permission : undefined
+        const strict = permissionConfig?.auto_review?.strict === true
         // Auto review/cache must operate only on the patterns that matched an
         // `auto` rule. The original request may also contain ask-controlled
         // patterns; caching those before the user replies would turn a rejected
@@ -246,7 +251,10 @@ export const layer = Layer.effect(
           if (circuit) yield* circuit.recordNonDenial(request.sessionID)
           if (!needsAsk) return
         } else {
-          const decision = yield* PermissionAuto.evaluate({ ...autoRequest, strict }, reviewer)
+          const decision = yield* PermissionAuto.evaluate(
+            { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
+            reviewer,
+          )
           log.info("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
           if (decision.action === "allow") {
             if (circuit) yield* circuit.recordNonDenial(request.sessionID)
@@ -469,9 +477,12 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
 
 export const defaultLayer = layer.pipe(
   Layer.provide(Bus.layer),
-  // Cache/circuit are local permission concerns, so the default layer can provide
-  // them without requiring the provider-backed reviewer. The reviewer stays
-  // optional to avoid a dependency cycle in unit tests and small runtimes.
+  // Permission.Service captures optional auto-review collaborators at layer
+  // construction time. Keep the production default fully wired here so nested
+  // session/runtime layers cannot accidentally construct a reviewer-less
+  // permission service and downgrade Auto shell decisions to plain ask.
+  Layer.provide(Config.defaultLayer),
+  Layer.provide(PermissionReviewer.defaultLayerWithSession),
   Layer.provide(PermissionSessionCache.defaultLayer),
   Layer.provide(PermissionCircuitBreaker.defaultLayer),
 )

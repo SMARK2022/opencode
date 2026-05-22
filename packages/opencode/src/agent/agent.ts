@@ -171,11 +171,9 @@ export const layer = Layer.effect(
             native: true,
           },
           // [local-smark] Auto 原生 Agent 开始
-          // `Auto` 复用 build 的权限形状，仅把 `bash` 改为 `auto`。这样 shell
-          // 命令会进入本分支新增的 deterministic precheck / reviewer / user
-          // fallback 链路，而 edit、task、read 等其他权限继续保持 build 的
-          // allow 风格；repo_clone、repo_overview、外部目录等既有安全默认值也
-          // 不被放宽，避免为了启用 auto shell 而降低原有边界。
+          // `Auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
+          // 等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
+          // 扩大到新的工具审批面。
           Auto: {
             name: "Auto",
             description: "Build-like agent that routes shell commands through auto permission review.",
@@ -186,6 +184,10 @@ export const layer = Layer.effect(
                 question: "allow",
                 plan_enter: "allow",
                 bash: "auto",
+                external_directory: {
+                  "*": "auto",
+                  ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+                },
               }),
               user,
             ),

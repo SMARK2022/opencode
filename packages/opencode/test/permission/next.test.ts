@@ -23,40 +23,42 @@ const env = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
 )
-// Separate layer with a deterministic reviewer and real session cache exercises
-// the auto integration path through Permission.ask without a live provider model.
 let reviewedCalls = 0
 let nonDenialCalls = 0
+const reviewerLayer = Layer.succeed(
+  PermissionReviewer.Service,
+  PermissionReviewer.Service.of({
+    review: () =>
+      Effect.sync(() => {
+        reviewedCalls++
+        return {
+          action: "allow" as const,
+          reason: "reviewer approved the auto-controlled part",
+          reviewID: "review_mixed",
+          risk_level: "medium" as const,
+          user_authorization: "medium" as const,
+        }
+      }),
+  }),
+)
+const circuitLayer = Layer.succeed(
+  PermissionCircuitBreaker.Service,
+  PermissionCircuitBreaker.Service.of({
+    recordDenial: () => Effect.succeed({ kind: "continue" as const, consecutive: 1, recent: 1 }),
+    recordNonDenial: () =>
+      Effect.sync(() => {
+        nonDenialCalls++
+      }),
+  }),
+)
 const reviewedEnv = Layer.mergeAll(
-  Permission.layer.pipe(Layer.provide(bus)),
-  PermissionSessionCache.layer,
+  Permission.layer.pipe(
+    Layer.provide(bus),
+    Layer.provide(PermissionSessionCache.layer),
+    Layer.provide(reviewerLayer),
+    Layer.provide(circuitLayer),
+  ),
   bus,
-  Layer.succeed(
-    PermissionReviewer.Service,
-    PermissionReviewer.Service.of({
-      review: () =>
-        Effect.sync(() => {
-          reviewedCalls++
-          return {
-            action: "allow" as const,
-            reason: "reviewer approved the auto-controlled part",
-            reviewID: "review_mixed",
-            risk_level: "medium" as const,
-            user_authorization: "medium" as const,
-          }
-        }),
-    }),
-  ),
-  Layer.succeed(
-    PermissionCircuitBreaker.Service,
-    PermissionCircuitBreaker.Service.of({
-      recordDenial: () => Effect.succeed({ kind: "continue" as const, consecutive: 1, recent: 1 }),
-      recordNonDenial: () =>
-        Effect.sync(() => {
-          nonDenialCalls++
-        }),
-    }),
-  ),
   CrossSpawnSpawner.defaultLayer,
   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
 )
@@ -701,21 +703,19 @@ it.instance(
 )
 
 it.instance(
-  "ask - auto falls back to user approval for opaque bash commands",
+  "ask - auto allows opaque bash commands during development without pending user approval",
   () =>
     Effect.gen(function* () {
-      const fiber = yield* ask({
+      yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["echo $HOME"],
         metadata: { command: "echo $HOME" },
         always: ["echo *"],
         ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
-      }).pipe(Effect.forkScoped)
+      })
 
-      expect(yield* waitForPending(1)).toHaveLength(1)
-      yield* rejectAll()
-      yield* Fiber.await(fiber)
+      expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
 )
@@ -943,28 +943,25 @@ reviewed.instance(
 )
 
 reviewed.instance(
-  "ask - auto routes non-shell general tools to user approval without reviewer load",
+  "ask - auto routes non-shell general tools to reviewer without pending user approval",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
-      const fiber = yield* ask({
+      yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "edit",
         patterns: ["src/a.ts"],
         always: ["*"],
         ruleset: [{ permission: "edit", pattern: "*", action: "auto" as const }],
         metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
-      }).pipe(Effect.forkScoped)
+      })
 
       // [local-smark] general 非 shell auto 路由回归开始
-      // 当前阶段只让 cautious 请求进入 LLM reviewer。edit/apply_patch 这类非 shell
-      // auto 请求没有 bash 级语义证据，预审层级是 general，因此应保持既有用户
-      // 审批路径，不能为了缓存 diff 上下文而提前消耗 reviewer 调用。
-      expect(yield* waitForPending(1)).toHaveLength(1)
-      expect(reviewedCalls).toBe(0)
+      // 开发期要求 edit/apply_patch 这类非 shell auto 请求不要回到普通 ask；
+      // 它们没有 bash 级语义证据，预审层级是 general，因此交给 reviewer 单点判断。
+      expect(reviewedCalls).toBe(1)
+      expect(yield* list()).toHaveLength(0)
       // [local-smark] general 非 shell auto 路由回归结束
-      yield* rejectAll()
-      yield* Fiber.await(fiber)
     }),
   { git: true },
 )
