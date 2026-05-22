@@ -229,6 +229,7 @@ const layer = Layer.effectDiscard(
                   ...LocationMutation.externalDirectoryPermission(external),
                   sessionID: context.sessionID,
                   agent: context.agent,
+                  metadata: { command: input.command, cwd: target.canonical, shell },
                   source,
                 })
               const warnings = (yield* externalCommandDirectories(fs, input.command, target.canonical)).map(
@@ -241,6 +242,7 @@ const layer = Layer.effectDiscard(
                 save: [input.command],
                 sessionID: context.sessionID,
                 agent: context.agent,
+                metadata: { command: input.command, cwd: target.canonical, shell },
                 source,
               })
 
@@ -356,7 +358,7 @@ const layer = Layer.effectDiscard(
                 content: [{ type: "text", text: value.contextOutput }, { type: "text", text: modelOutput(value) }],
               }))))
               // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
-            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }))),
+            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to execute command: ${input.command}`, error }))),
         }),
       })
       .pipe(Effect.orDie)

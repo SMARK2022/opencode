@@ -139,7 +139,7 @@ const layer = Layer.effectDiscard(
                 ? `${cause.message}\nUse a narrower path or include pattern before searching file contents.`
                 : cause instanceof Ripgrep.InvalidPatternError || cause instanceof Ripgrep.Error
                   ? cause.message
-                  : `Unable to grep for ${input.pattern}`,
+                  : PermissionV2.autoDeniedMessage(cause) ?? `Unable to grep for ${input.pattern}`,
             }))),
         }),
       })

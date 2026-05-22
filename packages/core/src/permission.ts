@@ -10,6 +10,13 @@ import { SessionV2 } from "./session"
 import { SessionStore } from "./session/store"
 import { Wildcard } from "./util/wildcard"
 import { PermissionSaved } from "./permission/saved"
+import { Config } from "./config"
+import { ConfigAutoReview } from "./config/auto-review"
+import { PermissionAuto } from "./permission/auto"
+import { PermissionReviewer } from "./permission/reviewer"
+import { PermissionV1 } from "./v1/permission"
+import { SessionID } from "@opencode-ai/schema/session-id"
+import { SessionMessage } from "./session/message"
 
 export { Effect, Rule, Ruleset } from "@opencode-ai/schema/permission"
 const missingAgentPermissions: Permission.Ruleset = [{ action: "*", resource: "*", effect: "deny" }]
@@ -65,7 +72,15 @@ export class CorrectedError extends Schema.TaggedErrorClass<CorrectedError>()("P
 
 export class BlockedError extends Schema.TaggedErrorClass<BlockedError>()("PermissionV2.BlockedError", {
   rules: Permission.Ruleset,
-}) {}
+  reason: Schema.String.pipe(Schema.optional),
+}) {
+  override get message() { return this.reason ?? "This tool call was blocked by configured permissions." }
+}
+
+// 只交付自动审查的明确理由；静态拒绝仍保留各工具既有的错误契约。
+export function autoDeniedMessage(error: unknown) {
+  return error instanceof BlockedError && error.reason !== undefined ? error.message : undefined
+}
 
 export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("PermissionV2.NotFoundError", {
   requestID: ID,
@@ -115,6 +130,10 @@ const layer = Layer.effect(
     const sessions = yield* SessionStore.Service
     const saved = yield* PermissionSaved.Service
     const pending = new Map<ID, Pending>()
+    const config = yield* Config.Service
+    const reviewer = yield* PermissionReviewer.Service
+    const cache = new Map<string, Set<string>>()
+    const circuits = new Map<string, { consecutive: number; recent: boolean[]; triggered: boolean }>()
 
     yield* EffectRuntime.addFinalizer(() =>
       EffectRuntime.forEach(pending.values(), (item) => Deferred.fail(item.deferred, new DeclinedError()), {
@@ -158,8 +177,58 @@ const layer = Layer.effect(
       if (denied(input, rules)) return { effect: "deny" as const, rules }
       const all = [...rules, ...(yield* savedRules())]
       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
-      // 后续自动裁决接线前保留人工审批，不能把尚未解析的 auto 当成 allow。
-      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") || effects.includes("auto") ? "ask" : "allow"
+      const resources = input.resources.filter((_, index) => effects[index] === "auto")
+      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
+      if (effect === "deny" || resources.length === 0) return { effect, rules: all }
+      const entries = yield* config.entries()
+      const options = entries.flatMap((entry) => entry.type === "document" && entry.info.auto_review ? [entry.info.auto_review] : [])
+        .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})
+      const recorded = input.source?.type === "tool" ? yield* sessions.message(SessionMessage.ID.make(input.source.messageID)) : undefined
+      const tool = recorded?.sessionID === input.sessionID && recorded.message.type === "assistant"
+        ? recorded.message.content.find((part) => part.type === "tool" && part.id === input.source?.callID) : undefined
+      // 审查读取已经记录的工具输入，不提前读取尚未获准访问的目标文件。
+      const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata }
+      const key = JSON.stringify([input.action, resources, metadata, input.agent, all, options, Config.latest(entries, "approvals_reviewer")])
+      const known = cache.get(input.sessionID) ?? new Set<string>()
+      cache.set(input.sessionID, known)
+      const state = circuits.get(input.sessionID) ?? { consecutive: 0, recent: [], triggered: false }
+      circuits.set(input.sessionID, state)
+      const record = (denied: boolean) => {
+        state.consecutive = denied ? state.consecutive + 1 : 0
+        state.recent.push(denied)
+        if (state.recent.length > Math.max(1, Math.floor(options.recent_denial_window ?? 50))) state.recent.shift()
+      }
+      if (known.has(key)) {
+        record(false)
+        return { effect, rules: all }
+      }
+      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict }, {
+        review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
+      })
+      const sessionID = SessionID.make(input.sessionID)
+      // 使用既有兼容事件记录审查，不能冒充用户的 once/always 批准。
+      if (decision.source === "reviewer") {
+        const reviewID = "reviewID" in decision ? decision.reviewID : undefined
+        if (reviewID) yield* events.publish(PermissionV1.Event.ReviewCompleted, {
+          sessionID, reviewID, outcome: decision.action, rationale: decision.reason,
+        })
+        else yield* events.publish(PermissionV1.Event.ReviewFailed, { sessionID, reviewID: "unknown", reason: decision.reason })
+      }
+      if (decision.action === "deny") {
+        if (decision.source === "reviewer") {
+          record(true)
+          const recent = state.recent.filter(Boolean).length
+          if (!state.triggered && (state.consecutive >= Math.max(1, options.max_consecutive_denials ?? 3) || recent >= Math.max(1, options.max_recent_denials ?? 10))) {
+            state.triggered = true
+            yield* events.publish(PermissionV1.Event.CircuitBroken, { sessionID, consecutive: state.consecutive, recent })
+          }
+        }
+        return { effect: "deny" as const, rules: all, reason: new PermissionV1.AutoDeniedError({ reason: decision.reason }).message }
+      }
+      if (decision.action === "ask") return { effect: "ask" as const, rules: all }
+      record(false)
+      if (decision.source === "reviewer") known.add(key)
+      // 自动批准不覆盖请求中另一个仍为 ask 的资源。
       return { effect, rules: all }
     })
 
@@ -199,10 +268,11 @@ const layer = Layer.effect(
     const assert = EffectRuntime.fn("PermissionV2.assert")((input: AssertInput) =>
       EffectRuntime.uninterruptibleMask((restore) =>
         EffectRuntime.gen(function* () {
-          const result = yield* evaluateInput(input)
+          const result = yield* restore(evaluateInput(input))
           if (result.effect === "deny") {
             return yield* new BlockedError({
               rules: relevant(input, result.rules),
+              reason: "reason" in result ? result.reason : undefined,
             })
           }
           if (result.effect === "allow") return
@@ -308,5 +378,5 @@ export const locationLayer = layer.pipe(Layer.provideMerge(AgentV2.locationLayer
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [EventV2.node, Location.node, AgentV2.node, SessionStore.node, PermissionSaved.node],
+  deps: [EventV2.node, Location.node, AgentV2.node, SessionStore.node, PermissionSaved.node, Config.node, PermissionReviewer.node],
 })

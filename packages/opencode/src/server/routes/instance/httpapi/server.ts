@@ -21,6 +21,11 @@ import { MCP } from "@/mcp"
 import { McpRuntime } from "@opencode-ai/core/mcp"
 import { McpAuth } from "@/mcp/auth"
 import { Permission } from "@/permission"
+import { PermissionReviewer } from "@/permission/reviewer/service"
+import { PermissionSessionCache } from "@/permission/cache/session-cache"
+import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
+// #199：auto review 管线三服务需进入生产 app group（见下）
+
 import { Plugin } from "@/plugin"
 import { PluginPtyEnvironment } from "@/plugin/pty-environment"
 import { InstanceStore } from "@/project/instance-store"
@@ -232,6 +237,12 @@ const app = LayerNode.group([
   Discovery.node,
   Question.node,
   Permission.node,
+  // #199：LayerNode.compile 仅 provide deps 而不注入成员；生产 server runtime
+  // #199：必须把 reviewer/cache/circuit 并列入组，否则 Auto agent 在生产
+  // #199：恒 fail-closed（AutoDeniedError），用户 bash:auto 也退化为普通 ask。
+  PermissionReviewer.node,
+  PermissionSessionCache.node,
+  PermissionCircuitBreaker.node,
   PermissionSaved.node,
   Todo.node,
   Session.node,

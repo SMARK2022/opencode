@@ -25,6 +25,7 @@ const assertions: PermissionV2.AssertInput[] = []
 const writes: string[] = []
 let reads = 0
 let denyAction: string | undefined
+let denyReason: string | undefined
 let afterRead = (_target: string, _content: Uint8Array): Effect.Effect<void> => Effect.void
 
 const permission = Layer.succeed(
@@ -33,7 +34,7 @@ const permission = Layer.succeed(
     assert: (input) =>
       Effect.sync(() => assertions.push(input)).pipe(
         Effect.andThen(
-          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void,
+          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [], reason: denyReason })) : Effect.void,
         ),
       ),
     ask: () => Effect.die("unused"),
@@ -49,6 +50,7 @@ const reset = () => {
   writes.length = 0
   reads = 0
   denyAction = undefined
+  denyReason = undefined
   afterRead = () => Effect.void
 }
 
@@ -281,6 +283,12 @@ describe("EditTool", () => {
                 expect(matching).toEqual({ type: "error", value: "Unable to edit secret.txt" })
                 expect(missing).toEqual(matching)
                 expect(assertions.map((input) => input.action)).toEqual(["edit", "edit"])
+                expect(reads).toBe(0)
+                expect(writes).toEqual([])
+
+                // 自动拒绝保留审查反馈，但同样不能先探测文件内容。
+                denyReason = "Automatic review rejected this edit. Ask the user before attempting it again."
+                expect(yield* executeTool(registry, call({ path: "secret.txt", oldString: "secret content", newString: "replacement" }))).toEqual({ type: "error", value: denyReason })
                 expect(reads).toBe(0)
                 expect(writes).toEqual([])
               }),
