@@ -74,7 +74,8 @@ const layer = Layer.effect(
       if (build) return build
       for (const agent of data.agents.values()) {
         const fallback = selectable(agent)
-        if (fallback) return fallback
+        // Auto 只接受显式选择，禁用其他主代理不应悄悄启用自动权限。
+        if (fallback && agent.id !== "Auto") return fallback
       }
     }
 
@@ -100,7 +101,10 @@ const layer = Layer.effect(
         return { id: info?.id ?? defaultID, info }
       }),
       all: Effect.fn("AgentV2.all")(function* () {
-        return Array.fromIterable(state.get().agents.values())
+        const data = state.get()
+        const selected = data.default ?? defaultID
+        // 与旧运行时一致：默认项居首，其余使用本地化名称顺序。
+        return Array.fromIterable(data.agents.values()).toSorted((a, b) => Number(b.id === selected) - Number(a.id === selected) || a.id.localeCompare(b.id))
       }),
     })
   }),
