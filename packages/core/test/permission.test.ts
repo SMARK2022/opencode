@@ -7,6 +7,13 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Location } from "@opencode-ai/core/location"
 import { PermissionV2 } from "@opencode-ai/core/permission"
+import { Config } from "@opencode-ai/core/config"
+import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
+import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
+import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
+import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
+import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
 import { PermissionTable } from "@opencode-ai/core/permission/sql"
 import { PermissionSaved } from "@opencode-ai/core/permission/saved"
 import { Project } from "@opencode-ai/core/project"
@@ -18,6 +25,27 @@ import { SessionStore } from "@opencode-ai/core/session/store"
 import { eq } from "drizzle-orm"
 import { location } from "./fixture/location"
 import { testEffect } from "./lib/effect"
+
+let reviewSettings = new Config.Info({})
+let assessment: typeof PermissionReviewerSchema.Assessment.Type = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
+const reviewRequests: LLMRequest[] = []
+let reviewGate: Deferred.Deferred<void> | undefined
+let reviewStarted: Deferred.Deferred<void> | undefined
+let malformed = false
+const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
+  prepare: () => Effect.die("unused"),
+  stream: () => { throw new Error("review must not start a Session stream") },
+  generate: (request) => Effect.gen(function* () {
+    reviewRequests.push(request)
+    if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
+    if (reviewGate) yield* Deferred.await(reviewGate)
+    return new LLMResponse({ message: Message.assistant([]), finishReason: "tool-calls", events: malformed ? [] : [
+      LLMEvent.toolCall({ id: "review", name: "generate_object", input: assessment }),
+    ] })
+  }),
+}))
+const reviewModel = SessionRunnerModel.layerWith(() => Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route })))
+const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
 
 const current = Layer.succeed(
   Location.Service,
@@ -33,7 +61,10 @@ const it = testEffect(
       AgentV2.node,
       PermissionV2.node,
     ]),
-    [[Location.node, current]],
+    [[Location.node, current], [Config.node, reviewConfig],
+      // 只替换模型与运输边界；Permission、reviewer、Schema 和事件仍使用真实实现。
+      [SessionRunnerModel.node, reviewModel], [LayerNodePlatform.llmClient, reviewClient],
+    ],
   ),
 )
 
@@ -312,4 +343,77 @@ describe("PermissionV2", () => {
       expect(yield* saved.list()).toEqual([])
     }),
   )
+  it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
+    reviewSettings = new Config.Info({})
+    reviewRequests.length = 0
+    malformed = false
+    reviewGate = undefined
+    reviewStarted = undefined
+    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+    const service = yield* PermissionV2.Service
+    const sessions = yield* SessionStore.Service
+    const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
+    // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
+    expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
+    const pending = yield* service.ask(assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." } }))
+    expect(pending.effect).toBe("ask")
+    yield* service.reply({ requestID: pending.id, reply: "once" })
+    expect(reviewRequests).toHaveLength(0)
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    // 危险组合不等待模型，也不会产生可被用户误批准的 pending。
+    const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)
+    expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
+    expect(denied.message).toContain("Do not retry the same outcome")
+    expect(denied.message).toContain("Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.")
+    expect(PermissionV2.autoDeniedMessage(denied)).toBe(denied.message)
+    expect(reviewRequests).toHaveLength(0)
+    const edit = assertion({ action: "edit", resources: ["src/a.ts"], metadata: { filepath: "/project/src/a.ts", diff: "-old\n+new" } })
+    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
+    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(1)
+    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("generate_object")
+    expect(JSON.stringify(reviewRequests[0]?.tools)).not.toContain('"bash"')
+    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("-old")
+    // 同一路径的新编辑计划不能复用旧裁决；另一个 Session 也不能共享审批。
+    expect(yield* service.ask({ ...edit, metadata: { ...edit.metadata, diff: "-old\n+other" } })).toMatchObject({ effect: "allow" })
+    const database = yield* Database.Service
+    yield* database.db.insert(SessionTable).values({ id: SessionV2.ID.make("ses_other"), project_id: Project.ID.global, slug: "other", directory: "/project", title: "other", version: "test", agent: "test" }).run().pipe(Effect.orDie)
+    expect(yield* service.ask({ ...edit, sessionID: SessionV2.ID.make("ses_other") })).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(3)
+    yield* setRules([{ action: "edit", resource: "*", effect: "deny" }])
+    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(3)
+    yield* setRules([{ action: "edit", resource: "*", effect: "auto" }, { action: "edit", resource: "manual", effect: "ask" }])
+    const mixed = yield* service.ask({ ...edit, resources: ["src/a.ts", "manual"] })
+    expect(mixed.effect).toBe("ask")
+    yield* service.reply({ requestID: mixed.id, reply: "reject" })
+    expect(yield* service.list()).toEqual([])
+    // strict 强制只读操作也审查；结构错误按配置分别拒绝或交回人工。
+    yield* setRules([{ action: "*", resource: "*", effect: "auto" }])
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
+    expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(5)
+    malformed = true
+    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ fallback: "user" }) })
+    const fallback = yield* service.ask(edit)
+    expect(fallback.effect).toBe("ask")
+    yield* service.reply({ requestID: fallback.id, reply: "reject" })
+    malformed = false
+    assessment = { ...assessment, outcome: "allow", risk_level: "critical" }
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
+    assessment = { ...assessment, risk_level: "low" }
+    // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
+    reviewGate = yield* Deferred.make<void>()
+    reviewStarted = yield* Deferred.make<void>()
+    const fiber = yield* service.assert({ ...edit, metadata: { diff: "cancel" } }).pipe(Effect.forkScoped)
+    yield* Deferred.await(reviewStarted)
+    yield* Fiber.interrupt(fiber)
+    reviewGate = undefined
+    reviewStarted = undefined
+    expect(yield* service.list()).toEqual([])
+    expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
+    reviewSettings = new Config.Info({})
+  }))
 })

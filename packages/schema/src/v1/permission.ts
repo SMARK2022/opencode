@@ -65,4 +65,31 @@ const Replied = define({
   type: "permission.replied",
   schema: { sessionID: SessionID, requestID: ID, reply: Reply },
 })
-export const Event = { Asked, Replied, Definitions: inventory(Asked, Replied) }
+// #199：以下三个事件仅用于观察/审计，不影响 permission 决议本身。ask 与 error
+// #199：仍通过原有 Asked/Replied 路径返回，订阅者无需监听这些新事件即可保持行为不变。
+// #199：ReviewCompleted 在 reviewer 给出 allow/deny 时发布，绑定 reviewID 供审计
+// #199：追溯；outcome 与 reviewer 决议一致，但 permission 层仍独立执行 cache/circuit。
+const ReviewCompleted = define({
+  type: "permission.review.completed",
+  schema: { sessionID: SessionID, reviewID: Schema.String, outcome: Schema.Literals(["allow", "deny"]), rationale: Schema.String },
+})
+// #199：ReviewFailed 在 reviewer 异常退出（超时/provider 错误）时发布，reviewID 缺失
+// #199：时记为 unknown；permission 层据此 fail-closed 而非静默放行。
+const ReviewFailed = define({
+  type: "permission.review.failed",
+  schema: { sessionID: SessionID, reviewID: Schema.String, reason: Schema.String },
+})
+// #199：CircuitBroken 在连续拒绝触发阈值时发布，是咨询性信号——UI 可据此提示
+// #199：用户，但 permission 层的 deny 结果不依赖此事件。
+const CircuitBroken = define({
+  type: "permission.review.circuit_broken",
+  schema: { sessionID: SessionID, consecutive: Schema.Number, recent: Schema.Number },
+})
+export const Event = {
+  Asked,
+  Replied,
+  ReviewCompleted,
+  ReviewFailed,
+  CircuitBroken,
+  Definitions: inventory(Asked, Replied, ReviewCompleted, ReviewFailed, CircuitBroken),
+}

@@ -146,7 +146,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         Effect.onInterrupt(() => background.cancel(child.id).pipe(Effect.andThen(sessions.interrupt(child.id)))),
       )
       }))
-    }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute task: ${input.description}`, error }))),
+    }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to execute task: ${input.description}`, error }))),
   }) }).pipe(Effect.orDie)
 }))
 

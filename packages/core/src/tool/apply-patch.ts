@@ -83,12 +83,12 @@ const layer = Layer.effectDiscard(
             toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],
             execute: (input, context) => {
               const applied: Array<typeof Applied.Type> = []
-              const fail = (path: string) => {
+              const fail = (path: string, error?: unknown) => {
                 const prefix =
                   applied.length === 0
                     ? `Unable to apply patch at ${path}`
                     : `Patch partially applied before failing at ${path}. Applied: ${applied.map((item) => item.resource).join(", ")}`
-                return new ToolFailure({ message: prefix })
+                return new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? prefix })
               }
               return Effect.gen(function* () {
                 const source = {
@@ -199,7 +199,7 @@ const layer = Layer.effectDiscard(
                   { discard: true },
                 )
                 return { applied, files: patchFiles }
-              }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch"))))
+              }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch", error))))
             },
           }),
           "edit",

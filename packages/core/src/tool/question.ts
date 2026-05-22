@@ -69,7 +69,7 @@ const layer = Layer.effectDiscard(
                 source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
               })
               .pipe(
-                Effect.mapError(() => new ToolFailure({ message: "Permission denied: question" })),
+                Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? "Permission denied: question" })),
                 Effect.andThen(
                   question
                     .ask({

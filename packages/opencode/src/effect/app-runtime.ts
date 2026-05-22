@@ -20,6 +20,9 @@ import { Skill } from "@/skill"
 import { Discovery } from "@/skill/discovery"
 import { Question } from "@/question"
 import { Permission } from "@/permission"
+import { PermissionReviewer } from "@/permission/reviewer/service"
+import { PermissionSessionCache } from "@/permission/cache/session-cache"
+import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
 import { Todo } from "@/session/todo"
 import { Session } from "@/session/session"
 import { SessionStatus } from "@/session/status"
@@ -74,6 +77,14 @@ export const AppLayer = AppNodeBuilderV1.build(
     Skill.node,
     Discovery.node,
     Question.node,
+    // #199：reviewer 在 Permission 之前声明，builder 按 dep 拓扑排序而非数组顺序。
+    // #199：reviewer 依赖 Config/Provider/Session，这些 node 已在 group 中。
+    PermissionReviewer.node,
+    // #199：cache/circuit 必须与 Permission 并列声明。LayerNode.compile 用
+    // #199：Layer.provide 组合 deps，丢弃未被静态需求的服务层；Permission 用
+    // #199：serviceOption 可选查询，仅靠 Permission.node deps 隐式提供将运行时不可达。
+    PermissionSessionCache.node,
+    PermissionCircuitBreaker.node,
     Permission.node,
     Todo.node,
     Session.node,

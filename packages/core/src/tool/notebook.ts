@@ -78,7 +78,7 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
     action, resources: [args.filePath], save: [args.filePath], metadata: { args },
     sessionID: context.sessionID, agent: context.agent,
     source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
-  }).pipe(Effect.mapError(error => new ToolFailure({ message: `Permission denied: ${action}`, error })))
+  }).pipe(Effect.mapError(error => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Permission denied: ${action}`, error })))
   // 模型继续接收原生summary正文，完整响应同时经统一settlement保存在structured。
   const common = { output: Output, toModelOutput: ({ output }: { output: typeof Output.Encoded }) => [{ type: "text" as const, text: output.summary }] }
   yield* tools.register({

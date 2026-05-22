@@ -52,7 +52,7 @@ export const toModelOutput = (skill: SkillV2.Info, files: ReadonlyArray<string>)
 }
 
 const unableToLoad = (name: string, error?: unknown) =>
-  new ToolFailure({ message: `Unable to load skill ${name}`, error })
+  new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to load skill ${name}`, error })
 
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {

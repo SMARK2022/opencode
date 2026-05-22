@@ -105,7 +105,7 @@ const layer = Layer.effectDiscard(
                       ? new ToolFailure({
                           message: "File changed after permission approval. Read it again before editing.",
                         })
-                      : new ToolFailure({ message: `Unable to edit ${input.path}` }),
+                      : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to edit ${input.path}` }),
                   ),
                 )
 
@@ -134,6 +134,7 @@ const layer = Layer.effectDiscard(
                       ...LocationMutation.externalDirectoryPermission(external),
                       sessionID: context.sessionID,
                       agent: context.agent,
+                    metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
                       source: permissionSource,
                     }),
                   )
@@ -146,6 +147,7 @@ const layer = Layer.effectDiscard(
                     save: ["*"],
                     sessionID: context.sessionID,
                     agent: context.agent,
+                      metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
                     source: permissionSource,
                   }),
                 )

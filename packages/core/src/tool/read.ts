@@ -152,7 +152,7 @@ const layer = Layer.effectDiscard(
                   error instanceof Image.DecodeError ||
                   error instanceof Image.SizeError
                     ? error.message
-                    : `Unable to read ${input.path}`
+                    : PermissionV2.autoDeniedMessage(error) ?? `Unable to read ${input.path}`
                 return new ToolFailure({ message })
               }),
             )

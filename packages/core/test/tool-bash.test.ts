@@ -41,6 +41,7 @@ const runs: Array<{
   readonly options?: AppProcess.RunOptions
 }> = []
 let denyAction: string | undefined
+let denyReason: string | undefined
 let result: AppProcess.RunResult = {
   command: "mock",
   exitCode: 0,
@@ -61,7 +62,7 @@ const permission = Layer.succeed(
       Effect.sync(() => assertions.push(input)).pipe(
         Effect.andThen(Effect.suspend(() => afterPermission(input))),
         Effect.andThen(
-          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void,
+          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [], reason: denyReason })) : Effect.void,
         ),
       ),
     ask: () => Effect.die("unused"),
@@ -102,6 +103,7 @@ const reset = () => {
   assertions.length = 0
   runs.length = 0
   denyAction = undefined
+  denyReason = undefined
   runFailure = undefined
   afterPermission = () => Effect.void
   result = {
@@ -623,6 +625,13 @@ describe("BashTool", () => {
           denyAction = "bash"
           yield* withTool(active.path, (registry) => executeTool(registry, call({ command: "pwd" })))
           expect(assertions.map((item) => item.action)).toEqual(["bash"])
+          expect(runs).toEqual([])
+
+          // 拒绝正文必须进入真实结算的模型结果，且不能因此执行进程。
+          denyReason = "Automatic review rejected this operation. Do not retry through another tool."
+          expect(yield* withTool(active.path, (registry) => executeTool(registry, call({ command: "pwd" })))).toEqual({ type: "error", value: denyReason })
+          denyAction = "external_directory"
+          expect(yield* withTool(active.path, (registry) => executeTool(registry, call({ command: "pwd", workdir: outside.path })))).toEqual({ type: "error", value: denyReason })
           expect(runs).toEqual([])
         }),
       ([active, outside]) =>
