@@ -89,16 +89,16 @@ export function retryable(error: Err, provider: string) {
     const status = error.data.statusCode
     // 5xx errors are transient server failures and should always be retried,
     // even when the provider SDK doesn't explicitly mark them as retryable.
+    // #191：移除 status !== undefined 守卫——无 statusCode 的可重试错误（transport）也应重试
     if (
       !error.data.isRetryable &&
       !(status !== undefined && status >= 500) &&
-      // 网络异常（statusCode 为 undefined）也应重试，避免瞬时网络故障直接失败
-      status !== undefined &&
       !matchesRetryableMessage(error.data.message) &&
       !matchesRetryableMessage(error.data.responseBody)
     )
       return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
+      // #191：FreeUsageLimitError 是计费门槛，优先于通用 5xx 重试判定
       return {
         message: GO_UPSELL_MESSAGE,
         action: {

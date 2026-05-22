@@ -44,6 +44,35 @@ interface FetchDecompressionError extends Error {
   path: string
 }
 
+// #191：仅限 transport 层瞬时故障；provider/status 错误和非法 payload 必须走各自非重试分支
+// #191：码集合覆盖 Node/undici/TLS 常见瞬时故障；ECONNRESET 由既有 switch case 处理故不在此列
+const TRANSIENT_TRANSPORT_CODES = new Set([
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ConnectionClosed",
+  "ConnectionRefused",
+  "FailedToOpenSocket",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_ABORTED",
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "SSE_READ_TIMEOUT",
+  // #191：SSE_READ_TIMEOUT 是自研超时码，与其他 Node/undici 网络码同属 transport 层重试类
+])
+  // #191：ECONNRESET 被排除在集合外，由 fromError 顶层 case 按嵌套深度单独判定，避免双重分类
+
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
@@ -728,6 +757,34 @@ export function fromError(
         },
         { cause: e },
       ).toObject()
+    case !ctx.aborted && !APICallError.isInstance(e) && (() => {
+      // #191：ctx.aborted 表示用户主动取消，不得转为可重试错误
+      // #191：在 catch-all 之前检查 transport 层瞬时故障
+      // #191：先解包 AI SDK RetryError，取 lastError 再判定
+      const retried = retryErrorCause(e)
+      if (retried) return true
+      // #191：transportError 命中时返回 true 进入本 case
+      return Boolean(transportError(e))
+    })():
+      // #191：RetryError 解包后递归调用 fromError
+      {
+        const retried = retryErrorCause(e)
+        if (retried) return fromError(retried, ctx)
+        // #191：transport 层瞬时故障转为可重试 APIError
+          // #191：isRetryable=true 是 retryable() 的入口契约，metadata 保留原始错误信息
+        const transport = transportError(e)
+        if (transport) {
+          return new APIError(
+            {
+              message: transport.message,
+              isRetryable: true,
+              metadata: transport.metadata,
+            },
+            { cause: e },
+          ).toObject()
+        }
+      }
+      return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
     case e instanceof Error:
       return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
     default:
@@ -757,6 +814,101 @@ export function fromError(
       } catch {}
       return new NamedError.Unknown({ message: JSON.stringify(e) }, { cause: e }).toObject()
   }
+}
+
+
+// #191：errorLike 统一 Error 与裸对象两种形态，使 cause 链检查覆盖非标准错误包装
+type ErrorLike = {
+  name?: unknown
+  message?: unknown
+  code?: unknown
+  syscall?: unknown
+  cause?: unknown
+  lastError?: unknown
+  errors?: unknown
+}
+
+// #191：安全提取 Error-like 属性，兼容 Error 和普通对象
+// #191：非 Error 对象也可能有 code/cause，需兼容裸对象
+function errorLike(value: unknown): ErrorLike | undefined {
+  if (value instanceof Error) return value as ErrorLike
+  if (typeof value === "object" && value !== null) return value as ErrorLike
+  return undefined
+}
+
+// #191：stringValue 统一 code/name/syscall 为字符串比较，避免数字或符号混入判定
+// #191：防止 number/undefined 混入 code 判定
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined
+}
+
+// #191：解包 AI SDK RetryError，取 lastError 或 errors 末尾
+// #191：只处理 AI_RetryError，其他包装错误不拆
+// #191：lastError 是 AI SDK 记录的最终失败，优先于 errors 数组；两者都不存在时不拆
+function retryErrorCause(value: unknown) {
+  const error = errorLike(value)
+  if (!error) return undefined
+  if (stringValue(error.name) !== "AI_RetryError") return undefined
+  if (error.lastError !== undefined && error.lastError !== value) return error.lastError
+  if (!Array.isArray(error.errors)) return undefined
+  const last = error.errors.at(-1)
+  // #191：避免自引用死循环
+  return last === value ? undefined : last
+}
+
+// #191：递归判定 transport 层瞬时故障，最多展开 2 层 cause
+// #191：ECONNRESET 顶层 switch 已有专门 case，嵌套时才走 transport
+function transportError(value: unknown, depth = 0): { message: string; metadata: Record<string, string> } | undefined {
+  const error = errorLike(value)
+  if (!error) return undefined
+
+  const code = stringValue(error.code)
+  // #191：code/name/message 三级判定：code 优先，其次 name，最后消息文本兜底
+  const name = stringValue(error.name)
+  const message = errorMessage(value)
+  const syscall = stringValue(error.syscall)
+  const retryCode = code
+  // #191：ECONNRESET 仅在嵌套 cause 时视为可重试，顶层由既有 case 处理，避免重复分类
+    ? code === "ECONNRESET" && depth > 0
+      ? code
+      : TRANSIENT_TRANSPORT_CODES.has(code)
+        // #191：transport 码集合是跨 provider 的稳定性契约，新增码需同步测试
+        ? code
+        : undefined
+    : name === "TimeoutError"
+      ? "TimeoutError"
+      : message === "SSE read timed out"
+        // #191：消息兜底用于未携带 code 的 provider 超时错误，保证重试语义一致
+        ? "SSE_READ_TIMEOUT"
+        : undefined
+  // #191：fetch failed / cannot connect 也视为可重试
+  const retryable =
+    retryCode !== undefined ||
+    message === "fetch failed" ||
+    message === "failed to fetch" ||
+    message.startsWith("Cannot connect to API:")
+    // #191：fetch failed 是 Node/undici 网络层通用包装，Cannot connect 是代理层提示，二者均属瞬时故障
+
+  if (retryable) {
+    // #191：部分 provider 用裸消息而非错误码表达网络失败，因此消息匹配不可省略
+    return {
+      message,
+      // #191：仅附加非空元数据
+        // #191：metadata.message 恒存在供下游展示，code/name/syscall 仅在有值时附加
+      metadata: {
+        message,
+        ...(retryCode ? { code: retryCode } : {}),
+        ...(name ? { name } : {}),
+        ...(syscall ? { syscall } : {}),
+      },
+    }
+  }
+
+  // #191：递归检查 cause 链，限制深度防死循环
+  // #191：cause 链可能成环（错误对象互相引用），depth 上限 2 是防死循环的硬边界
+  // #191：cause === value 直接截断自引用环，depth 上限兜底深链，保证判定必然终止
+  if (depth >= 2 || error.cause === undefined || error.cause === value) return undefined
+  return transportError(error.cause, depth + 1)
 }
 
 export * as MessageV2 from "./message-v2"

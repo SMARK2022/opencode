@@ -1,11 +1,11 @@
-import { Effect, Stream } from "effect"
+import { Effect, Schedule, Stream } from "effect"
 import { Headers, HttpClientRequest } from "effect/unstable/http"
 import { Auth } from "../auth"
 import { render as renderEndpoint } from "../endpoint"
 import { Framing, type Framing as FramingDef } from "../framing"
 import type { Transport, TransportPrepareInput } from "./index"
 import * as ProviderShared from "../../protocols/shared"
-import { mergeJsonRecords, type LLMRequest } from "../../schema"
+import { LLMError, TransportReason, mergeJsonRecords, type LLMRequest } from "../../schema"
 
 export type JsonRequestInput<Body> = TransportPrepareInput<Body>
 
@@ -128,25 +128,36 @@ export const httpJson = <Body, Frame>(input: HttpJsonInput<Body, Frame>): HttpJs
       })),
     ),
   frames: (prepared, request, runtime) =>
-    Stream.unwrap(
-      runtime.http
-        .execute(prepared.request)
-        .pipe(
+    Stream.suspend(() => {
+      let started = false
+      const frames = Stream.unwrap(
+        runtime.http.execute(prepared.request).pipe(
           Effect.map((response) =>
             prepared.framing.frame(
               response.stream.pipe(
-                Stream.mapError((error) =>
-                  ProviderShared.eventError(
-                    `${request.model.provider}/${request.model.route.id}`,
-                    `Failed to read ${request.model.provider}/${request.model.route.id} stream`,
-                    ProviderShared.errorText(error),
-                  ),
-                ),
+                // 字节读取失败是运输故障；协议/JSON解码仍在原有不可重试分支。
+                Stream.mapError((error) => new LLMError({
+                  module: "HttpTransport",
+                  method: "frames",
+                  reason: new TransportReason({
+                    message: `Failed to read ${request.model.provider}/${request.model.route.id} stream: ${ProviderShared.errorText(error)}`,
+                    kind: error.reason._tag,
+                  }),
+                })),
               ),
             ),
           ),
         ),
-    ),
+      )
+      return frames.pipe(
+        // 已交付的frame可能包含工具副作用，之后绝不自动重放本provider turn。
+        Stream.tap(() => Effect.sync(() => { started = true })),
+        Stream.retry(($) => $(Schedule.exponential(500).pipe(Schedule.take(2))).pipe(
+          // 仅重取此处的body故障，不重复包裹executor已耗尽的建连/status重试。
+          Schedule.while(({ input }) => !started && input.module === "HttpTransport" && input.reason._tag === "Transport"),
+        )),
+      )
+    }),
 })
 
 export const sseJson = {

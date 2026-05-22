@@ -127,7 +127,7 @@ export class TransportReason extends Schema.Class<TransportReason>("LLM.Error.Tr
   http: Schema.optional(HttpContext),
 }) {
   get retryable() {
-    // 未取得 HTTP 响应的网络异常交给既有有限 RequestExecutor 重试，不重启已开始的 Session turn。
+    // 运输owner仅在内容交付前有限重试网络故障，不重启已开始的Session turn。
     return true
   }
 }

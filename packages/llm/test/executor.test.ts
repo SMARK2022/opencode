@@ -425,6 +425,50 @@ describe("RequestExecutor", () => {
     }).pipe(Effect.provideService(Random.Random, randomMidpoint)),
   )
 
+  it.live("retries response-body transport failure before the first provider frame", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0)
+      const model = OpenAIChat.route.with({ endpoint: { baseURL: "https://api.openai.test/v1" } }).model({ id: "gpt-4o-mini" })
+      const response = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello." })).pipe(
+        Effect.provide(dynamicResponse((input) => Effect.gen(function* () {
+          const attempt = yield* Ref.getAndUpdate(attempts, (value) => value + 1)
+          if (attempt === 0) return input.respond(new ReadableStream({
+            start(controller) {
+              controller.error(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }))
+            },
+          }), { headers: { "content-type": "text/event-stream" } })
+          return input.respond(sseRaw(
+            `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }))}`,
+            `data: ${JSON.stringify(deltaChunk({}, "stop"))}`,
+            "data: [DONE]",
+          ), { headers: { "content-type": "text/event-stream" } })
+        }))),
+      )
+      // 真实协议成功收口且只重取一次，不在Session层另开provider turn。
+      expect(response.events.some((event) => event.type === "finish")).toBe(true)
+      expect(yield* Ref.get(attempts)).toBe(2)
+    }),
+  )
+
+  it.live("bounds response-body retries and preserves their transport classification", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0)
+      const model = OpenAIChat.route.with({ endpoint: { baseURL: "https://api.openai.test/v1" } }).model({ id: "gpt-4o-mini" })
+      const error = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello." })).pipe(
+        Effect.provide(dynamicResponse((input) => Ref.update(attempts, (value) => value + 1).pipe(
+          Effect.as(input.respond(new ReadableStream({
+            start(controller) { controller.error(new Error("connection reset")) },
+          }), { headers: { "content-type": "text/event-stream" } })),
+        ))),
+        Effect.flip,
+      )
+      // 耗尽仍是真实失败，不伪造完成结果，也不无限重连。
+      expectLLMError(error)
+      expect(error.reason).toMatchObject({ _tag: "Transport" })
+      expect(yield* Ref.get(attempts)).toBe(3)
+    }),
+  )
+
   it.effect("does not retry after a successful response reaches stream parsing", () =>
     Effect.gen(function* () {
       const attempts = yield* Ref.make(0)
