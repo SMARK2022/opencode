@@ -116,6 +116,23 @@ export const TaskTool = Tool.define(
         )
       }
 
+      // #200：先解析代理再决定 bypassAgentCheck，hidden 拦截优先于权限审批
+      const next = yield* agent.get(params.subagent_type)
+      if (!next) {
+        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
+      }
+      // #200：permission-reviewer 为保留协议代理，非用户可调用子代理；
+      // #200：同时检查请求键与 hidden 标志，防止项目配置解除隐藏后经 reviewer 路由
+      // #200：保留名检查在 hidden 检查之前，双重保障即使配置 unhide 仍被拒绝
+      if (params.subagent_type === "permission-reviewer" && ctx.extra?.allowHiddenAgent !== true) {
+        return yield* Effect.fail(new Error(`Agent type is not available: ${params.subagent_type}`))
+      }
+      // #200：bypassAgentCheck 用于内部派发片段，但不可暴露 hidden 实现代理；
+      // #200：未来内部路径需要独立的 allowHiddenAgent 标志
+      if (next.hidden === true && ctx.extra?.allowHiddenAgent !== true) {
+        return yield* Effect.fail(new Error(`Agent type is not available: ${params.subagent_type}`))
+      }
+
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
           permission: id,
@@ -126,11 +143,6 @@ export const TaskTool = Tool.define(
             subagent_type: params.subagent_type,
           },
         })
-      }
-
-      const next = yield* agent.get(params.subagent_type)
-      if (!next) {
-        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
       const session = params.task_id

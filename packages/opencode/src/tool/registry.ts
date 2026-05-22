@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { PlanExitTool } from "./plan"
+import { PermissionReviewDecisionTool } from "./permission_review_decision"
 import { Session } from "@/session/session"
 import { QuestionTool } from "./question"
 import { ShellTool } from "./shell"
@@ -105,6 +106,7 @@ const layer = Layer.effect(
     const todo = yield* TodoWriteTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
+    const permissionReviewDecision = yield* PermissionReviewDecisionTool
     const webfetch = yield* WebFetchTool
     const websearch = yield* WebSearchTool
     const shell = yield* ShellTool
@@ -223,6 +225,7 @@ const layer = Layer.effect(
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
+          permission_review_decision: Tool.init(permissionReviewDecision),
           ...(codeModeTool ? { execute: Tool.init(codeModeTool) } : {}),
         })
 
@@ -242,7 +245,9 @@ const layer = Layer.effect(
             tool.todo,
             tool.search,
             tool.skill,
+            // #200：注册到 builtin 供 reviewer 获取，但 ids/tools 双层过滤对外不可见
             tool.patch,
+            tool.permission_review_decision,
             ...(tool.execute ? [tool.execute] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
@@ -259,11 +264,14 @@ const layer = Layer.effect(
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
-      return (yield* all()).map((tool) => tool.id)
+      // #200：decision 工具注册保留但不公开 id，避免出现在权限/插件/普通代理列表
+      return (yield* all()).map((tool) => tool.id).filter((id) => id !== PermissionReviewDecisionTool.id)
     })
 
     const describeTask = Effect.fn("ToolRegistry.describeTask")(function* (agent: Agent.Info) {
-      const items = (yield* agents.list()).filter((item) => item.mode !== "primary")
+      // #200：hidden 代理是实现细节而非子代理选项，describeTask 过滤防探测，
+      // #200：TaskTool 执行期同步拦截，双闸防止模型发现或调用隐藏代理
+      const items = (yield* agents.list()).filter((item) => item.mode !== "primary" && item.hidden !== true)
       const filtered = items.filter(
         (item) => Permission.evaluate("task", item.name, agent.permission).action !== "deny",
       )
@@ -289,10 +297,15 @@ const layer = Layer.effect(
     })
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      const internalReviewer = yield* agents.get("permission-reviewer")
       const filtered = (yield* all()).filter((tool) => {
         if (tool.id === WebSearchTool.id) {
           return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
         }
+
+        // #200：decision 工具仅对 reviewer 对象开放，按引用而非名比较，
+        // #200：配置伪造的代理无法冒名获取审批元数据工具
+        if (tool.id === PermissionReviewDecisionTool.id) return input.agent === internalReviewer
 
         const usePatch =
           input.modelID.includes("gpt-") && !input.modelID.includes("oss") && !input.modelID.includes("gpt-4")
