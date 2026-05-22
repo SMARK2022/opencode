@@ -118,6 +118,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // [local-smark] daemon multi-instance workspace tracking
     let syncedWorkspace = project.workspace.current()
     let connectedOnce = false
+    // [重连快照版本] 这些计数只描述 TUI 本地 store，不是 daemon 版本号；
+    // 用来让重连快照清理 stale blocker，同时保留 list 发出后到达的 SSE 变更。
+    let permissionVersion = 0
+    let questionVersion = 0
+    let permissionRefreshes = 0
+    let questionRefreshes = 0
+    let permissionRefreshVersion = 0
+    let questionRefreshVersion = 0
+    const permissionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
+    const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
     let pendingPartDeltas: EventMessagePartDelta[] = []
     let pendingPartDeltaTimer: Timer | undefined
 
@@ -215,6 +225,140 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
+    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) {
+      // [快照建表] reconnect 会用 daemon list 整体替换 pending map；这里先排序，
+      // 保持后续 permission/question asked/replied 增量更新依赖的二分查找不变量。
+      return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => {
+        ;(result[request.sessionID] ??= []).push(request)
+        return result
+      }, {})
+    }
+
+    function pendingRequestChangeKey(sessionID: string, requestID: string) {
+      // [本地变更键] 只在内存里区分 session/request；不改变 SDK shape、持久化值或用户可见 id。
+      return `${sessionID}\0${requestID}`
+    }
+
+    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(
+      snapshot: Record<string, T[]>,
+      current: Record<string, T[]>,
+      changes: Map<string, { sessionID: string; requestID: string; version: number }>,
+      since: number,
+    ) {
+      // [快照叠加规则] 整体替换负责丢弃断线期间已解决的 blocker；list 期间新到的
+      // asked/replied 只按 request id 从当前 store 回放，避免旧快照抹掉或复活新状态。
+      const result = Object.fromEntries(
+        Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]]),
+      ) as Record<string, T[]>
+      for (const change of changes.values()) {
+        if (change.version <= since) continue
+        const currentRequests = current[change.sessionID]
+        if (!currentRequests) {
+          removePendingRequest(result, change.sessionID, change.requestID)
+          continue
+        }
+        const currentMatch = Binary.search(currentRequests, change.requestID, (request) => request.id)
+        if (!currentMatch.found) {
+          removePendingRequest(result, change.sessionID, change.requestID)
+          continue
+        }
+        const requests = result[change.sessionID] ?? []
+        const match = Binary.search(requests, change.requestID, (request) => request.id)
+        if (match.found) {
+          requests[match.index] = currentRequests[currentMatch.index]
+        } else {
+          requests.splice(match.index, 0, currentRequests[currentMatch.index])
+        }
+        result[change.sessionID] = requests
+      }
+      return result
+    }
+
+    function removePendingRequest<T extends { id: string }>(requestsBySession: Record<string, T[]>, sessionID: string, id: string) {
+      const requests = requestsBySession[sessionID]
+      if (!requests) return
+      const match = Binary.search(requests, id, (request) => request.id)
+      if (!match.found) return
+      const next = requests.toSpliced(match.index, 1)
+      if (next.length === 0) {
+        delete requestsBySession[sessionID]
+        return
+      }
+      requestsBySession[sessionID] = next
+    }
+
+    function markPermissionRequestChange(sessionID: string, requestID: string) {
+      permissionVersion += 1
+      if (permissionRefreshes === 0) return
+      permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), {
+        sessionID,
+        requestID,
+        version: permissionVersion,
+      })
+    }
+
+    function markQuestionRequestChange(sessionID: string, requestID: string) {
+      questionVersion += 1
+      if (questionRefreshes === 0) return
+      questionChanges.set(pendingRequestChangeKey(sessionID, requestID), {
+        sessionID,
+        requestID,
+        version: questionVersion,
+      })
+    }
+
+    async function refreshPermissionRequests(workspace: string | undefined) {
+      const version = permissionVersion
+      const refreshVersion = permissionRefreshVersion + 1
+      permissionRefreshVersion = refreshVersion
+      permissionRefreshes += 1
+      try {
+        const response = await sdk.client.permission.list({ workspace })
+        // [竞态保护] 多次 reconnect 的 list 可能乱序返回；只有最新快照能覆盖 store。
+        if (refreshVersion !== permissionRefreshVersion) return
+        setStore(
+          "permission",
+          reconcile(
+            pendingRequestsWithLiveChanges(
+              pendingRequestsBySession(response.data ?? []),
+              store.permission,
+              permissionChanges,
+              version,
+            ),
+          ),
+        )
+      } finally {
+        permissionRefreshes -= 1
+        if (permissionRefreshes === 0) permissionChanges.clear()
+      }
+    }
+
+    async function refreshQuestionRequests(workspace: string | undefined) {
+      const version = questionVersion
+      const refreshVersion = questionRefreshVersion + 1
+      questionRefreshVersion = refreshVersion
+      questionRefreshes += 1
+      try {
+        const response = await sdk.client.question.list({ workspace })
+        // [问题快照规则] 与 permission 一致：最新 reconnect 快照负责整体替换，实时 SSE 另行叠加。
+        if (refreshVersion !== questionRefreshVersion) return
+        setStore(
+          "question",
+          reconcile(
+            pendingRequestsWithLiveChanges(
+              pendingRequestsBySession(response.data ?? []),
+              store.question,
+              questionChanges,
+              version,
+            ),
+          ),
+        )
+      } finally {
+        questionRefreshes -= 1
+        if (questionRefreshes === 0) questionChanges.clear()
+      }
+    }
+
     // [local-smark] refreshStatus for daemon session status tracking
     async function refreshStatus() {
       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
@@ -238,6 +382,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           void bootstrap()
           break
         case "permission.replied": {
+          markPermissionRequestChange(event.properties.sessionID, event.properties.requestID)
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break
           const match = Binary.search(requests, event.properties.requestID, (r) => r.id)
@@ -254,6 +399,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "permission.asked": {
           const request = event.properties
+          markPermissionRequestChange(request.sessionID, request.id)
           const requests = store.permission[request.sessionID]
           if (!requests) {
             setStore("permission", request.sessionID, [request])
@@ -276,6 +422,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "question.replied":
         case "question.rejected": {
+          markQuestionRequestChange(event.properties.sessionID, event.properties.requestID)
           const requests = store.question[event.properties.sessionID]
           if (!requests) break
           const match = Binary.search(requests, event.properties.requestID, (r) => r.id)
@@ -292,6 +439,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "question.asked": {
           const request = event.properties
+          markQuestionRequestChange(request.sessionID, request.id)
           const requests = store.question[request.sessionID]
           if (!requests) {
             setStore("question", request.sessionID, [request])
@@ -581,6 +729,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             refreshStatus(),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
+            // [pending 恢复入口] permission/question 只在 daemon 内存里，SSE 又不能 replay；
+            // reconnect bootstrap 必须主动拉快照，才能恢复断线期间仍 pending 的 blocker。
+            refreshPermissionRequests(workspace),
+            refreshQuestionRequests(workspace),
             project.workspace.sync(),
           ]).then(() => {
             setStore("status", "complete")

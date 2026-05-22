@@ -419,7 +419,13 @@ const live: Layer.Layer<
 
             const result = yield* run({ ...input, abort: ctrl.signal })
 
-            return Stream.fromAsyncIterable(result.fullStream, (e) => (e instanceof Error ? e : new Error(String(e))))
+            return Stream.fromAsyncIterable(result.fullStream, (e) =>
+              e instanceof Error
+                ? e
+                : // [stream 错误保真] 部分 provider 会用结构化对象 reject stream；
+                  // 保留到 Error.cause，让 MessageV2 能按 provider 语义分类。
+                  new Error(String(e), { cause: e }),
+            )
           }),
         ),
       )

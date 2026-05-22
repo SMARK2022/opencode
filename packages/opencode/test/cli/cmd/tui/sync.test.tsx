@@ -2,8 +2,8 @@
 import { describe, expect, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { tmpdir } from "../../../fixture/fixture"
-import { directory, mount, wait, worktree } from "./sync-fixture"
-import type { AssistantMessage, GlobalEvent, ToolPart } from "@opencode-ai/sdk/v2"
+import { directory, json, mount, wait, worktree } from "./sync-fixture"
+import type { AssistantMessage, GlobalEvent, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
 
 function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
@@ -15,6 +15,81 @@ function branchEvent(branch: string, workspace?: string): GlobalEvent {
       type: "vcs.branch.updated",
       properties: { branch },
     },
+  }
+}
+
+function serverConnectedEvent(id: string): GlobalEvent {
+  return {
+    directory: "global",
+    payload: { id, type: "server.connected", properties: {} },
+  }
+}
+
+function permissionAskedEvent(request: PermissionRequest): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: { id: `evt_${request.id}`, type: "permission.asked", properties: request },
+  }
+}
+
+function questionAskedEvent(request: QuestionRequest): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: { id: `evt_${request.id}`, type: "question.asked", properties: request },
+  }
+}
+
+function permissionRepliedEvent(request: PermissionRequest): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id: `evt_${request.id}_replied`,
+      type: "permission.replied",
+      properties: { sessionID: request.sessionID, requestID: request.id, reply: "once" },
+    },
+  }
+}
+
+function questionRejectedEvent(request: QuestionRequest): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id: `evt_${request.id}_rejected`,
+      type: "question.rejected",
+      properties: { sessionID: request.sessionID, requestID: request.id },
+    },
+  }
+}
+
+function permissionRequest(id: string): PermissionRequest {
+  return {
+    id,
+    sessionID: "ses_1",
+    permission: "edit",
+    patterns: ["/tmp/opencode/**/*.ts"],
+    metadata: { reason: "tool approval" },
+    always: [],
+    tool: { messageID: "msg_1", callID: "call_1" },
+  }
+}
+
+function questionRequest(id: string): QuestionRequest {
+  return {
+    id,
+    sessionID: "ses_1",
+    questions: [
+      {
+        question: "Which file should I inspect first?",
+        header: "Inspect",
+        options: [{ label: "Sync", description: "Review the sync store." }],
+        multiple: false,
+      },
+    ],
+    tool: { messageID: "msg_1", callID: "call_question_1" },
   }
 }
 
@@ -76,6 +151,284 @@ function deltaEvent(id: string, delta: string, partID = "part_1"): GlobalEvent {
 }
 
 describe("tui sync", () => {
+  test("recovers pending permission and question requests after reconnect", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let reconnected = false
+    const permission = permissionRequest("perm_1")
+    const question = questionRequest("question_1")
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/permission") return json(reconnected ? [permission] : [])
+      if (url.pathname === "/question") return json(reconnected ? [question] : [])
+    })
+
+    try {
+      expect(sync.data.permission.ses_1).toBeUndefined()
+      expect(sync.data.question.ses_1).toBeUndefined()
+
+      // The first server.connected marks the initial SSE attachment; only later
+      // connected events represent reconnects that should force a bootstrap.
+      emit(serverConnectedEvent("evt_connected_initial"))
+      await Bun.sleep(30)
+      reconnected = true
+      emit(serverConnectedEvent("evt_connected_reconnect"))
+
+      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
+      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
+
+      expect(sync.data.permission.ses_1).toEqual([permission])
+      expect(sync.data.question.ses_1).toEqual([question])
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("keeps asked events that arrive while reconnect snapshots are in flight", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let reconnected = false
+    const permission = permissionRequest("perm_race")
+    const question = questionRequest("question_race")
+    let permissionSnapshots = 0
+    let questionSnapshots = 0
+    let stalePermissionSnapshot: (() => void) | undefined
+    let staleQuestionSnapshot: (() => void) | undefined
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/permission") {
+        if (!reconnected) return json([])
+        permissionSnapshots += 1
+        if (permissionSnapshots > 1) return json([permission])
+        return new Promise<Response>((resolve) => {
+          stalePermissionSnapshot = () => resolve(json([]))
+        })
+      }
+      if (url.pathname === "/question") {
+        if (!reconnected) return json([])
+        questionSnapshots += 1
+        if (questionSnapshots > 1) return json([question])
+        return new Promise<Response>((resolve) => {
+          staleQuestionSnapshot = () => resolve(json([]))
+        })
+      }
+    })
+
+    try {
+      emit(serverConnectedEvent("evt_connected_initial"))
+      await Bun.sleep(30)
+      reconnected = true
+      emit(serverConnectedEvent("evt_connected_reconnect"))
+      await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
+
+      emit(permissionAskedEvent(permission))
+      emit(questionAskedEvent(question))
+      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
+      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
+
+      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("reconnect snapshots were not requested")
+      stalePermissionSnapshot()
+      staleQuestionSnapshot()
+      await Bun.sleep(30)
+
+      expect(sync.data.permission.ses_1).toEqual([permission])
+      expect(sync.data.question.ses_1).toEqual([question])
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("clears requests that are absent from reconnect snapshots", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const permission = permissionRequest("perm_cleared")
+    const question = questionRequest("question_cleared")
+    const { app, emit, sync } = await mount()
+
+    try {
+      emit(serverConnectedEvent("evt_connected_initial"))
+      await Bun.sleep(30)
+      emit(permissionAskedEvent(permission))
+      emit(questionAskedEvent(question))
+      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
+      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
+
+      emit(serverConnectedEvent("evt_connected_reconnect"))
+
+      await wait(() => sync.data.permission.ses_1 === undefined && sync.data.question.ses_1 === undefined)
+      expect(sync.data.permission.ses_1).toBeUndefined()
+      expect(sync.data.question.ses_1).toBeUndefined()
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("keeps replied events that arrive while reconnect snapshots are in flight", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let reconnected = false
+    const permission = permissionRequest("perm_reply_race")
+    const question = questionRequest("question_reply_race")
+    let permissionSnapshots = 0
+    let questionSnapshots = 0
+    let stalePermissionSnapshot: (() => void) | undefined
+    let staleQuestionSnapshot: (() => void) | undefined
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/permission") {
+        if (!reconnected) return json([])
+        permissionSnapshots += 1
+        if (permissionSnapshots > 1) return json([])
+        return new Promise<Response>((resolve) => {
+          stalePermissionSnapshot = () => resolve(json([permission]))
+        })
+      }
+      if (url.pathname === "/question") {
+        if (!reconnected) return json([])
+        questionSnapshots += 1
+        if (questionSnapshots > 1) return json([])
+        return new Promise<Response>((resolve) => {
+          staleQuestionSnapshot = () => resolve(json([question]))
+        })
+      }
+    })
+
+    try {
+      emit(serverConnectedEvent("evt_connected_initial"))
+      await Bun.sleep(30)
+      emit(permissionAskedEvent(permission))
+      emit(questionAskedEvent(question))
+      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
+      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
+
+      reconnected = true
+      emit(serverConnectedEvent("evt_connected_reconnect"))
+      await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
+
+      emit(permissionRepliedEvent(permission))
+      emit(questionRejectedEvent(question))
+      await wait(() => (sync.data.permission.ses_1?.length ?? 0) === 0 && (sync.data.question.ses_1?.length ?? 0) === 0)
+
+      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("reconnect snapshots were not requested")
+      stalePermissionSnapshot()
+      staleQuestionSnapshot()
+      await Bun.sleep(30)
+
+      expect(sync.data.permission.ses_1 ?? []).toEqual([])
+      expect(sync.data.question.ses_1 ?? []).toEqual([])
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("clears stale requests while preserving rapid asked events during reconnect recovery", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let reconnected = false
+    const stale = permissionRequest("perm_stale")
+    const liveFirst = permissionRequest("perm_live_1")
+    const liveSecond = permissionRequest("perm_live_2")
+    let staleSnapshot: (() => void) | undefined
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname !== "/permission") return
+      if (!reconnected) return json([])
+      if (staleSnapshot) return new Promise<Response>(() => {})
+      return new Promise<Response>((resolve) => {
+        staleSnapshot = () => resolve(json([]))
+      })
+    })
+
+    try {
+      emit(serverConnectedEvent("evt_connected_initial"))
+      await Bun.sleep(30)
+      emit(permissionAskedEvent(stale))
+      await wait(() => sync.data.permission.ses_1?.[0]?.id === stale.id)
+
+      reconnected = true
+      emit(serverConnectedEvent("evt_connected_reconnect"))
+      await wait(() => Boolean(staleSnapshot))
+
+      emit(permissionAskedEvent(liveFirst))
+      await wait(() => sync.data.permission.ses_1?.some((request) => request.id === liveFirst.id))
+      if (!staleSnapshot) throw new Error("reconnect snapshot was not requested")
+      staleSnapshot()
+      emit(permissionAskedEvent(liveSecond))
+      await wait(() => sync.data.permission.ses_1?.some((request) => request.id === liveSecond.id))
+
+      await wait(() => !sync.data.permission.ses_1?.some((request) => request.id === stale.id))
+      expect(sync.data.permission.ses_1?.map((request) => request.id)).toEqual([liveFirst.id, liveSecond.id])
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("keeps the newest reconnect snapshot when an earlier snapshot resolves last", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    let reconnected = false
+    let permissionSnapshots = 0
+    let questionSnapshots = 0
+    let stalePermissionSnapshot: (() => void) | undefined
+    let staleQuestionSnapshot: (() => void) | undefined
+    const permission = permissionRequest("perm_latest")
+    const question = questionRequest("question_latest")
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/permission") {
+        if (!reconnected) return json([])
+        permissionSnapshots += 1
+        if (permissionSnapshots > 1) return json([permission])
+        return new Promise<Response>((resolve) => {
+          stalePermissionSnapshot = () => resolve(json([]))
+        })
+      }
+      if (url.pathname === "/question") {
+        if (!reconnected) return json([])
+        questionSnapshots += 1
+        if (questionSnapshots > 1) return json([question])
+        return new Promise<Response>((resolve) => {
+          staleQuestionSnapshot = () => resolve(json([]))
+        })
+      }
+    })
+
+    try {
+      emit(serverConnectedEvent("evt_connected_initial"))
+      await Bun.sleep(30)
+      reconnected = true
+      emit(serverConnectedEvent("evt_connected_reconnect_1"))
+      await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
+      emit(serverConnectedEvent("evt_connected_reconnect_2"))
+
+      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
+      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
+
+      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("stale reconnect snapshots were not requested")
+      stalePermissionSnapshot()
+      staleQuestionSnapshot()
+      await Bun.sleep(30)
+
+      expect(sync.data.permission.ses_1).toEqual([permission])
+      expect(sync.data.question.ses_1).toEqual([question])
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
   test("refresh scopes sessions by default and lists project sessions when disabled", async () => {
     const previous = Global.Path.state
     await using tmp = await tmpdir()

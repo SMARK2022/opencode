@@ -761,6 +761,10 @@ export function Prompt(props: PromptProps) {
     set(prompt) {
       input.setText(prompt.input)
       setStore("prompt", prompt)
+      if (prompt.mode) {
+        // [ref 恢复模式] PromptInfo 已携带 mode；同步到 store.mode，保证 shell 草稿走 /shell。
+        setStore("mode", prompt.mode)
+      }
       restoreExtmarksFromParts(prompt.parts)
       input.gotoBufferEnd()
     },
@@ -1247,17 +1251,50 @@ export function Prompt(props: PromptProps) {
             },
           ]
         : []
+    let newSessionNavigation: ReturnType<typeof setTimeout> | undefined
+    let cancelNewSessionNavigation = false
+
+    function showSubmitFailureToast() {
+      toast.show({
+        message: "Sending prompt failed. Your draft was kept.",
+        variant: "error",
+      })
+    }
+
+    function keepDraftAfterSubmitFailure() {
+      // [同步失败边界] normal prompt 等待 prompt_async 接受；失败说明 daemon 没接到 POST，草稿必须保留。
+      showSubmitFailureToast()
+      return false
+    }
+
+    function restoreDraftAfterBackgroundFailure(prompt: typeof store.prompt, mode: typeof currentMode) {
+      showSubmitFailureToast()
+      // [提交失败恢复] shell/slash 没有 async acceptance 路由，只能保持原先的
+      // fire-and-forget 体验；如果后台请求很快失败，需要恢复草稿并取消新会话跳转。
+      // 迟到错误不能覆盖用户已输入的新内容，所以只在当前草稿仍为空时恢复。
+      cancelNewSessionNavigation = true
+      if (newSessionNavigation) clearTimeout(newSessionNavigation)
+      if (store.prompt.input || store.prompt.parts.length > 0) return
+      setStore("prompt", prompt)
+      setStore("mode", mode)
+    }
 
     if (store.mode === "shell") {
-      void sdk.client.session.shell({
-        sessionID,
-        agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          modelID: selectedModel.modelID,
-        },
-        command: inputText,
-      })
+      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
+      void sdk.client.session
+        .shell({
+          sessionID,
+          agent: agent.name,
+          model: {
+            providerID: selectedModel.providerID,
+            modelID: selectedModel.modelID,
+          },
+          command: inputText,
+        })
+        .then((response) => {
+          if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode)
+        })
+        .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
       setStore("mode", "normal")
     } else if (
       inputText.startsWith("/") &&
@@ -1274,24 +1311,32 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
-      void sdk.client.session.command({
-        sessionID,
-        command: command.slice(1),
-        arguments: args,
-        agent: agent.name,
-        model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-        messageID,
-        variant,
-        parts: nonTextParts
-          .filter((x) => x.type === "file")
-          .map((x) => ({
-            id: PartID.ascending(),
-            ...x,
-          })),
-      })
+      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
+      void sdk.client.session
+        .command({
+          sessionID,
+          command: command.slice(1),
+          arguments: args,
+          agent: agent.name,
+          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+          messageID,
+          variant,
+          parts: nonTextParts
+            .filter((x) => x.type === "file")
+            .map((x) => ({
+              id: PartID.ascending(),
+              ...x,
+            })),
+        })
+        .then((response) => {
+          if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode)
+        })
+        .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
     } else {
-      sdk.client.session
-        .prompt({
+      // [normal 提交边界] prompt_async 在 daemon 接受消息后返回；只在这个边界之后清草稿，
+      // 避免网络丢包时用户输入消失但 runner 从未收到。
+      const response = await sdk.client.session
+        .promptAsync({
           sessionID,
           ...selectedModel,
           messageID,
@@ -1308,7 +1353,8 @@ export function Prompt(props: PromptProps) {
             ...nonTextParts.map(assign),
           ],
         })
-        .catch(() => {})
+        .catch((error) => ({ error }))
+      if (response.error) return keepDraftAfterSubmitFailure()
       if (editorParts.length > 0) editor.markSelectionSent()
     }
     history.append({
@@ -1323,10 +1369,12 @@ export function Prompt(props: PromptProps) {
     setStore("extmarkToPartIndex", new Map())
     props.onSubmit?.()
 
-    // temporary hack to make sure the message is sent
+    // [新会话跳转边界] 新建会话要延迟跳转以保留既有交互；如果 shell/slash
+    // 后台 POST 快速失败并恢复草稿，这个跳转会被取消，避免进入空会话。
     if (!props.sessionID) {
       if (editorParts.length > 0) editor.preserveSelectionFromNewSession()
-      setTimeout(() => {
+      newSessionNavigation = setTimeout(() => {
+        if (cancelNewSessionNavigation) return
         route.navigate({
           type: "session",
           sessionID,

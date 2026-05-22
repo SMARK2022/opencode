@@ -76,6 +76,7 @@ type Wait = {
   tick: number
   armed: boolean
   live: boolean
+  statusBusy: boolean
   done: Deferred.Deferred<void, unknown>
 }
 
@@ -404,26 +405,6 @@ function createLayer(input: StreamInput) {
         input.signal?.addEventListener("abort", halt, { once: true })
         yield* Effect.addFinalizer(() => closeScope())
 
-        const events = yield* Scope.provide(scope)(
-          Effect.acquireRelease(
-            Effect.promise(() =>
-              input.sdk.global.event({
-                signal: abort.signal,
-              }),
-            ),
-            (events) =>
-              Effect.sync(() => {
-                void events.stream.return(undefined).catch(() => {})
-              }),
-          ),
-        )
-        closeStream = () => {
-          void events.stream.return(undefined).catch(() => {})
-        }
-        input.trace?.write("recv.subscribe", {
-          sessionID: input.sessionID,
-        })
-
         const state: State = {
           data: createSessionData(),
           subagent: createSubagentData(),
@@ -657,13 +638,22 @@ function createLayer(input: StreamInput) {
           )
         })
 
-        const idle = Effect.fn("RunStreamTransport.idle")((fallback: boolean) =>
+        const idle = Effect.fn("RunStreamTransport.idle")((next: Wait, fallback: boolean) =>
           Effect.promise(() => input.sdk.session.status()).pipe(
             Effect.map((out) => {
               const item = out.data?.[input.sessionID]
-              return !item || item.type === "idle"
+              const observed = next.live || next.statusBusy
+              if (!item) return fallback && observed
+              if (item.type !== "idle") {
+                next.statusBusy = true
+                return false
+              }
+
+              // [状态轮询收口] 只有先观察到本轮 busy/活动事件后，idle 才能结束 turn；
+              // 否则缺失状态或上一轮遗留 idle 会把刚提交的 prompt 提前标记完成。
+              return observed
             }),
-            Effect.orElseSucceed(() => fallback),
+            Effect.orElseSucceed(() => fallback && (next.live || next.statusBusy)),
           ),
         )
 
@@ -688,15 +678,23 @@ function createLayer(input: StreamInput) {
             return
           }
 
+          if (event.type === "session.status") {
+            if (event.properties.status.type !== "idle") {
+              next.statusBusy = true
+              next.live = true
+            }
+            return
+          }
+
           next.live = true
         }
 
         const complete = Effect.fn("RunStreamTransport.complete")(function* (next: Wait, fallback: boolean) {
-          if (state.wait !== next || !next.armed || !next.live) {
+          if (state.wait !== next || !next.armed) {
             return
           }
 
-          if (!(yield* idle(fallback)) || state.wait !== next) {
+          if (!(yield* idle(next, fallback)) || state.wait !== next) {
             return
           }
 
@@ -738,90 +736,122 @@ function createLayer(input: StreamInput) {
           })
         }
 
-        const watch = Effect.fn("RunStreamTransport.watch")(() =>
-          Stream.fromAsyncIterable(events.stream, (error) =>
-            error instanceof Error ? error : new Error(String(error)),
-          ).pipe(
-            Stream.takeUntil(() => input.footer.isClosed || abort.signal.aborted),
-            Stream.runForEach(
-              Effect.fn("RunStreamTransport.event")(function* (item: unknown) {
-                if (input.footer.isClosed) {
-                  abort.abort()
-                  return
-                }
-
-                if (isMatchingDisposeEvent(item, input.directory)) {
-                  yield* fail(new Error("instance disposed"))
-                  yield* closeScope()
-                  return
-                }
-
-                const event = globalPayloadEvent(item)
-                if (!event) {
-                  return
-                }
-
-                const sessionID = sid(event)
-                if (sessionID !== input.sessionID && (!sessionID || !state.subagent.tabs.has(sessionID))) {
-                  return
-                }
-
-                input.trace?.write("recv.event", event)
-                trackBlocker(event)
-
-                const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
-                const next = reduceSessionData({
-                  data: state.data,
-                  event,
-                  sessionID: input.sessionID,
-                  thinking: input.thinking,
-                  limits: input.limits(),
-                })
-                state.data = next.data
-
-                if (
-                  event.type === "message.part.updated" &&
-                  event.properties.part.sessionID === input.sessionID &&
-                  event.properties.part.type === "tool" &&
-                  event.properties.part.tool === "question" &&
-                  event.properties.part.state.status === "running" &&
-                  state.data.questions.length === 0
-                ) {
-                  yield* recoverQuestion(event.properties.part.id).pipe(
-                    Effect.forkIn(scope, { startImmediately: true }),
-                    Effect.asVoid,
-                  )
-                }
-
-                const changed = reduceSubagentData({
-                  data: state.subagent,
-                  event,
-                  sessionID: input.sessionID,
-                  thinking: input.thinking,
-                  limits: input.limits(),
-                })
-                if (changed && prev) {
-                  traceTabs(input.trace, prev, listSubagentTabs(state.subagent))
-                }
-                releaseBlocker(event)
-
-                syncFooter(next.commits, next.footer?.patch, changed ? currentSubagentState() : undefined)
-
-                touch(event)
-                yield* mark(event)
+        const watch = Effect.fn("RunStreamTransport.watch")(function* () {
+          while (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
+            const events = yield* Effect.tryPromise({
+              try: () =>
+                input.sdk.global.event({
+                  signal: abort.signal,
+                }),
+              catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+            }).pipe(
+              Effect.catch((error) => {
+                // [重订阅失败] clean EOF 可以恢复，但重新建立 SSE 失败是真故障；
+                // 直接唤醒 active wait，避免 runPromptTurn 无期限等待。
+                if (input.footer.isClosed || abort.signal.aborted || closed) return Effect.void
+                return fail(error).pipe(Effect.as(undefined))
               }),
-            ),
-            Effect.catch((error) => (abort.signal.aborted ? Effect.void : fail(error))),
-            Effect.ensuring(
-              Effect.gen(function* () {
-                if (!abort.signal.aborted && !state.fault) {
-                  yield* fail(new Error("global event stream closed"))
-                }
-                closeStream()
-              }),
-            ),
-          ),
-        )
+            )
+            if (!events) return
+            const closeCurrentStream = () => {
+              void events.stream.return(undefined).catch(() => {})
+            }
+            closeStream = closeCurrentStream
+            input.trace?.write("recv.subscribe", {
+              sessionID: input.sessionID,
+            })
+
+            // [SSE clean EOF] daemon 重启或代理抖动会正常关闭流；这不是 turn 失败。
+            // 只有 thrown stream error 才 fault，普通结束则回到 while 继续订阅。
+            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) =>
+              error instanceof Error ? error : new Error(String(error)),
+            ).pipe(
+              Stream.takeUntil(() => input.footer.isClosed || abort.signal.aborted),
+              Stream.runForEach(
+                Effect.fn("RunStreamTransport.event")(function* (item: unknown) {
+                  if (input.footer.isClosed) {
+                    abort.abort()
+                    return
+                  }
+
+                  if (isMatchingDisposeEvent(item, input.directory)) {
+                    yield* fail(new Error("instance disposed"))
+                    yield* closeScope()
+                    return
+                  }
+
+                  const event = globalPayloadEvent(item)
+                  if (!event) {
+                    return
+                  }
+
+                  const sessionID = sid(event)
+                  if (sessionID !== input.sessionID && (!sessionID || !state.subagent.tabs.has(sessionID))) {
+                    return
+                  }
+
+                  input.trace?.write("recv.event", event)
+                  trackBlocker(event)
+
+                  const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
+                  const next = reduceSessionData({
+                    data: state.data,
+                    event,
+                    sessionID: input.sessionID,
+                    thinking: input.thinking,
+                    limits: input.limits(),
+                  })
+                  state.data = next.data
+
+                  if (
+                    event.type === "message.part.updated" &&
+                    event.properties.part.sessionID === input.sessionID &&
+                    event.properties.part.type === "tool" &&
+                    event.properties.part.tool === "question" &&
+                    event.properties.part.state.status === "running" &&
+                    state.data.questions.length === 0
+                  ) {
+                    yield* recoverQuestion(event.properties.part.id).pipe(
+                      Effect.forkIn(scope, { startImmediately: true }),
+                      Effect.asVoid,
+                    )
+                  }
+
+                  const changed = reduceSubagentData({
+                    data: state.subagent,
+                    event,
+                    sessionID: input.sessionID,
+                    thinking: input.thinking,
+                    limits: input.limits(),
+                  })
+                  if (changed && prev) {
+                    traceTabs(input.trace, prev, listSubagentTabs(state.subagent))
+                  }
+                  releaseBlocker(event)
+
+                  syncFooter(next.commits, next.footer?.patch, changed ? currentSubagentState() : undefined)
+
+                  touch(event)
+                  yield* mark(event)
+                }),
+              ),
+              Effect.as(true),
+              Effect.catch((error) => (abort.signal.aborted ? Effect.succeed(false) : fail(error).pipe(Effect.as(false)))),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (closeStream === closeCurrentStream) closeStream = () => {}
+                  closeCurrentStream()
+                }),
+              ),
+            )
+            if (!ok) return
+            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
+              // [重连节流] 测试替身、代理或死 daemon 可能立即返回已关闭流；短 sleep
+              // 防止 CPU tight loop，同时不会影响真实 SSE 的 turn 状态保留。
+              yield* Effect.sleep("100 millis")
+            }
+          }
+        })
 
         yield* bootstrap()
         yield* Scope.provide(scope)(watch().pipe(Effect.forkScoped))
@@ -852,6 +882,7 @@ function createLayer(input: StreamInput) {
             tick: state.tick,
             armed: false,
             live: false,
+            statusBusy: false,
             done: yield* Deferred.make<void, unknown>(),
           }
           state.wait = item

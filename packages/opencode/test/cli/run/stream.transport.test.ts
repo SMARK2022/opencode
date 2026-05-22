@@ -162,7 +162,7 @@ function statusMap(busy: boolean): SessionStatusMap {
     return { "session-1": { type: "busy" } }
   }
 
-  return {}
+  return { "session-1": { type: "idle" } }
 }
 
 function assistantMessage(input: { sessionID: string; id: string; parts: SessionMessage["parts"] }): SessionMessage {
@@ -1320,6 +1320,292 @@ describe("run stream transport", () => {
         }),
       ).rejects.toThrow("boom")
     } finally {
+      await transport.close()
+    }
+  })
+
+  test("resubscribes when the global event stream closes cleanly during an active turn", async () => {
+    const first = globalFeed()
+    const second = globalFeed()
+    const ui = footer()
+    let subscriptions = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
+        },
+        promptAsync: async () => {
+          first.push(globalEvent(busy()))
+          first.close()
+          return ok(undefined)
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+
+      await waitFor(() => (subscriptions > 1 ? true : undefined))
+      second.push(globalEvent(idle()))
+
+      await expect(turn).resolves.toBeUndefined()
+      expect(subscriptions).toBeGreaterThanOrEqual(2)
+    } finally {
+      first.close()
+      second.close()
+      await transport.close()
+    }
+  })
+
+  test("completes from status polling when reconnect misses all active turn events", async () => {
+    const first = globalFeed()
+    const second = globalFeed()
+    const ui = footer()
+    let subscriptions = 0
+    let statusCallsAfterReconnect = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
+        },
+        promptAsync: async () => {
+          first.close()
+          return ok(undefined)
+        },
+        status: async () => {
+          if (subscriptions <= 1) return ok({})
+          statusCallsAfterReconnect += 1
+          return ok({
+            "session-1": {
+              type: statusCallsAfterReconnect === 1 ? "busy" : "idle",
+            },
+          })
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+
+      await waitFor(() => (subscriptions > 1 ? true : undefined))
+
+      const outcome = await Promise.race([
+        turn.then(
+          () => "done" as const,
+          (error) => error,
+        ),
+        Bun.sleep(2_000).then(
+          () =>
+            new Error(
+              `turn did not complete after ${subscriptions} subscriptions and ${statusCallsAfterReconnect} status polls`,
+            ),
+        ),
+      ])
+      if (outcome instanceof Error) throw outcome
+      expect(outcome).toBe("done")
+    } finally {
+      first.close()
+      second.close()
+      await transport.close()
+    }
+  })
+
+  test("keeps a turn pending when clean EOF happens before daemon status appears", async () => {
+    const first = globalFeed()
+    const second = globalFeed()
+    const ui = footer()
+    const accepted = defer()
+    let subscriptions = 0
+    let postStarted = false
+    let acceptedDone = false
+    let statusAfterAccept = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
+        },
+        promptAsync: async () => {
+          postStarted = true
+          first.close()
+          await accepted.promise
+          return ok(undefined)
+        },
+        status: async () => {
+          if (acceptedDone) statusAfterAccept += 1
+          return ok({})
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+      let settled = false
+      turn.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+
+      await waitFor(() => (postStarted ? true : undefined))
+      await waitFor(() => (subscriptions > 1 ? true : undefined))
+      acceptedDone = true
+      accepted.resolve()
+      await waitFor(() => (statusAfterAccept > 0 ? true : undefined))
+      await Bun.sleep(20)
+
+      expect(settled).toBe(false)
+
+      second.push(globalEvent(busy()))
+      second.push(globalEvent(idle()))
+      await expect(turn).resolves.toBeUndefined()
+    } finally {
+      first.close()
+      second.close()
+      await transport.close()
+    }
+  })
+
+  test("ignores a lone idle event when daemon status has not observed the turn", async () => {
+    const src = globalFeed()
+    const ui = footer()
+    let statusCalls = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalStream: src.stream,
+        status: async () => {
+          statusCalls += 1
+          return ok({})
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+      let settled = false
+      turn.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+
+      await waitFor(() => (ui.events.some((event) => event.type === "turn.wait") ? true : undefined))
+      src.push(globalEvent(idle()))
+      await waitFor(() => (statusCalls > 0 ? true : undefined))
+      await Bun.sleep(20)
+
+      expect(settled).toBe(false)
+
+      src.push(globalEvent(busy()))
+      src.push(globalEvent(idle()))
+      await expect(turn).resolves.toBeUndefined()
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("rejects the active turn when resubscribing the global event stream fails", async () => {
+    const first = globalFeed()
+    const ui = footer()
+    let subscriptions = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          if (subscriptions > 1) throw new Error("subscribe boom")
+          return globalSse(first.stream)
+        },
+        promptAsync: async () => {
+          first.push(globalEvent(busy()))
+          first.close()
+          return ok(undefined)
+        },
+        status: async () => ok({ "session-1": { type: "busy" } }),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+
+      await expect(
+        Promise.race([
+          turn,
+          Bun.sleep(1_000).then(() => {
+            throw new Error("turn did not fault")
+          }),
+        ]),
+      ).rejects.toThrow("subscribe boom")
+    } finally {
+      first.close()
       await transport.close()
     }
   })

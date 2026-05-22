@@ -1208,8 +1208,16 @@ export function fromError(
     const retried = retryErrorCause(e)
     if (retried) return fromError(retried, ctx)
 
+    const apiCall = APICallError.isInstance(e) ? undefined : apiCallErrorCause(e)
+    if (apiCall) return fromError(apiCall, ctx)
+
+    const stream = APICallError.isInstance(e) ? undefined : streamError(e)
+    if (stream) return fromStreamError(e, stream)
+
     const transport = APICallError.isInstance(e) ? undefined : transportError(e)
     if (transport) {
+      // [错误分类顺序] structured stream error 可能包在 "fetch failed" 里；必须先解析
+      // provider 语义，再落到通用 transport retry，避免 context overflow 被误重试。
       return new APIError(
         {
           message: transport.message,
@@ -1282,6 +1290,20 @@ export function fromError(
         ).toObject()
       }
 
+      const transport = !parsed.isRetryable && parsed.statusCode === undefined ? transportError(e.cause) : undefined
+      if (transport) {
+        // [APICallError 例外] AI SDK 可能把 socket/TLS 包成 statusless 非重试 APIError；
+        // 只有这种无 status 的模糊形态可回看 cause，显式 4xx 仍以 provider 判定为准。
+        return new APIError(
+          {
+            message: transport.message,
+            isRetryable: true,
+            metadata: transport.metadata,
+          },
+          { cause: e },
+        ).toObject()
+      }
+
       return new APIError(
         {
           message: parsed.message,
@@ -1298,30 +1320,42 @@ export function fromError(
     default:
       try {
         const parsed = ProviderError.parseStreamError(e)
-        if (parsed) {
-          if (parsed.type === "context_overflow") {
-            return new ContextOverflowError(
-              {
-                message: parsed.message,
-                responseBody: parsed.responseBody,
-              },
-              { cause: e },
-            ).toObject()
-          }
-          return new APIError(
-            {
-              message: parsed.message,
-              isRetryable: parsed.isRetryable,
-              responseBody: parsed.responseBody,
-            },
-            {
-              cause: e,
-            },
-          ).toObject()
-        }
+        if (parsed) return fromStreamError(e, parsed)
       } catch {}
       return new NamedError.Unknown({ message: JSON.stringify(e) }, { cause: e }).toObject()
   }
+}
+
+function streamError(value: unknown) {
+  const parsed = ProviderError.parseStreamError(value)
+  if (parsed) return parsed
+  const error = errorLike(value)
+  // [stream cause 回看] Effect async-iterable 边界会把 provider chunk 包成 Error；
+  // 原始结构化对象才是 retry/context 信号，所以要先检查 cause。
+  if (error?.cause === undefined || error.cause === value) return undefined
+  return ProviderError.parseStreamError(error.cause)
+}
+
+function fromStreamError(value: unknown, parsed: NonNullable<ReturnType<typeof ProviderError.parseStreamError>>) {
+  if (parsed.type === "context_overflow") {
+    return new ContextOverflowError(
+      {
+        message: parsed.message,
+        responseBody: parsed.responseBody,
+      },
+      { cause: value },
+    ).toObject()
+  }
+  return new APIError(
+    {
+      message: parsed.message,
+      isRetryable: parsed.isRetryable,
+      responseBody: parsed.responseBody,
+    },
+    {
+      cause: value,
+    },
+  ).toObject()
 }
 
 type ErrorLike = {
@@ -1352,6 +1386,15 @@ function retryErrorCause(value: unknown) {
   if (!Array.isArray(error.errors)) return undefined
   const last = error.errors.at(-1)
   return last === value ? undefined : last
+}
+
+function apiCallErrorCause(value: unknown, depth = 0) {
+  const error = errorLike(value)
+  if (!error || depth >= 2 || error.cause === undefined || error.cause === value) return undefined
+  // [外层包装解开] SDK/framework 外层错误可能包住 APICallError；先解析 provider 错误，
+  // 让显式 4xx/non-retryable 响应优先于更深层的 transport cause。
+  if (APICallError.isInstance(error.cause)) return error.cause
+  return apiCallErrorCause(error.cause, depth + 1)
 }
 
 function transportError(value: unknown, depth = 0): { message: string; metadata: Record<string, string> } | undefined {

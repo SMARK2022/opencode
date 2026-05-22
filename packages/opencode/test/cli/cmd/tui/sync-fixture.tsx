@@ -52,15 +52,16 @@ export function createEventSource() {
   }
 }
 
-type FetchHandler = (url: URL) => Response | Promise<Response> | undefined
+type FetchHandler = (url: URL, request?: Request, init?: RequestInit) => Response | Promise<Response> | undefined
 
 export function createFetch(override?: FetchHandler) {
   const session = [] as URL[]
-  const fetch = (async (input: RequestInfo | URL) => {
-    const url = new URL(input instanceof Request ? input.url : String(input))
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : undefined
+    const url = new URL(request?.url ?? String(input))
     if (url.pathname === "/session") session.push(url)
 
-    const overridden = await override?.(url)
+    const overridden = await override?.(url, request, init)
     if (overridden) return overridden
 
     switch (url.pathname) {
@@ -87,6 +88,11 @@ export function createFetch(override?: FetchHandler) {
         return json({ id: "proj_test" })
       case "/provider":
         return json({ all: [], default: {}, connected: [] })
+      // Most sync tests do not care about in-memory blockers; default empty
+      // lists let reconnect/bootstrap recovery run without every test stubbing them.
+      case "/permission":
+      case "/question":
+        return json([])
       case "/session":
         return json([])
       case "/vcs":

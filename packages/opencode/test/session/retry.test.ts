@@ -30,6 +30,11 @@ function wrap(message: unknown): ReturnType<NamedError["toObject"]> {
   return { name: "", data: { message } }
 }
 
+function withCause<T extends Error>(error: T, cause: unknown) {
+  Object.defineProperty(error, "cause", { value: cause })
+  return error
+}
+
 describe("session.retry.delay", () => {
   test("caps delay at 30 seconds when headers missing", () => {
     const error = apiError()
@@ -428,6 +433,117 @@ describe("session.message-v2.fromError", () => {
     expect(SessionRetry.retryable(result, retryProvider)).toEqual({
       message: "An error occurred while processing your request.",
     })
+  })
+
+  test("converts statusless APICallError transport causes to retryable APIError", () => {
+    const result = MessageV2.fromError(
+      withCause(
+        new APICallError({
+          message: "provider request failed",
+          url: "https://example.com/v1/chat/completions",
+          requestBodyValues: {},
+          isRetryable: false,
+        }),
+        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
+      ),
+      { providerID },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(result.data.metadata?.code).toBe("ETIMEDOUT")
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket timed out" })
+  })
+
+  test("keeps explicit APICallError 4xx failures non-retryable even with transport causes", () => {
+    const result = MessageV2.fromError(
+      withCause(
+        new APICallError({
+          message: "bad request",
+          url: "https://example.com/v1/chat/completions",
+          requestBodyValues: {},
+          statusCode: 400,
+          responseHeaders: { "content-type": "application/json" },
+          responseBody: '{"error":"bad request"}',
+          isRetryable: false,
+        }),
+        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
+      ),
+      { providerID },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(false)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
+  })
+
+  test("keeps wrapped explicit APICallError 4xx failures non-retryable", () => {
+    const result = MessageV2.fromError(
+      new Error("outer wrapper", {
+        cause: withCause(
+          new APICallError({
+            message: "bad request",
+            url: "https://example.com/v1/chat/completions",
+            requestBodyValues: {},
+            statusCode: 400,
+            responseHeaders: { "content-type": "application/json" },
+            responseBody: '{"error":"bad request"}',
+            isRetryable: false,
+          }),
+          Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
+        ),
+      }),
+      { providerID },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(false)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
+  })
+
+  test("converts structured stream errors carried by Error.cause to retryable APIError", () => {
+    const result = MessageV2.fromError(
+      new Error("stream failed", {
+        cause: {
+          type: "error",
+          error: {
+            code: "server_error",
+            message: "The provider stream failed after it started.",
+          },
+        },
+      }),
+      { providerID: ProviderID.make("openai") },
+    )
+
+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({
+      message: "The provider stream failed after it started.",
+    })
+  })
+
+  test("prioritizes structured stream errors over generic fetch wrappers", () => {
+    const result = MessageV2.fromError(
+      new TypeError("fetch failed", {
+        cause: {
+          type: "error",
+          error: {
+            code: "context_length_exceeded",
+            message: "Input exceeds the context window.",
+          },
+        },
+      }),
+      { providerID: ProviderID.make("openai") },
+    )
+
+    expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
+    if (!MessageV2.ContextOverflowError.isInstance(result)) throw new Error("expected ContextOverflowError")
+    expect(result.data.message).toBe("Input exceeds context window of this model")
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
   })
 
   test("converts SSE read timeouts to retryable APIError", () => {
