@@ -1,10 +1,11 @@
 import { Effect } from "effect"
 import { PermissionPrecheck } from "./precheck"
 
-// #198：自动决策类型——allow/ask/deny 三态，source 追踪决策来源（precheck 或 reviewer），ask 表示 reviewer 不可用时回退到用户审批
+// #202：自动决策类型——allow/ask/deny 三态，source 追踪决策来源（precheck 或 reviewer）
+// #202：ask 的 source 扩展为 precheck | reviewer_unavailable：general 层级在 strict 关闭时直接回退用户审批
 export type Decision =
   | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
-  | { action: "ask"; reason: string; source: "reviewer_unavailable" }
+  | { action: "ask"; reason: string; source: "precheck" | "reviewer_unavailable" }
   | { action: "deny"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
 
 // #198：reviewer 输出比 Decision 更窄——到达 review 边界后模型必须决定 allow/deny，用户回退由 reviewer 错误表示而非第三种 outcome，使策略失败和 reviewer 不可用保持可区分
@@ -29,7 +30,8 @@ export interface ReviewInput {
   readonly permission: string
   readonly patterns: readonly string[]
   readonly metadata: Readonly<Record<string, unknown>>
-  readonly precheck: { readonly action: "prompt"; readonly reason: string }
+  // #202：precheck 以 level（safe/general/cautious/dangerous）而非 action 传递给 reviewer，避免把确定性风险分层误解成最终执行决策
+  readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
 }
 
 // #198：reviewer 通过注入而非构造——确定性路由可在无 provider/session 层时测试，且在小型运行时无 reviewer 时 fail closed
@@ -42,27 +44,32 @@ export function evaluate(
   reviewer?: Reviewer,
 ) {
   return Effect.gen(function* () {
-    // #198：路由顺序：precheck 先于 reviewer——确定性层拦截已知安全/危险命令，仅 prompt 命令才消耗 reviewer 配额
+    // #202：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截，仅 cautious 才消耗 reviewer 配额
     const precheck = PermissionPrecheck.evaluate(input)
-    // #198：fast-path allow 保留无提示行为——strict 仅禁用此快速路径，critical deny 仍在 reviewer 前生效，危险载荷永不成为模型决策
-    if (precheck.action === "allow" && !input.strict) {
-      // #198：precheck allow 直接放行——这些命令已通过只读不变量验证，无需 reviewer 审查
+    // #202：四级预审路由——safe 直接允许；general 回到用户审批但不调用 reviewer；cautious 进入 reviewer/user fallback；dangerous 直接拒绝
+    // #202：strict 是用户显式配置的例外，保留原本"低风险也审"的能力，但默认路径不会让 general 占用 LLM
+    if (precheck.level === "safe" && !input.strict) {
+      // #202：precheck safe 直接放行——这些命令已通过只读不变量验证，无需 reviewer 审查
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    // #198：precheck deny 直接拒绝——危险载荷在 reviewer 前拦截，防止模型被说服放行已知危险命令
-    if (precheck.action === "deny") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    // #202：precheck dangerous 直接拒绝——危险载荷在 reviewer 前拦截，防止模型被说服放行已知危险命令
+    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    // #202：general 在非 strict 下回到用户审批——未知/动态/包装器命令不占用 LLM，保持既有 ask 路径
+    if (precheck.level === "general" && !input.strict) {
+      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
+    }
 
-    // #198：prompt 是 review 边界——确定性 precheck 无法安全决定时，reviewer 必须显式返回 allow/deny；无 reviewer 时回退到用户审批
-    // #198：无 reviewer 注入时回退到 ask——保持原有用户审批路径，不因缺少 reviewer 而阻断
+    // #202：cautious 是 review 边界——确定性 precheck 发现可见风险但非立即禁止，reviewer 必须显式返回 allow/deny
+    // #202：无 reviewer 注入时回退到 ask——保持原有用户审批路径，不因缺少 reviewer 而阻断
     if (!reviewer) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
 
-    // #198：reviewer 调用——precheck.action 固定为 prompt 使 reviewer 契约一致，strict 模式在 reason 中标注以供审计
+    // #202：reviewer 调用——precheck.level 传递实际层级使 reviewer 契约一致，strict 模式在 reason 中标注以供审计
     return yield* reviewer.review({
       ...input,
       precheck: {
-        action: "prompt",
-        // #198：strict 模式复用同一 reviewer 契约（precheck.action 始终为 prompt），但保留穿越边界的原因供审计日志区分
-        reason: input.strict && precheck.action === "allow" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
+        level: precheck.level,
+        // #202：strict 模式保留穿越边界的原因——safe/general 经 strict 送审时标注，cautious 保持原 reason
+        reason: input.strict && precheck.level !== "cautious" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
       },
     }).pipe(
       Effect.match({
