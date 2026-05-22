@@ -258,6 +258,33 @@ describe("tool.shell permissions", () => {
     }),
   )
 
+  each("includes shell action evidence in bash permission metadata", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+          yield* run(
+            {
+              command: "git status",
+              description: "Inspect git status",
+            },
+            capture(requests),
+          )
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.metadata).toMatchObject({
+            action_kind: "shell",
+            command: "git status",
+            cwd: tmp,
+          })
+          expect(typeof bashReq!.metadata.shell).toBe("string")
+        }),
+      )
+    }),
+  )
+
   for (const item of ps) {
     it.live(`parses PowerShell conditionals for permission prompts [${item.label}]`, () =>
       withShell(
@@ -314,6 +341,57 @@ describe("tool.shell permissions", () => {
       ),
     )
   }
+
+  each("does not suggest broad wrapper prefixes for always-allow prompts", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const err = new Error("stop after permission")
+          const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+          expect(
+            yield* fail(
+              {
+                command: "bash -lc 'git status'",
+                description: "Inspect git status through shell wrapper",
+              },
+              capture(requests, err),
+            ),
+          ).toMatchObject({ message: err.message })
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.always).not.toContain("bash *")
+          expect(bashReq!.always).not.toContain("bash -lc *")
+        }),
+      )
+    }),
+  )
+
+  each("does not suggest broad git branch prefixes for always-allow prompts", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const err = new Error("stop after permission")
+          const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+          expect(
+            yield* fail(
+              {
+                command: "git branch -D feature/review",
+                description: "Delete a branch",
+              },
+              capture(requests, err),
+            ),
+          ).toMatchObject({ message: err.message })
+          const bashReq = requests.find((r) => r.permission === "bash")
+          expect(bashReq).toBeDefined()
+          expect(bashReq!.always).not.toContain("git branch *")
+        }),
+      )
+    }),
+  )
 
   each("asks for external_directory permission for wildcard external paths", () =>
     runIn(

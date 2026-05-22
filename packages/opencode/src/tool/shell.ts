@@ -23,6 +23,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { PermissionPrecheck } from "@/permission/precheck"
 import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decoding"
 import {
   BashDiagnosticCollector,
@@ -297,7 +298,11 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
   return tree
 })
 
-const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan) {
+const ask = Effect.fn("ShellTool.ask")(function* (
+  ctx: Tool.Context,
+  scan: Scan,
+  metadata: { command: string; cwd: string; shell: string },
+) {
   if (scan.dirs.size > 0) {
     const globs = Array.from(scan.dirs).map((dir) => {
       if (process.platform === "win32") return AppFileSystem.normalizePathPattern(path.join(dir, "*"))
@@ -316,7 +321,16 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
     permission: ShellID.ToolID,
     patterns: Array.from(scan.patterns),
     always: Array.from(scan.always),
-    metadata: {},
+    // [local-smark] auto permission preflight needs the exact shell action.
+    // Patterns are user-facing approval summaries and can be split/reordered by
+    // parsing; keep the raw command and resolved cwd here so future reviewers do
+    // not infer security decisions from presentation strings.
+    metadata: {
+      action_kind: "shell",
+      command: metadata.command,
+      cwd: metadata.cwd,
+      shell: metadata.shell,
+    },
   })
 })
 
@@ -579,7 +593,13 @@ export const ShellTool = Tool.define(
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          const always = BashArity.prefix(tokens)
+          // Auto permission must never suggest broad wrapper or interpreter
+          // allow-rules (for example `bash *`, `python -c *`, or `git *`). Those
+          // prefixes can hide arbitrary follow-up behavior, so the UI should only
+          // offer Always for concrete low-risk commands that precheck can later
+          // evaluate with the same visible prefix.
+          if (PermissionPrecheck.canAlwaysAllowPrefix(always)) scan.always.add(always.join(" ") + " *")
         }
       }
 
@@ -867,7 +887,7 @@ export const ShellTool = Tool.define(
                   if (compatibility) throw new Error(compatibility)
                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
-                  yield* ask(ctx, scan)
+                  yield* ask(ctx, scan, { command: params.command, cwd, shell: name })
                 }),
               )
 
