@@ -746,30 +746,39 @@ export function fromError(
         ).toObject()
       }
 
+      // #192：statusless 非重试 APIError 的 cause 可能是 transport
+        // #192：仅当无 statusCode 时才查 cause，4xx 有明确状态码不应被 cause 改写
+      if (!parsed.isRetryable && parsed.statusCode === undefined) {
+        const transport = transportError(e.cause)
+          // #192：此处返回的是升级后的 APIError，重试性与 message 来自 transport 判定
+        if (transport) return new APIError({ message: transport.message, isRetryable: true, metadata: transport.metadata }, { cause: e }).toObject()
+      }
       return new APIError(
-        {
-          message: parsed.message,
-          statusCode: parsed.statusCode,
-          isRetryable: parsed.isRetryable,
-          responseHeaders: parsed.responseHeaders,
-          responseBody: parsed.responseBody,
-          metadata: parsed.metadata,
-        },
+        { message: parsed.message, statusCode: parsed.statusCode, isRetryable: parsed.isRetryable, responseHeaders: parsed.responseHeaders, responseBody: parsed.responseBody, metadata: parsed.metadata },
         { cause: e },
       ).toObject()
     case !ctx.aborted && !APICallError.isInstance(e) && (() => {
       // #191：ctx.aborted 表示用户主动取消，不得转为可重试错误
       // #191：在 catch-all 之前检查 transport 层瞬时故障
-      // #191：先解包 AI SDK RetryError，取 lastError 再判定
-      const retried = retryErrorCause(e)
-      if (retried) return true
-      // #191：transportError 命中时返回 true 进入本 case
+      // #192：先解包 RetryError，再查 apiCallErrorCause/streamError/transportError
+      if (retryErrorCause(e)) return true
+      // #192：非 APICallError 的 cause 链中可能藏 APICallError，需优先解析
+      if (apiCallErrorCause(e)) return true
+      // #192：结构化 stream 错误（含 code/type）比 transport 判定更具体，优先采用，防 context_overflow 被误重试
+      if (streamError(e)) return true
+      // #191：transportError 命中时返回 true
       return Boolean(transportError(e))
     })():
       // #191：RetryError 解包后递归调用 fromError
       {
         const retried = retryErrorCause(e)
         if (retried) return fromError(retried, ctx)
+        // #192：递归返回的 APICallError 作为新错误重走 fromError，保持分类一致
+        const apiCall = apiCallErrorCause(e)
+        if (apiCall) return fromError(apiCall, ctx)
+        // #192：fromStreamError 用 parsed 结构构造 ContextOverflow/APIError，responseBody 完整透传，避免 overflow 误判为网络故障
+        const stream = streamError(e)
+        if (stream) return fromStreamError(e, stream)
         // #191：transport 层瞬时故障转为可重试 APIError
           // #191：isRetryable=true 是 retryable() 的入口契约，metadata 保留原始错误信息
         const transport = transportError(e)
@@ -911,5 +920,48 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
   return transportError(error.cause, depth + 1)
 }
 
-export * as MessageV2 from "./message-v2"
+// #192：非 APICallError 的 cause 链中查找 APICallError，限制深度防环
+// #192：外层 Error 可能包装了 APICallError——需递归解包才能正确分类
+function apiCallErrorCause(value: unknown, depth = 0) {
+  const error = errorLike(value)
+  if (!error || depth >= 2) return undefined
+  const cause = error.cause
+  if (!cause || cause === value) return undefined
+  if (APICallError.isInstance(cause)) return cause
+  return apiCallErrorCause(cause, depth + 1)
+}
+
+// #192：structured stream error 检查——保留完整 ParsedStreamError（含 responseBody）
+// #192：responseBody 是 provider 返回的诊断体，丢弃会导致 context_overflow/api_error 丢失关键信息
+// #192：递归检查 cause 链——stream error 可能被 fetch wrapper 或 RetryError 包裹
+// #192：返回完整 parsed 对象——fromStreamError 需要 responseBody 构造错误
+function streamError(value: unknown): NonNullable<ReturnType<typeof ProviderError.parseStreamError>> | undefined {
+  const parsed = ProviderError.parseStreamError(value)
+  if (parsed) return parsed
+  // #192：stream error 可能藏在多层 cause 中，递归一层即覆盖 fetch wrapper 包装
+  const error = errorLike(value)
+  if (error && error.cause !== undefined && error.cause !== value) {
+    const causeParsed = ProviderError.parseStreamError(error.cause)
+    if (causeParsed) return causeParsed
+  }
+  return undefined
+}
+
+// #192：从 stream error 构造——context_overflow 走专用类型，保留 responseBody 供诊断
+// #192：ContextOverflowError 不可重试——与 transport 故障区分
+// #192：APIError 的 isRetryable 来自 ParsedStreamError——仅 api_error 变体有此字段
+function fromStreamError(e: unknown, parsed: NonNullable<ReturnType<typeof ProviderError.parseStreamError>>) {
+  if (parsed.type === "context_overflow") {
+    return new ContextOverflowError(
+      { message: parsed.message, responseBody: parsed.responseBody },
+      { cause: e },
+    ).toObject()
+  }
+  return new APIError(
+    { message: parsed.message, isRetryable: parsed.isRetryable, responseBody: parsed.responseBody },
+    { cause: e },
+  ).toObject()
+}
+
+export * as MessageV2 from "./message-v2" 
 export const node = LayerNode.group([Database.node])

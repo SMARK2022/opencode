@@ -153,6 +153,16 @@ export const {
     const fullSyncedSessions = new Set<string>()
     // #132：区分首次 connected 与重连
     let connectedOnce = false
+    // #192：重连后 permission/question 快照版本
+    // #192：版本计数决定哪些本地变更应回放，避免重连恢复丢变更
+    let permissionVersion = 0
+    let questionVersion = 0
+    let permissionRefreshes = 0
+    let questionRefreshes = 0
+    let permissionRefreshVersion = 0
+    let questionRefreshVersion = 0
+    const permissionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
+    const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
     // #186：同一 part/field 的相邻 delta 在 16ms 窗内合并，压低 Solid store 抖动
     // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
     let pendingPartDeltas: EventMessagePartDelta[] = []
@@ -379,6 +389,7 @@ export const {
           void bootstrap({ fatal: false }).catch(() => undefined)
           break
         case "permission.replied": {
+          markPermissionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -395,6 +406,7 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
+          markPermissionRequestChange(request.sessionID, request.id)
           if (permission.mode === "auto") {
             void sdk.client.permission.reply({
               requestID: request.id,
@@ -426,6 +438,7 @@ export const {
 
         case "question.replied":
         case "question.rejected": {
+          markQuestionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
           const requests = store.question[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -442,6 +455,7 @@ export const {
 
         case "question.asked": {
           const request = event.properties
+          markQuestionRequestChange(request.sessionID, request.id)
           const requests = store.question[request.sessionID]
           if (!requests) {
             setStore("question", request.sessionID, [request])
@@ -690,6 +704,61 @@ export const {
     const args = useArgs()
 
     // #153：session_status 独立刷新，force sync 与 bootstrap 共用同一入口
+    // #192：快照按 session 建表，供后续增量 update 提供二分查找的排序不变式
+    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) { return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => { ;(result[request.sessionID] ??= []).push(request); return result }, {}) }
+    function pendingRequestChangeKey(sessionID: string, requestID: string) { return `${sessionID}\0${requestID}` }
+    // #192：merge live changes 防 stale 覆盖
+    // #192：快照整体替换负责丢弃断线期间已解决的 blocker，live changes 只回放本地确认的变更
+    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(snapshot: Record<string, T[]>, current: Record<string, T[]>, changes: Map<string, { sessionID: string; requestID: string; version: number }>, since: number) {
+      const result = Object.fromEntries(Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]])) as Record<string, T[]>
+      for (const change of changes.values()) {
+        if (change.version <= since) continue
+          // #192：版本号小于快照起始的变更已被快照包含，跳过避免重复回放
+        const currentRequests = current[change.sessionID]
+        if (!currentRequests) { removePendingRequest(result, change.sessionID, change.requestID); continue }
+          // #192：当前 store 已无该请求说明已解决，快照中对应项也应清除
+        const currentMatch = search(currentRequests, change.requestID, (request) => request.id)
+        if (!currentMatch.found) { removePendingRequest(result, change.sessionID, change.requestID); continue }
+          // #192：变更指向的请求在 store 中不存在时同样从快照结果移除
+        const requests = result[change.sessionID] ?? []
+        const match = search(requests, change.requestID, (request) => request.id)
+        if (match.found) { requests[match.index] = currentRequests[currentMatch.index] } else { requests.splice(match.index, 0, currentRequests[currentMatch.index]) }
+        result[change.sessionID] = requests
+      }
+      return result
+    }
+    function removePendingRequest<T extends { id: string }>(requestsBySession: Record<string, T[]>, sessionID: string, id: string) {
+      const requests = requestsBySession[sessionID]
+      if (!requests) return
+      const match = search(requests, id, (request) => request.id)
+      if (!match.found) return
+      const next = requests.toSpliced(match.index, 1)
+      if (next.length === 0) { delete requestsBySession[sessionID]; return }
+      requestsBySession[sessionID] = next
+    }
+    // #192：permission 变更记录在本地增量表，重连快照恢复后据此回放
+    // #192：permissionVersion 是本地单调计数，快照恢复时仅回放版本号更新的变更
+    // #192：快照恢复以版本号为界：变更版本高于快照起始才回放，保证不丢不重
+    function markPermissionRequestChange(sessionID: string, requestID: string) { permissionVersion += 1; if (permissionRefreshes === 0) return; permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: permissionVersion }) }
+    // #192：question 变更与 permission 同走增量表，保证两类 blocker 一致恢复
+    // #192：questionVersion 与 permission 同规则，保证两类请求恢复一致
+    function markQuestionRequestChange(sessionID: string, requestID: string) { questionVersion += 1; if (questionRefreshes === 0) return; questionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: questionVersion }) }
+    // #192：refreshVersion 是请求计数，仅最新 reconnect 的响应写 store，乱序返回被丢弃
+    // #192：permission 快照恢复与本地变更回放合并，是重连后 store 重建的完整路径
+    // #192：快照整体替换后由本地变更表决定保留哪些请求，阻断期解决的 blocker 不再回放，live changes 只回放本地确认的变更
+    async function refreshPermissionRequests(workspace: string | undefined) {
+      const version = permissionVersion; const refreshVersion = permissionRefreshVersion + 1; permissionRefreshVersion = refreshVersion; permissionRefreshes += 1
+      try { const response = await sdk.client.permission.list({ workspace }); if (refreshVersion !== permissionRefreshVersion) return; setStore("permission", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.permission, permissionChanges, version))) }
+      // #192：竞态守卫比对刷新时的版本号，旧响应即使后到也不覆盖新快照
+      finally { permissionRefreshes -= 1; if (permissionRefreshes === 0) permissionChanges.clear() }
+    }
+    // #192：question 与 permission 共用同一快照替换+live merge 规则，保证两类请求恢复一致
+    async function refreshQuestionRequests(workspace: string | undefined) {
+      const version = questionVersion; const refreshVersion = questionRefreshVersion + 1; questionRefreshVersion = refreshVersion; questionRefreshes += 1
+      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.question, questionChanges, version))) }
+      finally { questionRefreshes -= 1; if (questionRefreshes === 0) questionChanges.clear() }
+    }
+
     async function refreshStatus() {
       // 失败随 bootstrap 的 Effect.all 语义上抛，与其他首次拉取保持一致的致命性
       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
@@ -776,6 +845,9 @@ export const {
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
             // #153：bootstrap 以同一入口拉取 status，替代原先内联的实现
             refreshStatus(),
+            // #192：refresh 拉取快照后回放本地变更，pending 请求在 store 中重建
+            refreshPermissionRequests(workspace),
+            refreshQuestionRequests(workspace),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
             project.workspace.sync(),

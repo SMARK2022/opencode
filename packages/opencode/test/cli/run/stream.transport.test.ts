@@ -183,7 +183,8 @@ function statusMap(busy: boolean): SessionStatusMap {
     return { "session-1": { type: "busy" } }
   }
 
-  return {}
+  // #192：默认返回 idle 而非空——status polling 需要区分 "未知" 和 "idle"
+  return { "session-1": { type: "idle" } }
 }
 
 function assistantMessage(input: { sessionID: string; id: string; parts: SessionMessage["parts"] }): SessionMessage {
@@ -2264,6 +2265,326 @@ describe("run stream transport", () => {
         }),
       ).rejects.toThrow("boom")
     } finally {
+      await transport.close()
+    }
+  })
+
+  // #192：全局 SSE 关闭若发生在活动 turn 期间，clean EOF 走重连是保活不变量
+  // #192：第一次 subscribe 关闭后第二次 subscribe 必须接替——不应让活动 turn 失败
+  // #192：promptAsync 推送 busy 事件后关闭 first stream——模拟 clean EOF
+  // #192：second stream 的事件是重连后状态收口的输入源，idle 结束 turn
+  // #192：subscriptions >= 2 证明重连发生——单次 subscribe 不够
+  test("resubscribes when the global event stream closes cleanly during an active turn", async () => {
+    const first = globalFeed()
+    const second = globalFeed()
+    const ui = footer()
+    let subscriptions = 0
+
+    // #192：globalEvent 第一次返回 first stream，第二次返回 second stream
+    // #192：busy 事件后关闭流，验证重连后不丢已确认的 busy 状态
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
+        },
+        promptAsync: async () => {
+          first.push(globalEvent(busy()))
+          first.close()
+          return ok(undefined)
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      // #192：runPromptTurn 启动活动 turn——SSE 在 turn 期间关闭
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+
+      // #192：断言第二次订阅发生，验证 clean EOF 后确实重连而非丢弃 turn
+      await waitFor(() => (subscriptions > 1 ? true : undefined))
+      // #192：重连成功后 busy→idle 序列驱动 turn 正常完成，验证 status 收口路径
+      second.push(globalEvent(idle()))
+
+      await expect(turn).resolves.toBeUndefined()
+      // #192：clean EOF 必须触发重订阅，subscriptions 计数是重连发生的可观察证据
+      expect(subscriptions).toBeGreaterThanOrEqual(2)
+    } finally {
+      first.close()
+      second.close()
+      await transport.close()
+    }
+  })
+
+  // #192：重连丢失全部 turn 事件时，靠 status polling + statusBusy 完成
+  // #192：事件完全丢失时只能靠 status 轮询判定 turn 状态，是降级主路径
+  // #192：status polling 第一次返回 busy——确认 turn 仍在执行
+  // #192：status polling 第二次返回 idle——turn 完成
+  // #192：waitFor subscriptions > 1 确保重连完成后才开始 status 检查
+  // #192：超时 2 秒保护——避免 status polling 永远不返回 idle 时挂死
+  test("completes from status polling when reconnect misses all active turn events", async () => {
+    const first = globalFeed()
+    const second = globalFeed()
+    const ui = footer()
+    let subscriptions = 0
+    let statusCallsAfterReconnect = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
+        },
+        promptAsync: async () => {
+          first.close()
+          return ok(undefined)
+        },
+        status: async () => {
+          if (subscriptions <= 1) return ok({})
+          statusCallsAfterReconnect += 1
+          return ok({
+            "session-1": {
+              type: statusCallsAfterReconnect === 1 ? "busy" : "idle",
+            },
+          })
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+
+      await waitFor(() => (subscriptions > 1 ? true : undefined))
+
+      const outcome = await Promise.race([
+        turn.then(
+          () => "done" as const,
+          (error) => error,
+        ),
+        Bun.sleep(2_000).then(
+          () =>
+            new Error(
+              `turn did not complete after ${subscriptions} subscriptions and ${statusCallsAfterReconnect} status polls`,
+            ),
+        ),
+      ])
+      if (outcome instanceof Error) throw outcome
+      expect(outcome).toBe("done")
+    } finally {
+      first.close()
+      second.close()
+      await transport.close()
+    }
+  })
+
+  // #192：clean EOF 在 daemon status 出现前发生——turn 保持 pending 直到观察到 busy
+  // #192：promptAsync 延迟完成——模拟 daemon 尚未开始处理
+  // #192：重连后 status 返回空——daemon 未观察到 turn
+  // #192：settled 必须为 false——turn 不应在未观察到 busy 时完成或失败
+  // #192：只有 second stream 推送 busy + idle 后 turn 才完成
+  // #192：accepted promise 控制 promptAsync 完成时机——确保 clean EOF 在 status 之前
+  test("keeps a turn pending when clean EOF happens before daemon status appears", async () => {
+    const first = globalFeed()
+    const second = globalFeed()
+    const ui = footer()
+    const accepted = defer()
+    let subscriptions = 0
+    let postStarted = false
+    let acceptedDone = false
+    let statusAfterAccept = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
+        },
+        promptAsync: async () => {
+          postStarted = true
+          first.close()
+          await accepted.promise
+          return ok(undefined)
+        },
+        status: async () => {
+          if (acceptedDone) statusAfterAccept += 1
+          return ok({})
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+      let settled = false
+      turn.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+
+      await waitFor(() => (postStarted ? true : undefined))
+      await waitFor(() => (subscriptions > 1 ? true : undefined))
+      acceptedDone = true
+      accepted.resolve()
+      await waitFor(() => (statusAfterAccept > 0 ? true : undefined))
+      await Bun.sleep(20)
+
+      expect(settled).toBe(false)
+
+      second.push(globalEvent(busy()))
+      second.push(globalEvent(idle()))
+      await expect(turn).resolves.toBeUndefined()
+    } finally {
+      first.close()
+      second.close()
+      await transport.close()
+    }
+  })
+
+  // #192：孤立的 idle 事件在 daemon 未观察 turn 时不应完成——需先看到 busy
+  // #192：turn.wait 事件表示 transport 正在等待 daemon 响应
+  // #192：status 无记录时无法结束 turn，等待事件或超时保护
+  // #192：idle 事件不应完成 turn——可能是前一个 turn 的残留
+  // #192：未观察到 busy 的孤立 idle 是残留事件，不得结束活动 turn
+  // #192：busy + idle 序列后 turn 才正常完成——需要完整的 busy → idle 生命周期
+  test("ignores a lone idle event when daemon status has not observed the turn", async () => {
+    const src = globalFeed()
+    const ui = footer()
+    let statusCalls = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalStream: src.stream,
+        status: async () => {
+          statusCalls += 1
+          return ok({})
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+      let settled = false
+      turn.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+
+      await waitFor(() => (ui.events.some((event) => event.type === "turn.wait") ? true : undefined))
+      src.push(globalEvent(idle()))
+      await waitFor(() => (statusCalls > 0 ? true : undefined))
+      await Bun.sleep(20)
+
+      expect(settled).toBe(false)
+
+      src.push(globalEvent(busy()))
+      src.push(globalEvent(idle()))
+      await expect(turn).resolves.toBeUndefined()
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  // #192：重订阅失败应 reject 活动 turn——不应静默成功
+  // #192：第二次 globalEvent 调用抛异常——模拟重连失败
+  // #192：重连失败是硬故障，reject 透传原始错误而非吞掉
+  // #192：超时 1 秒保护——避免重连失败时 turn 永远 pending
+  // #192：status 返回 busy 但不应阻止 reject——重连失败优先于 status
+  test("rejects the active turn when resubscribing the global event stream fails", async () => {
+    const first = globalFeed()
+    const ui = footer()
+    let subscriptions = 0
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalEvent: () => {
+          subscriptions += 1
+          if (subscriptions > 1) throw new Error("subscribe boom")
+          return globalSse(first.stream)
+        },
+        promptAsync: async () => {
+          first.push(globalEvent(busy()))
+          first.close()
+          return ok(undefined)
+        },
+        status: async () => ok({ "session-1": { type: "busy" } }),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+
+      await expect(
+        Promise.race([
+          turn,
+          Bun.sleep(1_000).then(() => {
+            throw new Error("turn did not fault")
+          }),
+        ]),
+      ).rejects.toThrow("subscribe boom")
+    } finally {
+      first.close()
       await transport.close()
     }
   })
