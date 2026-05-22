@@ -136,6 +136,9 @@ export type Provider = Schema.Schema.Type<typeof Provider>
 export const Event = ModelsDev.Event
 
 declare const OPENCODE_MODELS_DEV: Record<string, Provider> | undefined
+// #195：源 patch 刷新 models-snapshot.js vendor 数据；tip 用 OPENCODE_MODELS_DEV 构建时注入替代
+// #195：catalog 数据通过 MODELS_DEV_API_JSON 环境变量在构建时获取，不再提交为源码文件
+export const MODELS_DEV_EMBEDDED = typeof OPENCODE_MODELS_DEV !== "undefined"
 
 export interface Interface {
   readonly get: () => Effect.Effect<Record<string, Provider>>
