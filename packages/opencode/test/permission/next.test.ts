@@ -943,22 +943,28 @@ reviewed.instance(
 )
 
 reviewed.instance(
-  "ask - reviewer cache key includes edit diff context",
+  "ask - auto routes non-shell general tools to user approval without reviewer load",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
-      const base = {
+      const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "edit",
         patterns: ["src/a.ts"],
         always: ["*"],
         ruleset: [{ permission: "edit", pattern: "*", action: "auto" as const }],
-      }
+        metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
+      }).pipe(Effect.forkScoped)
 
-      yield* ask({ ...base, metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" } })
-      yield* ask({ ...base, metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+other" } })
-
-      expect(reviewedCalls).toBe(2)
+      // [local-smark] general 非 shell auto 路由回归开始
+      // 当前阶段只让 cautious 请求进入 LLM reviewer。edit/apply_patch 这类非 shell
+      // auto 请求没有 bash 级语义证据，预审层级是 general，因此应保持既有用户
+      // 审批路径，不能为了缓存 diff 上下文而提前消耗 reviewer 调用。
+      expect(yield* waitForPending(1)).toHaveLength(1)
+      expect(reviewedCalls).toBe(0)
+      // [local-smark] general 非 shell auto 路由回归结束
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
     }),
   { git: true },
 )

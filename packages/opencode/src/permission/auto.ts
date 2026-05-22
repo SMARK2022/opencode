@@ -4,7 +4,7 @@ import type { SessionID } from "@/session/schema"
 
 export type Decision =
   | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
-  | { action: "ask"; reason: string; source: "reviewer_unavailable" }
+  | { action: "ask"; reason: string; source: "precheck" | "reviewer_unavailable" }
   | { action: "deny"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
 
 // Reviewer output is intentionally narrower than Permission.ask: once precheck
@@ -32,7 +32,7 @@ export interface ReviewInput {
   readonly permission: string
   readonly patterns: readonly string[]
   readonly metadata: Readonly<Record<string, unknown>>
-  readonly precheck: { readonly action: "prompt"; readonly reason: string }
+  readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
 }
 
 // The reviewer is injected rather than constructed here so the deterministic
@@ -48,29 +48,34 @@ export function evaluate(
 ) {
   return Effect.gen(function* () {
     const precheck = PermissionPrecheck.evaluate(input)
-    // Fast-path deterministic allows preserve existing no-prompt behavior. The
-    // `strict` flag deliberately disables only this fast path; critical precheck
-    // denies still win before any reviewer so dangerous payloads never become a
-    // model decision or user coaching opportunity.
-    if (precheck.action === "allow" && !input.strict) {
+    // [local-smark] auto 四级预审路由开始
+    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许，general
+    // 回到既有用户审批但不调用 reviewer，cautious 才进入 reviewer/user fallback，
+    // dangerous 直接拒绝。strict 是用户显式配置的例外，用来保留原本“低风险也审”
+    // 的能力，但默认路径不会让 general 占用 LLM。
+    if (precheck.level === "safe" && !input.strict) {
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    if (precheck.action === "deny") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+    if (precheck.level === "general" && !input.strict) {
+      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
+    }
+    // [local-smark] auto 四级预审路由结束
 
-    // Prompt is the auto layer's review boundary: deterministic precheck cannot
-    // safely decide, so a reviewer must explicitly return allow/deny. When no
-    // reviewer is wired yet, fall back to the existing user approval path.
+    // Cautious is the default auto review boundary: deterministic precheck found
+    // a visible risk that is neither harmless nor immediately forbidden, so a
+    // reviewer must explicitly return allow/deny. When no reviewer is wired yet,
+    // fall back to the existing user approval path.
     if (!reviewer) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
 
     return yield* reviewer.review({
       ...input,
       precheck: {
-        action: "prompt",
-        // Strict mode reuses the same reviewer contract (`precheck.action` is
-        // always prompt) but preserves why the request crossed the boundary, so
-        // policy and audit logs can distinguish normal ambiguity from strict
-        // review of an otherwise low-risk command.
-        reason: input.strict && precheck.action === "allow" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
+        level: precheck.level,
+        // Strict mode preserves why the request crossed the reviewer boundary, so
+        // policy and audit logs can distinguish normal cautious review from
+        // explicit strict review of an otherwise safe/general command.
+        reason: input.strict && precheck.level !== "cautious" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
       },
     }).pipe(
       Effect.match({

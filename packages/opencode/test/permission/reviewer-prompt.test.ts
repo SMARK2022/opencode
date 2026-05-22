@@ -25,7 +25,7 @@ describe("permission reviewer prompt", () => {
         permission: "bash",
         patterns: ["git push"],
         metadata: { command: "git push" },
-        precheck: { action: "prompt", reason: "git push requires reviewer approval" },
+        precheck: { level: "cautious", reason: "git push requires reviewer approval" },
       }),
       "previous reviewer attempt timed out",
     )

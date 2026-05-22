@@ -1,7 +1,6 @@
-export type Decision =
-  | { action: "allow"; reason: string }
-  | { action: "prompt"; reason: string }
-  | { action: "deny"; reason: string }
+export const LEVELS = ["safe", "general", "cautious", "dangerous"] as const
+export type Level = (typeof LEVELS)[number]
+export type Decision = { level: Level; reason: string }
 
 // Wrappers return either a script we can inspect for critical deny patterns or
 // an explicit `ask` result when the wrapper is too open-ended to inspect. These
@@ -10,14 +9,15 @@ export type Decision =
 type UnwrapResult = { action: "script"; script: string; reason: string } | { action: "ask"; reason: string } | { action: "none" }
 type RemoteResult = { action: "remote"; script?: string; reason: string } | { action: "none" }
 
-// Permission precheck is the deterministic, non-LLM classifier that runs before
-// the optional reviewer. Keep the boundary intentionally narrow:
-// - `allow`: direct, plainly read-only commands with no dynamic shell behavior.
-// - `prompt`: destructive, state-changing, wrapper-based, remote, interpreter,
-//   dynamic, or otherwise opaque commands that are not visibly critical.
-// - `deny`: visible critical payloads where prompting would teach or encourage
-//   retries through shell indirection, generated scripts, MCP tools, or another
-//   bypass. Every new allow rule must preserve that fail-closed invariant.
+// [local-smark] 四级预审分层开始
+// Permission precheck 是 reviewer 之前的确定性分类器。这里不用 allow/prompt/deny
+// 表达执行结果，而是先给 shell 命令分层：safe 表示直接、只读、无敏感路径的
+// 无害命令；general 表示未知、动态、包装器或普通副作用，回到用户审批但不占用
+// LLM；cautious 表示删除、git 状态变更、远程传输、敏感读取等需要 reviewer 或
+// 用户明确判断的操作；dangerous 表示全盘/根目录删除、远程脚本直管道执行、凭据
+// 外传、反连 shell 等直接拒绝的操作。这个分层是降低 LLM 负载的边界：默认只有
+// cautious 才进入 auto reviewer，safe/general/dangerous 都不触发 LLM。
+// [local-smark] 四级预审分层结束
 
 // POSIX shell wrappers are treated as containers for another script. We inspect
 // `-c`/`-lc` payloads only to find critical denials, then still return prompt so
@@ -54,7 +54,12 @@ const INTERPRETER_FLAGS = new Map([
 // path is visibly piped/uploaded to a network or remote target. This regex is a
 // guardrail, not a secret scanner: keep it specific enough to avoid blocking
 // ordinary project files while still catching common credentials and key names.
-const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|~\/\.ssh\/[^\s|;]+|~\/\.aws\/credentials|~\/\.config\/gcloud\/[^\s|;]+|~\/\.kube\/config|~\/\.npmrc|~\/\.netrc|~\/\.git-credentials|credentials\.json|id_rsa|id_ed25519|[^\s|;]+\.pem|[^\s|;]+\.key)`
+const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|(?:~|[^\s|;]+)\/\.ssh\/[^\s|;]+|(?:~|[^\s|;]+)\/\.aws\/credentials|(?:~|[^\s|;]+)\/\.config\/gcloud\/[^\s|;]+|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|id_rsa|id_ed25519|[^\s|;]+\.pem|[^\s|;]+\.key)`
+// [local-smark] 敏感路径参数匹配开始
+// raw 扫描发生在 shell quote 被移除之前；允许敏感路径外侧有一层引号，避免
+// `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断。
+const SENSITIVE_PATH_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_PATTERN}["']?`
+// [local-smark] 敏感路径参数匹配结束
 
 // These prefixes are too broad to suggest as "always allow" rules from the shell
 // tool. The list mirrors the wrapper/interpreter/remote classifications below:
@@ -156,9 +161,9 @@ export function evaluate(input: {
   metadata: Readonly<Record<string, unknown>>
 }): Decision {
   // Only bash permission currently has enough syntactic evidence for precheck.
-  // Other tools intentionally fall through to prompt/user approval instead of
+  // Other tools intentionally fall through to user approval instead of
   // guessing about unrelated argument schemas.
-  if (input.permission !== "bash") return { action: "prompt", reason: "precheck only has bash coverage" }
+  if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 }
 
@@ -175,52 +180,66 @@ export function canAlwaysAllowPrefix(tokens: string[]) {
 function evaluateShell(command: string, depth: number): Decision {
   // Recursion only follows wrapper payloads we extracted as plain text. A depth
   // cap keeps malformed or adversarial nested wrappers from consuming time while
-  // preserving the fail-safe behavior: prompt instead of allow.
-  if (depth > 4) return { action: "prompt", reason: "nested shell wrapper requires explicit approval" }
-  if (!command.trim()) return { action: "prompt", reason: "empty shell command requires explicit approval" }
+  // preserving the fail-safe behavior: general/user approval instead of safe.
+  if (depth > 4) return { level: "general", reason: "nested shell wrapper requires explicit approval" }
+  if (!command.trim()) return { level: "general", reason: "empty shell command requires explicit approval" }
 
   // Raw scanning runs before token splitting so critical payloads hidden behind
   // command substitution, redirection, wrapper strings, or invalid syntax still
   // fail closed instead of being downgraded to a generic prompt.
   const danger = dangerousRaw(command)
-  if (danger) return { action: "deny", reason: danger }
+  if (danger) return { level: "dangerous", reason: danger }
+  const caution = cautiousRaw(command)
+  if (caution) return { level: "cautious", reason: caution }
 
   const commands = splitCommands(command)
-  if (!commands) return { action: "prompt", reason: "opaque shell command requires explicit approval" }
+  if (!commands) return { level: "general", reason: "opaque shell command requires explicit approval" }
 
   const decisions = commands.map((item) => evaluateCommand(item, depth))
-  const deny = decisions.find((item) => item.action === "deny")
-  if (deny) return deny
-  if (decisions.every((item) => item.action === "allow")) return { action: "allow", reason: "known read-only shell command" }
-  return decisions.find((item) => item.action === "prompt") ?? { action: "prompt", reason: "unknown shell command" }
+  const dangerous = decisions.find((item) => item.level === "dangerous")
+  if (dangerous) return dangerous
+  const cautious = decisions.find((item) => item.level === "cautious")
+  if (cautious) return cautious
+  if (decisions.every((item) => item.level === "safe")) return { level: "safe", reason: "known read-only shell command" }
+  return decisions.find((item) => item.level === "general") ?? { level: "general", reason: "unknown shell command" }
 }
 
 function evaluateCommand(command: string, depth: number): Decision {
   const tokens = tokenize(command)
-  if (!tokens) return { action: "prompt", reason: "unable to tokenize shell command" }
-  if (tokens.length === 0) return { action: "prompt", reason: "empty shell command requires explicit approval" }
+  if (!tokens) return { level: "general", reason: "unable to tokenize shell command" }
+  if (tokens.length === 0) return { level: "general", reason: "empty shell command requires explicit approval" }
 
   const unwrapped = unwrap(tokens)
   if (unwrapped.action === "script") {
     const decision = evaluateShell(unwrapped.script, depth + 1)
-    if (decision.action === "deny") return decision
-    return { action: "prompt", reason: unwrapped.reason }
+    // [local-smark] 包装器载荷分层传播开始
+    // 包装器本身仍不能变成 safe，因为未来同一前缀可能承载任意脚本；但如果
+    // 可见脚本已经是 cautious/dangerous，就保留更高风险层级，让 auto reviewer
+    // 只审真正需要判断的谨慎操作，而普通包装器仍回到用户审批。
+    if (decision.level === "dangerous" || decision.level === "cautious") return decision
+    return { level: "general", reason: unwrapped.reason }
+    // [local-smark] 包装器载荷分层传播结束
   }
-  if (unwrapped.action === "ask") return { action: "prompt", reason: unwrapped.reason }
+  if (unwrapped.action === "ask") return { level: "general", reason: unwrapped.reason }
 
   const remote = remoteWrapper(tokens)
   if (remote.action === "remote") {
     if (remote.script) {
       const decision = evaluateShell(remote.script, depth + 1)
-      if (decision.action === "deny") return decision
+      // [local-smark] 远程载荷分层传播开始
+      // SSH/WSL 跨越本机信任边界，安全的远程只读命令仍是 general；可见的远程
+      // 删除、git 变更等谨慎操作要保留 cautious，避免把用户明确提到的远程破坏
+      // 性动作降级成普通未知命令。
+      if (decision.level === "dangerous" || decision.level === "cautious") return decision
+      // [local-smark] 远程载荷分层传播结束
     }
-    return { action: "prompt", reason: remote.reason }
+    return { level: "general", reason: remote.reason }
   }
 
   const risk = riskyTokens(tokens)
   if (risk) return risk
-  if (safeTokens(tokens)) return { action: "allow", reason: "known read-only shell command" }
-  return { action: "prompt", reason: "unknown shell command" }
+  if (safeTokens(tokens)) return { level: "safe", reason: "known read-only shell command" }
+  return { level: "general", reason: "unknown shell command" }
 }
 
 function splitCommands(command: string) {
@@ -256,6 +275,12 @@ function splitCommands(command: string) {
       continue
     }
     if (char === "$" || char === "`" || char === "(" || char === ")" || char === "{" || char === "}") return
+    // [local-smark] 不完整 shell 分隔符保护开始
+    // 单个 `&` 和换行也是 shell 命令分隔/后台执行语法。当前 splitter 只支持
+    // 明确的 `&&`、`||`、`;`、`|` 组合；遇到这些未建模分隔符时必须整体降级为
+    // general，不能让 `git status & rm -rf ...` 被当成 safe 的 git 参数。
+    if (char === "\n" || char === "\r") return
+    // [local-smark] 不完整 shell 分隔符保护结束
     if (char === ">" || char === "<" || char === "*" || char === "?" || char === "[") return
 
     const two = command.slice(i, i + 2)
@@ -267,6 +292,7 @@ function splitCommands(command: string) {
       start = i + 1
       continue
     }
+    if (char === "&") return
     if (char === ";" || char === "|") {
       const segment = command.slice(start, i).trim()
       if (!segment) return
@@ -440,24 +466,47 @@ function dangerousRaw(command: string) {
   // bytes as code. Privilege/env wrappers are included because they are common
   // install-script indirections and should not downgrade to prompt.
   if (/\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(normalized)) {
-    return "remote download piped to interpreter"
+    return "remote download piped to interpreter; review the script locally before running safe commands"
   }
   // PowerShell aliases for web download plus `iex` are equivalent to curl|sh.
   if (/\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i.test(normalized)) {
-    return "remote PowerShell download executed as code"
+    return "remote PowerShell download executed as code; review the script locally before running safe commands"
   }
+  // [local-smark] Windows 保护目标危险扫描开始
+  // Windows 的 format/rd/rmdir/del 可以直接作用于盘符根或用户目录。它们不一定
+  // 使用 rm 风格参数，所以在 raw 层先拦截，避免 token 解析差异把整盘/用户目录
+  // 删除降级成 general 或 cautious。
+  if (/\bformat\b\s+[A-Za-z]:/i.test(normalized)) return "Windows drive format"
+  if (
+    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"]|$))/i.test(
+      normalized,
+    )
+  ) {
+    return "Windows protected directory delete"
+  }
+  // [local-smark] Windows 保护目标危险扫描结束
   // Credential exfiltration is critical only when a sensitive read is visibly
   // connected to a network transfer. Direct reads stay prompt-only in safeTokens.
-  if (new RegExp(String.raw`\b(?:cat|type|Get-Content|gc)\s+${SENSITIVE_PATH_PATTERN}[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`, "i").test(normalized)) {
+  if (
+    new RegExp(
+      String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,
+      "i",
+    ).test(normalized)
+  ) {
     return "credential read piped to network transfer"
   }
   // Upload flags that reference sensitive files are treated as exfiltration even
   // without a pipe because the file is the outbound request body/form/upload.
-  if (new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw)?|-d|--form|-F|--upload-file|--form-string|-T)\s+@?${SENSITIVE_PATH_PATTERN})`).test(normalized)) {
+  if (
+    new RegExp(
+      String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      "i",
+    ).test(normalized)
+  ) {
     return "credential file sent with network transfer"
   }
   // `scp`, `sftp`, and `rsync` use `host:path` syntax rather than pipes/flags.
-  if (new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_PATTERN})(?=.*:)`).test(normalized)) {
+  if (new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)) {
     return "credential file sent with remote transfer"
   }
   // Common interpreter APIs and reverse shell idioms are scanned as raw text
@@ -478,43 +527,89 @@ function dangerousRaw(command: string) {
   }
 }
 
+function cautiousRaw(command: string) {
+  const normalized = command.replace(/\s+/g, " ").trim()
+  // [local-smark] raw 敏感读取谨慎扫描开始
+  // `$HOME/.aws/credentials` 这类 env-expanded 路径会让 splitter 降级为 opaque，
+  // 导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；这里仅把
+  // 本地敏感读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审。
+  if (
+    new RegExp(
+      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      "i",
+    ).test(normalized)
+  ) {
+    return "sensitive file read requires explicit approval"
+  }
+  // [local-smark] raw 敏感读取谨慎扫描结束
+}
+
 function riskyTokens(tokens: string[]): Decision | undefined {
   // Token-level risks are visible commands with known side effects. Critical
-  // protected targets deny; otherwise destructive-but-bounded operations prompt
-  // so explicit user approval or reviewer policy can decide.
+  // protected targets are dangerous; destructive-but-bounded operations are
+  // cautious so only that layer reaches the optional reviewer.
   const cmd = normalizeCommandName(tokens[0])
+  if (readsSensitivePath(tokens)) return { level: "cautious", reason: "sensitive file read requires explicit approval" }
   if (cmd === "rm" && hasRecursiveForceDeleteFlags(tokens.slice(1))) {
     if (tokens.slice(1).some((item) => protectedDeleteTarget(item))) {
-      return { action: "deny", reason: "critical recursive delete" }
+      return { level: "dangerous", reason: "critical recursive delete" }
     }
-    return { action: "prompt", reason: "recursive force delete requires explicit approval" }
+    return { level: "cautious", reason: "recursive force delete requires explicit approval" }
   }
-  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/"))) return { action: "deny", reason: "raw disk write" }
+  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/"))) return { level: "dangerous", reason: "raw disk write" }
   if (["mkfs", "mkfs.ext4", "fdisk", "parted", "wipefs", "shutdown", "reboot", "halt", "poweroff"].includes(cmd)) {
-    return { action: "deny", reason: "system destructive command" }
+    return { level: "dangerous", reason: "system destructive command" }
   }
   if (cmd === "git" && tokens[1] === "reset" && tokens.includes("--hard")) {
-    return { action: "prompt", reason: "destructive git reset requires explicit approval" }
+    return { level: "cautious", reason: "destructive git reset requires explicit approval" }
   }
   if (cmd === "git" && tokens[1] === "clean" && tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))) {
-    return { action: "prompt", reason: "destructive git clean requires explicit approval" }
+    return { level: "cautious", reason: "destructive git clean requires explicit approval" }
   }
   if (cmd === "git" && tokens[1] === "push" && tokens.some((item) => item === "--force" || item === "-f")) {
-    return { action: "prompt", reason: "force push requires explicit approval" }
+    return { level: "cautious", reason: "force push requires explicit approval" }
+  }
+  if (cmd === "git" && cautiousGitSubcommand(tokens)) {
+    return { level: "cautious", reason: "git state-changing command requires explicit approval" }
   }
   if (cmd === "chmod" && tokens.some((item) => item === "777" || item === "-R")) {
-    return { action: "prompt", reason: "permission widening requires explicit approval" }
+    return { level: "cautious", reason: "permission widening requires explicit approval" }
   }
   if (cmd === "chown" && tokens.some((item) => item.includes("root"))) {
-    return { action: "prompt", reason: "root ownership change requires explicit approval" }
+    return { level: "cautious", reason: "root ownership change requires explicit approval" }
   }
   if (cmd === "remove-item" && tokens.some((item) => item.toLowerCase() === "-recurse")) {
     if (tokens.slice(1).some((item) => protectedDeleteTarget(item))) {
-      return { action: "deny", reason: "critical PowerShell recursive delete" }
+      return { level: "dangerous", reason: "critical PowerShell recursive delete" }
     }
-    return { action: "prompt", reason: "recursive PowerShell delete requires explicit approval" }
+    return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
-  if (["scp", "sftp", "rsync"].includes(cmd)) return { action: "prompt", reason: "remote file transfer requires explicit approval" }
+  if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
+}
+
+function cautiousGitSubcommand(tokens: string[]) {
+  // [local-smark] Git 谨慎子命令识别开始
+  // Git 的很多子命令会修改索引、历史、引用或远端状态，且通常难以自动恢复。
+  // 这些命令不应像 unknown 一样只走 general/user，也不应直接 dangerous；标为
+  // cautious 后仅 auto 分支的 reviewer/user 会判断是否符合用户意图。
+  const subcommand = tokens[1]
+  if (!subcommand) return false
+  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)) return true
+  return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
+  // [local-smark] Git 谨慎子命令识别结束
+}
+
+function readsSensitivePath(tokens: string[]) {
+  // [local-smark] 敏感读取谨慎分层开始
+  // 读取 .env、SSH key、云凭据等本地敏感文件不是立即外传，因此不是 dangerous；
+  // 但它会把密钥内容暴露给 shell 输出和模型上下文，所以从 safe 提升为 cautious，
+  // 交给 reviewer/user 判断是否确有用户授权。
+  const cmd = normalizeCommandName(tokens[0])
+  if (!["cat", "type", "get-content", "gc", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
+    return false
+  }
+  return hasSensitivePath(tokens)
+  // [local-smark] 敏感读取谨慎分层结束
 }
 
 function joinShellTokens(tokens: string[]) {
@@ -572,7 +667,7 @@ function safeTokens(tokens: string[]) {
   if (hasSensitivePath(tokens)) return false
   if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd)) return true
   if (cmd === "tail") return !tokens.some((item) => item === "-f" || item === "--follow")
-  if (cmd === "rg") return !tokens.some((item) => ["--pre", "--hostname-bin", "--search-zip", "-z"].includes(item))
+  if (cmd === "rg") return !tokens.some(unsafeRipgrepFlag)
   if (cmd === "find") return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
   if (cmd === "sed") return tokens.length <= 4 && tokens[1] === "-n" && /^\d+(?:,\d+)?p$/.test(tokens[2] ?? "")
   if (cmd === "git") return gitSafe(tokens)
@@ -585,15 +680,26 @@ function gitSafe(tokens: string[]) {
   // worktrees, or execution path are rejected because they can redirect a safe
   // subcommand into another repository or helper.
   const unsafeGlobal = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"])
+  const unsafeReadFlag = new Set(["--ext-diff", "--textconv"])
   const safe = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame"])
+  let subcommand: string | undefined
   for (let i = 1; i < tokens.length; i++) {
     if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "="))) return false
+    if (unsafeReadFlag.has(tokens[i])) return false
     if (tokens[i] === "remote") return tokens[i + 1] === "-v"
     if (tokens[i] === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
     if (tokens[i] === "branch") return gitBranchSafe(tokens.slice(i + 1))
-    if (!tokens[i].startsWith("-")) return safe.has(tokens[i])
+    if (!tokens[i].startsWith("-") && !subcommand) subcommand = tokens[i]
   }
-  return false
+  return subcommand ? safe.has(subcommand) : false
+}
+
+function unsafeRipgrepFlag(item: string) {
+  // [local-smark] rg 外部命令 flag 保护开始
+  // `rg --pre=cmd` 和 `--hostname-bin=cmd` 会执行外部程序；native shell backend
+  // 没有 sandbox，因此这些 read-looking 命令不能进入 safe 直通路径。
+  return item === "-z" || item === "--pre" || item.startsWith("--pre=") || item === "--hostname-bin" || item.startsWith("--hostname-bin=") || item === "--search-zip" || item.startsWith("--search-zip=")
+  // [local-smark] rg 外部命令 flag 保护结束
 }
 
 function gitBranchSafe(args: string[]) {
@@ -624,13 +730,22 @@ function hasSensitivePath(tokens: string[]) {
       normalized.includes("/.env") ||
       normalized.includes("/.ssh/") ||
       normalized === "~/.aws/credentials" ||
+      normalized.endsWith("/.aws/credentials") ||
       normalized.startsWith("~/.config/gcloud/") ||
+      normalized.includes("/.config/gcloud/") ||
       normalized === "~/.kube/config" ||
+      normalized.endsWith("/.kube/config") ||
       normalized === "~/.npmrc" ||
+      normalized.endsWith("/.npmrc") ||
       normalized === "~/.netrc" ||
+      normalized.endsWith("/.netrc") ||
       normalized === "~/.git-credentials" ||
+      normalized.endsWith("/.git-credentials") ||
+      normalized === "credentials.json" ||
       normalized.endsWith("/credentials.json") ||
+      normalized === "id_rsa" ||
       normalized.endsWith("/id_rsa") ||
+      normalized === "id_ed25519" ||
       normalized.endsWith("/id_ed25519") ||
       normalized.endsWith(".pem") ||
       normalized.endsWith(".key")
