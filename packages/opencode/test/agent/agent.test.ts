@@ -90,7 +90,7 @@ it.instance("interactive agent keeps existing ask gates for command execution", 
 )
 
 // #201：Auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
-// #201：后续可重构 auto 分支实现，但必须维持 "build-like + bash:auto" 的用户契约
+// #203：后续可重构 auto 分支实现，但必须维持 "build-like + shell:auto" 的用户契约
 it.instance("Auto agent routes shell through auto while preserving build-like permissions", () =>
   Effect.gen(function* () {
     const auto = yield* load((svc) => svc.get("Auto"))
@@ -98,8 +98,10 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
     expect(auto?.mode).toBe("primary")
     expect(auto?.native).toBe(true)
 
-    // #201：Auto 只改变 shell 权限；其余权限保持 build-like，避免把 edit/task/notebook 引入 auto
+    // #203：Auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
+    // #203：或 notebook 执行也引入 auto 分支从而扩大本次切入面
     expect(evalPerm(auto, "bash")).toBe("auto")
+    expect(evalPerm(auto, "external_directory")).toBe("auto")
     expect(evalPerm(auto, "edit")).toBe("allow")
     expect(evalPerm(auto, "task")).toBe("allow")
     expect(evalPerm(auto, "vscode_notebook_run")).toBe("allow")
@@ -111,7 +113,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
     expect(evalPerm(auto, "plan_enter")).toBe("allow")
     expect(evalPerm(auto, "repo_clone")).toBe("allow")
     expect(evalPerm(auto, "repo_overview")).toBe("allow")
-    expect(Permission.evaluate("external_directory", "/some/other/path", auto!.permission).action).toBe("ask")
+    expect(Permission.evaluate("external_directory", "/some/other/path", auto!.permission).action).toBe("auto")
     expect(Permission.evaluate("external_directory", Truncate.GLOB, auto!.permission).action).toBe("allow")
   }),
 )

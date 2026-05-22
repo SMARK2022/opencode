@@ -150,6 +150,8 @@ export const Plugin = define({
               { action: "plan_enter", resource: "*", effect: "allow" },
               // Auto 只改变shell路由；其余基础权限及后续配置覆盖保持原样。
               { action: "bash", resource: "*", effect: id === "Auto" ? "auto" : "ask" },
+              // Auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
+              ...(id === "Auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
               ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
             ]),

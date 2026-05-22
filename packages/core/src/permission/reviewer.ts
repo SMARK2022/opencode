@@ -32,7 +32,9 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
   const review = Effect.fn("PermissionReviewer.review")(function* (input: PermissionAuto.ReviewInput) {
     const entries = yield* config.entries()
     const sessionID = input.sessionID
-    if (Config.latest(entries, "approvals_reviewer") !== "auto_review" || !sessionID) return yield* new Disabled()
+    const selected = Config.latest(entries, "approvals_reviewer")
+    // 显式user优先；未配置全局reviewer时，Auto仍使用相同的隔离审查路径。
+    if (!sessionID || selected === "user" || (selected !== "auto_review" && input.metadata.agent !== "Auto")) return yield* new Disabled()
     // 按字段合并各层配置，较近文档只覆盖它明确提供的策略项。
     const options = entries.flatMap((entry) => entry.type === "document" && entry.info.auto_review ? [entry.info.auto_review] : [])
       .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})

@@ -14,6 +14,19 @@ const bash = (command: string, reviewer?: PermissionAuto.Reviewer) =>
     ),
   )
 
+// #203：shell-origin external_directory 辅助——复用同一条 shell 命令证据做确定性预审
+const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Reviewer) =>
+  Effect.runPromise(
+    PermissionAuto.evaluate(
+      {
+        permission: "external_directory",
+        patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash" },
+      },
+      reviewer,
+    ),
+  )
+
 describe("permission auto routing", () => {
   // #202：验证 precheck safe 路径——只读命令不经过 reviewer，source 标记为 precheck
   test("allows safe commands after precheck without reviewer load", async () => {
@@ -54,8 +67,113 @@ describe("permission auto routing", () => {
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
-  // #202：验证 general 层级路由——未知命令在非 strict 下回退用户审批，不占用 reviewer 配额
-  test("routes general decisions to user approval without reviewer load", async () => {
+  // #203：PowerShell 用户目录凭据读取走 cautious → reviewer，防止 $env:USERPROFILE 展开绕过敏感路径检测
+  test("routes PowerShell user-profile credential reads to reviewer", async () => {
+    let called = false
+    await expect(
+      bash(String.raw`Get-Content -LiteralPath "$env:USERPROFILE\.aws\credentials"`, {
+        review: () =>
+          Effect.sync(() => {
+            called = true
+            return {
+              action: "deny" as const,
+              reason: "reviewer rejected user-profile credential read",
+              reviewID: "review_powershell_credentials",
+              risk_level: "high" as const,
+              user_authorization: "unknown" as const,
+            }
+          }),
+      }),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
+  // #203：PowerShell SSH 私钥读取/列举走 cautious → reviewer，覆盖 id_rsa/id_ed25519/id_ecdsa 与目录列举
+  test("routes PowerShell SSH private key access to reviewer", async () => {
+    let called = false
+    const reviewer = {
+      review: () =>
+        Effect.sync(() => {
+          called = true
+          return {
+            action: "deny" as const,
+            reason: "reviewer rejected SSH private key access",
+            reviewID: "review_ssh_key",
+            risk_level: "high" as const,
+            user_authorization: "unknown" as const,
+          }
+        }),
+    }
+
+    await expect(
+      bash(
+        String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`,
+        reviewer,
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    await expect(
+      bash(String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`, reviewer),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
+  // #203：shell-origin external_directory 复用命令证据——safe 放行，cautious 也放行给 bash auto，dangerous 拒绝
+  test("uses shell evidence for external directory auto routing", async () => {
+    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
+
+    let called = false
+    await expect(
+      shellExternalDirectory("cat ~/.aws/credentials", {
+        review: () =>
+          Effect.sync(() => {
+            called = true
+            return {
+              action: "deny" as const,
+              reason: "reviewer rejected sensitive external read",
+              reviewID: "review_external_shell",
+              risk_level: "high" as const,
+              user_authorization: "unknown" as const,
+            }
+          }),
+      }),
+    ).resolves.toMatchObject({ action: "allow", source: "precheck" })
+    expect(called).toBe(false)
+
+    await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
+  })
+
+  // #203：非 shell external_directory 缺少命令证据，走既有人工审批，不进入 reviewer
+  test("keeps non-shell external directory auto on the user approval path", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+            metadata: { filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa" },
+          },
+          {
+            review: () =>
+              Effect.sync(() => {
+                called = true
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer should not decide non-shell external_directory gates",
+                  reviewID: "review_non_shell_external_directory",
+                  risk_level: "high" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
+    expect(called).toBe(false)
+  })
+
+  // #203：开发期 shell general 直接 allow——Auto shell 不弹人工确认；未命中 dangerous/cautious 的命令先放行
+  test("allows shell general decisions during development without reviewer load", async () => {
     let called = false
     await expect(
       bash("unknown-tool --maybe-read", {
@@ -71,13 +189,40 @@ describe("permission auto routing", () => {
             }
           }),
       }),
-    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
+    ).resolves.toMatchObject({ action: "allow", source: "precheck" })
     expect(called).toBe(false)
   })
 
   // #198：验证无 reviewer 时回退到 ask——保持原有用户审批路径，source 标记为 reviewer_unavailable
   test("falls back to existing approval path when reviewer is not wired", async () => {
     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+  })
+
+  // #203：原生 Auto reviewer 缺失时 fail closed——cautious 不降级为可点击 ask，防止点 Allow 暴露敏感 shell 输出
+  test("fails closed for native Auto when reviewer is not wired", async () => {
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate({
+          permission: "bash",
+          patterns: ["git add ."],
+          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
+        }),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+  })
+
+  // #203：显式 user reviewer 配置强于原生 Auto fail-closed——保留用户审批作为 review 边界
+  test("honors explicit user reviewer configuration for native Auto", async () => {
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate({
+          permission: "bash",
+          patterns: ["git add ."],
+          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
+          reviewerDisabled: true,
+        }),
+      ),
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
   })
 
   // #202：验证 strict 模式——precheck safe 仍路由到 reviewer，level 透传为 safe，reason 标注 strict auto review required

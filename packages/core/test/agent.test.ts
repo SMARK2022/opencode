@@ -153,7 +153,7 @@ describe("AgentV2", () => {
         expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
         expect(PermissionV2.evaluate("read", ".env", item.permissions).effect).toBe("ask")
-        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe("ask")
+        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
       }
       // 显式默认可以选择Auto；仅剩Auto时仍不能成为隐式fallback。
       const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("Auto")))

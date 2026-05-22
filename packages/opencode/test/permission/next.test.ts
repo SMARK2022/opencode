@@ -733,23 +733,21 @@ it.instance(
   { git: true },
 )
 
-// #199：验证 precheck 对非只读命令回退到 ask，不静默放行未知风险。
+// #203：开发期 shell general 直接 allow——echo $HOME 不再弹人工确认，无 pending 请求
 it.instance(
-  "ask - auto falls back to user approval for opaque bash commands",
+  "ask - auto allows opaque bash commands during development without pending user approval",
   () =>
     Effect.gen(function* () {
-      const fiber = yield* ask({
+      yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["echo $HOME"],
         metadata: { command: "echo $HOME" },
         always: ["echo *"],
         ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
-      }).pipe(Effect.forkScoped)
+      })
 
-      expect(yield* waitForPending(1)).toHaveLength(1)
-      yield* rejectAll()
-      yield* Fiber.await(fiber)
+      expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
 )
@@ -992,27 +990,25 @@ reviewed.instance(
   { git: true },
 )
 
-// #202：edit/apply_patch 等非 shell auto 请求预审层级为 general，非 strict 下回退用户审批不调用 reviewer
+// #203：edit/apply_patch 等非 shell auto 请求预审层级为 general，开发期交给 reviewer 单点判断
 reviewed.instance(
-  "ask - auto routes non-shell general tools to user approval without reviewer load",
+  "ask - auto routes non-shell general tools to reviewer without pending user approval",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
-      const fiber = yield* ask({
+      yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "edit",
         patterns: ["src/a.ts"],
         always: ["*"],
         ruleset: [{ permission: "edit", pattern: "*", action: "auto" as const }],
         metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
-      }).pipe(Effect.forkScoped)
+      })
 
-      // #202：当前阶段只让 cautious 请求进入 LLM reviewer。edit 这类非 shell auto 请求
-      // #202：没有 bash 级语义证据，预审层级是 general，应保持用户审批路径，不消耗 reviewer 调用
-      expect(yield* waitForPending(1)).toHaveLength(1)
-      expect(reviewedCalls).toBe(0)
-      yield* rejectAll()
-      yield* Fiber.await(fiber)
+      // #203：开发期要求 edit 这类非 shell auto 请求不回到普通 ask；预审层级 general，
+      // #203：交给 reviewer 单点判断，不产生 pending 用户审批
+      expect(reviewedCalls).toBe(1)
+      expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
 )

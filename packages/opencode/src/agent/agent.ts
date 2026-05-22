@@ -185,9 +185,9 @@ const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // #201：Auto 原生 Agent——复用 build 权限形状，仅把 bash 改为 auto，shell 命令进入
-          // #201：deterministic precheck / reviewer / user fallback 链路；edit/task/read 等其他权限
-          // #201：保持 build 的 allow 风格，外部目录等既有安全默认值不被放宽
+          // #203：Auto 复用 build 权限形状，但只把 shell 命令接入 auto。edit
+          // #203：等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
+          // #203：扩大到新的工具审批面
           Auto: {
             name: "Auto",
             description: "Build-like agent that routes shell commands through auto permission review.",
@@ -198,6 +198,12 @@ const layer = Layer.effect(
                 question: "allow",
                 plan_enter: "allow",
                 bash: "auto",
+                // #203：external_directory:auto 让 shell 项目外路径门禁进入 auto 路由，
+                // #203：复用同一条命令的预审证据；白名单目录保持 allow 不被放宽
+                external_directory: {
+                  "*": "auto",
+                  ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
+                },
               }),
               user,
             ),
