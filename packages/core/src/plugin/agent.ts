@@ -129,7 +129,7 @@ export const Plugin = define({
       })
 
       // 注册归属现有 transform 的作用域，卸载或重载不留下第二份代理状态。
-      for (const id of ["interactive", "decide"]) {
+      for (const id of ["Auto", "interactive", "decide"]) {
         draft.update(AgentV2.ID.make(id), (item) => {
           // runner 同时禁用工具表，避免配置覆盖改变 decide 的无工具语义。
           if (id === "decide") {
@@ -138,7 +138,9 @@ export const Plugin = define({
             item.permissions.push({ action: "*", resource: "*", effect: "deny" })
             return
           }
-          item.description = "The default agent. Executes tools based on configured permissions."
+          item.description = id === "Auto"
+            ? "Build-like agent that routes shell commands through auto permission review."
+            : "The default agent. Executes tools based on configured permissions."
           // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
           item.mode = "primary"
           // 配置插件随后追加全局和代理专属规则，保留用户最后覆盖的优先级。
@@ -146,8 +148,8 @@ export const Plugin = define({
             ...PermissionV2.merge(defaults, [
               { action: "question", resource: "*", effect: "allow" },
               { action: "plan_enter", resource: "*", effect: "allow" },
-              // ask 触发原生审批；持久授权和拒绝仍由 PermissionV2 判定。
-              { action: "bash", resource: "*", effect: "ask" },
+              // Auto 只改变shell路由；其余基础权限及后续配置覆盖保持原样。
+              { action: "bash", resource: "*", effect: id === "Auto" ? "auto" : "ask" },
               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
               ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
             ]),

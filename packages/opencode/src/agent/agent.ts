@@ -16,7 +16,7 @@ import PROMPT_PERMISSION_REVIEWER from "./prompt/permission-reviewer.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 import { Permission } from "@/permission"
-import { mergeDeep, pipe, sortBy, values } from "remeda"
+import { mergeDeep } from "remeda"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { Plugin } from "@/plugin"
@@ -85,6 +85,10 @@ type State = Omit<Interface, "generate">
 
 // #200：保留代理名集合——permission-reviewer 的安全不变量不可被用户配置放宽
 const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
+// #201：显式选择的主 Agent 集合——Auto 可见且可经 default_agent 选择，但它会把
+// #201：shell 权限切到 auto 分支。为保持"只有显式选择才启用 auto"的不变量，未配置
+// #201：default_agent 时的隐式回退跳过此处列出的名称，避免禁用其他主 Agent 后意外进入 auto 路由
+const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["Auto"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -178,6 +182,25 @@ const layer = Layer.effect(
               user,
             ),
             // 保持可选的内置主代理身份，不改变 build 的默认选择。
+            mode: "primary",
+            native: true,
+          },
+          // #201：Auto 原生 Agent——复用 build 权限形状，仅把 bash 改为 auto，shell 命令进入
+          // #201：deterministic precheck / reviewer / user fallback 链路；edit/task/read 等其他权限
+          // #201：保持 build 的 allow 风格，外部目录等既有安全默认值不被放宽
+          Auto: {
+            name: "Auto",
+            description: "Build-like agent that routes shell commands through auto permission review.",
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                question: "allow",
+                plan_enter: "allow",
+                bash: "auto",
+              }),
+              user,
+            ),
             mode: "primary",
             native: true,
           },
@@ -384,14 +407,14 @@ const layer = Layer.effect(
 
         const list = Effect.fnUntraced(function* () {
           const cfg = yield* config.get()
-          return pipe(
-            agents,
-            values(),
-            sortBy(
-              [(x) => (cfg.default_agent ? x.name === cfg.default_agent : x.name === "build"), "desc"],
-              [(x) => x.name, "asc"],
-            ),
-          )
+          // #201：Agent 列表 localeCompare 排序——Auto 是大写可见 Agent，显式使用 localeCompare
+          // #201：语义而非码点排序，避免影响 mixed-case 自定义 Agent 展示顺序；默认 Agent 仍居首
+          const defaultName = cfg.default_agent ?? "build"
+          return Object.values(agents).toSorted((a, b) => {
+            if (a.name === defaultName && b.name !== defaultName) return -1
+            if (a.name !== defaultName && b.name === defaultName) return 1
+            return a.name.localeCompare(b.name)
+          })
         })
 
         const defaultInfo = Effect.fnUntraced(function* () {
@@ -403,7 +426,12 @@ const layer = Layer.effect(
             if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
             return agent
           }
-          const visible = Object.values(agents).find((a) => a.mode !== "subagent" && a.hidden !== true)
+          // #201：Auto 隐式默认排除——保持历史回退语义：无显式 default_agent 时不因新增可见
+          // #201：Auto 主 Agent 就自动启用 auto shell 路由；Auto 仍可经 default_agent 精确选择
+          const visible = Object.entries(agents).find(
+            ([name, agent]) =>
+              agent.mode !== "subagent" && agent.hidden !== true && !EXPLICIT_ONLY_PRIMARY_AGENT_NAMES.has(name),
+          )?.[1]
           if (!visible) throw new Error("no primary visible agent found")
           return visible
         })
