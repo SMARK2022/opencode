@@ -671,6 +671,8 @@ export function Prompt(props: PromptProps) {
     set(prompt) {
       input.setText(prompt.input)
       setStore("prompt", prompt)
+      // #192：还原草稿必须同时还原 mode，否则 shell 模式残留会让普通输入误走 /shell
+      if (prompt.mode) { setStore("mode", prompt.mode) }
       restoreExtmarksFromParts(prompt.parts)
       input.gotoBufferEnd()
     },
@@ -1132,17 +1134,45 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
+    // #192：draft 保留——提交失败时恢复输入
+    // #192：新会话跳转可取消——后台失败时不跳转
+    let newSessionNavigation: ReturnType<typeof setTimeout> | undefined
+    let cancelNewSessionNavigation = false
+
+    function showSubmitFailureToast() {
+      toast.show({ message: "Sending prompt failed. Your draft was kept.", variant: "error" })
+    }
+    // #192：move 状态与 draft 一起还原，保证失败后 UI 回到提交前形态
+    function keepDraftAfterSubmitFailure() {
+      showSubmitFailureToast()
+      if (finishMoveProgress) move.finishSubmit()
+      return false
+    }
+    // #192：shell/command 后台失败时恢复 draft
+      // #192：shell/command 无接受回执，失败只能靠恢复草稿兜底，且不覆盖用户新输入
+    function restoreDraftAfterBackgroundFailure(prompt: typeof store.prompt, mode: typeof currentMode) {
+      // #192：后台请求迟到失败不得覆盖用户已输入的新内容，仅空 draft 时恢复
+      showSubmitFailureToast()
+      cancelNewSessionNavigation = true
+      if (newSessionNavigation) clearTimeout(newSessionNavigation)
+      if (store.prompt.input || store.prompt.parts.length > 0) return
+      // #192：复用 set 同步输入框与附件标记，避免再次提交时把恢复的草稿同步为空。
+      ref.set({ ...prompt, mode })
+    }
+
     if (store.mode === "shell") {
       move.startSubmit()
-      void sdk.client.session.shell({
-        sessionID,
-        agent: agent.name,
-        model: {
-          providerID: selectedModel.providerID,
-          modelID: selectedModel.modelID,
-        },
-        command: inputText,
-      })
+      // #192：快照仅用于失败恢复，成功路径直接清空输入，两条路径互斥——后台调用无法 await
+      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
+      void sdk.client.session
+        .shell({
+          sessionID,
+          agent: agent.name,
+          model: { providerID: selectedModel.providerID, modelID: selectedModel.modelID },
+          command: inputText,
+        })
+        .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
+        .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
       setStore("mode", "normal")
     } else if (
       inputText.startsWith("/") &&
@@ -1156,43 +1186,40 @@ export function Prompt(props: PromptProps) {
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
-      void sdk.client.session.command({
-        sessionID,
-        command: command.slice(1),
-        arguments: args,
-        agent: agent.name,
-        model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-        variant,
-        parts: nonTextParts.filter((x) => x.type === "file"),
-      })
+      // #192：draft 快照在失败路径被还原，是后台失败时的唯一恢复来源
+      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
+      void sdk.client.session
+        .command({
+          sessionID,
+          command: command.slice(1),
+          arguments: args,
+          agent: agent.name,
+          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+          variant,
+          parts: nonTextParts.filter((x) => x.type === "file"),
+        })
+        .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
+        .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
     } else {
       move.startSubmit()
-      sdk.client.session
-        .prompt(
-          {
-            sessionID,
-            ...selectedModel,
-            agent: agent.name,
-            model: selectedModel,
-            variant,
-            parts: [
-              ...editorParts,
-              {
-                type: "text",
-                text: inputText,
-              },
-              ...nonTextParts,
-            ],
-          },
-          { throwOnError: true },
-        )
-        .catch((error) => {
-          toast.show({
-            title: "Failed to send prompt",
-            message: errorMessage(error),
-            variant: "error",
-          })
+      // #192：promptAsync 替代 prompt+throwOnError——daemon 确认接收后才清 draft
+        // #192：response.error 表示 daemon 未接受，保留 draft 并终止提交流程
+      const response = await sdk.client.session
+        .promptAsync({
+          sessionID,
+          ...selectedModel,
+          agent: agent.name,
+          model: selectedModel,
+          variant,
+          parts: [
+            ...editorParts,
+            { type: "text", text: inputText },
+            ...nonTextParts,
+          ],
         })
+        .catch((error) => ({ error }))
+      // #192：promptAsync 的 error 信封是 daemon 拒绝的信号，与本地异常同等处理
+      if (response.error) return keepDraftAfterSubmitFailure()
       if (editorParts.length > 0) editor.markSelectionSent()
     }
     history.append({
@@ -1210,11 +1237,10 @@ export function Prompt(props: PromptProps) {
     // temporary hack to make sure the message is sent
     if (!props.sessionID) {
       if (editorParts.length > 0) editor.preserveSelectionFromNewSession()
-      setTimeout(() => {
-        route.navigate({
-          type: "session",
-          sessionID,
-        })
+      // #192：后台失败时取消跳转，避免进入空会话丢失输入
+      newSessionNavigation = setTimeout(() => {
+        if (cancelNewSessionNavigation) return
+        route.navigate({ type: "session", sessionID })
       }, 50)
     }
     input.clear()

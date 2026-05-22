@@ -84,6 +84,8 @@ type Wait = {
   tick: number
   armed: boolean
   live: boolean
+  // #192：statusBusy 期间也算活跃
+  statusBusy: boolean
   onVisibleOutput?: (anchor: LocalReplayAnchor) => void
   done: Deferred.Deferred<void, unknown>
 }
@@ -423,25 +425,7 @@ function createLayer(input: StreamInput) {
         input.signal?.addEventListener("abort", halt, { once: true })
         yield* Effect.addFinalizer(() => closeScope())
 
-        const events = yield* Scope.provide(scope)(
-          Effect.acquireRelease(
-            Effect.promise(() =>
-              input.sdk.global.event({
-                signal: abort.signal,
-              }),
-            ),
-            (events) =>
-              Effect.sync(() => {
-                void events.stream.return(StreamClosed).catch(() => {})
-              }),
-          ),
-        )
-        closeStream = () => {
-          void events.stream.return(StreamClosed).catch(() => {})
-        }
-        input.trace?.write("recv.subscribe", {
-          sessionID: input.sessionID,
-        })
+                // #192：events 订阅移入 watch while 循环
 
         const state: State = {
           data: createSessionData(),
@@ -799,13 +783,19 @@ function createLayer(input: StreamInput) {
           )
         })
 
-        const idle = Effect.fn("RunStreamTransport.idle")((fallback: boolean) =>
+        const idle = Effect.fn("RunStreamTransport.idle")((next: Wait, fallback: boolean) =>
           Effect.promise(() => input.sdk.session.status()).pipe(
             Effect.map((out) => {
               const item = out.data?.[input.sessionID]
-              return !item || item.type === "idle"
+              // #192：live 或 statusBusy 都算活跃
+              const observed = next.live || next.statusBusy
+              if (!item) return fallback && observed
+              // #192：daemon 无该 session 记录时仅当已观察到活动才允许结束 turn，防止空窗误判
+              if (item.type !== "idle") { next.statusBusy = true; return false }
+              // #192：status 非 idle 说明 turn 仍在执行，标记 busy 并继续等待
+              return observed
             }),
-            Effect.orElseSucceed(() => fallback),
+            Effect.orElseSucceed(() => fallback && (next.live || next.statusBusy)),
           ),
         )
 
@@ -826,19 +816,24 @@ function createLayer(input: StreamInput) {
 
         const touch = (event: Event) => {
           const next = state.wait
-          if (!next || !active(event, input.sessionID)) {
+          if (!next || !active(event, input.sessionID)) { return }
+          // #192：session.status 单独处理
+          if (event.type === "session.status") {
+            // #192：session.status 事件是 turn 活跃的直接证据，优先级高于普通事件
+            if (event.properties.status.type !== "idle") { next.statusBusy = true; next.live = true }
             return
           }
-
           next.live = true
         }
 
         const complete = Effect.fn("RunStreamTransport.complete")(function* (next: Wait, fallback: boolean) {
-          if (state.wait !== next || !next.armed || !next.live) {
+          // #192：complete 入口只看 armed 与 idle；live 判定下沉到 idle 内部，避免职责重复
+          // #192：idle 内部用 observed 校验 live 与 statusBusy，complete 不再重复该判断
+          if (state.wait !== next || !next.armed) {
             return
           }
 
-          if (!(yield* idle(fallback)) || state.wait !== next) {
+          if (!(yield* idle(next, fallback)) || state.wait !== next) {
             return
           }
 
@@ -1124,63 +1119,54 @@ function createLayer(input: StreamInput) {
           return true
         })
 
-        const watch = Effect.fn("RunStreamTransport.watch")(() =>
-          Stream.fromAsyncIterable(events.stream, (error) =>
-            error instanceof Error ? error : new Error(String(error)),
-          ).pipe(
-            Stream.takeUntil(() => input.footer.isClosed || abort.signal.aborted),
-            Stream.runForEach(
-              Effect.fn("RunStreamTransport.event")(function* (item: unknown) {
-                if (input.footer.isClosed) {
-                  abort.abort()
-                  return
-                }
-
-                if (isMatchingDisposeEvent(item, input.directory)) {
-                  yield* fail(new Error("instance disposed"))
-                  yield* closeScope()
-                  return
-                }
-
-                const event = globalPayloadEvent(item)
-                if (!event) {
-                  return
-                }
-
-                const sessionID = sid(event)
-                if (booting || replaying) {
-                  if (sessionID) {
-                    input.trace?.write("recv.event", event)
-                    buffered.push(event)
-                  }
-                  return
-                }
-
-                if (!tracked(sessionID)) {
-                  if (sessionID) {
-                    input.trace?.write("recv.event", event)
-                    buffered.push(event)
-                  }
-                  return
-                }
-
-                input.trace?.write("recv.event", event)
-                yield* applyEvent(event)
-                yield* drainBuffered()
+        const watch = Effect.fn("RunStreamTransport.watch")(function* () {
+          // #192：订阅生命周期由 watch 循环持有，clean EOF 在循环内重建而非退出
+          // #192：clean EOF 是正常结束信号触发重连；真异常才走 fault 路径
+          while (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
+            const events = yield* Effect.tryPromise({
+              try: () => input.sdk.global.event({ signal: abort.signal }),
+              catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+            }).pipe(
+              Effect.catch((error) => {
+                if (input.footer.isClosed || abort.signal.aborted || closed) return Effect.void
+                return fail(error).pipe(Effect.as(undefined))
               }),
-            ),
-            Effect.catch((error) => (abort.signal.aborted ? Effect.void : fail(error))),
-            Effect.ensuring(
-              Effect.gen(function* () {
-                if (!abort.signal.aborted && !state.fault) {
-                  yield* fail(new Error("global event stream closed"))
-                }
-                closeStream()
-              }),
-            ),
-          ),
-        )
-
+            )
+            // #192：终止条件满足时静默退出，否则真实订阅故障走 fault 路径
+            if (!events) return
+            const closeCurrentStream = () => { void events.stream.return(StreamClosed).catch(() => {}) }
+            // #192：closeStream 在订阅期间指向当前流，供外部主动关闭
+            // #192：确保只清理当前流的 subscription，旧流 ensure 不改 closeStream 引用
+            closeStream = closeCurrentStream
+            input.trace?.write("recv.subscribe", { sessionID: input.sessionID })
+            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) => error instanceof Error ? error : new Error(String(error))).pipe(
+              Stream.takeUntil(() => input.footer.isClosed || abort.signal.aborted),
+              Stream.runForEach(
+                Effect.fn("RunStreamTransport.event")(function* (item: unknown) {
+                  if (input.footer.isClosed) { abort.abort(); return }
+                  if (isMatchingDisposeEvent(item, input.directory)) { yield* fail(new Error("instance disposed")); yield* closeScope(); return }
+                  const event = globalPayloadEvent(item)
+                  if (!event) return
+                  const sessionID = sid(event)
+                  if (booting || replaying) { if (sessionID) { input.trace?.write("recv.event", event); buffered.push(event) }; return }
+                  if (!tracked(sessionID)) { if (sessionID) { input.trace?.write("recv.event", event); buffered.push(event) }; return }
+                  input.trace?.write("recv.event", event)
+                  yield* applyEvent(event)
+                  yield* drainBuffered()
+                }),
+              ),
+              Effect.as(true),
+              Effect.catch((error) => (abort.signal.aborted ? Effect.succeed(false) : fail(error).pipe(Effect.as(false)))),
+              Effect.ensuring(Effect.sync(() => { if (closeStream === closeCurrentStream) closeStream = () => {}; closeCurrentStream() })),
+              // #192：closeStream 只在仍指向当前流时重置，旧流的 ensuring 不会误关新订阅
+            )
+            // #192：ok 标志区分 clean EOF 与真故障：clean EOF 外层重连，真故障退出
+            // #192：ok=false 表示流正常结束或已 fault；fault 由 catch 置位，clean EOF 走重连
+            if (!ok) return
+            // #192：重连节流——100ms 避免死 daemon tight loop
+            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) yield* Effect.sleep("100 millis")
+          }
+        })
         yield* Scope.provide(scope)(watch().pipe(Effect.forkScoped))
         yield* bootstrap()
 
@@ -1203,6 +1189,9 @@ function createLayer(input: StreamInput) {
             tick: state.tick,
             armed: false,
             live: false,
+            // #192：初始无 statusBusy
+            // #192：新 Wait 从非 busy 开始，只有收到事件或 status 才置位
+            statusBusy: false,
             onVisibleOutput: next.onVisibleOutput,
             done: yield* Deferred.make<void, unknown>(),
           }

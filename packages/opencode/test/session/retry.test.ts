@@ -32,6 +32,12 @@ function wrap(message: unknown): ReturnType<NamedError["toObject"]> {
   return { name: "", data: { message } }
 }
 
+// #192：withCause——给 Error 附加 cause，兼容 AI SDK 错误包装
+function withCause<T extends Error>(error: T, cause: unknown) {
+  Object.defineProperty(error, "cause", { value: cause })
+  return error
+}
+
 describe("session.retry.delay", () => {
   test("caps delay at 30 seconds when headers missing", () => {
     const error = apiError()
@@ -607,6 +613,146 @@ describe("session.message-v2.fromError", () => {
     if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
     expect(result.data.isRetryable).toBe(true)
     expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "fetch failed" })
+  })
+
+
+
+  // #192：无 statusCode 的 APICallError 无法自证重试性，需查 cause 决定重试
+  // #192：有 statusCode 的 4xx 保持非重试，即使 cause 链中有 transport 故障
+  // #192：无状态码的 APICallError 可能是 provider 包装了 transport 错误——需解包 cause 判定
+  // #192：metadata.code 必须透传 transport 错误码（如 ETIMEDOUT），供日志和诊断使用
+  test("converts statusless APICallError transport causes to retryable APIError", () => {
+    const result = MessageV2.fromError(
+      withCause(
+        new APICallError({
+          message: "provider request failed",
+          url: "https://example.com/v1/chat/completions",
+          requestBodyValues: {},
+          isRetryable: false,
+        }),
+        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
+      ),
+      { providerID },
+    )
+
+    // #192：statusless APICallError 应转为可重试 APIError
+    expect(SessionV1.APIError.isInstance(result)).toBe(true)
+    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
+    // #192：isRetryable=true——transport cause 使非重试变可重试
+    expect(result.data.isRetryable).toBe(true)
+    // #192：metadata.code 让下游能按错误码区分重试原因，便于观测与告警
+    expect(result.data.metadata?.code).toBe("ETIMEDOUT")
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket timed out" })
+  })
+
+  // #192：4xx 是确定性业务错误，transport cause 不改变其重试性
+  // #192：statusCode 存在即进入 APICallError 自身判定，无需解包 cause
+  // #192：responseBody 必须保留——4xx 的诊断体不能因 cause 解包而丢失
+  test("keeps explicit APICallError 4xx failures non-retryable even with transport causes", () => {
+    const result = MessageV2.fromError(
+      withCause(
+        new APICallError({
+          message: "bad request",
+          url: "https://example.com/v1/chat/completions",
+          requestBodyValues: {},
+          statusCode: 400,
+          responseHeaders: { "content-type": "application/json" },
+          responseBody: '{"error":"bad request"}',
+          isRetryable: false,
+        }),
+        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
+      ),
+      { providerID },
+    )
+
+    // #192：4xx APICallError 保持非重试——即使 cause 有 transport 故障
+    expect(SessionV1.APIError.isInstance(result)).toBe(true)
+    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
+    // #192：4xx 语义优先——statusCode 存在时不解包 transport cause
+    expect(result.data.isRetryable).toBe(false)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
+  })
+
+  // #192：外层 Error 包装的 4xx APICallError 也应保持非重试——apiCallErrorCause 递归查找
+  // #192：depth 限制 2 层——防止循环 cause 链导致无限递归
+  // #192：外层 Error 无 statusCode，但 cause 链中的 APICallError 有——需递归发现
+  test("keeps wrapped explicit APICallError 4xx failures non-retryable", () => {
+    const result = MessageV2.fromError(
+      new Error("outer wrapper", {
+        cause: withCause(
+          new APICallError({
+            message: "bad request",
+            url: "https://example.com/v1/chat/completions",
+            requestBodyValues: {},
+            statusCode: 400,
+            responseHeaders: { "content-type": "application/json" },
+            responseBody: '{"error":"bad request"}',
+            isRetryable: false,
+          }),
+          Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
+        ),
+      }),
+      { providerID },
+    )
+
+    expect(SessionV1.APIError.isInstance(result)).toBe(true)
+    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(false)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
+  })
+
+  // #192：cause 携带结构化 stream 错误时按类型精确映射，不丢 responseBody，解析为对应错误类型
+  // #192：stream error 结构为 { type:"error", error:{ code, message } }——ProviderError.parseStreamError 解析
+  // #192：server_error 是可重试的 provider 侧故障——与 transport 故障区分
+  // #192：openai provider 的 stream error 格式与其他 provider 可能不同
+  test("converts structured stream errors carried by Error.cause to retryable APIError", () => {
+    const result = MessageV2.fromError(
+      new Error("stream failed", {
+        cause: {
+          type: "error",
+          error: {
+            code: "server_error",
+            message: "The provider stream failed after it started.",
+          },
+        },
+      }),
+      { providerID: ProviderV2.ID.make("openai") },
+    )
+
+    expect(SessionV1.APIError.isInstance(result)).toBe(true)
+    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
+    expect(result.data.isRetryable).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({
+      message: "The provider stream failed after it started.",
+    })
+  })
+
+  // #192：context_length_exceeded 等结构化错误必须走 ContextOverflowError，不能退化为 transport 重试
+  // #192：ContextOverflowError 携带 responseBody 供诊断定位，不随 cause 丢失日志使用
+  // #192：TypeError("fetch failed") 的 cause 可能携带 provider 结构化错误——先查 streamError
+  // #192：context_length_exceeded 映射为 ContextOverflowError——不可重试，与 transport 故障区分
+  // #192：parseStreamError 将 context_length_exceeded 映射为统一消息——"Input exceeds context window of this model"
+  // #192：responseBody 从 parsed 结果透传到错误对象，供调用方诊断——fromStreamError 必须保留完整诊断信息
+  test("prioritizes structured stream errors over generic fetch wrappers", () => {
+    const result = MessageV2.fromError(
+      new TypeError("fetch failed", {
+        cause: {
+          type: "error",
+          error: {
+            code: "context_length_exceeded",
+            message: "Input exceeds the context window.",
+          },
+        },
+      }),
+      { providerID: ProviderV2.ID.make("openai") },
+    )
+
+    expect(SessionV1.ContextOverflowError.isInstance(result)).toBe(true)
+    if (!SessionV1.ContextOverflowError.isInstance(result)) throw new Error("expected ContextOverflowError")
+    expect(result.data.message).toBe("Input exceeds context window of this model")
+    // #192：错误构造时 responseBody 一并携带，避免诊断信息在转换中丢失，透传到 ContextOverflowError
+    expect(result.data.responseBody).toBeDefined()
+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
   })
 
 })

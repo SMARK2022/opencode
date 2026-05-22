@@ -385,7 +385,8 @@ const live: Layer.Layer<
             // 先释放 reader，外层既有 scope 才能 abort 运输；等 tee 的 iterator.return 会反向等该 abort。
             return Stream.fromReadableStream({
               evaluate: () => result.result.fullStream,
-              onError: (e) => e instanceof Error ? e : new Error(String(e)),
+              // #192：保留结构化错误 cause；reader 的既有释放责任不随错误转换迁移。
+              onError: (e) => e instanceof Error ? e : new Error(String(e), { cause: e }),
               releaseLockOnEnd: true,
             }).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
