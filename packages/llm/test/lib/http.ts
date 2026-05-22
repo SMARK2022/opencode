@@ -67,9 +67,14 @@ export const truncatedStream = (chunks: ReadonlyArray<string>) =>
   dynamicResponse((input) =>
     Effect.sync(() => {
       const encoder = new TextEncoder()
+      // 先让reader取得前序chunk，再报错；start中error会丢弃尚未消费的队列。
+      let index = 0
       const stream = new ReadableStream({
-        start(controller) {
-          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        pull(controller) {
+          if (index < chunks.length) {
+            controller.enqueue(encoder.encode(chunks[index++]))
+            return
+          }
           controller.error(new Error("connection reset"))
         },
       })

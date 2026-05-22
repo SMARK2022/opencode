@@ -77,7 +77,7 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
     async pull(ctrl) {
       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
         const id = setTimeout(() => {
-          const err = new ProviderError.ResponseStreamError("SSE read timed out")
+          const err = Object.assign(new ProviderError.ResponseStreamError("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
           ctl.abort(err)
           reader.cancel(err).catch(() => {})
           reject(err)
