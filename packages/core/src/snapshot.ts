@@ -1,4 +1,5 @@
 export * as Snapshot from "./snapshot"
+// #204：源 patch 的 models-snapshot.js（4MB 自动生成 vendor 数据）在 tip 同样缺失，跳过；本 patch 仅保留 filterCompacted 排序归一化这一行为变更
 
 import { makeLocationNode } from "./effect/app-node"
 import path from "path"

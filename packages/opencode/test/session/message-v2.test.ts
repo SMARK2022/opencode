@@ -1927,3 +1927,119 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
   })
 })
+
+describe("session.message-v2.filterCompacted", () => {
+  // #204：ID 刻意单调递增，镜像生产环境 MessageID.ascending() 的持久化顺序，复现真实压缩 transcript 失败模式
+  const OLD_USER = MessageID.make("msg_filter_001")
+  const OLD_ASSISTANT = MessageID.make("msg_filter_002")
+  const TAIL_USER = MessageID.make("msg_filter_003")
+  const TAIL_ASSISTANT = MessageID.make("msg_filter_004")
+  const COMPACTION_USER = MessageID.make("msg_filter_005")
+  const SUMMARY_ASSISTANT = MessageID.make("msg_filter_006")
+  const CONTINUE_USER = MessageID.make("msg_filter_007")
+
+  // #204：旧历史用户消息，应被 summary 排除在压缩窗口之外
+  const oldUser: SessionV1.WithParts = {
+    info: userInfo(OLD_USER),
+    parts: [{ ...basePart(OLD_USER, "filter-old-user"), type: "text", text: "old request" }] as SessionV1.Part[],
+  }
+
+  // #204：旧历史 assistant 回复，与 oldUser 同属被 summary 排除的历史
+  const oldAssistant: SessionV1.WithParts = {
+    info: assistantInfo(OLD_ASSISTANT, OLD_USER),
+    parts: [{ ...basePart(OLD_ASSISTANT, "filter-old-assistant"), type: "text", text: "old answer" }] as SessionV1.Part[],
+  }
+
+  // #204：retained tail——压缩边界保留的最近轮次，须在窗口内可见以维持上下文连续
+  const tailUser: SessionV1.WithParts = {
+    info: userInfo(TAIL_USER),
+    parts: [{ ...basePart(TAIL_USER, "filter-tail-user"), type: "text", text: "retained request" }] as SessionV1.Part[],
+  }
+
+  const tailAssistant: SessionV1.WithParts = {
+    info: assistantInfo(TAIL_ASSISTANT, TAIL_USER),
+    parts: [
+      { ...basePart(TAIL_ASSISTANT, "filter-tail-assistant"), type: "text", text: "retained answer" },
+    ] as SessionV1.Part[],
+  }
+
+  // #204：compaction user 携带 tail_start_id 指向 retained tail 起点
+  const compactionUser: SessionV1.WithParts = {
+    info: userInfo(COMPACTION_USER),
+    parts: [
+      {
+        ...basePart(COMPACTION_USER, "filter-compaction"),
+        type: "compaction",
+        auto: true,
+        tail_start_id: TAIL_USER,
+      },
+    ] as SessionV1.Part[],
+  }
+
+  // #204：summary assistant 标记 summary=true 且 finish，使其 parent compaction 进入 completed
+  const summaryAssistant: SessionV1.WithParts = {
+    info: {
+      ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER),
+      summary: true,
+      finish: "stop",
+    } as SessionV1.Assistant,
+    parts: [
+      { ...basePart(SUMMARY_ASSISTANT, "filter-summary"), type: "text", text: "summary of old work" },
+    ] as SessionV1.Part[],
+  }
+
+  // #204：summary 之后的续作用户消息，须出现在压缩窗口末尾
+  const continueUser: SessionV1.WithParts = {
+    info: userInfo(CONTINUE_USER),
+    parts: [
+      { ...basePart(CONTINUE_USER, "filter-continue"), type: "text", text: "continue from summary" },
+    ] as SessionV1.Part[],
+  }
+
+  // #204：期望窗口顺序——compaction、summary、retained tail、continue（旧历史被排除）
+  const expected = [COMPACTION_USER, SUMMARY_ASSISTANT, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER]
+
+  // #204：newest-first 输入（流式顺序）须保持压缩窗口不变
+  test("keeps the compacted summary and retained tail without reviving older history", () => {
+    // #204：输入按 newest-first（continue 在前），与流式 stream 顺序一致
+    expect(
+      MessageV2.filterCompacted([
+        continueUser,
+        summaryAssistant,
+        compactionUser,
+        tailAssistant,
+        tailUser,
+        oldAssistant,
+        oldUser,
+      ]).map((message) => message.info.id),
+    ).toStrictEqual(expected)
+  })
+
+  // #204：按时序输入（最旧在前）经排序归一化后须得到同一窗口——证明输入顺序无关
+  test("keeps the same compacted window when callers provide chronological history", () => {
+    // #204：输入按时序（old 在前），排序归一化后须与上例同窗口
+    expect(
+      MessageV2.filterCompacted([
+        oldUser,
+        oldAssistant,
+        tailUser,
+        tailAssistant,
+        compactionUser,
+        summaryAssistant,
+        continueUser,
+      ]).map((message) => message.info.id),
+    ).toStrictEqual(expected)
+    // 导入summary的ID可以较小，仍应按创建时间找到同一压缩边界。
+    const importedID = MessageID.make("msg_filter_000")
+    const importedSummary = {
+      ...summaryAssistant,
+      info: { ...summaryAssistant.info, id: importedID },
+      parts: summaryAssistant.parts.map((part) => ({ ...part, messageID: importedID })),
+    }
+    const history = [oldUser, oldAssistant, tailUser, tailAssistant, compactionUser, importedSummary, continueUser].map((message, index) => ({
+      ...message, info: { ...message.info, time: { ...message.info.time, created: index + 1 } },
+    }))
+    expect(MessageV2.filterCompacted(history).map((message) => message.info.id)).toStrictEqual([COMPACTION_USER, importedID, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER])
+    expect(MessageV2.filterCompacted(history.toReversed()).map((message) => message.info.id)).toStrictEqual([COMPACTION_USER, importedID, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER])
+  })
+})
