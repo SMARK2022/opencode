@@ -2,8 +2,9 @@ import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
+import { MessageID, PartID, SessionID } from "@/session/schema"
 import { generateObject, type ModelMessage } from "ai"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Schema, Semaphore } from "effect"
 import { PermissionReviewerPrompt } from "./prompt"
 import { Assessment, ReviewerRequest } from "./schema"
 import { PermissionReviewerTranscript } from "./transcript"
@@ -54,6 +55,8 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const provider = yield* Provider.Service
+    const sessions = yield* Session.Service
+    const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
 
     const review: Interface["review"] = (input) => Effect.gen(function* () {
       const cfg = yield* config.get()
@@ -101,6 +104,15 @@ export const layer = Layer.effect(
               return (yield* provider.getSmallModel(current.providerID)) ?? (yield* provider.getModel(current.providerID, current.modelID))
             })
         const language = yield* provider.getLanguage(model)
+        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+        yield* markToolReviewing(input)
+        const reviewerUser = reviewerSession
+          ? yield* recordReviewerRequest({
+              session: reviewerSession,
+              model,
+              text: messages.map((message) => `${message.role}: ${message.content}`).join("\n\n"),
+            })
+          : undefined
         // Use structured generation instead of free-form text parsing. The schema
         // enforces the JSON shape; PermissionAuto still performs semantic checks
         // for contradictory allows after the object is returned.
@@ -121,10 +133,14 @@ export const layer = Layer.effect(
           Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
         )
 
+        if (reviewerSession && reviewerUser) {
+          yield* recordReviewerDecision({ session: reviewerSession, model, parentID: reviewerUser.id, assessment })
+        }
+
         return {
           action: assessment.outcome,
           reason: assessment.rationale,
-          reviewID: crypto.randomUUID(),
+          reviewID: input.reviewID,
           risk_level: assessment.risk_level,
           user_authorization: assessment.user_authorization,
         } satisfies PermissionAuto.ReviewDecision
@@ -143,6 +159,136 @@ export const layer = Layer.effect(
     })
 
     return Service.of({ review })
+
+    function getReviewerSession(parentID: SessionID, model: Provider.Model) {
+      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
+        const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
+        if (existing) return existing
+        // A single child session per parent mirrors Codex's reusable guardian
+        // trunk: later reviews append new request/decision turns instead of
+        // creating detached one-off records, enabling future transcript deltas by
+        // child session id without changing the permission API again.
+        return yield* sessions.create({
+          parentID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+          agent: "permission-reviewer",
+          model: { providerID: model.providerID, id: model.id },
+        })
+      }))
+    }
+
+    function reviewerSessionLock(parentID: SessionID) {
+      const existing = reviewerSessionLocks.get(parentID)
+      if (existing) return existing
+      // Child-session creation is read-then-create because Session.Service does
+      // not expose an atomic get-or-create child primitive. A per-parent lock
+      // keeps concurrent tool reviews in one reusable reviewer transcript.
+      const next = Semaphore.makeUnsafe(1)
+      reviewerSessionLocks.set(parentID, next)
+      return next
+    }
+
+    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
+      return Effect.gen(function* () {
+        const message = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: input.session.id,
+          time: { created: Date.now() },
+          agent: "permission-reviewer",
+          model: { providerID: input.model.providerID, modelID: input.model.id },
+        } satisfies MessageV2.User)
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: input.session.id,
+          messageID: message.id,
+          type: "text",
+          // The text is synthetic protocol input: it should be inspectable in the
+          // hidden reviewer child session, but must not later count as human
+          // authorization evidence if that child transcript is projected again.
+          synthetic: true,
+          text: input.text,
+        } satisfies MessageV2.TextPart)
+        return message
+      })
+    }
+
+    function recordReviewerDecision(input: {
+      session: Session.Info
+      model: Provider.Model
+      parentID: MessageID
+      assessment: Schema.Schema.Type<typeof Assessment>
+    }) {
+      return Effect.gen(function* () {
+        const message = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          parentID: input.parentID,
+          role: "assistant",
+          mode: "permission-reviewer",
+          agent: "permission-reviewer",
+          path: { cwd: input.session.directory, root: input.session.directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: input.model.id,
+          providerID: input.model.providerID,
+          sessionID: input.session.id,
+          time: { created: Date.now(), completed: Date.now() },
+          finish: "tool-calls",
+        } satisfies MessageV2.Assistant)
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          sessionID: input.session.id,
+          messageID: message.id,
+          type: "tool",
+          callID: `permission-review-${input.parentID}`,
+          tool: "permission_review_decision",
+          state: {
+            status: "completed",
+            input: input.assessment,
+            output: JSON.stringify(input.assessment),
+            title: input.assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+            metadata: input.assessment,
+            time: { start: message.time.created, end: message.time.completed ?? Date.now() },
+          },
+        } satisfies MessageV2.ToolPart)
+      })
+    }
+
+    function markToolReviewing(input: PermissionAuto.ReviewInput) {
+      if (!input.sessionID || !input.tool) return Effect.void
+      return Effect.gen(function* () {
+        const message = yield* MessageV2.get({ sessionID: input.sessionID!, messageID: input.tool!.messageID })
+        const part = message.parts.find(
+          (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
+        )
+        if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
+        yield* sessions.updatePart({
+          ...part,
+          state: {
+            status: "running",
+            input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
+            title: `Auto review: ${input.precheck.level}`,
+            metadata: {
+              ...(part.state.status === "running" ? part.state.metadata : {}),
+              // This metadata is intentionally small and stable: clients can show
+              // that deterministic precheck handed the tool to the reviewer
+              // without rendering the hidden reviewer prompt or trusting it as a
+              // permission result.
+              autoReview: {
+                reviewID: input.reviewID,
+                precheck: input.precheck,
+              },
+            },
+            time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
+          },
+        } satisfies MessageV2.ToolPart)
+      }).pipe(
+        // Review display is best-effort: stale tool references can happen after
+        // cancellation, repair, or compaction, but losing that UI update must not
+        // convert an otherwise valid reviewer decision into a fail-closed deny.
+        Effect.catch(() => Effect.void),
+      )
+    }
   }),
 )
 

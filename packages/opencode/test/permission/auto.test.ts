@@ -63,6 +63,59 @@ describe("permission auto routing", () => {
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
+  test("reports the deterministic precheck boundary before reviewer completion", async () => {
+    const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git push origin main"],
+            metadata: { command: "git push origin main" },
+          },
+          {
+            review: (input) =>
+              Effect.succeed({
+                action: "allow",
+                reason: "reviewer approved explicit push",
+                reviewID: input.reviewID,
+                risk_level: "high",
+                user_authorization: "high",
+              }),
+          },
+          (input) =>
+            Effect.sync(() => {
+              starts.push(input)
+            }),
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "allow", source: "reviewer", reviewID: starts[0]?.reviewID })
+    expect(starts).toHaveLength(1)
+    expect(starts[0].precheck).toMatchObject({ level: "cautious" })
+  })
+
+  test("keeps the started review id when reviewer execution fails closed", async () => {
+    let started: string | undefined
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git push origin main"],
+            metadata: { command: "git push origin main" },
+          },
+          { review: () => Effect.fail(new Error("provider unavailable")) },
+          (input) =>
+            Effect.sync(() => {
+              started = input.reviewID
+            }),
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer", reviewID: started })
+  })
+
   test("routes PowerShell user-profile credential reads to reviewer", async () => {
     let called = false
     await expect(

@@ -15,6 +15,7 @@ import os from "os"
 import { evaluate as evalRule } from "./evaluate"
 import { PermissionID } from "./schema"
 import { PermissionAuto } from "./auto"
+import { PermissionPrecheck } from "./precheck"
 import { PermissionReviewer } from "./reviewer/service"
 import { PermissionSessionCache } from "./cache/session-cache"
 import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
@@ -86,6 +87,19 @@ export const Event = {
       reviewID: Schema.String,
       outcome: Schema.Literals(["allow", "deny"]),
       rationale: Schema.String,
+    }),
+  ),
+  ReviewStarted: BusEvent.define(
+    "permission.review.started",
+    Schema.Struct({
+      sessionID: SessionID,
+      reviewID: Schema.String,
+      permission: Schema.String,
+      patterns: Schema.Array(Schema.String),
+      precheck: Schema.Struct({
+        level: Schema.Literals(PermissionPrecheck.LEVELS),
+        reason: Schema.String,
+      }),
     }),
   ),
   ReviewFailed: BusEvent.define(
@@ -254,6 +268,19 @@ export const layer = Layer.effect(
           const decision = yield* PermissionAuto.evaluate(
             { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
             reviewer,
+            (review) =>
+              // This event is the user's visible boundary between deterministic
+              // precheck and model review. It intentionally carries only the
+              // matched auto patterns and precheck rationale, not raw hidden
+              // prompt text, so UIs can show progress without leaking synthetic
+              // reviewer context or duplicating the pending tool arguments.
+              bus.publish(Event.ReviewStarted, {
+                sessionID: request.sessionID,
+                reviewID: review.reviewID,
+                permission: autoRequest.permission,
+                patterns: [...autoRequest.patterns],
+                precheck: review.precheck,
+              }),
           )
           log.info("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
           if (decision.action === "allow") {

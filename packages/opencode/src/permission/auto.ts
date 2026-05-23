@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import { PermissionPrecheck } from "./precheck"
-import type { SessionID } from "@/session/schema"
+import type { MessageID, SessionID } from "@/session/schema"
 
 export type Decision =
   | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
@@ -28,10 +28,12 @@ export type ReviewDecision =
     }
 
 export interface ReviewInput {
+  readonly reviewID: string
   readonly sessionID?: SessionID
   readonly permission: string
   readonly patterns: readonly string[]
   readonly metadata: Readonly<Record<string, unknown>>
+  readonly tool?: { readonly messageID: MessageID; readonly callID: string }
   readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
 }
 
@@ -47,10 +49,15 @@ export function evaluate(
     permission: string
     patterns: readonly string[]
     metadata: Readonly<Record<string, unknown>>
+    tool?: { readonly messageID: MessageID; readonly callID: string }
     strict?: boolean
     reviewerDisabled?: boolean
   },
   reviewer?: Reviewer,
+  onReviewStart?: (input: {
+    readonly reviewID: string
+    readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
+  }) => Effect.Effect<void>,
 ) {
   return Effect.gen(function* () {
     const precheck = PermissionPrecheck.evaluate(input)
@@ -101,8 +108,17 @@ export function evaluate(
       return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
     }
 
+    const reviewID = crypto.randomUUID()
+    if (onReviewStart) {
+      // The review id is minted before the model call so progress UIs and final
+      // audit events can refer to the same logical review even if the model
+      // times out or fails before returning an assessment.
+      yield* onReviewStart({ reviewID, precheck })
+    }
+
     return yield* reviewer.review({
       ...input,
+      reviewID,
       precheck: {
         level: precheck.level,
         // Strict mode preserves why the request crossed the reviewer boundary, so
@@ -120,7 +136,7 @@ export function evaluate(
           if (tag === "PermissionReviewerDisabled" || tag === "PermissionReviewerFallbackToUser") {
             return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
           }
-          return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer" } satisfies Decision
+          return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
         },
         onSuccess: (reviewed) => {
           // The prompt is policy, but this is the hard guardrail. Contradictory
