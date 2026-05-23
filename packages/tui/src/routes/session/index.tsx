@@ -2920,6 +2920,10 @@ function Task(props: ToolProps) {
       part={props.part}
       onClick={() => {
         if (sessionID()) {
+          // #213：Task metadata 在子会话创建时即写入，但其消息可能尚未到达
+          // #213：先前的 prefetch 可能标记子会话为已同步而实际为空；显式导航时强制刷新
+          // #213：点击 task 始终打开实时 agent 视图，而非可能为空的缓存快照
+          void sync.session.sync(sessionID()!, { force: true })
           navigate({ type: "session", sessionID: sessionID()! })
         }
         const status = retry()
