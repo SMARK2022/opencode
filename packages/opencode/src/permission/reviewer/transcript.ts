@@ -61,6 +61,10 @@ function renderPart(part: Part) {
   if (part.hidden) return ""
   // #206：synthetic 文本不是用户输入——协议生成的上下文不应被误认为用户授权
   if (part.type === "text" && part.synthetic) return ""
+  // #209：reviewer 子会话请求 cell 是协议记录而非人类授权——排除以免被误认为授权证据
+  // #209：用 metadata 而非 synthetic 标记——请求 cell 需在子会话中可见可审计，仅在 transcript 投影给 reviewer 时排除
+  // #209：此排除防止增量审查把上一轮 reviewer 自身请求当作新的用户授权——否则 reviewer 会自我批准
+  if (part.type === "text" && part.metadata?.permissionReviewerRequest === true) return ""
   // #206：reasoning 是模型内部思考——不应作为授权证据，否则 reviewer 可能过度信任 agent 自身理由
   if (part.type === "reasoning") return ""
   if (part.type === "text") return truncate(part.text)

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Fiber, Layer, Schema } from "effect"
+import { Cause, DateTime, Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
 import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Database } from "@opencode-ai/core/database/database"
@@ -12,7 +12,7 @@ import { Config } from "@opencode-ai/core/config"
 import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
-import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
+import { LLMClient, LLMEvent, LLMRequest, Model } from "@opencode-ai/llm"
 import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
 import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
 import { PermissionTable } from "@opencode-ai/core/permission/sql"
@@ -24,6 +24,10 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { createLLMEventPublisher } from "@opencode-ai/core/session/runner/publish-llm-event"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { eq } from "drizzle-orm"
 import { location } from "./fixture/location"
 import { testEffect } from "./lib/effect"
@@ -34,17 +38,35 @@ const reviewRequests: LLMRequest[] = []
 let reviewGate: Deferred.Deferred<void> | undefined
 let reviewStarted: Deferred.Deferred<void> | undefined
 let malformed = false
+let reviewBeforeStream: Deferred.Deferred<void> | undefined
+let reviewArrivals: Deferred.Deferred<void> | undefined
 const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
   prepare: () => Effect.die("unused"),
-  stream: () => { throw new Error("review must not start a Session stream") },
-  generate: (request) => Effect.gen(function* () {
+  generate: () => Effect.die("reviewer must consume the actual provider stream"),
+  stream: (request) => Stream.unwrap(Effect.gen(function* () {
     reviewRequests.push(request)
-    if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
-    if (reviewGate) yield* Deferred.await(reviewGate)
-    return new LLMResponse({ message: Message.assistant([]), finishReason: "tool-calls", events: malformed ? [] : [
-      LLMEvent.toolCall({ id: "review", name: "generate_object", input: assessment }),
-    ] })
-  }),
+    if (reviewBeforeStream) {
+      if (reviewArrivals && reviewRequests.length === 2) yield* Deferred.succeed(reviewArrivals, undefined)
+      yield* Deferred.await(reviewBeforeStream)
+    }
+    // 在决策gate之前交付真实事件，断言中途投影而不是伪造最终助手对象。
+    return Stream.make(
+      LLMEvent.reasoningStart({ id: "review-reason" }),
+      LLMEvent.reasoningDelta({ id: "review-reason", text: "Actual reviewer reasoning before decision." }),
+      LLMEvent.reasoningEnd({ id: "review-reason" }),
+      LLMEvent.textStart({ id: "review-text" }),
+      LLMEvent.textDelta({ id: "review-text", text: "Checking the requested change." }),
+      LLMEvent.textEnd({ id: "review-text" }),
+    ).pipe(Stream.concat(Stream.unwrap(Effect.gen(function* () {
+      if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
+      if (reviewGate) yield* Deferred.await(reviewGate)
+      return malformed ? Stream.empty : Stream.make(
+        LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      )
+    }))))
+  })),
 }))
 const reviewModel = SessionRunnerModel.layerWith(() => Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route })))
 const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
@@ -427,7 +449,7 @@ describe("PermissionV2", () => {
     expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
     expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
-    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("generate_object")
+    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("permission_review_decision")
     expect(JSON.stringify(reviewRequests[0]?.tools)).not.toContain('"bash"')
     expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("-old")
     // 同一路径的新编辑计划不能复用旧裁决；另一个 Session 也不能共享审批。
@@ -471,6 +493,110 @@ describe("PermissionV2", () => {
     reviewStarted = undefined
     expect(yield* service.list()).toEqual([])
     expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
+    reviewSettings = new Config.Info({})
+  }))
+
+  // 真实事件驱动审查、原工具和终态投影，验证收益在模型返回前后都可观察。
+  it.effect("persists live native review traces and keeps outcomes through tool settlement", () => Effect.gen(function* () {
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
+    reviewRequests.length = 0
+    reviewGate = yield* Deferred.make<void>()
+    reviewStarted = yield* Deferred.make<void>()
+    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+    const service = yield* PermissionV2.Service
+    const sessions = yield* SessionStore.Service
+    const events = yield* EventV2.Service
+    const database = yield* Database.Service
+    const publisher = createLLMEventPublisher(events, { sessionID: SessionV2.ID.make("ses_test"), agent: "test", model: { id: ModelV2.ID.make("review"), providerID: ProviderV2.ID.make("test") } })
+    // 父工具来自真实publisher，审批引用与后续结果引用同一assistant/call身份。
+    yield* publisher.publish(LLMEvent.toolCall({ id: "parent", name: "bash", input: { command: "git add ." } }))
+    const assistantMessageID = yield* publisher.assistantMessageID("parent")
+    const request = assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." }, source: { type: "tool", messageID: assistantMessageID, callID: "parent" } })
+    const fiber = yield* service.ask(request).pipe(Effect.forkScoped)
+    yield* Deferred.await(reviewStarted)
+    const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, request.sessionID)).get().pipe(Effect.orDie)
+    expect(child).toBeDefined()
+    if (!child) return yield* Effect.die("Expected durable reviewer child")
+    const context = yield* sessions.context(SessionV2.ID.make(child.id))
+    expect(context.some((message) => message.type === "synthetic" && message.metadata?.permissionReviewerRequest === true)).toBe(true)
+    const parts = context.flatMap((message) => message.type === "assistant" ? message.content : [])
+    expect(parts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "reasoning", text: "Actual reviewer reasoning before decision." }),
+      expect.objectContaining({ type: "text", text: "Checking the requested change." }),
+    ]))
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "running", structured: { autoReview: { status: "reviewing", sessionID: child.id } } } }] })
+    // 中途普通工具进度和最终结果都不得擦除审批，审批本身不等于工具执行结果。
+    yield* Deferred.succeed(reviewGate, undefined)
+    expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
+    yield* events.publish(SessionEvent.Tool.Progress, {
+      sessionID: request.sessionID, assistantMessageID, callID: "parent", timestamp: yield* DateTime.now,
+      structured: { progress: "after-review" }, content: [],
+    })
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { structured: { autoReview: { status: "allowed", result: assessment } } } }] })
+    yield* publisher.publish(LLMEvent.toolResult({
+      id: "parent", name: "bash", result: { type: "text", value: "completed" },
+      output: { structured: { actualOutput: true }, content: [{ type: "text", text: "completed" }] },
+    }))
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed", structured: { actualOutput: true, autoReview: { status: "allowed", sessionID: child.id } } } }] })
+    // 取消第二次审查保留真实残片和失败身份，不留永久reviewing或假成功。
+    reviewGate = yield* Deferred.make<void>()
+    reviewStarted = yield* Deferred.make<void>()
+    yield* publisher.publish(LLMEvent.toolCall({ id: "parent-cancel", name: "bash", input: { command: "git commit -m test" } }))
+    const cancel = yield* service.assert({ ...request, id: PermissionV2.ID.create(), resources: ["git commit -m test"], metadata: { command: "git commit -m test" }, source: { type: "tool", messageID: assistantMessageID, callID: "parent-cancel" } }).pipe(Effect.forkScoped)
+    yield* Deferred.await(reviewStarted)
+    yield* Fiber.interrupt(cancel)
+    expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "failed", sessionID: child.id } } } }] })
+    yield* publisher.failUnsettledTools("Tool execution interrupted", false, true)
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "error", structured: { autoReview: { status: "failed" } } } }] })
+    // 两个请求先写入，再同时交付解释，固定复现共享child下的交错。
+    reviewRequests.length = 0
+    reviewBeforeStream = yield* Deferred.make<void>()
+    reviewArrivals = yield* Deferred.make<void>()
+    reviewGate = yield* Deferred.make<void>()
+    const visible = new Set<string>()
+    const bothVisible = yield* Deferred.make<void>()
+    const stop = yield* events.listen((event) => Effect.gen(function* () {
+      if (!Schema.is(SessionEvent.Text.Ended)(event) || event.data.sessionID !== child.id) return
+      visible.add(event.data.assistantMessageID)
+      if (visible.size === 2) yield* Deferred.succeed(bothVisible, undefined)
+    }))
+    yield* Effect.addFinalizer(() => stop)
+    for (const callID of ["parallel-a", "parallel-b"]) {
+      yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "bash", input: { command: `git add ${callID}` } }))
+    }
+    const concurrentA = yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add parallel-a"], metadata: { command: "git add parallel-a" }, source: { type: "tool", messageID: assistantMessageID, callID: "parallel-a" } }).pipe(Effect.forkScoped)
+    const concurrentB = yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add parallel-b"], metadata: { command: "git add parallel-b" }, source: { type: "tool", messageID: assistantMessageID, callID: "parallel-b" } }).pipe(Effect.forkScoped)
+    yield* Deferred.await(reviewArrivals)
+    const requests = (yield* sessions.context(SessionV2.ID.make(child.id))).filter((message) => message.type === "synthetic").slice(-2)
+    expect(requests).toHaveLength(2)
+    yield* Deferred.succeed(reviewBeforeStream, undefined)
+    yield* Deferred.await(bothVisible)
+    const active = (yield* sessions.context(SessionV2.ID.make(child.id))).filter((message) => message.type === "assistant" && !message.time.completed)
+    expect(active).toHaveLength(2)
+    expect(active.map((message) => message.metadata?.permissionReviewerRequestID).sort()).toEqual(requests.map((message) => message.id).sort())
+    const requestA = requests.find((message) => message.text.includes('"callID":"parallel-a"'))
+    const answerA = active.find((message) => message.metadata?.permissionReviewerRequestID === requestA?.id)
+    const answerB = active.find((message) => message.id !== answerA?.id)
+    expect(answerA).toBeDefined()
+    expect(answerB).toBeDefined()
+    // 取消A不关闭B；两者的终态都必须写回各自助手。
+    yield* Fiber.interrupt(concurrentA)
+    const cancelled = yield* sessions.context(SessionV2.ID.make(child.id))
+    expect(cancelled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
+    expect(cancelled.some((message) => message.type === "assistant" && message.id === answerB?.id && message.time.completed === undefined)).toBe(true)
+    yield* Deferred.succeed(reviewGate, undefined)
+    expect(yield* Fiber.join(concurrentB)).toMatchObject({ effect: "allow" })
+    const settled = yield* sessions.context(SessionV2.ID.make(child.id))
+    expect(settled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
+    expect(settled.find((message) => message.id === answerB?.id)).toMatchObject({ finish: "tool-calls" })
+    expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, request.sessionID)).all().pipe(Effect.orDie)).toHaveLength(1)
+    yield* publisher.failUnsettledTools("Test parent execution finished")
+    reviewBeforeStream = undefined
+    reviewArrivals = undefined
+    reviewGate = undefined
+    reviewStarted = undefined
     reviewSettings = new Config.Info({})
   }))
 })

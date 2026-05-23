@@ -523,7 +523,10 @@ function cautiousRaw(command: string) {
   const normalized = command.replace(/\s+/g, " ").trim()
   if (
     new RegExp(
-      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      // #209：去掉 (?:^|[;&|]\s*) 锚点——if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符，锚点导致漏审
+      // #209：\b 词边界单独足以匹配块内读取命令——Get-Content 前的 { 或 ( 不构成词字符，\b 仍能在标识符边界命中
+      String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      // #209：[^|;]* 前瞻仍把匹配限定在同一管道段内——去掉锚点不会让跨管道的读取命令误判为敏感读取
       "i",
     ).test(normalized)
   ) {

@@ -68,11 +68,32 @@ describe("normalizeSessionMessages", () => {
         recent: "recent",
         time: { created: 8 },
       },
+      { id: "msg_internal", type: "synthetic", time: { created: 8 }, ...{ sessionID: "ses_1", text: "INTERNAL CONTEXT" } },
+      {
+        id: "msg_review_request", type: "synthetic", time: { created: 9 },
+        ...{ sessionID: "ses_1", text: "system: exact policy\nuser: exact evidence", metadata: { permissionReviewerRequest: true, reviewID: "review_1" } },
+      },
+      {
+        id: "msg_review_answer", type: "assistant", agent: "permission-reviewer", model: { id: "review", providerID: "test" }, time: { created: 10, completed: 11 },
+        content: [
+          { type: "reasoning", text: "Actual reviewer reasoning" },
+          { type: "text", text: "Actual reviewer explanation" },
+          {
+            type: "tool", id: "decision", name: "permission_review_decision",
+            state: {
+              status: "completed", input: { outcome: "deny" },
+              content: [{ type: "text", text: "Exact decision" }],
+              ...{ structured: { reviewID: "review_1", outcome: "deny", risk_level: "high", user_authorization: "unknown", rationale: "Exact rationale" } },
+            },
+            time: { created: 10, ran: 10, completed: 11 },
+          },
+        ],
+      },
     ] satisfies SessionMessageInfo[]
 
     const result = normalizeSessionMessages("ses_1", source)
 
-    expect(result.messages).toHaveLength(2)
+    expect(result.messages).toHaveLength(4)
     expect(result.messages[0]).toMatchObject({
       id: "msg_3",
       role: "user",
@@ -101,6 +122,11 @@ describe("normalizeSessionMessages", () => {
       tool: "read",
       state: { status: "completed", output: "hello" },
     })
+    expect(result.messages.map((message) => message.id)).toEqual(["msg_3", "msg_4", "msg_review_request", "msg_review_answer"])
+    expect(result.parts.get("msg_review_request")?.[0]).toMatchObject({ text: "system: exact policy\nuser: exact evidence", synthetic: false, metadata: { permissionReviewerRequest: true } })
+    expect(result.messages[3]).toMatchObject({ role: "assistant", parentID: "msg_review_request" })
+    expect(result.parts.get("msg_review_answer")?.map((part) => part.type)).toEqual(["reasoning", "text", "tool"])
+    expect(result.parts.get("msg_review_answer")?.[2]).toMatchObject({ state: { status: "completed", metadata: { reviewID: "review_1", outcome: "deny", rationale: "Exact rationale" } } })
   })
 
   test("does not invent a parent for an assistant-only page", () => {

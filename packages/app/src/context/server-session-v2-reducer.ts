@@ -1,4 +1,5 @@
 import type { OpenCodeEvent, SessionMessageInfo, SessionPendingMessage } from "@opencode-ai/client/promise"
+import { nativeSessionEvent, type NativeSessionEvent } from "./native-session-event"
 
 type Assistant = Extract<SessionMessageInfo, { type: "assistant" }>
 type Compaction = Extract<SessionMessageInfo, { type: "compaction" }>
@@ -14,7 +15,10 @@ export type V2SessionReduction = {
 export function createV2SessionReducer() {
   const pending = new Map<string, SessionPendingMessage>()
 
-  const reduce = (source: readonly SessionMessageInfo[], event: OpenCodeEvent): V2SessionReduction | undefined => {
+  const reduce = (source: readonly SessionMessageInfo[], input: OpenCodeEvent | NativeSessionEvent): V2SessionReduction | undefined => {
+    const event = input.type.startsWith("session.next.") ? nativeSessionEvent(source, input, pending) : input
+    if (!event) return
+    if ("messages" in event) return event
     if (!("data" in event) || !("sessionID" in event.data) || typeof event.data.sessionID !== "string") return
     const sessionID = event.data.sessionID
     const result = (messages: SessionMessageInfo[], touched: string[] = []): V2SessionReduction => ({
@@ -54,7 +58,7 @@ export function createV2SessionReducer() {
       }
       case "session.agent.selected":
         return append({
-          id: messageID(event.id),
+          id: messageID(event.id, event.data),
           type: "agent-switched",
           metadata: event.metadata,
           agent: event.data.agent,
@@ -62,7 +66,7 @@ export function createV2SessionReducer() {
         })
       case "session.model.selected":
         return append({
-          id: messageID(event.id),
+          id: messageID(event.id, event.data),
           type: "model-switched",
           metadata: event.metadata,
           model: event.data.model,
@@ -74,7 +78,7 @@ export function createV2SessionReducer() {
         })
       case "session.synthetic":
         return append({
-          id: messageID(event.id),
+          id: messageID(event.id, event.data),
           type: "synthetic",
           metadata: event.data.metadata,
           text: event.data.text,
@@ -116,7 +120,10 @@ export function createV2SessionReducer() {
           sessionID,
         )
       case "session.step.started": {
-        const current = source.findLast((item): item is Assistant => item.type === "assistant" && !item.time.completed)
+        // 已绑定请求的审查助手并行运行；普通会话仍自动关闭上一串行步骤。
+        const current = event.data.agent === "permission-reviewer" && typeof event.metadata?.permissionReviewerRequestID === "string"
+          ? undefined
+          : source.findLast((item): item is Assistant => item.type === "assistant" && !item.time.completed)
         const completed =
           current && current.id !== event.data.assistantMessageID
             ? update(source, current.id, (item) =>
@@ -133,6 +140,7 @@ export function createV2SessionReducer() {
                 ? {
                     ...item,
                     agent: event.data.agent,
+                    metadata: event.metadata ?? item.metadata,
                     model: event.data.model,
                     retry: undefined,
                     error: undefined,
@@ -190,7 +198,7 @@ export function createV2SessionReducer() {
       case "session.text.started":
         return updateAssistant(source, event.data.assistantMessageID, sessionID, (item) => ({
           ...item,
-          content: insertOrdinal(item.content, "text", event.data.ordinal, { type: "text", text: "" }),
+          content: insertOrdinal(item.content, "text", event.data.ordinal, { type: "text", text: "", ...("textID" in event.data ? { id: event.data.textID } : {}) }),
         }))
       case "session.text.delta":
         return updateContent(source, event.data.assistantMessageID, sessionID, "text", event.data.ordinal, (item) => ({
@@ -207,6 +215,7 @@ export function createV2SessionReducer() {
           ...item,
           content: insertOrdinal(item.content, "reasoning", event.data.ordinal, {
             type: "reasoning",
+            ...("reasoningID" in event.data ? { id: event.data.reasoningID } : {}),
             text: "",
             state: event.data.state,
             time: { created: event.created },
@@ -278,8 +287,8 @@ export function createV2SessionReducer() {
           tool.state.status === "running"
             ? {
                 ...tool,
-                // state: { ...tool.state, structured: event.data.structured, content: event.data.content },
-                state: { ...tool.state, metadata: event.data.metadata },
+                // 实时视图保留canonical进度正文；快照和实时帧混合时structured不能停留在旧值。
+                state: { ...tool.state, metadata: event.data.metadata, ...("structured" in event.data ? { structured: event.data.structured } : {}), ...("content" in event.data ? { content: event.data.content } : {}) },
               }
             : tool,
         )
@@ -420,7 +429,9 @@ function key(sessionID: string, inputID: string) {
   return `${sessionID}:${inputID}`
 }
 
-function messageID(eventID: string) {
+function messageID(eventID: string, data?: unknown) {
+  // canonical事件明确携带消息ID；仅旧vendor协议才沿用event ID派生约定。
+  if (data && typeof data === "object" && "messageID" in data && typeof data.messageID === "string") return data.messageID
   return eventID.replace(/^evt_/, "msg_")
 }
 

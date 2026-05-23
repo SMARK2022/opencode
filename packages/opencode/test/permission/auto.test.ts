@@ -172,6 +172,15 @@ describe("permission auto routing", () => {
     await expect(
       bash(String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`, reviewer),
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    // #209：if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符——去掉锚点后才能被 cautiousRaw 捕获
+    // #209：验证 PowerShell 条件块内的敏感读取不再因锚点漏审——deny + reviewer 证明 cautiousRaw 命中并送审
+    // #209：Test-Path 与 Get-Content 在同一行但被 { } 分隔——旧锚点 (?:^|[;&|]\s*) 无法匹配 { 后的 Get-Content
+    await expect(
+      bash(
+        String.raw`if (Test-Path -LiteralPath "$env:USERPROFILE\.ssh\id_rsa") { Get-Content -LiteralPath "$env:USERPROFILE\.ssh\id_rsa" } else { "id_rsa not found" }`,
+        reviewer,
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
     expect(called).toBe(true)
   })
 

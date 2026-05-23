@@ -18,6 +18,9 @@ import { Config } from "@/config/config"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
+import { PermissionReviewer } from "@/permission/reviewer/service"
+import { PermissionSessionCache } from "@/permission/cache/session-cache"
+import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
 import { Plugin } from "../../src/plugin"
 import { Provider as ProviderSvc } from "@/provider/provider"
 import { Env } from "../../src/env"
@@ -182,6 +185,12 @@ const promptRoot = LayerNode.group([
   AgentSvc.node,
   Command.node,
   Permission.node,
+  // #209：reviewer/cache/circuit 必须与 Permission 并列声明——LayerNode.compile 用
+  // #209：Layer.provide 丢弃未被静态需求的服务层；Permission 用 serviceOption 查询，
+  // #209：仅靠 Permission.node deps 隐式提供时 reviewer 运行时不可达，集成测试失败。
+  PermissionReviewer.node,
+  PermissionSessionCache.node,
+  PermissionCircuitBreaker.node,
   Plugin.node,
   Config.node,
   ProviderSvc.node,
@@ -1655,6 +1664,96 @@ it.instance(
       ).toBe(false)
     }),
   15_000,
+)
+
+// #209：验证 reviewer streaming 持久化真实 reasoning 和 decision tool part
+// #209：端到端测试——mock LLM 返回 reasoning + permission_review_decision tool call，验证子会话持久化了各 part
+it.instance(
+  "auto permission reviewer persists real reasoning and decision tool parts",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer stream" })
+      const command = String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`
+      // #209：mock LLM 响应先发 reasoning 再调用 decision tool——模拟真实 reviewer 的推理-决策两阶段流
+      yield* llm.push(
+        reply()
+          .reason("Checking whether the user explicitly authorized private key disclosure.")
+          .tool("permission_review_decision", {
+            outcome: "deny",
+            risk_level: "high",
+            user_authorization: "unknown",
+            rationale: "private key read was not explicitly authorized",
+          })
+          .item(),
+      )
+
+      // #209：触发 auto 权限审查——ruleset 设为 auto 使敏感读取进入 reviewer 流程
+      // #209：Effect.flip 因为 reviewer deny 会使 ask 失败——flip 把失败转为成功值以继续断言持久化结果
+      yield* permissions
+        .ask({
+          sessionID: chat.id,
+          permission: "bash",
+          patterns: [command],
+          metadata: { command, agent: "Auto" },
+          always: ["*"],
+          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+        })
+        .pipe(Effect.flip)
+
+      // #209：reviewer 子会话作为父会话的 child 创建——find by agent 验证子会话已建立
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      // #209：从 reviewer 子会话拉取持久化消息——streamText 的 part 应已写入数据库
+      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      // #209：inputs 捕获发送给 provider 的请求——验证 tool_choice、tools、max_tokens 等 streamText 参数
+      const inputs = yield* llm.inputs
+      // #209：streamText 不强制 tool_choice=required——部分 provider 拒绝 forced tool_choice
+      expect(inputs[0].tool_choice).not.toBe("required")
+      expect(JSON.stringify(inputs[0].tools)).toContain("permission_review_decision")
+      expect(inputs[0].tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            function: expect.objectContaining({
+              name: "permission_review_decision",
+              parameters: expect.objectContaining({ type: "object" }),
+            }),
+          }),
+        ]),
+      )
+      // #209：maxOutputTokens 返回 model.limit.output=10000
+      expect(inputs[0].max_tokens).toBe(10000)
+      // #209：reviewer 请求 cell 带 permissionReviewerRequest metadata
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
+        ),
+      ).toBe(true)
+      // #209：streaming 持久化 reasoning part
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some((part) => part.type === "reasoning" && part.text.includes("explicitly authorized")),
+        ),
+      ).toBe(true)
+      // #209：streaming 持久化 decision tool part——验证 tool-call 事件把 assessment 写入 completed tool part
+      // #209：tool part 的 metadata.rationale 必须与 mock LLM 返回的一致——证明 Schema.decode 未丢失字段
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.rationale === "private key read was not explicitly authorized",
+          ),
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
 )
 
 it.instance("failed subtask preserves metadata on error tool state", () =>

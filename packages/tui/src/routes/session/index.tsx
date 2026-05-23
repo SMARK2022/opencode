@@ -1979,6 +1979,10 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={display() === "question"}>
           <Question {...toolprops} />
         </Match>
+        {/* #209：permission_review_decision 渲染为 reviewer 决策 cell */}
+        <Match when={display() === "permission_review_decision"}>
+          <PermissionReviewDecision {...toolprops} />
+        </Match>
         <Match when={display() === "skill"}>
           <Skill {...toolprops} />
         </Match>
@@ -2047,8 +2051,122 @@ function GenericTool(props: ToolProps) {
   )
 }
 
+// #209：auto-review metadata 类型——reviewID/sessionID/status/precheck/result 描述 reviewer 状态
+// #209：AutoReviewMetadata 由 service.ts updateToolAutoReview 写入工具 part 的 state.metadata.autoReview
+type AutoReviewMetadata = {
+  reviewID: string
+  sessionID?: string
+  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
+  precheck?: { level: string; reason: string }
+  result?: { risk_level: string; user_authorization: string; rationale: string }
+}
 
-// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats；导出供行为测试直接驱动
+// #209：从工具 metadata 提取 autoReview——非对象或缺少 reviewID 返回 undefined
+export function autoReviewMetadata(metadata: Record<string, unknown>): AutoReviewMetadata | undefined {
+  const value = metadata.autoReview
+  // #209：非对象或数组直接拒绝——防止 string/number 等 metadata 被强转为 review 结构
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  const review = value as Record<string, unknown>
+  // #209：reviewID 是 reviewer 写入的必填锚点——缺少则非有效 auto-review 注解，避免渲染空壳状态行
+  if (typeof review.reviewID !== "string") return
+  return review as AutoReviewMetadata
+}
+
+// #209：auto-review 状态标签——两行合约：命令 + 一行紧凑审查状态
+export function autoReviewLabel(review: AutoReviewMetadata) {
+  const agent = "@permission-reviewer"
+  // #209：◌/✓/! 三态字形——reviewing 进行中、allowed 通过、其余终态均为 ! 提示用户注意
+  // ◌ reviewing, ✓ allowed, ! all non-allow terminal outcomes
+  switch (review.status) {
+    case "allowed":
+      return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
+    case "denied":
+      return `! auto review · denied · ${review.result?.risk_level ?? "unknown"} risk · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
+    case "timed_out":
+      return `! auto review · timed out · failed closed · ${agent}`
+    case "failed":
+      return `! auto review · failed · failed closed · ${agent}`
+    case "fallback_user":
+      return `! auto review · unavailable · asking user · ${agent}`
+    default:
+      return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
+  }
+}
+
+// #209：auto-review 颜色——allowed 绿色，非 reviewing 非 allowed 橙色，其他蓝色
+// #209：颜色与字形分工——字形区分通过/失败，颜色补充严重度：终态失败橙色比 reviewing 蓝色更醒目
+function autoReviewColor(review: AutoReviewMetadata, theme: ReturnType<typeof useTheme>["theme"]) {
+  if (review.status === "allowed") return theme.success
+  if (review.status && review.status !== "reviewing") return theme.warning
+  return theme.info
+}
+
+// #209：AutoReviewLine——可点击导航到 reviewer 子会话的审查状态行
+function AutoReviewLine(props: { review: AutoReviewMetadata }) {
+  const { theme } = useTheme()
+  const { navigate } = useRoute()
+  const renderer = useRenderer()
+  const [hover, setHover] = createSignal(false)
+  // #209：仅当有 sessionID 时可点击——无子会话的审查不可导航，hover 也不高亮
+  const clickable = createMemo(() => Boolean(props.review.sessionID))
+  return (
+    <box
+      onMouseOver={() => clickable() && setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => {
+        // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
+        if (!props.review.sessionID) return
+        // 拖选审查结论时保留复制行为，不将选择动作当作导航。
+        if (renderer.getSelection()?.getSelectedText()) return
+        navigate({ type: "session", sessionID: props.review.sessionID })
+      }}
+    >
+      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
+        {autoReviewLabel(props.review)}
+      </text>
+    </box>
+  )
+}
+
+// #209：PermissionReviewDecision——reviewer 决策 tool cell，展示 outcome/risk/auth/rationale
+function PermissionReviewDecision(props: ToolProps) {
+  const { theme } = useTheme()
+  // #209：合并 input 与 metadata——tool-call 事件把 assessment 同时写入 input 和 metadata，合并确保字段完整
+  const decision = createMemo(() => ({ ...props.input, ...props.metadata }) as Record<string, unknown>)
+  const outcome = createMemo(() => (decision().outcome === "allow" ? "allowed" : "denied"))
+  const risk = createMemo(() => String(decision().risk_level ?? "unknown"))
+  const auth = createMemo(() => String(decision().user_authorization ?? "unknown"))
+  const rationale = createMemo(() => {
+    const value = decision().rationale
+    return typeof value === "string" ? value : ""
+  })
+  return (
+    <BlockTool title={`Permission review decision`} part={props.part}>
+      <box flexDirection="column" gap={1}>
+        {/* #209：结构化决策证据——assistant text 可能辩论替代方案，此 metadata 是审计的最终 reviewer 输出 */}
+        <box gap={1}>
+          <text fg={theme.textMuted}>outcome</text>
+          <text fg={theme.text}>{outcome()}</text>
+        </box>
+        <box gap={1}>
+          <text fg={theme.textMuted}>risk</text>
+          <text fg={theme.text}>{risk()}</text>
+        </box>
+        <box gap={1}>
+          <text fg={theme.textMuted}>auth</text>
+          <text fg={theme.text}>{auth()}</text>
+        </box>
+        <Show when={rationale()}>
+          <box flexDirection="column">
+            <text fg={theme.textMuted}>rationale</text>
+            <text fg={theme.text}>{rationale()}</text>
+          </box>
+        </Show>
+      </box>
+    </BlockTool>
+  )
+}
+
 export function createPendingToolInputStats(part: () => ToolPart) {
   const [stats, setStats] = createSignal<PendingToolInputStats>()
   let parser = createPendingToolInputParser(part().tool)
@@ -2351,7 +2469,12 @@ function Shell(props: ToolProps) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
   const ctx = use()
+  // #209：navigate 用于点击 auto-review 行导航到 reviewer 子会话
+  const { navigate } = useRoute()
   const isRunning = createMemo(() => props.part.state.status === "running")
+  // #209：autoReview 从工具 metadata 提取——reviewing/allowed/denied 状态驱动 UI
+  // #209：createMemo 缓存提取结果——metadata 仅在 part 更新时变化，避免每帧重复解析
+  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
   const [showContextOutput, setShowContextOutput] = createSignal(false)
   // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
@@ -2411,15 +2534,19 @@ function Shell(props: ToolProps) {
           // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
           preview={
             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
-              // #144：Shell 预览带命令前缀
-              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(limited(), 10, maxChars())}`}</text>
+              // #209：Shell 预览带命令前缀和 auto-review 状态行——折叠时也保留两行审查合约
+              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
             ) : undefined
           }
         >
           <box gap={1}>
+            {/* 命令与审查行相邻，其余输出仍沿用上游段间距。 */}
+            <box>
             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
             </Show>
+            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
+            </box>
             {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
             <Show when={showContextOutput() && contextOutputAvailable()}>
               <text fg={theme.info}>Model context output</text>
@@ -2434,9 +2561,22 @@ function Shell(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="$" pending="Writing command…" complete={stringValue(props.input.command)} part={props.part}>
-          {stringValue(props.input.command)}
-        </InlineTool>
+        <>
+          <InlineTool
+          icon="$"
+          pending="Writing command…"
+          complete={stringValue(props.input.command)}
+          part={props.part}
+          onClick={() => {
+            const sessionID = autoReview()?.sessionID
+            if (sessionID) navigate({ type: "session", sessionID })
+          }}
+          >
+            {stringValue(props.input.command)}
+          </InlineTool>
+          {/* 独立审查行保留导航，命令行仍使用原有错误详情展开。 */}
+          <Show when={autoReview()}>{(review) => <box paddingLeft={5}><AutoReviewLine review={review()} /></box>}</Show>
+        </>
       </Match>
     </Switch>
   )
@@ -3144,6 +3284,7 @@ const toolDisplays = new Set([
   "question",
   "skill",
   "execute",
+  "permission_review_decision",
 ])
 
 export function toolDisplay(tool: string) {

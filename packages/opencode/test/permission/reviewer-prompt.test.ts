@@ -165,6 +165,26 @@ describe("permission reviewer prompt", () => {
     expect(transcript.emptyEntries).toBe(true)
   })
 
+  // #209：reviewer 子会话请求 cell 带有 permissionReviewerRequest metadata——不应被误认为人类授权
+  // #209：验证 transcript 投影排除协议请求 cell——entries 为空证明 renderPart 提前返回空串
+  test("transcript excludes reviewer protocol request cells as authorization evidence", () => {
+    const transcript = PermissionReviewerTranscript.fromMessages([
+      {
+        info: userInfo("msg_reviewer_protocol"),
+        parts: [
+          // #209：metadata.permissionReviewerRequest=true 标记此文本为协议生成——与 synthetic 不同，cell 在子会话中仍可见
+          textPart("msg_reviewer_protocol", "prt_reviewer_protocol", "Auto permission review request", {
+            metadata: { permissionReviewerRequest: true },
+          }),
+        ],
+      },
+    ])
+
+    // #209：排除后 entries 为空且 emptyEntries=true——证明协议 cell 未被计入可授权 transcript
+    expect(transcript.entries).toEqual([])
+    expect(transcript.emptyEntries).toBe(true)
+  })
+
   // #206：验证单条消息多 part 时 ENTRY_CHAR_LIMIT 截短并标记 entryTruncated
   test("transcript bounds a single retained entry with many visible parts", () => {
     const transcript = PermissionReviewerTranscript.fromMessages([

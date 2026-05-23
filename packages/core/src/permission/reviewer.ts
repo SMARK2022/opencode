@@ -1,8 +1,8 @@
 export * as PermissionReviewer from "./reviewer"
 
 import path from "path"
-import { LLM, LLMClient, LLMEvent } from "@opencode-ai/llm"
-import { Context, DateTime, Effect, FileSystem, Layer, Schema, Semaphore } from "effect"
+import { LLM, LLMClient, LLMEvent, Tool } from "@opencode-ai/llm"
+import { Cause, Context, DateTime, Effect, FileSystem, Layer, Schema, Semaphore, Stream } from "effect"
 import { and, eq } from "drizzle-orm"
 import { Config } from "../config"
 import { ConfigAutoReview } from "../config/auto-review"
@@ -51,6 +51,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
     // 按字段合并各层配置，较近文档只覆盖它明确提供的策略项。
     const options = entries.flatMap((entry) => entry.type === "document" && entry.info.auto_review ? [entry.info.auto_review] : [])
       .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})
+    const timedOut = new Failed({ reason: "auto reviewer timed out" })
     const run = Effect.gen(function* () {
       const session = yield* sessions.get(SessionSchema.ID.make(sessionID))
       if (!session) return yield* new Failed({ reason: "Review session was not found" })
@@ -92,39 +93,73 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       yield* events.publish(SessionEvent.Synthetic, {
         sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
         text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${prompt}`,
-      })
-      yield* markToolReviewing(input, reviewerSession)
-      // 本项仍只生成结构化裁决，不唤醒子会话runner，也不执行合成决策工具。
-      const result = yield* LLM.generateObject({
-        model: selected.model, schema: PermissionReviewerSchema.Assessment,
-        system, prompt,
-      }).pipe(
-        Effect.provideService(LLMClient.Service, client),
-        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
-      )
+      }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
+      yield* updateToolAutoReview(input, { status: "reviewing", sessionID: reviewerSession })
       const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
         permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
       })
-      const callID = `permission-review-${input.reviewID}`
-      // 原生助手/工具事件保留完整Assessment，复用已有投影而非另建审计表。
-      yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "permission_review_decision", input: result.object }))
-      yield* publisher.publish(LLMEvent.toolResult({
-        id: callID, name: "permission_review_decision", result: { type: "text", value: JSON.stringify(result.object) },
-        output: { structured: result.object, content: [{ type: "text", text: JSON.stringify(result.object) }] },
-      }))
-      // 与源208一样记录裁决，不把审计助手的零用量冒充父请求的模型用量。
-      yield* events.publish(SessionEvent.Step.Ended, {
-        sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.assistantMessageID(callID),
-        finish: "tool-calls", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-      })
+      let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
+      // 只声明裁决协议：一次真实provider流，不接业务工具registry或会话执行循环。
+      const result = yield* client.stream(LLM.request({
+        model: selected.model, system, prompt,
+        tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
+          description: "Submit the structured allow/deny decision for this permission review.",
+          parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
+        }) }),
+      })).pipe(
+        Stream.runForEach((event) => Effect.gen(function* () {
+          yield* publisher.publish(event)
+          if (event.type === "provider-error" || event.type === "tool-error") return yield* new Failed({ reason: event.message })
+          if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
+          // 真实reasoning/text在裁决前已经落盘；同一Schema验证最终输入，绝不执行该工具。
+          assessment = yield* Schema.decodeUnknownEffect(PermissionReviewerSchema.Assessment)(event.input).pipe(Effect.mapError((error) => new Failed({ reason: error.message })))
+          yield* publisher.publish(LLMEvent.toolResult({
+            id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
+            output: { structured: { ...assessment, reviewID: input.reviewID }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
+          }))
+        })),
+        Effect.flatMap(() => assessment ? Effect.succeed(assessment) : Effect.fail(new Failed({ reason: "reviewer did not call permission_review_decision" }))),
+        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
+        Effect.onExit((exit) => Effect.gen(function* () {
+          const finalizer = exit._tag === "Failure"
+          yield* publisher.flush(finalizer)
+          if (exit._tag === "Failure") {
+            const failure = Cause.squash(exit.cause)
+            const reason = failure instanceof Error ? failure.message : "Review cancelled"
+            // 失败/取消闭合真实残片和工具，沿退出安全通知模式，不伪造成功助手。
+            yield* publisher.failUnsettledTools(reason, false, true)
+            yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
+          }
+          const settlement = publisher.stepSettlement()
+          if (exit._tag === "Success" || settlement) {
+            const usage = settlement?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+            // 已确认消耗留在审查子会话；失败不能退款，也不能算进父请求的账本。
+            yield* events.publish(SessionEvent.Step.Ended, {
+              sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.startAssistant(finalizer),
+              finish: settlement?.finish ?? "tool-calls", cost: SessionRunnerModel.cost(selected.pricing, usage), tokens: usage,
+            }, { finalizer })
+          }
+        })),
+      )
+      yield* updateToolAutoReview(input, { status: result.outcome === "allow" ? "allowed" : "denied", result })
       return {
-        action: result.object.outcome, reason: result.object.rationale, reviewID: input.reviewID,
-        risk_level: result.object.risk_level, user_authorization: result.object.user_authorization,
+        action: result.outcome, reason: result.rationale, reviewID: input.reviewID,
+        risk_level: result.risk_level, user_authorization: result.user_authorization,
       } satisfies PermissionAuto.ReviewDecision
-    }).pipe(Effect.mapError((error) => new Failed({ reason: error instanceof Error ? error.message : String(error) })))
+    }).pipe(Effect.mapError((error) => error instanceof Failed ? error : new Failed({ reason: error instanceof Error ? error.message : String(error) })))
     // 用户审批回退是显式配置；其他失败由共享 auto 路由拒绝，绝不转换成成功。
-    return yield* run.pipe(Effect.catch((error) => Effect.fail(options.fallback === "user"
-      ? new FallbackToUser({ reason: error.reason }) : error)))
+    return yield* run.pipe(
+      Effect.onExit((exit) => {
+        if (exit._tag === "Success") return Effect.void
+        const error = Cause.squash(exit.cause)
+        // 期限身份来自本次timeout错误对象；取消不靠英文文案猜测，也不变成用户批准。
+        return updateToolAutoReview(input, {
+          status: options.fallback === "user" && !Cause.hasInterrupts(exit.cause) ? "fallback_user" : error === timedOut ? "timed_out" : "failed",
+          error: error instanceof Error ? error.message : "Review cancelled",
+        }, true)
+      }),
+      Effect.catch((error) => Effect.fail(options.fallback === "user" ? new FallbackToUser({ reason: error.reason }) : error)),
+    )
   })
   return Service.of({ review })
 
@@ -150,7 +185,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
     }))
   }
 
-  function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSession: SessionSchema.ID) {
+  function updateToolAutoReview(input: PermissionAuto.ReviewInput, patch: Record<string, unknown>, finalizer = false) {
     const binding = input.tool
     if (!input.sessionID || !binding) return Effect.void
     return Effect.gen(function* () {
@@ -159,11 +194,15 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const part = recorded.message.content.find((part) => part.type === "tool" && part.id === binding.callID)
       if (!part || part.type !== "tool" || part.state.status !== "running") return
       // 已结算或过期引用不重启工具；仅在现有running投影记录关联，不泄漏审查正文。
+      const current = part.state.structured.autoReview
       yield* events.publish(SessionEvent.Tool.Progress, {
         sessionID: recorded.sessionID, assistantMessageID: recorded.message.id, callID: binding.callID, timestamp: yield* DateTime.now,
-        structured: { ...part.state.structured, autoReview: { reviewID: input.reviewID, sessionID: reviewerSession, precheck: input.precheck } },
+        structured: { ...part.state.structured, autoReview: {
+          ...(typeof current === "object" && current !== null && !Array.isArray(current) ? current : {}),
+          reviewID: input.reviewID, precheck: input.precheck, ...patch,
+        } },
         content: part.state.content,
-      })
+      }, { finalizer })
     })
   }
 }))

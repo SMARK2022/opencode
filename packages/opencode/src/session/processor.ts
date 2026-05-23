@@ -234,7 +234,12 @@ const layer = Layer.effect(
             status: "completed",
             input: match.part.state.input,
             output: output.output,
-            metadata: output.metadata,
+            // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
+            // #209：completion 用工具自身 output.metadata 覆盖——autoReview 是 reviewer 写入的外部注解，不属于工具输出，必须显式回填
+            // #209：无 autoReview 时直接用 output.metadata——非自动审查的工具不携带 reviewer 信封，无需额外合并
+            metadata: match.part.state.metadata?.autoReview
+              ? { ...output.metadata, autoReview: match.part.state.metadata.autoReview }
+              : output.metadata,
             title: output.title,
             time: { start: match.part.state.time.start, end: Date.now() },
             attachments: output.attachments,
@@ -258,6 +263,8 @@ const layer = Layer.effect(
             input: match.part.state.input,
             error: errorMessage(error),
             // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
+            // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
+            // 保留完整运行态metadata，审查链接与上游子调用进度可同时追溯。
             metadata: match.part.state.metadata,
             time: { start: match.part.state.time.start, end: Date.now() },
           },
