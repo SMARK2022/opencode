@@ -72,7 +72,11 @@ export const ApplyPatchTool = Tool.define(
 
       for (const hunk of hunks) {
         const filePath = path.resolve(instance.directory, hunk.path)
-        yield* assertExternalDirectoryEffect(ctx, filePath)
+        yield* assertExternalDirectoryEffect(ctx, filePath, {
+          // The external_directory gate runs before the final edit permission;
+          // carry patch intent so Auto review can judge more than the file path.
+          metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
+        })
 
         switch (hunk.type) {
           case "add": {
@@ -145,7 +149,11 @@ export const ApplyPatchTool = Tool.define(
             }
 
             const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
-            yield* assertExternalDirectoryEffect(ctx, movePath)
+            yield* assertExternalDirectoryEffect(ctx, movePath, {
+              // Moving to an external directory is a separate target gate; keep
+              // the same patch evidence but name the operation as the move leg.
+              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
+            })
 
             fileChanges.push({
               filePath,

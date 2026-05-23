@@ -42,7 +42,11 @@ export const WriteTool = Tool.define(
           const filepath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
-          yield* assertExternalDirectoryEffect(ctx, filepath)
+          yield* assertExternalDirectoryEffect(ctx, filepath, {
+            // Auto review needs the write payload intent before the later edit
+            // permission diff exists; otherwise external_directory is path-only.
+            metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
+          })
 
           const exists = yield* fs.existsSafe(filepath)
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }

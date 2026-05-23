@@ -202,7 +202,41 @@ describe("permission auto routing", () => {
     await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
   })
 
-  test("keeps non-shell external directory auto on the user approval path", async () => {
+  test("routes tool-origin external directory auto decisions to reviewer", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+            metadata: {
+              action_kind: "tool",
+              tool: "read",
+              operation: "read",
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
+          },
+          {
+            review: () =>
+              Effect.sync(() => {
+                called = true
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer rejected tool-origin external directory access",
+                  reviewID: "review_tool_external_directory",
+                  risk_level: "high" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
+  test("keeps external directory requests without tool evidence on the user approval path", async () => {
     let called = false
     await expect(
       Effect.runPromise(
@@ -220,8 +254,40 @@ describe("permission auto routing", () => {
                 called = true
                 return {
                   action: "deny" as const,
-                  reason: "reviewer should not decide non-shell external_directory gates",
-                  reviewID: "review_non_shell_external_directory",
+                  reason: "reviewer should not decide external directory access without tool evidence",
+                  reviewID: "review_external_directory_without_evidence",
+                  risk_level: "high" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
+    expect(called).toBe(false)
+  })
+
+  test("keeps malformed tool-origin external directory requests on the user approval path", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+            metadata: {
+              action_kind: "tool",
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
+          },
+          {
+            review: () =>
+              Effect.sync(() => {
+                called = true
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer should not decide malformed tool external directory evidence",
+                  reviewID: "review_malformed_tool_external_directory",
                   risk_level: "high" as const,
                   user_authorization: "unknown" as const,
                 }

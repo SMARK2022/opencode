@@ -63,6 +63,7 @@ export function evaluate(
     const precheck = PermissionPrecheck.evaluate(input)
     const isShell = input.permission === "bash"
     const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
+    const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
     // [local-smark] auto 四级预审路由开始
     // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
     // shell general 也直接允许，避免 Auto shell 回到人工确认；非 shell general
@@ -75,10 +76,10 @@ export function evaluate(
       // 和 bash 两个权限点重复消耗 LLM。非 dangerous 情况放行给后续 bash auto。
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    if (input.permission === "external_directory") {
-      // Auto agent 的 external_directory:auto 只是为了 shell 路径门禁能进入上面的
-      // shell-origin 分支。普通读写工具的项目外路径缺少 shell 命令证据，仍走既有
-      // 人工审批，避免把本轮 shell sandbox 修复扩大成全工具 reviewer 审批面。
+    if (input.permission === "external_directory" && !isToolExternalDirectory) {
+      // 无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
+      // auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
+      // metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断。
       return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
     if (precheck.level === "safe" && !input.strict) {
@@ -160,6 +161,28 @@ function errorTag(error: unknown) {
   // TaggedErrorClass instances expose `_tag`, but tests may use plain objects to
   // assert router behavior without depending on reviewer service construction.
   return error && typeof error === "object" && "_tag" in error && typeof error._tag === "string" ? error._tag : undefined
+}
+
+function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
+  // action_kind alone is caller-controlled metadata; require a known tool and
+  // its operation payload so path-only requests still fall back to user approval.
+  if (metadata.action_kind !== "tool") return false
+  if (metadata.tool === "read") return metadata.operation === "read"
+  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
+  if (metadata.tool === "edit") {
+    return (
+      (metadata.operation === "edit" || metadata.operation === "create") &&
+      typeof metadata.oldString === "string" &&
+      typeof metadata.newString === "string"
+    )
+  }
+  if (metadata.tool === "apply_patch") {
+    return (
+      (metadata.operation === "add" || metadata.operation === "update" || metadata.operation === "delete" || metadata.operation === "move") &&
+      typeof metadata.patchText === "string"
+    )
+  }
+  return false
 }
 
 function errorMessage(error: unknown) {

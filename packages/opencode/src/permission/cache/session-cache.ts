@@ -29,6 +29,10 @@ export const layer = Layer.effect(
     )
 
     const has = Effect.fn("PermissionSessionCache.has")(function* (request: RequestLike) {
+      // Tool-origin external directory prompts carry operation/payload evidence
+      // rather than a final diff; do not reuse a path allow for a later write or
+      // patch with different content in the same external directory.
+      if (isToolExternalDirectory(request)) return false
       // Cache hits require every pattern in the current request to have been
       // approved for this same session. A partial hit must still run review/user
       // approval for the remaining pattern instead of widening the approval.
@@ -38,6 +42,7 @@ export const layer = Layer.effect(
     })
 
     const put = Effect.fn("PermissionSessionCache.put")(function* (request: RequestLike, value: Value) {
+      if (isToolExternalDirectory(request)) return
       const all = yield* InstanceState.get(state)
       const session = all.get(request.sessionID) ?? new Map<Key, Value>()
       all.set(request.sessionID, session)
@@ -67,6 +72,10 @@ function canonicalKey(request: RequestLike, pattern: string) {
 
 function contextValue(value: unknown) {
   return typeof value === "string" ? value : undefined
+}
+
+function isToolExternalDirectory(request: RequestLike) {
+  return request.permission === "external_directory" && request.metadata.action_kind === "tool"
 }
 
 export const defaultLayer = layer

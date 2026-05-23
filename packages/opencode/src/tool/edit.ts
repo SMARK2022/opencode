@@ -68,7 +68,18 @@ export const EditTool = Tool.define(
           const filePath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
-          yield* assertExternalDirectoryEffect(ctx, filePath)
+          yield* assertExternalDirectoryEffect(ctx, filePath, {
+            // Include the intended edit operation so Auto reviewer decisions are
+            // based on tool evidence, not just the external path glob.
+            metadata: {
+              action_kind: "tool",
+              tool: "edit",
+              operation: params.oldString === "" ? "create" : "edit",
+              oldString: params.oldString,
+              newString: params.newString,
+              replaceAll: params.replaceAll === true,
+            },
+          })
 
           let diff = ""
           let contentOld = ""

@@ -11,6 +11,7 @@ type Kind = "file" | "directory"
 type Options = {
   bypass?: boolean
   kind?: Kind
+  metadata?: Readonly<Record<string, unknown>>
 }
 
 export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirectory")(function* (
@@ -38,6 +39,7 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
     patterns: [glob],
     always: [glob],
     metadata: {
+      ...options?.metadata,
       filepath: full,
       parentDir: dir,
     },

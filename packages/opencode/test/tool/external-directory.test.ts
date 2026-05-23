@@ -94,6 +94,28 @@ describe("tool.assertExternalDirectory", () => {
     }),
   )
 
+  it.live("preserves tool-origin metadata on external directory requests", () =>
+    Effect.gen(function* () {
+      const { requests, ctx } = makeCtx()
+
+      yield* provideInstance("/tmp/project")(
+        assertExternalDirectoryEffect(ctx, "/tmp/outside/file.txt", {
+          metadata: { action_kind: "tool", tool: "read", operation: "read" },
+        }),
+      )
+
+      const req = requests.find((r) => r.permission === "external_directory")
+      expect(req).toBeDefined()
+      expect(req!.metadata).toMatchObject({
+        action_kind: "tool",
+        tool: "read",
+        operation: "read",
+        filepath: process.platform === "win32" ? "F:\\tmp\\outside\\file.txt" : "/tmp/outside/file.txt",
+        parentDir: process.platform === "win32" ? "F:\\tmp\\outside" : "/tmp/outside",
+      })
+    }),
+  )
+
   it.live("skips prompting when bypass=true", () =>
     provideInstance("/tmp/project")(
       Effect.gen(function* () {
@@ -113,10 +135,8 @@ describe("tool.assertExternalDirectory", () => {
         Effect.gen(function* () {
           const { requests, ctx } = makeCtx()
 
-          const outerTmp = yield* tmpdirScoped()
-          yield* Effect.promise(() => Bun.write(path.join(outerTmp, "outside.txt"), "x"))
-
-          const target = path.join(outerTmp, "outside.txt")
+          yield* TestInstance
+          const target = path.join(path.parse(process.cwd()).root, "opencode-external-path-test", "outside.txt")
           const alt = target
             .replace(/^[A-Za-z]:/, "")
             .replaceAll("\\", "/")
@@ -125,7 +145,7 @@ describe("tool.assertExternalDirectory", () => {
           yield* assertExternalDirectoryEffect(ctx, alt)
 
           const req = requests.find((r) => r.permission === "external_directory")
-          const expected = glob(path.join(outerTmp, "*"))
+          const expected = glob(path.join(path.dirname(target), "*"))
           expect(req).toBeDefined()
           expect(req!.patterns).toEqual([expected])
           expect(req!.always).toEqual([expected])

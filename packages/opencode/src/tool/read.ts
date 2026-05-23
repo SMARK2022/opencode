@@ -473,6 +473,9 @@ export const ReadTool = Tool.define(
       yield* assertExternalDirectoryEffect(ctx, filepath, {
         bypass: Boolean(ctx.extra?.["bypassCwdCheck"]) || (yield* reference.contains(filepath)),
         kind: stat?.type === "Directory" ? "directory" : "file",
+        // Tool-origin evidence lets Auto review this external_directory gate
+        // without treating path-only requests as enough authorization context.
+        metadata: { action_kind: "tool", tool: "read", operation: "read" },
       })
 
       yield* ctx.ask({
