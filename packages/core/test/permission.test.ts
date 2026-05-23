@@ -20,7 +20,8 @@ import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { eq } from "drizzle-orm"
 import { location } from "./fixture/location"
@@ -352,6 +353,20 @@ describe("PermissionV2", () => {
     yield* setup([{ action: "*", resource: "*", effect: "auto" }])
     const service = yield* PermissionV2.Service
     const sessions = yield* SessionStore.Service
+    const evidence = yield* Database.Service
+    const evidenceRows = [
+      ...Array.from({ length: 45 }, (_, index) => ({
+        id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
+        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST AUTHORIZATION" : `Follow-up ${index}` },
+      })),
+      {
+        id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 46,
+        data: { time: { created: 46 }, agent: "test", model: { id: "review", providerID: "test" },
+          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) }] },
+      },
+      { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 47, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 47 }, text: "SYNTHETIC AUTHORIZATION" } },
+    ]
+    yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
     const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
     // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
     const agents = yield* AgentV2.Service
@@ -359,6 +374,12 @@ describe("PermissionV2", () => {
     const automatic = assertion({ agent: AgentV2.ID.make("Auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
+    const reviewText = JSON.stringify(reviewRequests[0]?.messages)
+    expect(reviewText).toContain("FIRST AUTHORIZATION")
+    expect(reviewText).toContain("Follow-up 44")
+    expect(reviewText).toContain("shortened")
+    expect(reviewText).not.toContain("PRIVATE REASONING")
+    expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
     // 外部目录复用同一shell预检，不再为相同命令调用第二次模型。
     expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)

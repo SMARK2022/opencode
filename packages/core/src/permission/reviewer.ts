@@ -50,9 +50,25 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const request = new PermissionReviewerSchema.ReviewerRequest({
         permission: input.permission, patterns: [...input.patterns], metadata: { ...input.metadata }, precheck: input.precheck,
       })
+      const rendered = history.slice(-120).map((message) => {
+        const text = render(message)
+        const role: PermissionReviewerPrompt.TranscriptEntry["role"] = message.type === "user" ? "user" : message.type === "shell" ? "tool" : "assistant"
+        return { role, text: truncate(text, 1000), truncated: text.length > 1000 }
+      })
+      const visible = rendered.filter((entry) => entry.text.trim())
+      const keep = new Set<number>()
+      const first = visible.findIndex((entry) => entry.role === "user")
+      const last = visible.findLastIndex((entry) => entry.role === "user")
+      // 真实用户锚点优先，模型推理或合成上下文不能冒充用户授权。
+      if (first >= 0) keep.add(first)
+      if (last >= 0) keep.add(last)
+      for (let index = visible.length - 1; index >= 0 && keep.size < 40; index--) keep.add(index)
+      const retained = visible.filter((_, index) => keep.has(index))
       const items = PermissionReviewerPrompt.buildUserPromptItems({
-        entries: history.slice(-40).map((message) => ({ role: message.type === "assistant" ? "assistant" : "user", text: render(message) })),
-        truncated: history.length > 40,
+        entries: retained.map(({ role, text }) => ({ role, text })),
+        truncated: history.length > 120 || visible.length > retained.length,
+        entryTruncated: retained.some((entry) => entry.truncated),
+        emptyEntries: rendered.length > visible.length,
       }, request, input.precheck.reason)
       // generateObject 只生成一次结构化裁决；合成输出工具不具备业务执行权限。
       const result = yield* LLM.generateObject({
@@ -75,18 +91,24 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
 }))
 
 function render(message: SessionMessage.Message) {
+  if (message.type === "synthetic" || message.type === "system") return ""
   if (message.type === "assistant") return message.content.map((part) => {
-    if (part.type !== "tool") return part.text.slice(0, 4000)
+    if (part.type === "reasoning") return ""
+    if (part.type !== "tool") return truncate(part.text)
     const state = part.state
     const body = state.status === "pending" ? state.input : state.status === "error" ? state.error.message
       : state.content.map((item) => item.type === "text" ? item.text : `[Attached ${item.mime}]`).join("\n")
-    return `<tool name="${part.name}" status="${state.status}">\n${JSON.stringify(state.input).slice(0, 4000)}\n${body.slice(0, 4000)}\n</tool>`
+    return `<tool name="${part.name}" status="${state.status}">\n${truncate(JSON.stringify(state.input))}\n${truncate(body)}\n</tool>`
   }).join("\n")
-  if (message.type === "user") return [message.text, ...(message.files ?? []).map((file) => `[Attached ${file.mime}: ${file.name ?? ""}]`)].join("\n").slice(0, 4000)
-  if (message.type === "compaction") return `${message.summary}\n${message.recent}`.slice(0, 4000)
-  if (message.type === "shell") return `${message.command}\n${message.output}`.slice(0, 4000)
-  if ("text" in message) return message.text.slice(0, 4000)
+  if (message.type === "user") return truncate([message.text, ...(message.files ?? []).map((file) => `[Attached ${file.mime}: ${file.name ?? ""}]`)].join("\n"))
+  if (message.type === "compaction") return truncate(`${message.summary}\n${message.recent}`)
+  if (message.type === "shell") return truncate(`${message.command}\n${message.output}`)
   return `<${message.type} />`
+}
+
+// 单段和整条截短都留下显式证据标记，而不是静默丢弃剩余内容。
+function truncate(text: string, limit = 4000) {
+  return text.length <= limit ? text : text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
 }
 
 export const node = makeLocationNode({ service: Service, layer,

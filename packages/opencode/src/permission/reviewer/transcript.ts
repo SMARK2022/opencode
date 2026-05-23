@@ -1,69 +1,97 @@
 import type { WithParts, Part, ToolPart } from "@opencode-ai/core/v1/session"
 import type { PermissionReviewerPrompt } from "./prompt"
 
-// #198：transcript 边界——最近 40 条消息、每 part 4000 字符上限，超出则标记 truncated 供模型识别缺失证据
 // #198：40 条消息上限平衡 token 预算和上下文覆盖——足够展示最近操作历史，不超出模型上下文窗口
 const ENTRY_LIMIT = 40
 // #198：4000 字符上限防止单条消息过长——tool 输出可能包含大量日志，截断保留前部分
 const PART_CHAR_LIMIT = 4000
+// #206：单条消息渲染上限 1000 字符——比 PART_CHAR_LIMIT 更小，防止单条消息占满 reviewer 上下文预算
+const ENTRY_CHAR_LIMIT = 1000
+// #206：渲染后的条目附带 truncated 标记——selectEntries 和 fromMessages 用它判断 entryTruncated
+type RenderedEntry = PermissionReviewerPrompt.TranscriptEntry & { truncated: boolean }
 
 export function fromMessages(messages: readonly WithParts[]): PermissionReviewerPrompt.TranscriptDelta {
-  // #198：取最近 N 条——旧消息可能包含过时上下文，最近消息更能反映当前意图
-  const recent = messages.slice(-ENTRY_LIMIT)
+  // #206：保留首条用户轮次和最近尾部——首条用户轮次通常包含原始授权，最近轮次解释重试和当前范围
+  // #206：过滤 hidden 消息——page 默认 includeHidden=false 已过滤，此处显式过滤保持 fromMessages 独立可用
+  const visibleMessages = messages.filter((message) => !message.info.hidden)
+  const rendered = visibleMessages.map((message) => {
+      const text = message.parts.map(renderPart).filter((part): part is string => Boolean(part?.trim())).join("\n")
+      const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
+      return {
+        role: message.info.role,
+        text: entry.text,
+        truncated: entry.truncated,
+      }
+    })
+  // #206：过滤渲染后无可见文本的条目——reasoning/synthetic 被排除后可能整条消息为空，需单独标记 emptyEntries
+  const visibleRendered = rendered.filter((entry) => entry.text.trim())
+  const entries = selectEntries(visibleRendered)
   return {
-    entries: recent.map((message) => ({
-      role: message.info.role,
-      text: message.parts.map(renderPart).filter(Boolean).join("\n"),
-    })),
-    // #198：truncated 标记——messages 超过 ENTRY_LIMIT 时告知模型有缺失证据
-    truncated: messages.length > recent.length,
+    entries: entries.items.map((entry) => ({ role: entry.role, text: entry.text })),
+    truncated: entries.truncated,
+    entryTruncated: entries.items.some((entry) => entry.truncated),
+    emptyEntries: visibleMessages.length > visibleRendered.length,
   }
 }
 
-// #198：渲染消息 part——hidden 直接跳过，text/reasoning/tool/file/subtask/patch/agent 各有格式，其余用 <type/> 占位
+// #206：选择策略——不超过 ENTRY_LIMIT 时全保留；超出时保留首条用户、最新用户和最近尾部
+function selectEntries(entries: readonly RenderedEntry[]) {
+  if (entries.length <= ENTRY_LIMIT) return { items: entries, truncated: false }
+  const keep = new Set<number>()
+  const userIndexes = entries.flatMap((entry, index) => (entry.role === "user" ? [index] : []))
+  // #206：首条用户轮次包含原始授权——即使截短也需保留作为授权锚点
+  if (userIndexes[0] !== undefined) keep.add(userIndexes[0])
+  const latestUserIndex = userIndexes.at(-1)
+  // #206：最新用户轮次解释当前范围和重试——与首条锚点配合覆盖授权意图的演变
+  if (latestUserIndex !== undefined) keep.add(latestUserIndex)
+  // #206：从尾部向前填充至 ENTRY_LIMIT——优先保留最新上下文，首条和最新用户已由锚点保留
+  for (let index = entries.length - 1; index >= 0 && keep.size < ENTRY_LIMIT; index--) {
+    keep.add(index)
+  }
+  return {
+    items: Array.from(keep)
+      .sort((left, right) => left - right)
+      .map((index) => entries[index]),
+    truncated: true,
+  }
+}
+
+// #206：hidden/synthetic/reasoning 不是用户授权证据——仿 Codex guardian，reviewer 看可见对话和工具证据，不看内部思考
 function renderPart(part: Part) {
-  // #198：hidden part 跳过——内部消息不纳入 reviewer 证据，防止泄露不应可见的信息
   if (part.hidden) return ""
-  // #198：text part 直接截断——普通文本是最常见的 part 类型
+  // #206：synthetic 文本不是用户输入——协议生成的上下文不应被误认为用户授权
+  if (part.type === "text" && part.synthetic) return ""
+  // #206：reasoning 是模型内部思考——不应作为授权证据，否则 reviewer 可能过度信任 agent 自身理由
+  if (part.type === "reasoning") return ""
   if (part.type === "text") return truncate(part.text)
-  // #198：reasoning part 用标签包裹——区分模型的思考过程与用户可见文本
-  if (part.type === "reasoning") return `<reasoning>${truncate(part.text)}</reasoning>`
-  // #198：tool part 需按状态分别渲染——pending/running/completed/error 各有不同信息
   if (part.type === "tool") return renderTool(part)
-  // #198：file part 用自闭合标签——mime 和 filename 供模型判断文件类型
   if (part.type === "file") return `<file mime="${part.mime}" filename="${part.filename ?? ""}" />`
-  // #198：subtask part 截断 description——子任务描述可能过长，400 字符足够
   if (part.type === "subtask") return `<subtask agent="${part.agent}" description="${truncate(part.description, 400)}" />`
-  // #198：patch part 仅列文件名——patch 内容可能极大，文件名足够让模型判断变更范围
   if (part.type === "patch") return `<patch files="${part.files.join(",")}" />`
-  // #198：agent part 用标签——标记 agent 调用但不包含输入输出
   if (part.type === "agent") return `<agent name="${part.name}" />`
-  // #198：未知 part 类型用占位标签——保留类型信息供模型识别
   return `<${part.type} />`
 }
 
 // #198：渲染 tool part——按状态 pending/running/completed/error 分别展示输入输出，超长截断
 function renderTool(part: ToolPart) {
-  // #198：pending 状态仅展示原始请求——尚未执行，无输入输出
   if (part.state.status === "pending") return `<tool name="${part.tool}" status="pending">${truncate(part.state.raw)}</tool>`
-  // #198：running 状态展示已解析输入——执行中，无输出
   if (part.state.status === "running") {
     return `<tool name="${part.tool}" status="running">${truncate(JSON.stringify(part.state.input))}</tool>`
   }
-  // #198：completed 状态展示输入和输出——title 提供人类可读摘要
   if (part.state.status === "completed") {
     return `<tool name="${part.tool}" status="completed" title="${part.state.title}">\ninput=${truncate(JSON.stringify(part.state.input))}\noutput=${truncate(part.state.output)}\n</tool>`
   }
-  // #198：error 状态展示错误信息——让模型了解前次工具失败原因
   return `<tool name="${part.tool}" status="error">${truncate(part.state.error)}</tool>`
 }
 
-// #198：截断——超限部分用 <truncated chars="N" /> 标记，让模型知道有省略内容而非假设省略是无害的
 function truncate(text: string, limit = PART_CHAR_LIMIT) {
-  // #198：未超限直接返回——多数文本不会触发截断
-  if (text.length <= limit) return text
-  // #198：截断并标记省略字符数——chars 属性告知模型省略了多少内容，避免假设截断部分无关键信息
-  return text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
+  return truncateWithFlag(text, limit).text
+}
+
+// #206：截断并返回标记——让 fromMessages 区分整条省略与条目内截短，分别设 truncated 和 entryTruncated
+function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT) {
+  if (text.length <= limit) return { text, truncated: false }
+  return { text: text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`, truncated: true }
 }
 
 export * as PermissionReviewerTranscript from "./transcript"
