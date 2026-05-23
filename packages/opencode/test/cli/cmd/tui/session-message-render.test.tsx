@@ -119,6 +119,35 @@ test("assistant first visible part ignores hidden completed tool parts", async (
   )
 })
 
+test("session follows streaming growth when the viewport is visually at the bottom", async () => {
+  await withRenderedSession(
+    [userMessage("msg_user", 1), assistantMessage("msg_bottom", 2, "msg_user")],
+    {
+      msg_user: [textPart("part_user", "msg_user", "show the bottom")],
+      msg_bottom: [textPart("part_bottom", "msg_bottom", `${"wrapped content ".repeat(180)}OLD_BOTTOM`)],
+    },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("OLD_BOTTOM")))
+
+      // Ctrl+Alt+Y scrolls up by exactly one line. The live TUI intentionally
+      // treats that one-row gap as still visually bottom-aligned, so a streaming
+      // text delta must remain reachable instead of leaving the new tail hidden
+      // below the prompt until another terminal/sidebar reflow recalculates it.
+      app.mockInput.pressKey("y", { ctrl: true, meta: true })
+      await app.renderOnce()
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("OLD_BOTTOM"))).toBe(false)
+
+      emit(
+        partDeltaEvent("evt_bottom_growth", "msg_bottom", "part_bottom", `${" new content".repeat(80)} NEW_BOTTOM`, "text"),
+      )
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("NEW_BOTTOM")))
+    },
+    {},
+    { width: 100, height: 18 },
+  )
+})
+
 test("pending edit tool shows streamed deletion and addition counts", async () => {
   await withRenderedSession(
     [assistantMessage("msg_pending_edit", 1)],
@@ -734,14 +763,18 @@ function pendingToolPart(id: string, messageID: string, tool: string, raw: strin
   } satisfies Extract<Part, { type: "tool" }>
 }
 
-function partDeltaEvent(id: string, messageID: string, partID: string, delta: string): GlobalEvent {
+function partDeltaEvent(id: string, messageID: string, partID: string, delta: string, field = "raw"): GlobalEvent {
+  // Most existing streaming-tool tests append to the pending tool `raw` buffer,
+  // which mirrors the daemon event shape for incremental tool input. The session
+  // bottom-stickiness regression streams a normal text part instead, so keep the
+  // historical default and only override `field` at that call site.
   return {
     directory,
     project: "proj_test",
     payload: {
       id,
       type: "message.part.delta",
-      properties: { sessionID, messageID, partID, field: "raw", delta },
+      properties: { sessionID, messageID, partID, field, delta },
     },
   }
 }

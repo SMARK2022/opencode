@@ -392,6 +392,7 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
+  let lastMaxScrollTop = 0
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
@@ -406,9 +407,21 @@ export function Session() {
 
   function syncSessionViewportStuckToBottom() {
     if (!scroll || scroll.isDestroyed) return
-    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
-    if (stuckToBottom === untrack(viewportStuckToBottom)) return
-    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
+    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
+    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
+    lastMaxScrollTop = maxScrollTop
+    const stuckToBottom = () => scroll.scrollTop >= maxScrollTop - 1
+    // The session viewport intentionally treats a one-row gap as visually
+    // bottom-aligned so terminal rounding and scrollbar half-cell drawing do not
+    // make the latest assistant line look detached. OpenTUI's sticky scroll only
+    // follows content growth from the exact max, so when that tolerated bottom
+    // band was already active and new rows appear, advance to the new max. Do
+    // not normalize on an ordinary render after a manual one-line scroll-up; the
+    // user should still be able to inspect the previous row until content grows.
+    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
+    if (stuckToBottom() === untrack(viewportStuckToBottom)) return
+    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom()))
   }
 
   event.on("session.status", (evt) => {
