@@ -209,8 +209,9 @@ describe("permission auto routing", () => {
     await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
   })
 
-  // #203：非 shell external_directory 缺少命令证据，走既有人工审批，不进入 reviewer
-  test("keeps non-shell external directory auto on the user approval path", async () => {
+  // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据，路由到 reviewer
+  // #210：无来源证据或证据不全的 external_directory 仍走人工审批，不进入 reviewer
+  test("routes tool-origin external directory auto decisions to reviewer", async () => {
     let called = false
     await expect(
       Effect.runPromise(
@@ -218,7 +219,12 @@ describe("permission auto routing", () => {
           {
             permission: "external_directory",
             patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
-            metadata: { filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa" },
+            metadata: {
+              action_kind: "tool",
+              tool: "read",
+              operation: "read",
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
           },
           {
             review: () =>
@@ -226,8 +232,73 @@ describe("permission auto routing", () => {
                 called = true
                 return {
                   action: "deny" as const,
-                  reason: "reviewer should not decide non-shell external_directory gates",
-                  reviewID: "review_non_shell_external_directory",
+                  reason: "reviewer rejected tool-origin external directory access",
+                  reviewID: "review_tool_external_directory",
+                  risk_level: "high" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
+  // #210：仅 filepath 无 tool 证据——回退人工审批，reviewer 不被调用
+  test("keeps external directory requests without tool evidence on the user approval path", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+            metadata: {
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
+          },
+          {
+            review: () =>
+              Effect.sync(() => {
+                called = true
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer should not decide external directory access without tool evidence",
+                  reviewID: "review_external_directory_without_evidence",
+                  risk_level: "high" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
+    expect(called).toBe(false)
+  })
+
+  // #210：action_kind=tool 但缺 tool/operation——证据不全，仍回退人工审批
+  test("keeps malformed tool-origin external directory requests on the user approval path", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+            metadata: {
+              action_kind: "tool",
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
+          },
+          {
+            review: () =>
+              Effect.sync(() => {
+                called = true
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer should not decide malformed tool external directory evidence",
+                  reviewID: "review_malformed_tool_external_directory",
                   risk_level: "high" as const,
                   user_authorization: "unknown" as const,
                 }

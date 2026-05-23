@@ -10,6 +10,7 @@ type Kind = "file" | "directory"
 type Options = {
   bypass?: boolean
   kind?: Kind
+  metadata?: Readonly<Record<string, unknown>>
 }
 
 export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirectory")(function* (
@@ -36,7 +37,9 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
     permission: "external_directory",
     patterns: [glob],
     always: [glob],
+    // #210：合并 caller 的 tool-origin 证据与门禁计算的 filepath/parentDir
     metadata: {
+      ...options?.metadata,
       filepath: full,
       parentDir: dir,
     },

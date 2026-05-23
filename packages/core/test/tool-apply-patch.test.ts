@@ -319,6 +319,8 @@ describe("ApplyPatchTool", () => {
                     ),
                   ),
                 ).toMatchObject({ type: "text" })
+                // 同目录同操作仍只批准一次，同时reviewer得到完整批次而非只有路径。
+                expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "apply_patch", operation: "update", patchText: expect.stringContaining(`*** Update File: ${second}`) })
                 expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
                 expect(assertions[0]?.resources).toEqual([
                   path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),

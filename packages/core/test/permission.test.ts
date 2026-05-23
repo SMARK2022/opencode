@@ -482,6 +482,16 @@ describe("PermissionV2", () => {
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
     expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
     assessment = { ...assessment, risk_level: "low" }
+    // 完全相同的工具门禁也必须重复审查，空字符串写入同样携带有效负载。
+    const external = { ...edit, action: "external_directory", resources: ["/outside/*"], metadata: { action_kind: "tool", tool: "write", operation: "write", content: "" } }
+    const reviews = reviewRequests.length
+    expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
+    expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(reviews + 2)
+    expect(reviewRequests.at(-1)?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")).toContain('"operation": "write"')
+    const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
+    expect(pathOnly.effect).toBe("ask")
+    yield* service.reply({ requestID: pathOnly.id, reply: "reject" })
     // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
     reviewGate = yield* Deferred.make<void>()
     reviewStarted = yield* Deferred.make<void>()

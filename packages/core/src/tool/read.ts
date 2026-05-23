@@ -101,6 +101,8 @@ const layer = Layer.effectDiscard(
               if (external)
                 yield* permission.assert({
                   ...LocationMutation.externalDirectoryPermission(external),
+                  // 路径解析仍由Location负责，leaf只提供即将执行的工具语义。
+                  metadata: { action_kind: "tool", tool: "read", operation: "read", filepath: target.canonical },
                   sessionID: context.sessionID,
                   agent: context.agent,
                   source,

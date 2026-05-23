@@ -204,6 +204,8 @@ describe("EditTool", () => {
             Effect.gen(function* () {
               expect(result.type).toBe("text")
               expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+              // 授权证据保留原始替换串，不通过提前读取外部文件生成第二份内容。
+              expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "edit", operation: "edit", oldString: "before", newString: "after" })
               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after")
               expect(writes).toHaveLength(1)
             }),

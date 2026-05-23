@@ -963,6 +963,16 @@ reviewed.instance(
       yield* ask(request)
 
       expect(reviewedCalls).toBe(1)
+      // 外部工具门禁既不能读取旧路径缓存，也不能写入可复用的新路径批准。
+      const cache = yield* PermissionSessionCache.Service
+      const stored = { ...request, permission: "external_directory", metadata: {} }
+      yield* cache.put(stored, "allow")
+      expect(yield* cache.has({ ...stored, metadata: { action_kind: "tool" } })).toBe(false)
+      const uncached = { ...stored, sessionID: SessionID.make("ses_uncached"), metadata: { action_kind: "tool" } }
+      yield* cache.put(uncached, "allow")
+      expect(yield* cache.has({ ...uncached, metadata: {} })).toBe(false)
+      expect(yield* cache.has(stored)).toBe(true)
+      expect(reviewedCalls).toBe(1)
     }),
   { git: true },
 )

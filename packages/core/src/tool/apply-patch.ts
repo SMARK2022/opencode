@@ -108,14 +108,16 @@ const layer = Layer.effectDiscard(
                 const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target }> = []
                 for (const hunk of hunks)
                   targets.push({ hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) })
-                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization>()
-                for (const { target } of targets) {
+                // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
+                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] }>()
+                for (const { hunk, target } of targets) {
                   const external = target.externalDirectory
-                  if (external) externalDirectories.set(external.resource, external)
+                  if (external) externalDirectories.set(`${external.resource}:${hunk.type}`, { ...external, operation: hunk.type })
                 }
                 for (const external of externalDirectories.values()) {
                   yield* permission.assert({
                     ...LocationMutation.externalDirectoryPermission(external),
+                    metadata: { action_kind: "tool", tool: "apply_patch", operation: external.operation, patchText: input.patchText },
                     sessionID: context.sessionID,
                     agent: context.agent,
                     source,

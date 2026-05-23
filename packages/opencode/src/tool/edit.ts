@@ -69,7 +69,18 @@ export const EditTool = Tool.define(
           const filePath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
-          yield* assertExternalDirectoryEffect(ctx, filePath)
+          // #210：携带 edit 操作意图让 Auto reviewer 基于工具证据而非仅外部路径 glob 判断
+          yield* assertExternalDirectoryEffect(ctx, filePath, {
+            metadata: {
+              action_kind: "tool",
+              tool: "edit",
+              // #210：oldString 为空表示创建新文件，operation 区分 create/edit
+              operation: params.oldString === "" ? "create" : "edit",
+              oldString: params.oldString,
+              newString: params.newString,
+              replaceAll: params.replaceAll === true,
+            },
+          })
 
           let diff = ""
           let contentOld = ""
