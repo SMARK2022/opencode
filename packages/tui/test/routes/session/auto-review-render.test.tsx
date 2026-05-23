@@ -240,9 +240,56 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
   },
 )
 
+// 与原回归一样经过正文delta和Markdown布局，而非仅调用滚动计算函数。
+test("session follows streamed text from a one-row bottom gap", async () => {
+  const message: AssistantMessage = {
+    id: "msg_bottom", sessionID, role: "assistant", parentID: "msg_user",
+    time: { created: 1 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const part: Part = { id: "part_bottom", sessionID, messageID: message.id, type: "text", text: `${"wrapped content ".repeat(180)}OLD_BOTTOM` }
+  await withRenderedReview([{ info: message, parts: [part] }], async (app, _route, emit) => {
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("OLD_BOTTOM")) return true
+      await Bun.sleep(10)
+      return false
+    }, { maxPasses: 300 })
+    await app.renderOnce()
+    await app.renderOnce()
+    // 沿实际快捷键进入一行容差区，未增长时仍尊重手动上滚。
+    app.mockInput.pressKey("y", { ctrl: true, meta: true })
+    await app.renderOnce()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
+    emit({
+      directory, project: "proj_test",
+      payload: { id: "evt_bottom_growth", type: "message.part.delta", properties: {
+        sessionID, messageID: message.id, partID: part.id, field: "text", delta: `${" new content".repeat(80)} NEW_BOTTOM`,
+      } },
+    })
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("NEW_BOTTOM")) return true
+      await Bun.sleep(10)
+      return false
+    }, { maxPasses: 300 })
+    expect(app.captureCharFrame()).toContain("NEW_BOTTOM")
+  }, { width: 100, height: 18 })
+})
+
+// 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
+async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {
+  for (let pass = 0; pass < options.maxPasses; pass++) {
+    await app.renderOnce()
+    if (await predicate(app.captureCharFrame())) return
+  }
+  throw new Error(`Expected session frame did not appear:\n${app.captureCharFrame()}`)
+}
+
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
-  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>) => Promise<void>,
+  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
+  dimensions: { width?: number; height?: number } = {},
 ) {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
@@ -259,12 +306,12 @@ async function withRenderedReview(
   }, events)
   const observed: { route?: ReturnType<typeof useRoute> } = {}
   const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} />, {
-    width: 110, height: 56, footerHeight: 0, screenMode: "alternate-screen",
+    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen",
   })
   try {
     await wait(() => Boolean(observed.route))
     if (!observed.route) throw new Error("review route was not mounted")
-    await run(app, observed.route)
+    await run(app, observed.route, events.emit)
   } finally {
     app.renderer.destroy()
   }
