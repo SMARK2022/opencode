@@ -753,6 +753,48 @@ describe("MessageV2.filterCompacted", () => {
     ),
   )
 
+  it.instance("uses hidden retained-tail anchors as boundaries without returning hidden messages", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const old = yield* addUser(sessionID, "old request")
+        const oldReply = yield* addAssistant(sessionID, old, { finish: "end_turn" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: oldReply,
+          type: "text",
+          text: "old reply",
+        })
+        const anchor = yield* addAssistant(sessionID, old)
+        const stored = yield* MessageV2.get({ sessionID, messageID: anchor })
+        if (stored.info.role === "assistant") {
+          yield* session.updateMessage({
+            ...stored.info,
+            time: { ...stored.info.time, completed: Date.now() },
+            error: new MessageV2.AbortedError({ message: "Aborted" }).toObject(),
+            hidden: { time: Date.now(), reason: "repair-empty-dangling-assistant" as const },
+          })
+        }
+
+        const compact = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, compact, anchor)
+        const summary = yield* addAssistant(sessionID, compact, { summary: true, finish: "stop" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: summary,
+          type: "text",
+          text: "summary",
+        })
+        const next = yield* addUser(sessionID, "next request")
+
+        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+
+        expect(result.map((item) => item.info.id)).toEqual([compact, summary, next])
+      }),
+    ),
+  )
+
   it.instance("fork remaps compaction tail_start_id for filterCompacted", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

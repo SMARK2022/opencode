@@ -1068,9 +1068,12 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
   const size = 50
   let before: string | undefined
+  // Compaction recovery needs hidden structural anchors; callers that build a
+  // visible transcript pass includeHidden=false and let page() apply that filter.
+  const includeHidden = opts?.includeHidden ?? true
   while (true) {
     const next = Effect.runSync(
-      page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden ?? true }).pipe(
+      page({ sessionID, limit: size, before, includeHidden }).pipe(
         Effect.catchIf(NotFoundError.isInstance, () =>
           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
         ),
@@ -1079,8 +1082,6 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }
     if (next.items.length === 0) break
     for (let i = next.items.length - 1; i >= 0; i--) {
       const msg = next.items[i]
-      if (!opts?.includeHidden && msg.info.hidden) continue
-      if (!opts?.includeHidden) msg.parts = msg.parts.filter((p) => !p.hidden)
       yield msg
     }
     if (!next.more || !next.cursor) break
@@ -1130,6 +1131,16 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
+  // Hidden messages can still be structural compaction anchors, but they must
+  // never be replayed to providers after undo/repair.  Keep them during the
+  // boundary walk and strip them only from the returned prompt window.
+  const visible = (items: WithParts[]) =>
+    items
+      .filter((msg) => !msg.info.hidden)
+      .map((msg) => ({
+        ...msg,
+        parts: msg.parts.filter((part) => !part.hidden),
+      }))
   for (const msg of ordered) {
     result.push(msg)
     if (retain) {
@@ -1146,8 +1157,9 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     }
     if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
       break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
+    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
       completed.add(msg.info.parentID)
+    }
   }
   result.reverse()
   const compactionIndex = result.findLastIndex(
@@ -1170,13 +1182,13 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return [
+    return visible([
       ...result.slice(compactionIndex, summaryIndex + 1),
       ...result.slice(tailIndex, compactionIndex),
       ...result.slice(summaryIndex + 1),
-    ]
+    ])
   }
-  return result
+  return visible(result)
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {

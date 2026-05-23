@@ -181,6 +181,13 @@ function splitTurn(input: {
     if (input.budget <= 0) return undefined
     if (input.turn.end - input.turn.start <= 1) return undefined
     for (let start = input.turn.start + 1; start < input.turn.end; start++) {
+      const msg = input.messages[start]!
+      // Split-turn anchors preserve long-running agent-loop context, but the
+      // persisted boundary must still be replayable after undo/repair.  Empty,
+      // hidden, pending, or errored messages can disappear from visible history
+      // and must stay in the summarized head instead of becoming tail_start_id.
+      if (msg.info.hidden || msg.parts.length === 0) continue
+      if (msg.info.role === "assistant" && (!msg.info.finish || msg.info.error)) continue
       const size = yield* input.estimate({
         messages: input.messages.slice(start, input.turn.end),
         model: input.model,
@@ -188,7 +195,7 @@ function splitTurn(input: {
       if (size > input.budget) continue
       return {
         start,
-        id: input.messages[start]!.info.id,
+        id: msg.info.id,
       } satisfies Tail
     }
     return undefined
