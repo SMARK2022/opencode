@@ -67,6 +67,64 @@ describe("permission auto routing", () => {
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
+  // #208：验证 onReviewStart 在 reviewer 完成前报告确定性 precheck 边界
+  test("reports the deterministic precheck boundary before reviewer completion", async () => {
+    const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git push origin main"],
+            metadata: { command: "git push origin main" },
+          },
+          {
+            review: (input) =>
+              // #208：reviewer 返回的 reviewID 应与 onReviewStart 收到的一致
+              Effect.succeed({
+                action: "allow",
+                reason: "reviewer approved explicit push",
+                reviewID: input.reviewID,
+                risk_level: "high",
+                user_authorization: "high",
+              }),
+          },
+          (input) =>
+            Effect.sync(() => {
+              starts.push(input)
+            }),
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "allow", source: "reviewer", reviewID: starts[0]?.reviewID })
+    expect(starts).toHaveLength(1)
+    // #208：precheck level 为 cautious——git push 属于 cautious 路由到 reviewer
+    expect(starts[0].precheck).toMatchObject({ level: "cautious" })
+  })
+
+  // #208：验证 reviewer 失败时保留已 minted 的 reviewID
+  test("keeps the started review id when reviewer execution fails closed", async () => {
+    let started: string | undefined
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git push origin main"],
+            metadata: { command: "git push origin main" },
+          },
+          { review: () => Effect.fail(new Error("provider unavailable")) },
+          (input) =>
+            // #208：onReviewStart 回调记录 minted reviewID——deny 仍携带此 ID 供审计
+            Effect.sync(() => {
+              started = input.reviewID
+            }),
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer", reviewID: started })
+  })
+
   // #203：PowerShell 用户目录凭据读取走 cautious → reviewer，防止 $env:USERPROFILE 展开绕过敏感路径检测
   test("routes PowerShell user-profile credential reads to reviewer", async () => {
     let called = false

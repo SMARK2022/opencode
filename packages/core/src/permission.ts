@@ -205,9 +205,15 @@ const layer = Layer.effect(
         record(false)
         return { effect, rules: all }
       }
-      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
+      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, tool: input.source, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
         review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
-      })
+      }, (review) => events.publish(PermissionV1.Event.ReviewStarted, {
+        sessionID: input.sessionID,
+        reviewID: review.reviewID,
+        permission: input.action,
+        patterns: [...resources],
+        precheck: review.precheck,
+      }))
       const sessionID = SessionID.make(input.sessionID)
       // 使用既有兼容事件记录审查，不能冒充用户的 once/always 批准。
       if (decision.source === "reviewer") {

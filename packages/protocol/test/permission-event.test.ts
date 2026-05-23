@@ -8,6 +8,7 @@ import { OpenCodeEvent } from "../src/groups/event"
 
 test("shared permission review events preserve the native event stream", () => {
   const events = [
+    { id: Event.ID.create(), type: "permission.review.started", data: { sessionID: SessionID.make("ses_test"), reviewID: "review", permission: "bash", patterns: ["git push"], precheck: { level: "cautious", reason: "publish" } } },
     { id: Event.ID.create(), type: "permission.review.completed", data: { sessionID: SessionID.make("ses_test"), reviewID: "review", outcome: "allow", rationale: "bounded action" } },
     { id: Event.ID.create(), type: "permission.review.failed", data: { sessionID: SessionID.make("ses_test"), reviewID: "review", reason: "provider unavailable" } },
     { id: Event.ID.create(), type: "permission.review.circuit_broken", data: { sessionID: SessionID.make("ses_test"), consecutive: 3, recent: 3 } },

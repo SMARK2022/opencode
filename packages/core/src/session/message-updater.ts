@@ -190,7 +190,10 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.started": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          // 审查child复用但模型并行，明确绑定的独立请求不能提前完成另一助手。
+          const currentAssistant = event.data.agent === "permission-reviewer" && typeof event.metadata?.permissionReviewerRequestID === "string"
+            ? undefined
+            : yield* adapter.getCurrentAssistant()
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -203,6 +206,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
               id: event.data.assistantMessageID,
               type: "assistant",
               agent: event.data.agent,
+              metadata: event.metadata,
               model: event.data.model,
               // 原生助手的 tokens 在 Ended 前仍缺省，元数据不会触发结算。
               inputEstimate: event.data.inputEstimate,
