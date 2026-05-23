@@ -751,6 +751,54 @@ describe("MessageV2.filterCompacted", () => {
     ),
   )
 
+  // #205：hidden 锚点可作为压缩边界但不进入返回窗口——验证 visible() 剔除 hidden 消息与 part
+  it.instance("uses hidden retained-tail anchors as boundaries without returning hidden messages", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        // #205：构造被 summary 取代的旧历史
+        const old = yield* addUser(sessionID, "old request")
+        const oldReply = yield* addAssistant(sessionID, old, { finish: "end_turn" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: oldReply,
+          type: "text",
+          text: "old reply",
+        })
+        // #205：anchor 是无 finish 的 dangling assistant，标 hidden+error；不可作持久化 tail_start_id
+        const anchor = yield* addAssistant(sessionID, old)
+        const stored = yield* MessageV2.get({ sessionID, messageID: anchor })
+        if (stored.info.role === "assistant") {
+          yield* session.updateMessage({
+            ...stored.info,
+            time: { ...stored.info.time, completed: Date.now() },
+            error: new SessionV1.AbortedError({ message: "Aborted" }).toObject(),
+            hidden: { time: Date.now(), reason: "repair-empty-dangling-assistant" as const },
+          })
+        }
+
+        const compact = yield* addUser(sessionID)
+        // #205：compaction 的 tail_start_id 指向 hidden anchor
+        yield* addCompactionPart(sessionID, compact, anchor)
+        const summary = yield* addAssistant(sessionID, compact, { summary: true, finish: "stop" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: summary,
+          type: "text",
+          text: "summary",
+        })
+        const next = yield* addUser(sessionID, "next request")
+
+        // #205：真实恢复入口负责读取hidden锚点，测试不替生产代码预先提供隐藏消息。
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
+
+        // #205：anchor 被 visible() 剔除，结果仅 compact/summary/next
+        expect(result.map((item) => item.info.id)).toEqual([compact, summary, next])
+      }),
+    ),
+  )
+
   it.instance("fork remaps compaction tail_start_id for filterCompacted", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

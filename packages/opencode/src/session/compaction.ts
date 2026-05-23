@@ -151,6 +151,12 @@ function splitTurn(input: {
     if (input.budget <= 0) return undefined
     if (input.turn.end - input.turn.start <= 1) return undefined
     for (let start = input.turn.start + 1; start < input.turn.end; start++) {
+      const msg = input.messages[start]!
+      // #205：持久化边界在 undo/repair 后仍须可重放——空、hidden、pending、errored 消息可能从可见历史消失
+      // #205：这类消息必须留在 summarized head，不能成为 tail_start_id，否则边界丢失引发上下文组装故障
+      if (msg.info.hidden || msg.parts.length === 0) continue
+      // #205：pending(无 finish)或 errored assistant 不可重放，同样跳过不作锁点
+      if (msg.info.role === "assistant" && (!msg.info.finish || msg.info.error)) continue
       const size = yield* input.estimate({
         messages: input.messages.slice(start, input.turn.end),
         model: input.model,
@@ -158,7 +164,7 @@ function splitTurn(input: {
       if (size > input.budget) continue
       return {
         start,
-        id: input.messages[start]!.info.id,
+        id: msg.info.id,
       } satisfies Tail
     }
     return undefined

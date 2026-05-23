@@ -1099,16 +1099,33 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "falls back to full summary when even one recent turn exceeds preserve token budget",
+    "falls back to full summary when a recent turn cannot be retained as a stable boundary",
     () => {
       const stub = llm()
       let captured = ""
       stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
       return Effect.gen(function* () {
+        const test = yield* TestInstance
         const ssn = yield* SessionNs.Service
         const session = yield* ssn.create({})
         yield* createUserMessage(session.id, "first")
-        yield* createUserMessage(session.id, "y".repeat(2_000))
+        const recent = yield* createUserMessage(session.id, "y".repeat(2_000))
+        // #205：补一个未完成（无 finish）的 assistant 占据该轮，使 splitTurn 无法留作 tail_start_id
+        // #205：迫使压缩回退到 full summary——验证不可重放边界不会被选为持久化锁点
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: recent.id,
+          time: { created: Date.now() },
+        })
         yield* createSummaryCompaction(session.id)
 
         const msgs = yield* ssn.messages({ sessionID: session.id })
