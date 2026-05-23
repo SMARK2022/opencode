@@ -325,6 +325,8 @@ describe("WriteTool", () => {
             Effect.gen(function* () {
               const canonicalTarget = path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "external.txt")
               expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+              // 真实leaf必须先传写入内容，再允许执行文件变更。
+              expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "write", operation: "write", content: "external" })
               expect(assertions[0]).toMatchObject({
                 resources: [
                   path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),

@@ -7,7 +7,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
 import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
 import { Filesystem } from "@/util/filesystem"
-import { TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { TestInstance, provideInstance, tmpdirScoped } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 
@@ -104,6 +104,29 @@ describe("tool.assertExternalDirectory", () => {
     }),
   )
 
+  // #210：tool-origin metadata 透传到 external_directory 请求，filepath/parentDir 仍由门禁补全
+  it.instance("preserves tool-origin metadata on external directory requests", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { requests, ctx } = makeCtx()
+      const target = path.join(path.dirname(test.directory), "outside", "file.txt")
+
+      yield* assertExternalDirectoryEffect(ctx, target, {
+        metadata: { action_kind: "tool", tool: "read", operation: "read" },
+      })
+
+      const req = requests.find((r) => r.permission === "external_directory")
+      expect(req).toBeDefined()
+      expect(req!.metadata).toMatchObject({
+        action_kind: "tool",
+        tool: "read",
+        operation: "read",
+        filepath: target,
+        parentDir: path.dirname(target),
+      })
+    }),
+  )
+
   if (process.platform === "win32") {
     it.instance(
       "normalizes Windows path variants to one glob",
@@ -111,10 +134,8 @@ describe("tool.assertExternalDirectory", () => {
         Effect.gen(function* () {
           const { requests, ctx } = makeCtx()
 
-          const outerTmp = yield* tmpdirScoped()
-          yield* Effect.promise(() => Bun.write(path.join(outerTmp, "outside.txt"), "x"))
-
-          const target = path.join(outerTmp, "outside.txt")
+          yield* TestInstance
+          const target = path.join(path.parse(process.cwd()).root, "opencode-external-path-test", "outside.txt")
           const alt = target
             .replace(/^[A-Za-z]:/, "")
             .replaceAll("\\", "/")
@@ -123,7 +144,7 @@ describe("tool.assertExternalDirectory", () => {
           yield* assertExternalDirectoryEffect(ctx, alt)
 
           const req = requests.find((r) => r.permission === "external_directory")
-          const expected = glob(path.join(outerTmp, "*"))
+          const expected = glob(path.join(path.dirname(target), "*"))
           expect(req).toBeDefined()
           expect(req!.patterns).toEqual([expected])
           expect(req!.always).toEqual([expected])

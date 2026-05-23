@@ -73,7 +73,10 @@ export const ApplyPatchTool = Tool.define(
 
       for (const hunk of hunks) {
         const filePath = path.resolve(instance.directory, hunk.path)
-        yield* assertExternalDirectoryEffect(ctx, filePath)
+        // #210：external_directory 门禁先于最终 edit 权限，携带 patch 意图让 Auto reviewer 判断的不仅是路径
+        yield* assertExternalDirectoryEffect(ctx, filePath, {
+          metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
+        })
 
         switch (hunk.type) {
           case "add": {
@@ -148,7 +151,10 @@ export const ApplyPatchTool = Tool.define(
             }
 
             const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
-            yield* assertExternalDirectoryEffect(ctx, movePath)
+            // #210：移动到外部目录是独立目标门禁，复用同一 patch 证据但 operation 标记为 move
+            yield* assertExternalDirectoryEffect(ctx, movePath, {
+              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
+            })
 
             fileChanges.push({
               filePath,

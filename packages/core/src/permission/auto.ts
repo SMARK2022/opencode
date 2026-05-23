@@ -65,6 +65,8 @@ export function evaluate(
     const precheck = PermissionPrecheck.evaluate(input)
     const isShell = input.permission === "bash"
     const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
+    // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据——仅凭路径不构成授权上下文
+    const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
     // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 Auto shell
     // #203：回到人工确认；非 shell general 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝
     // #203：strict 是用户显式配置的例外，保留原本"低风险也审"的能力
@@ -75,9 +77,10 @@ export function evaluate(
       // #203：重复消耗 LLM。非 dangerous 情况放行给后续 bash auto
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    if (input.permission === "external_directory") {
-      // #203：Auto 的 external_directory:auto 只为 shell 路径门禁进入上面的 shell-origin 分支。
-      // #203：普通读写工具的项目外路径缺少 shell 命令证据，仍走既有人工审批
+    if (input.permission === "external_directory" && !isToolExternalDirectory) {
+      // #210：无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
+      // #210：auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
+      // #210：metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断
       return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
     if (precheck.level === "safe" && !input.strict) {
@@ -150,6 +153,30 @@ export function evaluate(
 // #198：提取 _tag——TaggedErrorClass 暴露 _tag，但测试可能用普通对象断言路由行为
 function errorTag(error: unknown) {
   return error && typeof error === "object" && "_tag" in error && typeof error._tag === "string" ? error._tag : undefined
+}
+
+// #210：tool-origin 证据校验——action_kind 是 caller 可控 metadata，需同时携带已知 tool 及其 operation/payload，
+// #210：仅凭路径的请求仍回退人工审批，防止 reviewer 替路径授权后续读写内容
+function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
+  if (metadata.action_kind !== "tool") return false
+  if (metadata.tool === "read") return metadata.operation === "read"
+  // 空字符串也是有效写入负载；缺少content的纯路径请求才继续人工审批。
+  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
+  if (metadata.tool === "edit") {
+    return (
+      (metadata.operation === "edit" || metadata.operation === "create") &&
+      typeof metadata.oldString === "string" &&
+      typeof metadata.newString === "string"
+    )
+  }
+  if (metadata.tool === "apply_patch") {
+    // #210：apply_patch 需匹配 hunk.type（add/update/delete/move）并携带 patchText 证据
+    return (
+      (metadata.operation === "add" || metadata.operation === "update" || metadata.operation === "delete" || metadata.operation === "move") &&
+      typeof metadata.patchText === "string"
+    )
+  }
+  return false
 }
 
 // #198：提取错误消息——provider/model 错误在 deny reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议

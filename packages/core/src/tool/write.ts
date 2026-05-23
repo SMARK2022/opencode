@@ -83,6 +83,8 @@ const layer = Layer.effectDiscard(
                 if (external)
                   yield* permission.assert({
                     ...LocationMutation.externalDirectoryPermission(external),
+                    // 外部目录审批发生在写入前，包括清空文件的空字符串负载。
+                    metadata: { action_kind: "tool", tool: "write", operation: "write", content: input.content, filepath: target.canonical },
                     sessionID: context.sessionID,
                     agent: context.agent,
                     source,

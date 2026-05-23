@@ -134,7 +134,12 @@ const layer = Layer.effectDiscard(
                       ...LocationMutation.externalDirectoryPermission(external),
                       sessionID: context.sessionID,
                       agent: context.agent,
-                    metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
+                      metadata: {
+                        // 保留原生diff证据，补齐共享reviewer需要的操作与原始替换负载。
+                        filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }),
+                        action_kind: "tool", tool: "edit", operation: "edit",
+                        oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll === true,
+                      },
                       source: permissionSource,
                     }),
                   )

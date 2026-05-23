@@ -43,7 +43,10 @@ export const WriteTool = Tool.define(
           const filepath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
-          yield* assertExternalDirectoryEffect(ctx, filepath)
+          // #210：write 负载意图先于后续 edit 权限 diff 存在，否则 external_directory 仅凭路径无法授权
+          yield* assertExternalDirectoryEffect(ctx, filepath, {
+            metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
+          })
 
           const exists = yield* fs.existsSafe(filepath)
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }

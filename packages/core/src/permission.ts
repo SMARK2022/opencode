@@ -191,6 +191,8 @@ const layer = Layer.effect(
       const agent = yield* agents.resolve(selected)
       // 身份来自实际权限owner选择，不依赖模型自行声称使用Auto。
       const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata, agent: agent?.id }
+      // 工具外部路径门禁需逐次审查操作负载，不能复用自动审批缓存。
+      const toolExternal = input.action === "external_directory" && input.metadata?.action_kind === "tool"
       const key = JSON.stringify([input.action, resources, metadata, input.agent, all, options, Config.latest(entries, "approvals_reviewer")])
       const known = cache.get(input.sessionID) ?? new Set<string>()
       cache.set(input.sessionID, known)
@@ -201,7 +203,7 @@ const layer = Layer.effect(
         state.recent.push(denied)
         if (state.recent.length > Math.max(1, Math.floor(options.recent_denial_window ?? 50))) state.recent.shift()
       }
-      if (known.has(key)) {
+      if (!toolExternal && known.has(key)) {
         record(false)
         return { effect, rules: all }
       }
@@ -236,7 +238,7 @@ const layer = Layer.effect(
       }
       if (decision.action === "ask") return { effect: "ask" as const, rules: all }
       record(false)
-      if (decision.source === "reviewer") known.add(key)
+      if (decision.source === "reviewer" && !toolExternal) known.add(key)
       // 自动批准不覆盖请求中另一个仍为 ask 的资源。
       return { effect, rules: all }
     })

@@ -30,6 +30,9 @@ export const layer = Layer.effect(
     )
 
     const has = Effect.fn("PermissionSessionCache.has")(function* (request: RequestLike) {
+      // #210：tool-origin external_directory 请求携带 operation/payload 证据而非最终 diff，
+      // #210：不复用同一外部目录的路径放行去授权后续不同内容的 write/patch
+      if (isToolExternalDirectory(request)) return false
       // #198：缓存命中要求当前请求的每个 pattern 都已被同一 session 放行——部分命中仍需 review/审批剩余 pattern，不得扩大授权范围
       const session = (yield* InstanceState.get(state)).get(request.sessionID)
       // #198：无 session 记录时缓存未命中——首次请求或 session 重启后无历史授权
@@ -39,6 +42,8 @@ export const layer = Layer.effect(
     })
 
     const put = Effect.fn("PermissionSessionCache.put")(function* (request: RequestLike, value: Value) {
+      // #210：tool-origin 请求不写入缓存——放行不可跨内容复用，避免路径命中授权不同写操作
+      if (isToolExternalDirectory(request)) return
       const all = yield* InstanceState.get(state)
       // #198：按 sessionID 分组存储——不同 session 的授权互不干扰
       const session = all.get(request.sessionID) ?? new Map<Key, Value>()
@@ -52,6 +57,7 @@ export const layer = Layer.effect(
 )
 
 // #198：规范化缓存键——包含 permission、pattern、command、cwd、shell、filepath、diff，防止不同上下文的相同 pattern 误命中缓存
+// #210：tool-origin 请求在 has/put 入口短路，canonicalKey 无需纳入 operation/payload
 function canonicalKey(request: RequestLike, pattern: string) {
   // #198：JSON.stringify 生成稳定键——数组顺序固定，确保相同输入始终命中同一缓存槽
   return JSON.stringify([
@@ -70,6 +76,11 @@ function canonicalKey(request: RequestLike, pattern: string) {
 // #198：仅字符串值纳入键——非字符串 metadata 字段不影响缓存身份
 function contextValue(value: unknown) {
   return typeof value === "string" ? value : undefined
+}
+
+// #210：识别 tool-origin external_directory 请求——action_kind=tool 标记来自读写工具的项目外路径门禁
+function isToolExternalDirectory(request: RequestLike) {
+  return request.permission === "external_directory" && request.metadata.action_kind === "tool"
 }
 
 export const defaultLayer = layer
