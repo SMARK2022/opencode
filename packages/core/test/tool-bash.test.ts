@@ -599,6 +599,19 @@ describe("BashTool", () => {
               expect(runs).toHaveLength(1)
             }),
           ),
+          Effect.andThen(() => Effect.forEach([
+            { command: "ssh example.com cat /etc/os-release", warning: false },
+            { command: "wsl --exec cat /mnt/rescue/data.txt", warning: false },
+            { command: `wsl --exec cat /mnt/rescue/data.txt & type "${outside.path}"`, warning: true },
+          ], (item) => Effect.gen(function* () {
+            reset()
+            // 原始命令仍完整授权；仅路径提示排除客体片段。
+            const settled = yield* withTool(active.path, (registry) => settleTool(registry, call({ command: item.command })))
+            expect(assertions.map((request) => request.action)).toEqual(["bash"])
+            expect(assertions[0]?.resources).toEqual([item.command])
+            expect(runs).toHaveLength(1)
+            expect(settled.output?.content.some((part) => part.type === "text" && part.text.includes("Warnings:"))).toBe(item.warning)
+          }), { concurrency: 1 })),
         )
       },
       ([active, outside]) =>

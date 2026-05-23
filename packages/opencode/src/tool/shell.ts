@@ -11,6 +11,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
+import { ShellRemote } from "@opencode-ai/core/shell-remote"
 import { ShellID } from "./shell/id"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 
@@ -352,12 +353,15 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
 // 只检查解析出的命令头，不能把 echo 参数或路径里的 grep 当成执行工具。
 function shellCompatibilityError(root: Node, shellName: string) {
   // V1 保留完整 AST 提取；分类与错误文字复用 Core 的同一 guard。
-  return Shell.compatibilityError(localCommands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
+  return Shell.compatibilityError(localCommands(root, shellName).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
 }
 
 // #158：只扫描本地 command 节点；祖先含 string 视为远程/WSL 引号载荷
-function localCommands(root: Node) {
+function localCommands(root: Node, shellName: string) {
+  const remote = ShellRemote.ranges(root.text, shellName)
   return commands(root).filter((node) => {
+    // 客体命名空间只从宿主扫描剔除，原始命令仍完整进入bash授权。
+    if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
     let cur: Node | null = node
     while (cur) {
       // #158：string/raw_string 等类型包含 string 即视为载荷边界
@@ -434,7 +438,7 @@ export const ShellTool = Tool.define(
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
 
-      for (const node of commands(root)) {
+      for (const node of localCommands(root, Shell.name(shell))) {
         const command = parts(node)
         const tokens = command.map((item) => item.text)
         const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]

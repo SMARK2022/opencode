@@ -1836,6 +1836,33 @@ describe("tool.shell windows PS stderr and progress", () => {
         ),
     )
   }
+
+  // #207：SSH 远程路径不触发主机 external_directory——/etc/os-release 在 SSH 目标上读取不在 Windows 主机上
+  for (const item of ps) {
+    it.live(`does not ask for host external_directory for SSH remote paths [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(
+              yield* fail(
+                {
+                  // #207：/etc/os-release 在 SSH 目标上读取——SSH 与 WSL 共享远程载荷不变式：远程 POSIX 路径不应成为主机 external_directory 提示
+                  command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+            expect(requests.find((r) => r.permission === "external_directory")).toBeUndefined()
+            expect(requests.find((r) => r.permission === "bash")).toBeDefined()
+          }),
+        ),
+      ),
+    )
+  }
 })
 
 // #179：PowerShell ERROR 恢复节点上的本地 Unix 工具拒绝/放行
@@ -1885,6 +1912,180 @@ describe("tool.shell local command ERROR nodes (#179)", () => {
                 capture(requests, err),
               ),
             ).toMatchObject({ message: err.message })
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #207：WSL 客户机管道内允许 Unix 工具——兼容性守卫必须保留命名空间边界
+  for (const item of ps) {
+    it.live(`allows Unix text utilities inside WSL sh payloads [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(
+              yield* fail(
+                {
+                  // #207：WSL 客户机管道不是本地 PowerShell 管道——兼容性守卫必须保留命名空间边界使 POSIX 工具在备用 OS shell 内有效
+                  command: `wsl -d Ubuntu-22.04 -- sh -lc 'ps -ef | grep "[d]drescue"'`,
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+            expect(requests.find((r) => r.permission === "bash")).toBeDefined()
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #207：WSL 挂载路径不触发主机 external_directory——客户机路径不应被 Windows 路径解析伪造为主机路径
+  for (const item of ps) {
+    it.live(`does not ask for host external_directory for WSL mount paths [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(
+              yield* fail(
+                {
+                  // #207：/mnt/rescue 位于 WSL 客户机文件系统中——映射到 Windows 路径解析会伪造主机路径如 F:\mnt\rescue
+                  command:
+                    "wsl -d Ubuntu-22.04 -- sh -lc \"sudo mkdir -p /mnt/rescue && sudo mount -t exfat /dev/sde3 /mnt/rescue && mkdir -p /mnt/rescue/LexarE300_rescue && df -h /mnt/rescue && lsblk -o NAME,SIZE,FSTYPE,LABEL,RO,TYPE,MOUNTPOINTS /dev/sdc /dev/sde\"",
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+            expect(requests.find((r) => r.permission === "external_directory")).toBeUndefined()
+            expect(requests.find((r) => r.permission === "bash")).toBeDefined()
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #207：WSL 载荷后的本地管道仍受兼容性检查——尾部 grep 必须保持为本地命令
+  for (const item of ps) {
+    it.live(`rejects Unix text utilities after WSL payloads in local pipelines [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            expect(
+              yield* fail({
+                // #207：WSL 调用后的管道是主机 PowerShell 管道边界——只有引号内 echo ok 属于客户机
+                command: "wsl -d Ubuntu-22.04 -- sh -lc 'echo ok' | grep ok",
+              }),
+            ).toMatchObject({
+              message: expect.stringContaining(`The current shell is ${item.label}`),
+            })
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #207：WSL 载荷后的本地文件读取仍需 external_directory——主机文件系统访问不受客户机范围影响
+  for (const item of ps) {
+    it.live(`asks for host external_directory after WSL payloads in local pipelines [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(
+              yield* fail(
+                {
+                  // #207：WSL 客户机载荷在主机管道前结束——后续本地文件读取仍是主机文件系统访问
+                  command: `wsl -d Ubuntu-22.04 -- sh -lc 'echo ok' | Get-Content ${process.env.WINDIR!.replaceAll("\\", "/")}/win.ini`,
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+            const extDirReq = requests.find((r) => r.permission === "external_directory")
+            expect(extDirReq).toBeDefined()
+            expect(extDirReq!.patterns).toContain(Filesystem.normalizePathPattern(path.join(process.env.WINDIR!, "*")))
+          }),
+        ),
+      ),
+    )
+  }
+
+  // #207：SSH 载荷后的本地管道与 WSL 相同——引号内远程命令可用 POSIX 工具，本地管道仍受兼容性检查
+  for (const item of ps) {
+    it.live(`rejects Unix text utilities after SSH payloads in local pipelines [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            expect(
+              yield* fail({
+                // #207：SSH 远程命令可用 POSIX 工具，但 SSH 调用后的 PowerShell 管道是本地的
+                command: "ssh example.com 'echo ok' | grep ok",
+              }),
+            ).toMatchObject({
+              message: expect.stringContaining(`The current shell is ${item.label}`),
+            })
+          }),
+        ),
+      ),
+    )
+  }
+
+  if (cmdShell) {
+    // #207：cmd.exe 中单 & 启动另一个本地命令——WSL 客户机范围必须在分隔符前停止
+    it.live("rejects Unix text utilities after WSL payloads in cmd command chains [cmd]", () =>
+      withShell(
+        cmdShell,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            expect(
+              yield* fail({
+                // #207：cmd.exe 的 & 分隔符后尾部 grep 仍受现有 cmd Unix 工具拒绝覆盖
+                command: 'wsl -d Ubuntu-22.04 -- sh -lc "echo ok" & grep ok',
+              }),
+            ).toMatchObject({
+              message: expect.stringContaining("The current shell is cmd"),
+            })
+          }),
+        ),
+      ),
+    )
+
+    // #207：cmd & 分隔符后的 TYPE 命令读取 Windows 主机文件系统——仍需 external_directory
+    it.live("asks for host external_directory after WSL payloads in cmd command chains [cmd]", () =>
+      withShell(
+        cmdShell,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+            expect(
+              yield* fail(
+                {
+                  // #207：WSL 命令在 cmd & 分隔符前结束——TYPE 读取 Windows 主机文件系统
+                  command: `wsl -d Ubuntu-22.04 -- sh -lc "echo ok" & TYPE "${path.join(process.env.WINDIR!, "win.ini")}"`,
+                },
+                capture(requests, err),
+              ),
+            ).toMatchObject({ message: err.message })
+            const extDirReq = requests.find((r) => r.permission === "external_directory")
+            expect(extDirReq).toBeDefined()
+            expect(extDirReq!.patterns).toContain(Filesystem.normalizePathPattern(path.join(process.env.WINDIR!, "*")))
           }),
         ),
       ),

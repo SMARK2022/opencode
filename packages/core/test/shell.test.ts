@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { Shell } from "@opencode-ai/core/shell"
+import { ShellRemote } from "@opencode-ai/core/shell-remote"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { which } from "@opencode-ai/core/util/which"
 import { tmpdir } from "./fixture/tmpdir"
@@ -23,6 +24,21 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
 }
 
 describe("shell", () => {
+  test("keeps guest payload ranges separate from following host commands", () => {
+    // 边界识别不执行命令，两个shell族在任何测试平台都可验证。
+    for (const [shell, command, guest] of [
+      ["pwsh", "wsl -d Ubuntu -- cat /mnt/file", "cat /mnt/file"],
+      ["pwsh", "wsl --cd /tmp -u root --exec sh -lc 'cat /mnt/file | grep data' | Get-Content local", "sh -lc 'cat /mnt/file | grep data'"],
+      ["cmd", 'WSL.EXE --exec cat /mnt/file & TYPE local', "cat /mnt/file"],
+      ["pwsh", "ssh -p 22 host 'cat /etc/os-release | grep NAME' | grep local", "'cat /etc/os-release | grep NAME'"],
+      ["cmd", "ssh -i key host cat /etc/os-release & TYPE local", "cat /etc/os-release"],
+      ["cmd", "wsl --exec cat /mnt/file ^| data", "cat /mnt/file ^| data"],
+    ] as const) {
+      expect(ShellRemote.ranges(command, shell).map((range) => command.slice(range.start, range.end).trim())).toEqual([guest])
+    }
+    expect(ShellRemote.ranges("ssh -p 22 host", "pwsh")).toEqual([])
+  })
+
   test("builds Windows UTF-8 overlays without mutating the inherited environment", () => {
     const env = { PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" }
     // 平台作为纯输入覆盖两支，不写全局环境或伪造 process.platform。
