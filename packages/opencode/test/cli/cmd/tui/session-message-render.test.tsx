@@ -33,7 +33,7 @@ import { Session } from "../../../../src/cli/cmd/tui/routes/session"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
-import { createEventSource, createFetch, directory, json } from "./sync-fixture"
+import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
 
 const sessionID = "ses_render"
 
@@ -245,6 +245,116 @@ test("pending write tool shows streamed addition counts", async () => {
     async (app) => {
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src/new file.ts +2")))
       expect(frame[findRow(frame, "Write src/new file.ts")]).toContain("+2")
+    },
+  )
+})
+
+test("task tool click opens its subagent session", async () => {
+  const childID = "ses_child"
+  await withRenderedSession(
+    [assistantMessage("msg_task", 1)],
+    {
+      msg_task: [
+        completedToolPart(
+          "part_task",
+          "msg_task",
+          "task",
+          { description: "inspect files", subagent_type: "general" },
+          { sessionId: childID },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("General Task") && line.includes("inspect files")))
+      const raw = app.captureCharFrame().split("\n")
+      const y = raw.findIndex((line) => line.includes("General Task") && line.includes("inspect files"))
+      expect(y).toBeGreaterThanOrEqual(0)
+
+      await app.mockMouse.click(11, y + 1)
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session visible")))
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "inspect files (@general subagent)" }),
+        messages: [
+          {
+            id: "msg_child",
+            sessionID: childID,
+            role: "assistant",
+            time: { created: 2, completed: 3 },
+            parentID: "msg_child_user",
+            modelID: "model",
+            providerID: "provider",
+            mode: "build",
+            agent: "general",
+            path: { cwd: directory, root: directory },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          } satisfies AssistantMessage,
+        ],
+        parts: { msg_child: [textPart("part_child", "msg_child", "child session visible", { sessionID: childID })] },
+      },
+    },
+  )
+})
+
+test("task tool click refreshes a stale prefetched subagent session", async () => {
+  const childID = "ses_child_stale"
+  let childMessageRequests = 0
+  const childMessage = {
+    id: "msg_child_stale",
+    sessionID: childID,
+    role: "assistant",
+    time: { created: 2, completed: 3 },
+    parentID: "msg_child_user",
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "general",
+    path: { cwd: directory, root: directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  } satisfies AssistantMessage
+
+  await withRenderedSession(
+    [assistantMessage("msg_task_stale", 1)],
+    {
+      msg_task_stale: [
+        completedToolPart(
+          "part_task_stale",
+          "msg_task_stale",
+          "task",
+          { description: "inspect stale child", subagent_type: "general" },
+          { sessionId: childID },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("inspect stale child")))
+      await wait(() => childMessageRequests >= 1)
+      const raw = app.captureCharFrame().split("\n")
+      const y = raw.findIndex((line) => line.includes("inspect stale child"))
+      expect(y).toBeGreaterThanOrEqual(0)
+
+      await app.mockMouse.click(11, y + 1)
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session refreshed")))
+      expect(childMessageRequests).toBeGreaterThan(1)
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "inspect stale child (@general subagent)" }),
+        messages: () => {
+          childMessageRequests++
+          return childMessageRequests === 1 ? [] : [childMessage]
+        },
+        parts: { msg_child_stale: [textPart("part_child_stale", "msg_child_stale", "child session refreshed", { sessionID: childID })] },
+      },
     },
   )
 })
@@ -511,6 +621,14 @@ async function withRenderedSession(
   run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
   kv: Record<string, unknown> = {},
   dimensions: { width?: number; height?: number } = {},
+  extraSessions: Record<
+    string,
+    {
+      info: SessionInfo
+      messages: Array<AssistantMessage | SDKUserMessage> | (() => Array<AssistantMessage | SDKUserMessage>)
+      parts: Record<string, Part[]>
+    }
+  > = {},
 ) {
   const previous = Global.Path.state
   await using tmp = await tmpdir()
@@ -519,13 +637,26 @@ async function withRenderedSession(
 
   const info = sessionInfo()
   const calls = createFetch((url) => {
-    if (url.pathname === "/session") return json([info])
-    if (url.pathname === `/session/${sessionID}`) return json(info)
-    if (url.pathname === `/session/${sessionID}/message`) {
-      return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
+    const sessions: Record<
+      string,
+      {
+        info: SessionInfo
+        messages: Array<AssistantMessage | SDKUserMessage> | (() => Array<AssistantMessage | SDKUserMessage>)
+        parts: Record<string, Part[]>
+      }
+    > = { [sessionID]: { info, messages, parts }, ...extraSessions }
+    const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
+    if (url.pathname === "/session") return json(Object.values(sessions).map((session) => session.info))
+    if (match) {
+      const session = sessions[match[1]]
+      if (!session) return undefined
+      if (!match[2]) return json(session.info)
+      if (match[2] === "message") {
+        const sessionMessages = typeof session.messages === "function" ? session.messages() : session.messages
+        return json(sessionMessages.map((message) => ({ info: message, parts: session.parts[message.id] ?? [] })))
+      }
+      return json([])
     }
-    if (url.pathname === `/session/${sessionID}/todo`) return json([])
-    if (url.pathname === `/session/${sessionID}/diff`) return json([])
     return undefined
   })
 
@@ -622,7 +753,7 @@ function findRow(frame: string[], text: string) {
   return index
 }
 
-function sessionInfo() {
+function sessionInfo(extra: Partial<SessionInfo> = {}) {
   return {
     id: sessionID,
     slug: "render",
@@ -631,6 +762,7 @@ function sessionInfo() {
     title: "render",
     version: "1.0.0",
     time: { created: 1, updated: 1 },
+    ...extra,
   } satisfies SessionInfo
 }
 

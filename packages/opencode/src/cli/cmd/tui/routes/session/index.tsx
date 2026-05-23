@@ -2693,14 +2693,19 @@ function Task(props: ToolProps<typeof TaskTool>) {
     <InlineTool
       icon="│"
       spinner={isRunning()}
-      complete={props.input.description}
-      pending="Delegating..."
-      part={props.part}
-      onClick={() => {
-        if (props.metadata.sessionId) {
-          navigate({ type: "session", sessionID: props.metadata.sessionId })
-        }
-      }}
+        complete={props.input.description}
+        pending="Delegating..."
+        part={props.part}
+        onClick={() => {
+          if (props.metadata.sessionId) {
+            // Task metadata is written as soon as the child session exists, before
+            // its messages necessarily arrive. A previous prefetch can therefore
+            // mark the child as synced while it is still empty; force-refresh on
+            // explicit navigation so clicking a task always opens the live agent view.
+            void sync.session.sync(props.metadata.sessionId, { force: true })
+            navigate({ type: "session", sessionID: props.metadata.sessionId })
+          }
+        }}
     >
       {content()}
     </InlineTool>
