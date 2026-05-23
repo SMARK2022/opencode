@@ -580,6 +580,15 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
+  // #205：hidden 消息仍可作结构压缩锚点，但 undo/repair 后绝不能重放给 provider
+  // #205：边界遍历时保留它们，仅从返回的 prompt 窗口剔除
+  const visible = (items: WithParts[]) =>
+    items
+      .filter((msg) => !msg.info.hidden)
+      .map((msg) => ({
+        ...msg,
+        parts: msg.parts.filter((part) => !part.hidden),
+      }))
   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
   for (const msg of ordered) {
     result.push(msg)
@@ -597,8 +606,9 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     }
     if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
       break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
+    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
       completed.add(msg.info.parentID)
+    }
   }
   result.reverse()
   const compactionIndex = result.findLastIndex(
@@ -621,17 +631,18 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return [
+    return visible([
       ...result.slice(compactionIndex, summaryIndex + 1),
       ...result.slice(tailIndex, compactionIndex),
       ...result.slice(summaryIndex + 1),
-    ]
+    ])
   }
-  return result
+  return visible(result)
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  return filterCompacted(yield* stream(sessionID))
+  // #205：压缩恢复需要 hidden 结构锚点作为边界；visible() 会从返回的 prompt 窗口剔除它们
+  return filterCompacted(yield* stream(sessionID, { includeHidden: true }))
 })
 
 // filterCompacted reorders messages for model consumption
