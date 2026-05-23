@@ -150,6 +150,22 @@ describe("permission reviewer prompt", () => {
     expect(transcript.emptyEntries).toBe(true)
   })
 
+  test("transcript excludes reviewer protocol request cells as authorization evidence", () => {
+    const transcript = PermissionReviewerTranscript.fromMessages([
+      {
+        info: userInfo("msg_reviewer_protocol"),
+        parts: [
+          textPart("msg_reviewer_protocol", "prt_reviewer_protocol", "Auto permission review request", {
+            metadata: { permissionReviewerRequest: true },
+          }),
+        ],
+      },
+    ])
+
+    expect(transcript.entries).toEqual([])
+    expect(transcript.emptyEntries).toBe(true)
+  })
+
   test("transcript bounds a single retained entry with many visible parts", () => {
     const transcript = PermissionReviewerTranscript.fromMessages([
       {

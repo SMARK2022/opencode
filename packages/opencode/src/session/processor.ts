@@ -200,7 +200,13 @@ export const layer = Layer.effect(
             status: "completed",
             input: match.part.state.input,
             output: output.output,
-            metadata: output.metadata,
+            // Permission auto-review annotates the running tool part before the
+            // reviewed command executes. Tool completion replaces metadata with
+            // the tool's own result, so preserve that small review envelope here
+            // to keep the final shell card linked to the reviewer subagent.
+            metadata: match.part.state.metadata?.autoReview
+              ? { ...output.metadata, autoReview: match.part.state.metadata.autoReview }
+              : output.metadata,
             title: output.title,
             time: { start: match.part.state.time.start, end: Date.now() },
             attachments: output.attachments,
@@ -222,6 +228,10 @@ export const layer = Layer.effect(
             status: "error",
             input: match.part.state.input,
             error: errorMessage(error),
+            // Denied/failed auto reviews terminalize the shell as an error, but
+            // the UI still needs the review result line and reviewer-session link
+            // that were attached while the tool was running.
+            metadata: match.part.state.metadata?.autoReview ? { autoReview: match.part.state.metadata.autoReview } : undefined,
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })

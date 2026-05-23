@@ -6,7 +6,10 @@ export type Decision = { level: Level; reason: string }
 // an explicit `ask` result when the wrapper is too open-ended to inspect. These
 // helper result types intentionally do not include `allow`: wrapper execution is
 // never safe enough for deterministic approval by itself.
-type UnwrapResult = { action: "script"; script: string; reason: string } | { action: "ask"; reason: string } | { action: "none" }
+type UnwrapResult =
+  | { action: "script"; script: string; reason: string }
+  | { action: "ask"; reason: string }
+  | { action: "none" }
 type RemoteResult = { action: "remote"; script?: string; reason: string } | { action: "none" }
 
 // [local-smark] 四级预审分层开始
@@ -168,10 +171,16 @@ export function evaluate(input: {
     // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
     // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
     // ask，从而绕开 Auto agent 的 bash auto 路由。
-    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+    return evaluateShell(
+      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
+      0,
+    )
   }
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
-  return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+  return evaluateShell(
+    typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
+    0,
+  )
 }
 
 export function canAlwaysAllowPrefix(tokens: string[]) {
@@ -207,7 +216,8 @@ function evaluateShell(command: string, depth: number): Decision {
   if (dangerous) return dangerous
   const cautious = decisions.find((item) => item.level === "cautious")
   if (cautious) return cautious
-  if (decisions.every((item) => item.level === "safe")) return { level: "safe", reason: "known read-only shell command" }
+  if (decisions.every((item) => item.level === "safe"))
+    return { level: "safe", reason: "known read-only shell command" }
   return decisions.find((item) => item.level === "general") ?? { level: "general", reason: "unknown shell command" }
 }
 
@@ -388,7 +398,11 @@ function unwrap(tokens: string[]): UnwrapResult {
   if (cmd === "cmd") {
     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
     if (index >= 0 && tokens[index + 1]) {
-      return { action: "script", script: joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
+      return {
+        action: "script",
+        script: joinShellTokens(tokens.slice(index + 1)),
+        reason: "cmd wrapper requires explicit approval",
+      }
     }
     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
   }
@@ -400,7 +414,8 @@ function unwrap(tokens: string[]): UnwrapResult {
   if (["pythonw", "pyw", "pypy", "pypy3", "deno", "osascript"].includes(cmd)) {
     return { action: "ask", reason: "script interpreter requires explicit approval" }
   }
-  if (cmd === "bun" && tokens[1] === "x") return { action: "ask", reason: "package executor requires explicit approval" }
+  if (cmd === "bun" && tokens[1] === "x")
+    return { action: "ask", reason: "package executor requires explicit approval" }
   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
@@ -472,7 +487,11 @@ function dangerousRaw(command: string) {
   // Remote downloads piped directly to interpreters execute unreviewed network
   // bytes as code. Privilege/env wrappers are included because they are common
   // install-script indirections and should not downgrade to prompt.
-  if (/\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(normalized)) {
+  if (
+    /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(
+      normalized,
+    )
+  ) {
     return "remote download piped to interpreter; review the script locally before running safe commands"
   }
   // PowerShell aliases for web download plus `iex` are equivalent to curl|sh.
@@ -514,23 +533,43 @@ function dangerousRaw(command: string) {
     return "credential file sent with network transfer"
   }
   // `scp`, `sftp`, and `rsync` use `host:path` syntax rather than pipes/flags.
-  if (new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)) {
+  if (
+    new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)
+  ) {
     return "credential file sent with remote transfer"
   }
   // Common interpreter APIs and reverse shell idioms are scanned as raw text
   // because their dangerous target may be inside strings rather than tokens.
-  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(normalized)) {
+  if (
+    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(
+      normalized,
+    )
+  ) {
     return "critical PowerShell recursive delete"
   }
-  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) return "critical Python recursive delete"
-  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) return "critical Python file removal"
-  if (/(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
+  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized))
+    return "critical Python recursive delete"
+  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized))
+    return "critical Python file removal"
+  if (
+    /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(
+      normalized,
+    )
+  ) {
     return "critical Node.js file removal"
   }
-  if (/\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
+  if (
+    /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(
+      normalized,
+    )
+  ) {
     return "critical recursive delete through interpreter"
   }
-  if (/\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(normalized)) {
+  if (
+    /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(
+      normalized,
+    )
+  ) {
     return "reverse shell pattern"
   }
 }
@@ -543,7 +582,7 @@ function cautiousRaw(command: string) {
   // 本地敏感读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审。
   if (
     new RegExp(
-      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+      String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
       "i",
     ).test(normalized)
   ) {
@@ -564,14 +603,19 @@ function riskyTokens(tokens: string[]): Decision | undefined {
     }
     return { level: "cautious", reason: "recursive force delete requires explicit approval" }
   }
-  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/"))) return { level: "dangerous", reason: "raw disk write" }
+  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
+    return { level: "dangerous", reason: "raw disk write" }
   if (["mkfs", "mkfs.ext4", "fdisk", "parted", "wipefs", "shutdown", "reboot", "halt", "poweroff"].includes(cmd)) {
     return { level: "dangerous", reason: "system destructive command" }
   }
   if (cmd === "git" && tokens[1] === "reset" && tokens.includes("--hard")) {
     return { level: "cautious", reason: "destructive git reset requires explicit approval" }
   }
-  if (cmd === "git" && tokens[1] === "clean" && tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))) {
+  if (
+    cmd === "git" &&
+    tokens[1] === "clean" &&
+    tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))
+  ) {
     return { level: "cautious", reason: "destructive git clean requires explicit approval" }
   }
   if (cmd === "git" && tokens[1] === "push" && tokens.some((item) => item === "--force" || item === "-f")) {
@@ -592,7 +636,8 @@ function riskyTokens(tokens: string[]): Decision | undefined {
     }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
-  if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
+  if (["scp", "sftp", "rsync"].includes(cmd))
+    return { level: "cautious", reason: "remote file transfer requires explicit approval" }
 }
 
 function cautiousGitSubcommand(tokens: string[]) {
@@ -602,7 +647,10 @@ function cautiousGitSubcommand(tokens: string[]) {
   // cautious 后仅 auto 分支的 reviewer/user 会判断是否符合用户意图。
   const subcommand = tokens[1]
   if (!subcommand) return false
-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)) return true
+  if (
+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)
+  )
+    return true
   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
   // [local-smark] Git 谨慎子命令识别结束
 }
@@ -613,7 +661,26 @@ function readsSensitivePath(tokens: string[]) {
   // dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
   // 所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权。
   const cmd = normalizeCommandName(tokens[0])
-  if (!["cat", "type", "get-content", "gc", "get-childitem", "gci", "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
+  if (
+    ![
+      "cat",
+      "type",
+      "get-content",
+      "gc",
+      "get-childitem",
+      "gci",
+      "ls",
+      "dir",
+      "grep",
+      "rg",
+      "head",
+      "tail",
+      "less",
+      "more",
+      "sed",
+      "awk",
+    ].includes(cmd)
+  ) {
     return false
   }
   return hasSensitivePath(tokens)
@@ -624,7 +691,9 @@ function joinShellTokens(tokens: string[]) {
   // Reconstruct cmd/WSL payloads for recursive raw scanning without reusing the
   // original command text. Quoting keeps spaces intact and avoids inventing new
   // separators while still surfacing dangerous substrings to `dangerousRaw`.
-  return tokens.map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`)).join(" ")
+  return tokens
+    .map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`))
+    .join(" ")
 }
 
 function decodePowerShell(input: string) {
@@ -632,7 +701,9 @@ function decodePowerShell(input: string) {
   // rather than deny because opaque encoded text is risky but not evidence of a
   // specific critical payload.
   try {
-    return Buffer.from(input, "base64").toString("utf16le").replace(/^\uFEFF/, "")
+    return Buffer.from(input, "base64")
+      .toString("utf16le")
+      .replace(/^\uFEFF/, "")
   } catch {
     return
   }
@@ -643,7 +714,10 @@ function hasRecursiveForceDeleteFlags(tokens: string[]) {
   // short flags (`-r -f`, `-R -f`), or long flags. Treat the pair as equivalent
   // before checking protected targets so option spelling cannot downgrade a root
   // delete from deny to prompt.
-  return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) && tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
+  return (
+    tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) &&
+    tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
+  )
 }
 
 function protectedDeleteTarget(input: string) {
@@ -673,13 +747,16 @@ function safeTokens(tokens: string[]) {
   // `cat README.md` is otherwise a safe file read.
   const cmd = normalizeCommandName(tokens[0])
   if (hasSensitivePath(tokens)) return false
-  if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd)) return true
+  if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd))
+    return true
   if (cmd === "tail") return !tokens.some((item) => item === "-f" || item === "--follow")
   if (cmd === "rg") return !tokens.some(unsafeRipgrepFlag)
-  if (cmd === "find") return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
+  if (cmd === "find")
+    return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
   if (cmd === "sed") return tokens.length <= 4 && tokens[1] === "-n" && /^\d+(?:,\d+)?p$/.test(tokens[2] ?? "")
   if (cmd === "git") return gitSafe(tokens)
-  if (["npm", "pnpm", "yarn"].includes(cmd)) return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
+  if (["npm", "pnpm", "yarn"].includes(cmd))
+    return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
   return versionSafe(tokens)
 }
 
@@ -692,7 +769,8 @@ function gitSafe(tokens: string[]) {
   const safe = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame"])
   let subcommand: string | undefined
   for (let i = 1; i < tokens.length; i++) {
-    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "="))) return false
+    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "=")))
+      return false
     if (unsafeReadFlag.has(tokens[i])) return false
     if (tokens[i] === "remote") return tokens[i + 1] === "-v"
     if (tokens[i] === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
@@ -706,7 +784,15 @@ function unsafeRipgrepFlag(item: string) {
   // [local-smark] rg 外部命令 flag 保护开始
   // `rg --pre=cmd` 和 `--hostname-bin=cmd` 会执行外部程序；native shell backend
   // 没有 sandbox，因此这些 read-looking 命令不能进入 safe 直通路径。
-  return item === "-z" || item === "--pre" || item.startsWith("--pre=") || item === "--hostname-bin" || item.startsWith("--hostname-bin=") || item === "--search-zip" || item.startsWith("--search-zip=")
+  return (
+    item === "-z" ||
+    item === "--pre" ||
+    item.startsWith("--pre=") ||
+    item === "--hostname-bin" ||
+    item.startsWith("--hostname-bin=") ||
+    item === "--search-zip" ||
+    item.startsWith("--search-zip=")
+  )
   // [local-smark] rg 外部命令 flag 保护结束
 }
 

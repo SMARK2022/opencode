@@ -3,7 +3,13 @@ import { expect, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
-import type { AssistantMessage, GlobalEvent, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
+import type {
+  AssistantMessage,
+  GlobalEvent,
+  Part,
+  Session as SessionInfo,
+  UserMessage as SDKUserMessage,
+} from "@opencode-ai/sdk/v2"
 import { onCleanup } from "solid-js"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
@@ -39,7 +45,7 @@ test("assistant inline tool messages are separated outside the message border", 
       msg_two: [completedToolPart("part_grep", "msg_two", "grep", { pattern: "needle" })],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Grep \"needle\"")))
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes('Grep "needle"')))
       const read = findRow(frame, "Read alpha.ts")
 
       expect(frame[read]).toMatch(/^┃\s+→ Read alpha\.ts/)
@@ -61,7 +67,8 @@ test("assistant internal part spacing keeps the same message border continuous",
     async (app) => {
       const frame = await waitForFrame(
         app,
-        (lines) => lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
+        (lines) =>
+          lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
       )
       const thinking = findRow(frame, "Thinking")
 
@@ -76,7 +83,10 @@ test("assistant first visible part does not inherit top spacing from hidden part
   await withRenderedSession(
     [assistantMessage("msg_hidden", 1)],
     {
-      msg_hidden: [textPart("part_empty", "msg_hidden", "   "), textPart("part_visible", "msg_hidden", "First visible")],
+      msg_hidden: [
+        textPart("part_empty", "msg_hidden", "   "),
+        textPart("part_visible", "msg_hidden", "First visible"),
+      ],
     },
     async (app) => {
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("First visible")))
@@ -127,7 +137,9 @@ test("pending edit tool shows streamed deletion and addition counts", async () =
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts +1 -2")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Edit src/space file.ts +1 -2")),
+      )
       expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("+1 -2")
     },
   )
@@ -236,11 +248,240 @@ test("pending tool line counts update from streamed raw deltas", async () => {
   )
 })
 
+test("shell tool renders auto review as a second status line", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_auto_review", 1)],
+    {
+      msg_auto_review: [
+        runningToolPart("part_shell_review", "msg_auto_review", "bash", {
+          command: 'Get-Content -Path "$env:USERPROFILE\\.ssh\\id_rsa"',
+          metadata: {
+            autoReview: {
+              reviewID: "review_shell",
+              sessionID: "ses_reviewer_child",
+              status: "reviewing",
+              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
+            },
+          },
+        }),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("◌ auto review · cautious · @permission-reviewer")),
+      )
+      const command = findRow(frame, 'Get-Content -Path "$env:USERPROFILE\\.ssh\\id_rsa"')
+      expect(frame[command + 1]).toContain("◌ auto review · cautious · @permission-reviewer")
+    },
+  )
+})
+
+test("completed shell tool keeps the auto review result line", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_auto_review_done", 1)],
+    {
+      msg_auto_review_done: [
+        completedToolPart(
+          "part_shell_review_done",
+          "msg_auto_review_done",
+          "bash",
+          { command: "git push origin main" },
+          {
+            output: "pushed",
+            autoReview: {
+              reviewID: "review_shell_done",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
+      )
+      const command = findRow(frame, "$ git push origin main")
+      expect(frame[command + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+    },
+  )
+})
+
+test("collapsed completed shell preview keeps the auto review result line", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_auto_review_collapsed", 1)],
+    {
+      msg_auto_review_collapsed: [
+        completedToolPart(
+          "part_shell_review_collapsed",
+          "msg_auto_review_collapsed",
+          "bash",
+          { command: "git push origin main" },
+          {
+            output: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
+            autoReview: {
+              reviewID: "review_shell_collapsed",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toBe(
+        true,
+      )
+    },
+  )
+})
+
+test("errored shell tool keeps the denied auto review result line", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_auto_review_error", 1)],
+    {
+      msg_auto_review_error: [
+        errorToolPart(
+          "part_shell_review_error",
+          "msg_auto_review_error",
+          "bash",
+          { command: "git push origin main" },
+          "auto reviewer denied",
+          {
+            autoReview: {
+              reviewID: "review_shell_error",
+              sessionID: "ses_reviewer_child",
+              status: "denied",
+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "unknown", rationale: "push was not authorized" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("! auto review · denied · high risk · auth unknown")),
+      )
+      const command = findRow(frame, "git push origin main")
+      expect(frame[command + 1]).toContain("! auto review · denied · high risk · auth unknown")
+    },
+  )
+})
+
+test("permission review decision renders as a reviewer cell", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_review_decision", 1)],
+    {
+      msg_review_decision: [
+        completedToolPart(
+          "part_review_decision",
+          "msg_review_decision",
+          "permission_review_decision",
+          {
+            outcome: "deny",
+            risk_level: "high",
+            user_authorization: "unknown",
+            rationale: "private key read was not explicitly authorized",
+          },
+          {
+            outcome: "deny",
+            risk_level: "high",
+            user_authorization: "unknown",
+            rationale: "private key read was not explicitly authorized",
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("denied")) &&
+          lines.some((line) => line.includes("high")) &&
+          lines.some((line) => line.includes("unknown")) &&
+          lines.some((line) => line.includes("rationale")) &&
+          lines.some((line) => line.includes("private key read was not explicitly authorized")),
+      )
+      expect(frame.some((line) => line.includes("! Permission review decision"))).toBe(false)
+    },
+  )
+})
+
+test("reviewer child session shows full reviewer prompt and assistant rationale before decision tool", async () => {
+  await withRenderedSession(
+    [userMessage("msg_review_request", 1), assistantMessage("msg_review_answer", 2, "msg_review_request")],
+    {
+      msg_review_request: [
+        textPart(
+          "part_review_request",
+          "msg_review_request",
+          [
+            "system:",
+            "You are opencode's isolated permission reviewer.",
+            "",
+            "user:",
+            ">>> TRANSCRIPT START",
+            "[1] user: please inspect the exact key file",
+            ">>> TRANSCRIPT END",
+            ">>> APPROVAL REQUEST START",
+            '{"permission":"bash"}',
+            ">>> APPROVAL REQUEST END",
+          ].join("\n"),
+          { metadata: { permissionReviewerRequest: true } },
+        ),
+      ],
+      msg_review_answer: [
+        textPart(
+          "part_review_text",
+          "msg_review_answer",
+          "The requested private key read is not explicitly authorized.",
+        ),
+        completedToolPart(
+          "part_review_decision_flow",
+          "msg_review_answer",
+          "permission_review_decision",
+          {
+            outcome: "deny",
+            risk_level: "high",
+            user_authorization: "unknown",
+            rationale: "private key read was not explicitly authorized",
+          },
+          {
+            outcome: "deny",
+            risk_level: "high",
+            user_authorization: "unknown",
+            rationale: "private key read was not explicitly authorized",
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes(">>> TRANSCRIPT START")) &&
+          lines.some((line) => line.includes(">>> APPROVAL REQUEST START")) &&
+          lines.some((line) => line.includes("rationale")) &&
+          lines.some((line) => line.includes("private key read")),
+      )
+    },
+    {},
+    { height: 42 },
+  )
+})
+
 async function withRenderedSession(
-  messages: AssistantMessage[],
+  messages: Array<AssistantMessage | SDKUserMessage>,
   parts: Record<string, Part[]>,
   run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
   kv: Record<string, unknown> = {},
+  dimensions: { width?: number; height?: number } = {},
 ) {
   const previous = Global.Path.state
   await using tmp = await tmpdir()
@@ -261,8 +502,8 @@ async function withRenderedSession(
 
   const events = createEventSource()
   const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
-    width: 80,
-    height: 16,
+    width: dimensions.width ?? 80,
+    height: dimensions.height ?? 16,
     footerHeight: 0,
   })
 
@@ -274,7 +515,10 @@ async function withRenderedSession(
   }
 }
 
-function SessionHarness(props: { fetch: typeof globalThis.fetch; events: ReturnType<typeof createEventSource>["source"] }) {
+function SessionHarness(props: {
+  fetch: typeof globalThis.fetch
+  events: ReturnType<typeof createEventSource>["source"]
+}) {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
@@ -361,13 +605,24 @@ function sessionInfo() {
   } satisfies SessionInfo
 }
 
-function assistantMessage(id: string, created: number) {
+function userMessage(id: string, created: number) {
+  return {
+    id,
+    sessionID,
+    role: "user",
+    time: { created },
+    agent: "permission-reviewer",
+    model: { providerID: "provider", modelID: "model" },
+  } satisfies SDKUserMessage
+}
+
+function assistantMessage(id: string, created: number, parentID = "msg_user") {
   return {
     id,
     sessionID,
     role: "assistant",
     time: { created, completed: created + 1 },
-    parentID: "msg_user",
+    parentID,
     modelID: "model",
     providerID: "provider",
     mode: "build",
@@ -378,17 +633,24 @@ function assistantMessage(id: string, created: number) {
   } satisfies AssistantMessage
 }
 
-function textPart(id: string, messageID: string, text: string) {
+function textPart(id: string, messageID: string, text: string, extra: Partial<Extract<Part, { type: "text" }>> = {}) {
   return {
     id,
     sessionID,
     messageID,
     type: "text",
     text,
+    ...extra,
   } satisfies Extract<Part, { type: "text" }>
 }
 
-function completedToolPart(id: string, messageID: string, tool: string, input: Record<string, unknown>) {
+function completedToolPart(
+  id: string,
+  messageID: string,
+  tool: string,
+  input: Record<string, unknown>,
+  metadata: Record<string, unknown> = {},
+) {
   return {
     id,
     sessionID,
@@ -401,7 +663,56 @@ function completedToolPart(id: string, messageID: string, tool: string, input: R
       input,
       output: "",
       title: tool,
-      metadata: {},
+      metadata,
+      time: { start: 1, end: 2 },
+    },
+  } satisfies Extract<Part, { type: "tool" }>
+}
+
+function runningToolPart(
+  id: string,
+  messageID: string,
+  tool: string,
+  input: Record<string, unknown> & { metadata?: Record<string, unknown> },
+) {
+  const metadata = input.metadata ?? {}
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "tool",
+    callID: id,
+    tool,
+    state: {
+      status: "running",
+      input: Object.fromEntries(Object.entries(input).filter(([key]) => key !== "metadata")),
+      title: tool,
+      metadata,
+      time: { start: 1 },
+    },
+  } satisfies Extract<Part, { type: "tool" }>
+}
+
+function errorToolPart(
+  id: string,
+  messageID: string,
+  tool: string,
+  input: Record<string, unknown>,
+  error: string,
+  metadata: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "tool",
+    callID: id,
+    tool,
+    state: {
+      status: "error",
+      input,
+      error,
+      metadata,
       time: { start: 1, end: 2 },
     },
   } satisfies Extract<Part, { type: "tool" }>

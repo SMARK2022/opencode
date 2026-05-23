@@ -281,7 +281,11 @@ export function Session() {
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
   const local = useLocal()
   const userMessageAgentColors = createMemo(() => {
-    return new Map(messages().filter((m) => m.role === "user").map((m) => [m.id, local.agent.color(m.agent)]))
+    return new Map(
+      messages()
+        .filter((m) => m.role === "user")
+        .map((m) => [m.id, local.agent.color(m.agent)]),
+    )
   })
   function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
     const s = scroll
@@ -1886,6 +1890,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "question"}>
           <Question {...toolprops} />
         </Match>
+        <Match when={props.part.tool === "permission_review_decision"}>
+          <PermissionReviewDecision {...toolprops} />
+        </Match>
         <Match when={props.part.tool === "skill"}>
           <Skill {...toolprops} />
         </Match>
@@ -1991,18 +1998,85 @@ function GenericTool(props: ToolProps<any>) {
         </InlineTool>
       }
     >
-        <BlockTool
-          title={`# ${props.tool} ${input(props.input)}`}
-          part={props.part}
-          maxLines={10}
-          threshold={20}
-          totalLines={output().split("\n").length}
-          totalChars={output().length}
-          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
-        >
+      <BlockTool
+        title={`# ${props.tool} ${input(props.input)}`}
+        part={props.part}
+        maxLines={10}
+        threshold={20}
+        totalLines={output().split("\n").length}
+        totalChars={output().length}
+        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+      >
         <text fg={theme.text}>{output()}</text>
-        </BlockTool>
+      </BlockTool>
     </Show>
+  )
+}
+
+type AutoReviewMetadata = {
+  reviewID: string
+  sessionID?: string
+  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
+  precheck?: { level: string; reason: string }
+  result?: { risk_level: string; user_authorization: string; rationale: string }
+}
+
+function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>): AutoReviewMetadata | undefined {
+  const value = (metadata as Record<string, unknown>).autoReview
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  const review = value as Record<string, unknown>
+  if (typeof review.reviewID !== "string") return
+  return review as AutoReviewMetadata
+}
+
+function autoReviewLabel(review: AutoReviewMetadata) {
+  const agent = "@permission-reviewer"
+  // Keep the main shell card to the agreed two-line contract: command first,
+  // then one compact review status line. The three glyphs are stable UI states:
+  // ◌ means the hidden reviewer agent is running, ✓ means the reviewer allowed
+  // execution, and ! covers all non-allow terminal outcomes.
+  switch (review.status) {
+    case "allowed":
+      return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
+    case "denied":
+      return `! auto review · denied · ${review.result?.risk_level ?? "unknown"} risk · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
+    case "timed_out":
+      return `! auto review · timed out · failed closed · ${agent}`
+    case "failed":
+      return `! auto review · failed · failed closed · ${agent}`
+    case "fallback_user":
+      return `! auto review · unavailable · asking user · ${agent}`
+    default:
+      return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
+  }
+}
+
+function autoReviewColor(review: AutoReviewMetadata, theme: ReturnType<typeof useTheme>["theme"]) {
+  if (review.status === "allowed") return theme.success
+  if (review.status && review.status !== "reviewing") return theme.warning
+  return theme.info
+}
+
+function AutoReviewLine(props: { review: AutoReviewMetadata }) {
+  const { theme } = useTheme()
+  const { navigate } = useRoute()
+  const renderer = useRenderer()
+  const [hover, setHover] = createSignal(false)
+  const clickable = createMemo(() => Boolean(props.review.sessionID))
+  return (
+    <box
+      onMouseOver={() => clickable() && setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => {
+        if (!props.review.sessionID) return
+        if (renderer.getSelection()?.getSelectedText()) return
+        navigate({ type: "session", sessionID: props.review.sessionID })
+      }}
+    >
+      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
+        {autoReviewLabel(props.review)}
+      </text>
+    </box>
   )
 }
 
@@ -2085,7 +2159,12 @@ function InlineTool(props: {
           <Spinner color={fg()} children={props.children} />
         </Match>
         <Match when={true}>
-          <text paddingLeft={3} fg={fg()} wrapMode="none" attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
+          <text
+            paddingLeft={3}
+            fg={fg()}
+            wrapMode="none"
+            attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}
+          >
             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
               <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
             </Show>
@@ -2207,8 +2286,10 @@ function BlockTool(props: {
 
 function Shell(props: ToolProps<typeof ShellTool>) {
   const { theme } = useTheme()
+  const { navigate } = useRoute()
   const pathFormatter = usePathFormatter()
   const isRunning = createMemo(() => props.part.state.status === "running")
+  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
   const [showContextOutput, setShowContextOutput] = createSignal(false)
   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
   const output = createMemo(() => {
@@ -2216,8 +2297,13 @@ function Shell(props: ToolProps<typeof ShellTool>) {
     return stripAnsi(text?.trim() ?? "")
   })
   const shellPreviewText = createMemo(() => {
-    if (!output()) return `$ ${props.input.command ?? ""}`
-    return [`$ ${props.input.command ?? ""}`, "", output()].join("\n")
+    const review = autoReview()
+    const header = [`$ ${props.input.command ?? ""}`, review ? autoReviewLabel(review) : undefined].filter(Boolean)
+    // Collapsed shell previews must keep the same two-line review contract as
+    // the expanded body; otherwise long outputs hide the allow/deny reviewer
+    // result until the user expands the command card.
+    if (!output()) return header.join("\n")
+    return [...header, "", output()].join("\n")
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2255,8 +2341,9 @@ function Shell(props: ToolProps<typeof ShellTool>) {
           contextLabel="returned to model"
           preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
         >
-          <box gap={1}>
+          <box>
             <text fg={theme.text}>$ {props.input.command}</text>
+            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
             <Show when={showContextOutput()}>
               <text fg={theme.info}>Model context output</text>
             </Show>
@@ -2267,11 +2354,56 @@ function Shell(props: ToolProps<typeof ShellTool>) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="$" pending="Writing command..." complete={props.input.command} part={props.part}>
-          {props.input.command}
+        <InlineTool
+          icon="$"
+          pending="Writing command..."
+          complete={props.input.command}
+          part={props.part}
+          onClick={() => {
+            const sessionID = autoReview()?.sessionID
+            if (sessionID) navigate({ type: "session", sessionID })
+          }}
+        >
+          {[props.input.command, autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
+            .filter(Boolean)
+            .join("\n")}
         </InlineTool>
       </Match>
     </Switch>
+  )
+}
+
+function PermissionReviewDecision(props: ToolProps<any>) {
+  const { theme } = useTheme()
+  const decision = createMemo(() => ({ ...props.input, ...props.metadata }) as Record<string, unknown>)
+  const outcome = createMemo(() => (decision().outcome === "allow" ? "allowed" : "denied"))
+  const risk = createMemo(() => String(decision().risk_level ?? "unknown"))
+  const auth = createMemo(() => String(decision().user_authorization ?? "unknown"))
+  const rationale = createMemo(() => (typeof decision().rationale === "string" ? decision().rationale : ""))
+  return (
+    <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
+      <box flexDirection="column" gap={1}>
+        {/* Keep the structured decision evidence in the tool cell: the assistant text may debate alternatives, but this metadata is the audited final reviewer output. */}
+        <box gap={1}>
+          <text fg={theme.textMuted}>outcome</text>
+          <text fg={theme.text}>{outcome()}</text>
+        </box>
+        <box gap={1}>
+          <text fg={theme.textMuted}>risk</text>
+          <text fg={theme.text}>{risk()}</text>
+        </box>
+        <box gap={1}>
+          <text fg={theme.textMuted}>auth</text>
+          <text fg={theme.text}>{auth()}</text>
+        </box>
+        <Show when={rationale()}>
+          <box flexDirection="column">
+            <text fg={theme.textMuted}>rationale</text>
+            <text fg={theme.text}>{rationale()}</text>
+          </box>
+        </Show>
+      </box>
+    </BlockTool>
   )
 }
 
@@ -2356,7 +2488,9 @@ function Write(props: ToolProps<typeof WriteTool>) {
           threshold={20}
           totalLines={diffStats().total}
           totalChars={diff()!.length}
-          preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
+          preview={
+            <DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
+          }
         >
           <box gap={1} flexDirection="column">
             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
@@ -2600,7 +2734,14 @@ function Edit(props: ToolProps<typeof EditTool>) {
           threshold={20}
           totalLines={stats().total}
           totalChars={diffContent().length}
-          preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
+          preview={
+            <DiffPreview
+              diff={previewDiff(diffContent(), 10)}
+              filePath={props.input.filePath}
+              view={view()}
+              maxLines={10}
+            />
+          }
         >
           <box gap={1} flexDirection="column">
             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
@@ -2628,7 +2769,8 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
     const filePath = pendingPath(pathFormatter, stats.filePath)
     return (
       <>
-        Patch <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
+        Patch{" "}
+        <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
           {filePath}
         </Show>
         <PendingStats stats={stats} />
@@ -2660,45 +2802,50 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
 
   return (
     <Switch>
-        <Match when={files().length > 0}>
-          <For each={files()}>
-            {(file) => (
-              <BlockTool
-                title={title(file)}
-                part={props.part}
-                maxLines={10}
-                threshold={20}
-                totalLines={(file.patch ?? "").split("\n").length}
-                totalChars={(file.patch ?? "").length}
-                preview={
-                  <Show
-                    when={file.type !== "delete"}
-                    fallback={
-                      <text fg={theme.diffRemoved} paddingLeft={1}>
-                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                      </text>
-                    }
-                  >
-                    <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
-                  </Show>
-                }
-              >
-                <box gap={1} flexDirection="column">
-                  <Show
-                    when={file.type !== "delete"}
-                    fallback={
-                      <text fg={theme.diffRemoved} paddingLeft={1}>
-                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                      </text>
-                    }
-                  >
-                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-                  </Show>
-                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-                </box>
-              </BlockTool>
-            )}
-          </For>
+      <Match when={files().length > 0}>
+        <For each={files()}>
+          {(file) => (
+            <BlockTool
+              title={title(file)}
+              part={props.part}
+              maxLines={10}
+              threshold={20}
+              totalLines={(file.patch ?? "").split("\n").length}
+              totalChars={(file.patch ?? "").length}
+              preview={
+                <Show
+                  when={file.type !== "delete"}
+                  fallback={
+                    <text fg={theme.diffRemoved} paddingLeft={1}>
+                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                    </text>
+                  }
+                >
+                  <DiffPreview
+                    diff={previewDiff(file.patch || "", 10)}
+                    filePath={file.filePath}
+                    view={view()}
+                    maxLines={10}
+                  />
+                </Show>
+              }
+            >
+              <box gap={1} flexDirection="column">
+                <Show
+                  when={file.type !== "delete"}
+                  fallback={
+                    <text fg={theme.diffRemoved} paddingLeft={1}>
+                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                    </text>
+                  }
+                >
+                  <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
+                </Show>
+                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+              </box>
+            </BlockTool>
+          )}
+        </For>
       </Match>
       <Match when={true}>
         <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>

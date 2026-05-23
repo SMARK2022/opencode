@@ -20,7 +20,12 @@ const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Revie
       {
         permission: "external_directory",
         patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
-        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash" },
+        metadata: {
+          action_kind: "shell",
+          command,
+          cwd: process.cwd(),
+          shell: process.platform === "win32" ? "powershell" : "bash",
+        },
       },
       reviewer,
     ),
@@ -161,11 +166,20 @@ describe("permission auto routing", () => {
     await expect(
       bash(String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`, reviewer),
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    await expect(
+      bash(
+        String.raw`if (Test-Path -LiteralPath "$env:USERPROFILE\.ssh\id_rsa") { Get-Content -LiteralPath "$env:USERPROFILE\.ssh\id_rsa" } else { "id_rsa not found" }`,
+        reviewer,
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
     expect(called).toBe(true)
   })
 
   test("uses shell evidence for external directory auto routing", async () => {
-    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
+    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({
+      action: "allow",
+      source: "precheck",
+    })
 
     let called = false
     await expect(
@@ -196,7 +210,9 @@ describe("permission auto routing", () => {
           {
             permission: "external_directory",
             patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
-            metadata: { filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa" },
+            metadata: {
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
           },
           {
             review: () =>

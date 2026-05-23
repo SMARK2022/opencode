@@ -507,7 +507,9 @@ it.instance(
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
       const payload = Buffer.from(
-        yield* Effect.promise(() => Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer()),
+        yield* Effect.promise(() =>
+          Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer(),
+        ),
       ).toString("base64")
 
       yield* prompt.prompt({
@@ -748,6 +750,82 @@ it.instance(
         expect(result.parts.some((part) => part.type === "text" && part.text === "second")).toBe(true)
         expect(result.info.finish).toBe("stop")
       }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer persists real reasoning and decision tool parts",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer stream" })
+      const command = String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`
+      yield* llm.push(
+        reply()
+          .reason("Checking whether the user explicitly authorized private key disclosure.")
+          .tool("permission_review_decision", {
+            outcome: "deny",
+            risk_level: "high",
+            user_authorization: "unknown",
+            rationale: "private key read was not explicitly authorized",
+          })
+          .item(),
+      )
+
+      yield* permissions
+        .ask({
+          sessionID: chat.id,
+          permission: "bash",
+          patterns: [command],
+          metadata: { command, agent: "Auto" },
+          always: ["*"],
+          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+        })
+        .pipe(Effect.flip)
+
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      const inputs = yield* llm.inputs
+      expect(inputs[0].tool_choice).not.toBe("required")
+      expect(JSON.stringify(inputs[0].tools)).toContain("permission_review_decision")
+      expect(inputs[0].tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            function: expect.objectContaining({
+              name: "permission_review_decision",
+              parameters: expect.objectContaining({ type: "object" }),
+            }),
+          }),
+        ]),
+      )
+      expect(inputs[0].max_tokens).toBe(10000)
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
+        ),
+      ).toBe(true)
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some((part) => part.type === "reasoning" && part.text.includes("explicitly authorized")),
+        ),
+      ).toBe(true)
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.rationale === "private key read was not explicitly authorized",
+          ),
+        ),
+      ).toBe(true)
     }),
   { git: true },
 )

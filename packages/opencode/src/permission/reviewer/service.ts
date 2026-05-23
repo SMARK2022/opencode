@@ -1,10 +1,14 @@
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
+import { ProviderTransform } from "@/provider/transform"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, PartID, SessionID } from "@/session/schema"
-import { generateObject, type ModelMessage } from "ai"
+import { toJsonSchema } from "@/util/effect-zod"
+import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } from "ai"
 import { Context, Effect, Layer, Schema, Semaphore } from "effect"
+import * as Stream from "effect/Stream"
+import { mergeDeep } from "remeda"
 import { PermissionReviewerPrompt } from "./prompt"
 import { Assessment, ReviewerRequest } from "./schema"
 import { PermissionReviewerTranscript } from "./transcript"
@@ -47,6 +51,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
 
 const REVIEWER_MESSAGE_FETCH_LIMIT = 120
 
+const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
+  mergeDeep(target, source ?? {}) as Record<string, any>
+
 // The reviewer layer is provider-backed but intentionally receives only a bounded
 // transcript projection plus the planned action JSON. It never reuses the main
 // agent's model messages, tools, or scratchpad as reviewer context.
@@ -58,123 +65,134 @@ export const layer = Layer.effect(
     const sessions = yield* Session.Service
     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
 
-    const review: Interface["review"] = (input) => Effect.gen(function* () {
-      const cfg = yield* config.get()
-      const permission = cfg.permission
-      if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
-      const autoReview = permission?.auto_review
+    const review: Interface["review"] = (input) =>
+      Effect.gen(function* () {
+        const cfg = yield* config.get()
+        const permission = cfg.permission
+        if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
+        const autoReview = permission?.auto_review
 
-      const run = Effect.gen(function* () {
-        const request = new ReviewerRequest({
-          permission: input.permission,
-          patterns: [...input.patterns],
-          metadata: { ...input.metadata },
-          precheck: input.precheck,
-        })
-        const tenantPolicy = yield* loadTenantPolicy(autoReview)
-        // Transcript collection is best-effort and bounded twice: fetch a wider
-        // recent window than the final reviewer prompt, then let transcript
-        // selection preserve user anchors and cap entries/chars. This avoids
-        // walking very old sessions on the permission path while still keeping
-        // substantially more authorization context than the final prompt size.
-        const transcript = input.sessionID
-          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
-              .pipe(
+        const run = Effect.gen(function* () {
+          const request = new ReviewerRequest({
+            permission: input.permission,
+            patterns: [...input.patterns],
+            metadata: { ...input.metadata },
+            precheck: input.precheck,
+          })
+          const model = autoReview?.model
+            ? // User-specified reviewer models use the same provider/model parser as
+              // normal agent config so aliases and provider validation stay in one
+              // place. A bad model fails closed unless fallback=user is configured.
+              yield* provider.getModel(
+                Provider.parseModel(autoReview.model).providerID,
+                Provider.parseModel(autoReview.model).modelID,
+              )
+            : yield* Effect.gen(function* () {
+                const current = yield* provider.defaultModel()
+                return (
+                  (yield* provider.getSmallModel(current.providerID)) ??
+                  (yield* provider.getModel(current.providerID, current.modelID))
+                )
+              })
+          const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+          yield* markToolReviewing(input, reviewerSession?.id)
+          const tenantPolicy = yield* loadTenantPolicy(autoReview)
+          // Transcript collection is best-effort and bounded twice: fetch a wider
+          // recent window than the final reviewer prompt, then let transcript
+          // selection preserve user anchors and cap entries/chars. This avoids
+          // walking very old sessions on the permission path while still keeping
+          // substantially more authorization context than the final prompt size.
+          const transcript = input.sessionID
+            ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
                 Effect.map((page) => {
                   const transcript = PermissionReviewerTranscript.fromMessages(page.items)
                   return { ...transcript, truncated: transcript.truncated || page.more }
                 }),
                 Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
               )
-          : { entries: [], truncated: false, entryTruncated: false }
-        const messages = buildMessages({
-          system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
-          userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
-        })
-        const model = autoReview?.model
-          // User-specified reviewer models use the same provider/model parser as
-          // normal agent config so aliases and provider validation stay in one
-          // place. A bad model fails closed unless fallback=user is configured.
-          ? yield* provider.getModel(
-              Provider.parseModel(autoReview.model).providerID,
-              Provider.parseModel(autoReview.model).modelID,
-            )
-          : yield* Effect.gen(function* () {
-              const current = yield* provider.defaultModel()
-              return (yield* provider.getSmallModel(current.providerID)) ?? (yield* provider.getModel(current.providerID, current.modelID))
-            })
-        const language = yield* provider.getLanguage(model)
-        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
-        yield* markToolReviewing(input)
-        const reviewerUser = reviewerSession
-          ? yield* recordReviewerRequest({
-              session: reviewerSession,
-              model,
-              text: messages.map((message) => `${message.role}: ${message.content}`).join("\n\n"),
-            })
-          : undefined
-        // Use structured generation instead of free-form text parsing. The schema
-        // enforces the JSON shape; PermissionAuto still performs semantic checks
-        // for contradictory allows after the object is returned.
-        const assessment = yield* Effect.promise(() =>
-          generateObject({
-            model: language,
+            : { entries: [], truncated: false, entryTruncated: false }
+          const messages = buildMessages({
+            system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
+            userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
+          })
+          const reviewerUser = reviewerSession
+            ? yield* recordReviewerRequest({
+                session: reviewerSession,
+                model,
+                text: renderReviewerPrompt(messages),
+              })
+            : undefined
+          const assessment = yield* runReviewerAgent({
+            session: reviewerSession,
+            model,
+            parentID: reviewerUser?.id,
             messages,
-            schema: Object.assign(Schema.toStandardSchemaV1(Assessment), Schema.toStandardJSONSchemaV1(Assessment)),
-          }).then((result) => result.object),
-        ).pipe(
-          Effect.timeoutOrElse({
-            // Timeout is a security boundary: if the reviewer cannot complete in
-            // time, the tool call must not execute unless explicit user fallback
-            // is configured below.
-            duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
-            orElse: () => Effect.fail(new ReviewerTimedOut()),
-          }),
-          Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
+          }).pipe(
+            Effect.timeoutOrElse({
+              // Timeout is a security boundary: if the reviewer cannot complete in
+              // time, the tool call must not execute unless explicit user fallback
+              // is configured below.
+              duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
+              orElse: () => Effect.fail(new ReviewerTimedOut()),
+            }),
+            Effect.mapError((error) =>
+              isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
+            ),
+          )
+          yield* markToolReviewed(input, assessment)
+
+          return {
+            action: assessment.outcome,
+            reason: assessment.rationale,
+            reviewID: input.reviewID,
+            risk_level: assessment.risk_level,
+            user_authorization: assessment.user_authorization,
+          } satisfies PermissionAuto.ReviewDecision
+        })
+
+        return yield* run.pipe(
+          Effect.catch((error: unknown) =>
+            Effect.gen(function* () {
+              yield* markToolReviewFailed(
+                input,
+                autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
+                  ? "fallback_user"
+                  : error instanceof ReviewerTimedOut
+                    ? "timed_out"
+                    : "failed",
+                errorMessage(error),
+              )
+              // `fallback: "user"` is deliberately narrow: disabled reviewer already
+              // means normal user routing, while all other failures become an explicit
+              // fallback signal for PermissionAuto. Default behavior is fail-closed.
+              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
+                return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
+              }
+              return yield* Effect.fail(error)
+            }),
+          ),
         )
-
-        if (reviewerSession && reviewerUser) {
-          yield* recordReviewerDecision({ session: reviewerSession, model, parentID: reviewerUser.id, assessment })
-        }
-
-        return {
-          action: assessment.outcome,
-          reason: assessment.rationale,
-          reviewID: input.reviewID,
-          risk_level: assessment.risk_level,
-          user_authorization: assessment.user_authorization,
-        } satisfies PermissionAuto.ReviewDecision
       })
-
-      return yield* run.pipe(
-        Effect.catch((error: unknown) =>
-          // `fallback: "user"` is deliberately narrow: disabled reviewer already
-          // means normal user routing, while all other failures become an explicit
-          // fallback signal for PermissionAuto. Default behavior is fail-closed.
-          autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
-            ? Effect.fail(new ReviewerFallbackToUser({ reason: errorMessage(error) }))
-            : Effect.fail(error),
-        ),
-      )
-    })
 
     return Service.of({ review })
 
     function getReviewerSession(parentID: SessionID, model: Provider.Model) {
-      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
-        const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
-        if (existing) return existing
-        // A single child session per parent mirrors Codex's reusable guardian
-        // trunk: later reviews append new request/decision turns instead of
-        // creating detached one-off records, enabling future transcript deltas by
-        // child session id without changing the permission API again.
-        return yield* sessions.create({
-          parentID,
-          title: "Auto permission review (@permission-reviewer subagent)",
-          agent: "permission-reviewer",
-          model: { providerID: model.providerID, id: model.id },
-        })
-      }))
+      return reviewerSessionLock(parentID).withPermits(1)(
+        Effect.gen(function* () {
+          const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
+          if (existing) return existing
+          // A single child session per parent mirrors Codex's reusable guardian
+          // trunk: later reviews append new request/decision turns instead of
+          // creating detached one-off records, enabling future transcript deltas by
+          // child session id without changing the permission API again.
+          return yield* sessions.create({
+            parentID,
+            title: "Auto permission review (@permission-reviewer subagent)",
+            agent: "permission-reviewer",
+            model: { providerID: model.providerID, id: model.id },
+          })
+        }),
+      )
     }
 
     function reviewerSessionLock(parentID: SessionID) {
@@ -203,58 +221,300 @@ export const layer = Layer.effect(
           sessionID: input.session.id,
           messageID: message.id,
           type: "text",
-          // The text is synthetic protocol input: it should be inspectable in the
-          // hidden reviewer child session, but must not later count as human
-          // authorization evidence if that child transcript is projected again.
-          synthetic: true,
+          // This visible child-session message is the audit-friendly reviewer
+          // request cell. It mirrors the exact bounded system/user prompt sent to
+          // the reviewer model so the hidden child agent feels like a normal
+          // subagent run instead of an opaque audit summary. The metadata marker
+          // keeps this generated protocol cell out of future authorization
+          // evidence if reviewer child transcripts are ever projected again.
+          metadata: { permissionReviewerRequest: true },
           text: input.text,
         } satisfies MessageV2.TextPart)
         return message
       })
     }
 
-    function recordReviewerDecision(input: {
-      session: Session.Info
+    function runReviewerAgent(input: {
+      session: Session.Info | undefined
       model: Provider.Model
-      parentID: MessageID
-      assessment: Schema.Schema.Type<typeof Assessment>
+      parentID: MessageID | undefined
+      messages: readonly ModelMessage[]
     }) {
+      const session = input.session
+      const parentID = input.parentID
+      if (!session || !parentID) return runReviewerStream(input.messages, input.model)
       return Effect.gen(function* () {
-        const message = yield* sessions.updateMessage({
+        const message: MessageV2.Assistant = {
           id: MessageID.ascending(),
-          parentID: input.parentID,
+          parentID,
           role: "assistant",
           mode: "permission-reviewer",
           agent: "permission-reviewer",
-          path: { cwd: input.session.directory, root: input.session.directory },
+          path: { cwd: session.directory, root: session.directory },
           cost: 0,
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           modelID: input.model.id,
           providerID: input.model.providerID,
-          sessionID: input.session.id,
-          time: { created: Date.now(), completed: Date.now() },
-          finish: "tool-calls",
-        } satisfies MessageV2.Assistant)
-        yield* sessions.updatePart({
-          id: PartID.ascending(),
-          sessionID: input.session.id,
+          sessionID: session.id,
+          time: { created: Date.now() },
+        }
+        yield* sessions.updateMessage(message)
+        const assessment = yield* runReviewerStream(input.messages, input.model, {
+          sessionID: session.id,
           messageID: message.id,
-          type: "tool",
-          callID: `permission-review-${input.parentID}`,
-          tool: "permission_review_decision",
-          state: {
-            status: "completed",
-            input: input.assessment,
-            output: JSON.stringify(input.assessment),
-            title: input.assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
-            metadata: input.assessment,
-            time: { start: message.time.created, end: message.time.completed ?? Date.now() },
-          },
-        } satisfies MessageV2.ToolPart)
+        }).pipe(
+          Effect.tapError((error) =>
+            Effect.gen(function* () {
+              message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
+              message.time.completed = Date.now()
+              yield* sessions.updateMessage(message)
+            }),
+          ),
+        )
+        message.finish = "tool-calls"
+        message.time.completed = Date.now()
+        yield* sessions.updateMessage(message)
+        return assessment
       })
     }
 
-    function markToolReviewing(input: PermissionAuto.ReviewInput) {
+    function runReviewerStream(
+      messages: readonly ModelMessage[],
+      model: Provider.Model,
+      persist?: { sessionID: SessionID; messageID: MessageID },
+    ) {
+      return Effect.acquireUseRelease(
+        Effect.sync(() => new AbortController()),
+        (abort) =>
+          Effect.gen(function* () {
+            const language = yield* provider.getLanguage(model)
+            const providerInfo = yield* provider.getProvider(model.providerID)
+            const sessionID = persist?.sessionID ?? "permission-reviewer"
+            const options = mergeOptions(
+              ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
+              model.options,
+            )
+            const result = streamText({
+              model: wrapLanguageModel({
+                model: language,
+                middleware: [
+                  {
+                    specificationVersion: "v3" as const,
+                    async transformParams(args) {
+                      if (args.type === "stream") {
+                        // Match normal SessionPrompt requests: provider adapters
+                        // expect opencode's message normalization before seeing
+                        // reasoning/tool-call payloads.
+                        // @ts-expect-error AI SDK's internal prompt type is narrower than ModelMessage here.
+                        args.params.prompt = ProviderTransform.message(args.params.prompt, model, options)
+                      }
+                      return args.params
+                    },
+                  },
+                ],
+              }),
+              messages: [...messages],
+              tools: {
+                permission_review_decision: tool({
+                  description: "Submit the structured allow/deny decision for this permission review.",
+                  inputSchema: jsonSchema(toJsonSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
+                  execute: async (assessment) => ({
+                    title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+                    metadata: assessment,
+                    output: JSON.stringify(assessment),
+                  }),
+                }),
+              },
+              // Some OpenAI-compatible providers reject forced tool_choice even
+              // though they can emit tool calls. The reviewer prompt requires this
+              // tool, and absence of the call still fails closed below.
+              maxRetries: 0,
+              providerOptions: ProviderTransform.providerOptions(model, options),
+              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
+              abortSignal: abort.signal,
+            })
+            let assessment: Schema.Schema.Type<typeof Assessment> | undefined
+            let textPart: MessageV2.TextPart | undefined
+            let reasoningPart: MessageV2.ReasoningPart | undefined
+            const toolParts = new Map<string, MessageV2.ToolPart>()
+            const toolInput = new Map<string, string>()
+
+            yield* Stream.runForEach(
+              Stream.fromAsyncIterable(result.fullStream, (error) => error),
+              Effect.fnUntraced(function* (event) {
+                if (!persist) {
+                  if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+                    assessment = Schema.decodeUnknownSync(Assessment)(event.input)
+                  }
+                  return
+                }
+                if (event.type === "reasoning-start") {
+                  reasoningPart = yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    type: "reasoning",
+                    text: "",
+                    time: { start: Date.now() },
+                    metadata: event.providerMetadata,
+                  } satisfies MessageV2.ReasoningPart)
+                  return
+                }
+                if (event.type === "reasoning-delta" && reasoningPart) {
+                  reasoningPart.text += event.text
+                  if (event.providerMetadata) reasoningPart.metadata = event.providerMetadata
+                  yield* sessions.updatePart(reasoningPart)
+                  return
+                }
+                if (event.type === "reasoning-end" && reasoningPart) {
+                  reasoningPart.time = { ...reasoningPart.time, end: Date.now() }
+                  if (event.providerMetadata) reasoningPart.metadata = event.providerMetadata
+                  yield* sessions.updatePart(reasoningPart)
+                  reasoningPart = undefined
+                  return
+                }
+                if (event.type === "text-start") {
+                  textPart = yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    type: "text",
+                    text: "",
+                    time: { start: Date.now() },
+                    metadata: event.providerMetadata,
+                  } satisfies MessageV2.TextPart)
+                  return
+                }
+                if (event.type === "text-delta" && textPart) {
+                  textPart.text += event.text
+                  if (event.providerMetadata) textPart.metadata = event.providerMetadata
+                  yield* sessions.updatePart(textPart)
+                  return
+                }
+                if (event.type === "text-end" && textPart) {
+                  textPart.time = { start: textPart.time?.start ?? Date.now(), end: Date.now() }
+                  if (event.providerMetadata) textPart.metadata = event.providerMetadata
+                  yield* sessions.updatePart(textPart)
+                  textPart = undefined
+                  return
+                }
+                if (event.type === "tool-input-start") {
+                  const part = yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    type: "tool",
+                    callID: event.id,
+                    tool: event.toolName,
+                    state: { status: "pending", input: {}, raw: "" },
+                  } satisfies MessageV2.ToolPart)
+                  toolParts.set(event.id, part)
+                  return
+                }
+                if (event.type === "tool-input-delta") {
+                  toolInput.set(event.id, (toolInput.get(event.id) ?? "") + event.delta)
+                  return
+                }
+                if (event.type === "tool-input-end") {
+                  const part = toolParts.get(event.id)
+                  if (!part || part.state.status !== "pending") return
+                  const next = {
+                    ...part,
+                    state: { ...part.state, raw: toolInput.get(event.id) ?? "" },
+                  } satisfies MessageV2.ToolPart
+                  toolParts.set(event.id, yield* sessions.updatePart(next))
+                  return
+                }
+                if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+                  assessment = Schema.decodeUnknownSync(Assessment)(event.input)
+                  const existing = toolParts.get(event.toolCallId)
+                  const part = yield* sessions.updatePart({
+                    ...(existing ?? {
+                      id: PartID.ascending(),
+                      sessionID: persist.sessionID,
+                      messageID: persist.messageID,
+                      type: "tool" as const,
+                      callID: event.toolCallId,
+                      tool: event.toolName,
+                    }),
+                    state: {
+                      status: "completed",
+                      input: assessment,
+                      title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+                      metadata: assessment,
+                      output: JSON.stringify(assessment),
+                      time: { start: Date.now(), end: Date.now() },
+                    },
+                  } satisfies MessageV2.ToolPart)
+                  toolParts.set(event.toolCallId, part)
+                  return
+                }
+                if (event.type === "tool-error") {
+                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
+                }
+                if (event.type === "error") {
+                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
+                }
+              }),
+            )
+
+            if (textPart)
+              yield* sessions.updatePart({
+                ...textPart,
+                time: { start: textPart.time?.start ?? Date.now(), end: Date.now() },
+              })
+            if (reasoningPart)
+              yield* sessions.updatePart({
+                ...reasoningPart,
+                time: { start: reasoningPart.time.start, end: Date.now() },
+              })
+            if (!assessment)
+              return yield* new ReviewerRunError({ reason: "reviewer did not call permission_review_decision" })
+            return assessment
+          }),
+        (abort) => Effect.sync(() => abort.abort()),
+      )
+    }
+
+    function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
+      return updateToolAutoReview(input, {
+        status: "reviewing",
+        ...(reviewerSessionID ? { sessionID: reviewerSessionID } : {}),
+      })
+    }
+
+    function markToolReviewed(input: PermissionAuto.ReviewInput, assessment: Schema.Schema.Type<typeof Assessment>) {
+      return updateToolAutoReview(input, {
+        status: assessment.outcome === "allow" ? "allowed" : "denied",
+        result: {
+          risk_level: assessment.risk_level,
+          user_authorization: assessment.user_authorization,
+          rationale: assessment.rationale,
+        },
+      })
+    }
+
+    function markToolReviewFailed(
+      input: PermissionAuto.ReviewInput,
+      status: "timed_out" | "failed" | "fallback_user",
+      reason: string,
+    ) {
+      return updateToolAutoReview(input, { status, error: reason })
+    }
+
+    function updateToolAutoReview(
+      input: PermissionAuto.ReviewInput,
+      patch: {
+        status: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
+        sessionID?: SessionID
+        error?: string
+        result?: {
+          risk_level: Schema.Schema.Type<typeof Assessment>["risk_level"]
+          user_authorization: Schema.Schema.Type<typeof Assessment>["user_authorization"]
+          rationale: string
+        }
+      },
+    ) {
       if (!input.sessionID || !input.tool) return Effect.void
       return Effect.gen(function* () {
         const message = yield* MessageV2.get({ sessionID: input.sessionID!, messageID: input.tool!.messageID })
@@ -262,21 +522,29 @@ export const layer = Layer.effect(
           (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
         )
         if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
+        const metadata = part.state.status === "running" ? part.state.metadata : {}
+        const current =
+          metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
+            ? metadata.autoReview
+            : {}
         yield* sessions.updatePart({
           ...part,
           state: {
             status: "running",
             input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
-            title: `Auto review: ${input.precheck.level}`,
+            title:
+              patch.status === "reviewing" ? `Auto review: ${input.precheck.level}` : `Auto review: ${patch.status}`,
             metadata: {
-              ...(part.state.status === "running" ? part.state.metadata : {}),
+              ...metadata,
               // This metadata is intentionally small and stable: clients can show
               // that deterministic precheck handed the tool to the reviewer
               // without rendering the hidden reviewer prompt or trusting it as a
               // permission result.
               autoReview: {
+                ...current,
                 reviewID: input.reviewID,
                 precheck: input.precheck,
+                ...patch,
               },
             },
             time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
@@ -302,8 +570,19 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
   ] satisfies ModelMessage[]
 }
 
+function renderReviewerPrompt(messages: readonly ModelMessage[]) {
+  return messages
+    .map((message) =>
+      [
+        `${message.role}:`,
+        typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2),
+      ].join("\n"),
+    )
+    .join("\n\n")
+}
+
 function isReviewerError(error: unknown): error is Error {
-  // Preserve typed reviewer failures through the generateObject error mapping;
+  // Preserve typed reviewer failures through provider stream error mapping;
   // everything else is wrapped as ReviewerRunError for one fail-closed path.
   return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
 }
@@ -319,7 +598,8 @@ function reviewerEnabled(permission: Config.Info["permission"], metadata: Readon
 
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message
-  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string")
+    return error.message
   return String(error)
 }
 
@@ -330,8 +610,8 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
     // the baseline critical-deny taxonomy.
     const pathPolicy = autoReview?.policy_path
       ? yield* Effect.promise(() => Bun.file(autoReview.policy_path!).text()).pipe(
-          Effect.mapError((error) =>
-            new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
+          Effect.mapError(
+            (error) => new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
           ),
         )
       : ""
@@ -341,10 +621,7 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
   })
 }
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(Provider.defaultLayer),
-)
+export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer))
 
 // Permission.defaultLayer consumes this bundled reviewer layer before building
 // Permission.Service. `Layer.suspend` preserves the historical cycle boundary:
