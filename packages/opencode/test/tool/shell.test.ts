@@ -1020,6 +1020,203 @@ describe("tool.shell permissions", () => {
     }
 
     for (const item of ps) {
+      it.live(`allows Unix text utilities inside WSL sh payloads [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    // This is a WSL guest pipeline, not a local PowerShell
+                    // pipeline. The compatibility guard must preserve that
+                    // namespace boundary so POSIX utilities remain valid inside
+                    // the alternate OS shell while still rejecting local grep.
+                    command: `wsl -d Ubuntu-22.04 -- sh -lc 'ps -ef | grep "[d]drescue"'`,
+                    description: "Inspect ddrescue process in WSL",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              expect(requests.find((r) => r.permission === "bash")).toBeDefined()
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`does not ask for host external_directory for WSL mount paths [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    // `/mnt/rescue` lives in the WSL guest filesystem for this
+                    // command. Mapping it through Windows path resolution would
+                    // fabricate a host path such as `F:\mnt\rescue`, so the
+                    // shell scanner must leave guest paths to the WSL command's
+                    // normal bash permission instead of raising external_directory.
+                    command:
+                      "wsl -d Ubuntu-22.04 -- sh -lc \"sudo mkdir -p /mnt/rescue && sudo mount -t exfat /dev/sde3 /mnt/rescue && mkdir -p /mnt/rescue/LexarE300_rescue && df -h /mnt/rescue && lsblk -o NAME,SIZE,FSTYPE,LABEL,RO,TYPE,MOUNTPOINTS /dev/sdc /dev/sde\"",
+                    description: "Inspect WSL rescue mount",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              expect(requests.find((r) => r.permission === "external_directory")).toBeUndefined()
+              expect(requests.find((r) => r.permission === "bash")).toBeDefined()
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`rejects Unix text utilities after WSL payloads in local pipelines [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              expect(
+                yield* fail({
+                  // The pipe after the WSL invocation is a host PowerShell
+                  // pipeline boundary. Only the quoted `echo ok` belongs to the
+                  // guest; the trailing `grep` must remain a local command so
+                  // the existing PowerShell compatibility protection cannot be
+                  // bypassed by prefixing a pipeline with WSL.
+                  command: "wsl -d Ubuntu-22.04 -- sh -lc 'echo ok' | grep ok",
+                  description: "Search WSL output locally",
+                }),
+              ).toMatchObject({
+                message: expect.stringContaining(`The current shell is ${item.label}`),
+              })
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`asks for host external_directory after WSL payloads in local pipelines [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    // The WSL guest payload ends before the host pipeline. A
+                    // following local file read is still a host filesystem access
+                    // and must keep the external_directory gate that protects
+                    // paths outside the current project.
+                    command: `wsl -d Ubuntu-22.04 -- sh -lc 'echo ok' | Get-Content ${process.env.WINDIR!.replaceAll("\\", "/")}/win.ini`,
+                    description: "Read host file after WSL output",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const extDirReq = requests.find((r) => r.permission === "external_directory")
+              expect(extDirReq).toBeDefined()
+              expect(extDirReq!.patterns).toContain(Filesystem.normalizePathPattern(path.join(process.env.WINDIR!, "*")))
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`rejects Unix text utilities after SSH payloads in local pipelines [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              expect(
+                yield* fail({
+                  // SSH has the same host/remote boundary as WSL for this
+                  // scanner: quoted remote commands may use POSIX utilities, but
+                  // a PowerShell pipeline after the SSH call is local and remains
+                  // subject to the existing Unix-utility rejection.
+                  command: "ssh example.com 'echo ok' | grep ok",
+                  description: "Search SSH output locally",
+                }),
+              ).toMatchObject({
+                message: expect.stringContaining(`The current shell is ${item.label}`),
+              })
+            }),
+          ),
+        ),
+      )
+    }
+
+    if (cmdShell) {
+      it.live("rejects Unix text utilities after WSL payloads in cmd command chains [cmd]", () =>
+        withShell(
+          cmdShell,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              expect(
+                yield* fail({
+                  // In cmd.exe, a single `&` starts another local command. The
+                  // WSL guest range must stop before that separator so a trailing
+                  // local `grep` remains covered by the existing cmd Unix-utility
+                  // rejection instead of being hidden inside the WSL payload.
+                  command: 'wsl -d Ubuntu-22.04 -- sh -lc "echo ok" & grep ok',
+                  description: "Search WSL output locally with cmd",
+                }),
+              ).toMatchObject({
+                message: expect.stringContaining("The current shell is cmd"),
+              })
+            }),
+          ),
+        ),
+      )
+
+      it.live("asks for host external_directory after WSL payloads in cmd command chains [cmd]", () =>
+        withShell(
+          cmdShell,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    // The WSL command ends before cmd's `&` separator. A `TYPE`
+                    // command after that point reads the Windows host filesystem,
+                    // so it must still request external_directory for the Windows
+                    // directory rather than being swallowed by the guest range.
+                    command: `wsl -d Ubuntu-22.04 -- sh -lc "echo ok" & TYPE "${path.join(process.env.WINDIR!, "win.ini")}"`,
+                    description: "Read host file after WSL output with cmd",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const extDirReq = requests.find((r) => r.permission === "external_directory")
+              expect(extDirReq).toBeDefined()
+              expect(extDirReq!.patterns).toContain(Filesystem.normalizePathPattern(path.join(process.env.WINDIR!, "*")))
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
       it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
         withShell(
           item,
@@ -1037,6 +1234,36 @@ describe("tool.shell permissions", () => {
                   capture(requests, err),
                 ),
               ).toMatchObject({ message: err.message })
+            }),
+          ),
+        ),
+      )
+    }
+
+    for (const item of ps) {
+      it.live(`does not ask for host external_directory for SSH remote paths [${item.label}]`, () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    // `/etc/os-release` is read on the SSH target, not on the
+                    // Windows host. SSH shares the same remote-payload invariant
+                    // as WSL: remote POSIX paths must not become fabricated host
+                    // external_directory prompts.
+                    command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
+                    description: "Inspect SSH remote OS release",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              expect(requests.find((r) => r.permission === "external_directory")).toBeUndefined()
+              expect(requests.find((r) => r.permission === "bash")).toBeDefined()
             }),
           ),
         ),

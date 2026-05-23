@@ -94,6 +94,19 @@ const GIT_WRITES = new Set([
 ])
 const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch"])
 const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
+// These commands carry an inner shell for another filesystem namespace. The
+// local PowerShell/cmd compatibility checks and external_directory scanner must
+// inspect the wrapper invocation itself, but must not reinterpret the payload's
+// POSIX commands or guest paths as host Windows commands/paths.
+const REMOTE_SHELL_COMMANDS = new Set(["ssh", "wsl"])
+// WSL option names that consume the following token before the guest command
+// starts. Keeping this list explicit prevents distro/user/cd values such as
+// `Ubuntu-22.04` or `/tmp` from being mistaken for guest executable text.
+const WSL_OPTIONS_WITH_VALUE = new Set(["-d", "--distribution", "-u", "--user", "--cd"])
+// SSH option names that consume the following token before the remote host. The
+// scanner only needs common option/value boundaries so it can keep local SSH
+// options local while marking text after the host as remote shell payload.
+const SSH_OPTIONS_WITH_VALUE = new Set(["-b", "-c", "-e", "-F", "-i", "-J", "-l", "-m", "-o", "-p", "-S", "-W"])
 
 function bashCompressionEnabled(config?: Config.Info) {
   return config?.tool_output?.bash_compression ?? true
@@ -117,6 +130,25 @@ type Scan = {
 type Chunk = {
   text: string
   size: number
+}
+
+// Raw text tokens preserve source offsets from the original command line. Those
+// offsets let `localCommands` filter parser-recovered payload commands without
+// depending on a particular tree-sitter recovery shape for malformed WSL/SSH
+// strings.
+type Token = {
+  text: string
+  start: number
+  end: number
+}
+
+type Range = {
+  start: number
+  end: number
+}
+
+type Segment = Range & {
+  text: string
 }
 
 export const log = Log.create({ service: "shell-tool" })
@@ -513,7 +545,9 @@ function shellCompatibilityError(root: Node, shellName: string): string | undefi
 }
 
 function localCommands(root: Node) {
+  const remoteRanges = remotePayloadRanges(root.text)
   return commands(root).filter((node) => {
+    if (remoteRanges.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
     let parent = node.parent
     while (parent && parent.id !== root.id) {
       // tree-sitter-powershell can recover POSIX fragments inside quoted WSL/ssh
@@ -524,6 +558,116 @@ function localCommands(root: Node) {
     }
     return true
   })
+}
+
+function remotePayloadRanges(command: string) {
+  // Compute source ranges for remote/alternate-OS payloads before relying on the
+  // parse tree. PowerShell recovery can surface commands from quoted payloads as
+  // root-level commands, so parent-node checks alone cannot protect host scans.
+  return commandSegments(command).flatMap((segment) => {
+    const tokens = tokenizeLocalSegment(segment.text, segment.start)
+    const cmd = (tokens[0]?.text ?? "").toLowerCase().replace(/\.exe$/, "")
+    if (!REMOTE_SHELL_COMMANDS.has(cmd)) return []
+    if (cmd === "wsl") return wslPayloadRange(tokens, segment.end)
+    if (cmd === "ssh") return sshPayloadRange(tokens, segment.end)
+    return []
+  })
+}
+
+function commandSegments(command: string) {
+  // Segmenting stops remote ranges at host shell separators while respecting
+  // quotes. This keeps `wsl ... 'guest | grep'` inside the guest, but treats
+  // `wsl ... 'guest' | grep` as a local pipeline after the WSL process exits.
+  const result: Segment[] = []
+  let start = 0
+  let quote = ""
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+    if (quote) {
+      if (char === "`") i++
+      else if (char === quote) quote = ""
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      continue
+    }
+    const paired = (char === "&" || char === "|") && command[i + 1] === char
+    // These separators terminate the current host command segment. Single `|`
+    // and `&` matter because `wsl ... 'guest' | grep x` in PowerShell and
+    // `wsl ... "guest" & grep x` in cmd both have a guest command before the
+    // separator and a local host command after it; the remote payload range must
+    // stop before those local commands continue.
+    if (char === "|" || char === "&" || char === ";" || char === "\n" || paired) {
+      result.push({ start, end: i, text: command.slice(start, i) })
+      start = i + (paired ? 2 : 1)
+      if (paired) i++
+    }
+  }
+  result.push({ start, end: command.length, text: command.slice(start) })
+  return result
+}
+
+function tokenizeLocalSegment(command: string, offset: number) {
+  // This is intentionally a tiny offset-preserving lexer, not a shell parser. It
+  // only understands whitespace, simple quotes, and PowerShell backtick escapes
+  // because the caller only needs wrapper names/options and payload boundaries.
+  const result: Token[] = []
+  for (let i = 0; i < command.length; i++) {
+    if (/\s/.test(command[i])) continue
+    const start = i
+    if (command[i] === "'" || command[i] === '"') {
+      const quote = command[i]
+      let text = ""
+      for (i++; i < command.length; i++) {
+        if (command[i] === "`") {
+          text += command[i + 1] ?? ""
+          i++
+          continue
+        }
+        if (command[i] === quote) break
+        text += command[i]
+      }
+      result.push({ text, start: offset + start, end: offset + Math.min(i + 1, command.length) })
+      continue
+    }
+    while (i + 1 < command.length && !/\s/.test(command[i + 1])) i++
+    result.push({ text: command.slice(start, i + 1), start: offset + start, end: offset + i + 1 })
+  }
+  return result
+}
+
+function wslPayloadRange(tokens: Token[], end: number) {
+  // WSL options are parsed here only to locate the guest command boundary. The
+  // payload is not approved or interpreted by this scanner; once the boundary is
+  // found, every recovered command inside it is excluded from host path and local
+  // shell-compatibility checks so `/mnt/rescue` remains a guest path.
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i].text.toLowerCase()
+    if (token === "--" || token === "-e" || token === "--exec") return tokens[i + 1] ? [{ start: tokens[i + 1].start, end }] : []
+    if (WSL_OPTIONS_WITH_VALUE.has(token)) {
+      i++
+      continue
+    }
+    if (token.startsWith("-")) continue
+    return [{ start: tokens[i].start, end }]
+  }
+  return []
+}
+
+function sshPayloadRange(tokens: Token[], end: number) {
+  // SSH has a local executable and local options followed by a remote host. Only
+  // tokens after that host are remote shell text; keeping the host/options local
+  // preserves existing permission prompts while preventing remote grep/cat paths
+  // from being treated as Windows PowerShell commands or host external paths.
+  const host = tokens.slice(1).findIndex((item, index, items) => {
+    if (items[index - 1] && SSH_OPTIONS_WITH_VALUE.has(items[index - 1].text)) return false
+    if (item.text === "--") return false
+    return !item.text.startsWith("-")
+  })
+  if (host < 0) return []
+  const start = host + 2
+  return tokens[start] ? [{ start: tokens[start].start, end }] : []
 }
 
 function powershellUnixAlternative(name: string) {
@@ -588,7 +732,7 @@ export const ShellTool = Tool.define(
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
 
-      for (const node of commands(root)) {
+      for (const node of localCommands(root)) {
         const command = parts(node)
         const tokens = command.map((item) => item.text)
         const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
