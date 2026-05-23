@@ -1119,10 +1119,18 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
 })
 
 export function filterCompacted(msgs: Iterable<WithParts>) {
+  // Compaction markers are discovered by scanning newest-to-oldest: the summary
+  // assistant must be seen before its parent compaction user can stop the walk and
+  // restore the retained tail.  Some callers already stream in that order while
+  // others naturally hold chronological arrays, so normalize here to keep the
+  // safety boundary local to the compaction filter.  MessageID.ascending() is the
+  // persisted ordering invariant; relying on caller order can revive pre-summary
+  // history and inflate the next compaction request past the model limit.
+  const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
-  for (const msg of msgs) {
+  for (const msg of ordered) {
     result.push(msg)
     if (retain) {
       if (msg.info.id === retain) break

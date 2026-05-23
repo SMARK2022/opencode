@@ -1654,3 +1654,101 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
   })
 })
+
+describe("session.message-v2.filterCompacted", () => {
+  // The IDs are deliberately monotonic because production messages are created by
+  // MessageID.ascending().  This fixture mirrors the failure mode from a real
+  // compacted transcript: old history must stay excluded after the summary,
+  // retained tail messages must remain visible for continuity, and callers may
+  // supply either newest-first streams or chronological arrays without changing
+  // that observable compacted window.
+  const OLD_USER = MessageID.make("msg_filter_001")
+  const OLD_ASSISTANT = MessageID.make("msg_filter_002")
+  const TAIL_USER = MessageID.make("msg_filter_003")
+  const TAIL_ASSISTANT = MessageID.make("msg_filter_004")
+  const COMPACTION_USER = MessageID.make("msg_filter_005")
+  const SUMMARY_ASSISTANT = MessageID.make("msg_filter_006")
+  const CONTINUE_USER = MessageID.make("msg_filter_007")
+
+  const oldUser: MessageV2.WithParts = {
+    info: userInfo(OLD_USER),
+    parts: [{ ...basePart(OLD_USER, "filter-old-user"), type: "text", text: "old request" }] as MessageV2.Part[],
+  }
+
+  const oldAssistant: MessageV2.WithParts = {
+    info: assistantInfo(OLD_ASSISTANT, OLD_USER),
+    parts: [{ ...basePart(OLD_ASSISTANT, "filter-old-assistant"), type: "text", text: "old answer" }] as MessageV2.Part[],
+  }
+
+  const tailUser: MessageV2.WithParts = {
+    info: userInfo(TAIL_USER),
+    parts: [{ ...basePart(TAIL_USER, "filter-tail-user"), type: "text", text: "retained request" }] as MessageV2.Part[],
+  }
+
+  const tailAssistant: MessageV2.WithParts = {
+    info: assistantInfo(TAIL_ASSISTANT, TAIL_USER),
+    parts: [
+      { ...basePart(TAIL_ASSISTANT, "filter-tail-assistant"), type: "text", text: "retained answer" },
+    ] as MessageV2.Part[],
+  }
+
+  const compactionUser: MessageV2.WithParts = {
+    info: userInfo(COMPACTION_USER),
+    parts: [
+      {
+        ...basePart(COMPACTION_USER, "filter-compaction"),
+        type: "compaction",
+        auto: true,
+        tail_start_id: TAIL_USER,
+      },
+    ] as MessageV2.Part[],
+  }
+
+  const summaryAssistant: MessageV2.WithParts = {
+    info: {
+      ...assistantInfo(SUMMARY_ASSISTANT, COMPACTION_USER),
+      summary: true,
+      finish: "stop",
+    } as MessageV2.Assistant,
+    parts: [
+      { ...basePart(SUMMARY_ASSISTANT, "filter-summary"), type: "text", text: "summary of old work" },
+    ] as MessageV2.Part[],
+  }
+
+  const continueUser: MessageV2.WithParts = {
+    info: userInfo(CONTINUE_USER),
+    parts: [
+      { ...basePart(CONTINUE_USER, "filter-continue"), type: "text", text: "continue from summary" },
+    ] as MessageV2.Part[],
+  }
+
+  const expected = [COMPACTION_USER, SUMMARY_ASSISTANT, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER]
+
+  test("keeps the compacted summary and retained tail without reviving older history", () => {
+    expect(
+      MessageV2.filterCompacted([
+        continueUser,
+        summaryAssistant,
+        compactionUser,
+        tailAssistant,
+        tailUser,
+        oldAssistant,
+        oldUser,
+      ]).map((message) => message.info.id),
+    ).toStrictEqual(expected)
+  })
+
+  test("keeps the same compacted window when callers provide chronological history", () => {
+    expect(
+      MessageV2.filterCompacted([
+        oldUser,
+        oldAssistant,
+        tailUser,
+        tailAssistant,
+        compactionUser,
+        summaryAssistant,
+        continueUser,
+      ]).map((message) => message.info.id),
+    ).toStrictEqual(expected)
+  })
+})
