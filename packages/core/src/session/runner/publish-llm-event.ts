@@ -52,8 +52,8 @@ const settledOutput = (value: ToolOutput | undefined, result: ToolResultValue): 
   return { structured: record(settled.structured), content: settled.content }
 }
 
-/** Persist one provider turn without executing tools or starting a continuation turn. */
-export const createLLMEventPublisher = (events: EventV2.Interface, input: Input) => {
+// 仅持久化一次provider turn；请求关联放事件envelope，不混入Step的业务data。
+export const createLLMEventPublisher = (events: EventV2.Interface, input: Input, metadata?: Readonly<Record<string, unknown>>) => {
   const tools = new Map<
     string,
     {
@@ -83,7 +83,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
       timestamp: yield* timestamp,
       inputEstimate: input.inputEstimate?.(),
       snapshot: input.snapshot,
-    }, { finalizer })
+    }, { finalizer, metadata })
     return assistantMessageID
   })
   const currentAssistantMessageID = () =>

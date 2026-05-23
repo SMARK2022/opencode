@@ -26,10 +26,15 @@ export type ReviewDecision =
     }
 
 export interface ReviewInput {
+  // #208：reviewID 在 auto.ts mint 后传递给 reviewer——UI 和审计事件可引用同一逻辑审查即使模型超时
+  readonly reviewID: string
   readonly sessionID?: string
   readonly permission: string
   readonly patterns: readonly string[]
   readonly metadata: Readonly<Record<string, unknown>>
+  // #208：tool 可选绑定——reviewer 标记工具状态为 reviewing 供 UI 展示进度
+  // #208：messageID 用 string 而非 MessageID brand——PermissionV1.Request.tool 用 Schema.String
+  readonly tool?: { readonly messageID: string; readonly callID: string }
   // #202：precheck 以 level（safe/general/cautious/dangerous）而非 action 传递给 reviewer，避免把确定性风险分层误解成最终执行决策
   readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
 }
@@ -44,10 +49,16 @@ export function evaluate(
     permission: string
     patterns: readonly string[]
     metadata: Readonly<Record<string, unknown>>
+    tool?: { readonly messageID: string; readonly callID: string }
     strict?: boolean
     reviewerDisabled?: boolean
   },
   reviewer?: Reviewer,
+  // #208：onReviewStart 在 reviewer 调用前回调——发布 ReviewStarted 事件供 UI 展示进度
+  onReviewStart?: (input: {
+    readonly reviewID: string
+    readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
+  }) => Effect.Effect<void>,
 ) {
   return Effect.gen(function* () {
     // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
@@ -90,9 +101,17 @@ export function evaluate(
       return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
     }
 
+    // #208：reviewID 在模型调用前 mint——进度 UI 和最终审计事件可引用同一逻辑审查即使模型超时或失败
+    const reviewID = crypto.randomUUID()
+    // #208：onReviewStart 在 reviewer 调用前回调——发布 ReviewStarted 事件供 UI 展示进度
+    if (onReviewStart) {
+      yield* onReviewStart({ reviewID, precheck })
+    }
+
     // #202：reviewer 调用——precheck.level 传递实际层级使 reviewer 契约一致，strict 模式在 reason 中标注以供审计
     return yield* reviewer.review({
       ...input,
+      reviewID,
       precheck: {
         level: precheck.level,
         // #202：strict 模式保留穿越边界的原因——safe/general 经 strict 送审时标注，cautious 保持原 reason
@@ -108,7 +127,7 @@ export function evaluate(
             return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
           }
           // #198：其他失败 fail closed——超时/provider 错误/schema 错误时拒绝而非放行，防止不透明的 reviewer 故障打开安全缺口
-          return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer" } satisfies Decision
+          return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
         },
         onSuccess: (reviewed) => {
           // #198：硬护栏——矛盾模型输出转为 deny，防止 malformed allow 削弱确定性 precheck 或租户策略

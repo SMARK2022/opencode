@@ -6,9 +6,10 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { Database } from "@opencode-ai/core/database/database"
 
-import { SessionID } from "@/session/schema"
+import { MessageID, PartID, SessionID } from "@/session/schema"
+import type { ToolPart, User, Assistant, TextPart } from "@opencode-ai/core/v1/session"
 import { generateObject, type ModelMessage } from "ai"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Schema, Semaphore } from "effect"
 import { PermissionReviewerPrompt } from "./prompt"
 import { Assessment, ReviewerRequest } from "./schema"
 import { PermissionReviewerTranscript } from "./transcript"
@@ -67,7 +68,10 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
     const database = yield* Database.Service
+    // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
     const session = yield* Session.Service
+    // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
+    const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
 
     const review: Interface["review"] = (input) => Effect.gen(function* () {
       const cfg = yield* config.get()
@@ -117,6 +121,19 @@ export const layer = Layer.effect(
               return (yield* provider.getSmallModel(current.providerID)) ?? (yield* provider.getModel(current.providerID, current.modelID))
             })
         const language = yield* provider.getLanguage(model)
+        // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
+        const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
+        // #208：标记工具状态为 reviewing——UI 展示确定性 precheck 到模型审查的进度
+        // #208：markToolReviewing best-effort 标记——过期工具引用不影响有效决策
+        yield* markToolReviewing(input)
+        // #208：在子会话中记录 reviewer 请求——synthetic 文本不作为用户授权证据
+        const reviewerUser = reviewerSession
+          ? yield* recordReviewerRequest({
+              session: reviewerSession,
+              model,
+              text: messages.map((message) => `${message.role}: ${message.content}`).join("\n\n"),
+            })
+          : undefined
         // #198：generateObject 结构化输出——schema 同时提供 StandardSchemaV1 和 StandardJSONSchemaV1 确保 provider 兼容
         // #198：双重 schema 提供者——StandardSchemaV1 用于运行时验证，StandardJSONSchemaV1 用于 provider API 请求格式
         const assessment = yield* Effect.promise(() =>
@@ -136,10 +153,16 @@ export const layer = Layer.effect(
           Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
         )
 
+        // #208：在子会话中记录 reviewer 决策——供未来 transcript delta 审计追溯
+        if (reviewerSession && reviewerUser) {
+          yield* recordReviewerDecision({ session: reviewerSession, model, parentID: reviewerUser.id, assessment })
+        }
+
         return {
           action: assessment.outcome,
           reason: assessment.rationale,
-          reviewID: crypto.randomUUID(),
+          // #208：reviewID 由 auto.ts mint 后传入——不再在此处随机生成
+          reviewID: input.reviewID,
           risk_level: assessment.risk_level,
           user_authorization: assessment.user_authorization,
         } satisfies PermissionAuto.ReviewDecision
@@ -157,6 +180,136 @@ export const layer = Layer.effect(
     })
 
     return Service.of({ review })
+
+    // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
+    function getReviewerSession(parentID: SessionID, model: Provider.Model) {
+      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
+        // #208：优先复用已有 permission-reviewer 子会话——每次审查创建新 transcript 会丢失前序请求/决策上下文
+        const existing = (yield* session.children(parentID)).find((item) => item.agent === "permission-reviewer")
+        if (existing) return existing
+        // #208：单个子会话镜像 Codex guardian trunk——后续审查追加新请求/决策轮次
+        return yield* session.create({
+          parentID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+          agent: "permission-reviewer",
+          model: { providerID: model.providerID, id: model.id },
+        })
+      }))
+    }
+
+    function reviewerSessionLock(parentID: SessionID) {
+      const existing = reviewerSessionLocks.get(parentID)
+      if (existing) return existing
+      // #208：get-or-create 非原子——每父会话锁保持并发工具审查复用同一 reviewer transcript
+      const next = Semaphore.makeUnsafe(1)
+      reviewerSessionLocks.set(parentID, next)
+      return next
+    }
+
+    // #208：记录 reviewer 请求为 synthetic 用户消息——可检查但不作为人类授权证据
+    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
+      return Effect.gen(function* () {
+        const message = yield* session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: input.session.id,
+          time: { created: Date.now() },
+          agent: "permission-reviewer",
+          model: { providerID: input.model.providerID, modelID: input.model.id },
+        } satisfies User)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: input.session.id,
+          messageID: message.id,
+          type: "text",
+          // #208：synthetic=true 防止此文本在子会话 transcript 投影时被误认为人类授权
+          synthetic: true,
+          text: input.text,
+        } satisfies TextPart)
+        return message
+      })
+    }
+
+    // #208：记录 reviewer 决策为助手消息+tool part——供未来 transcript delta 审计追溯
+    function recordReviewerDecision(input: {
+      session: Session.Info
+      model: Provider.Model
+      parentID: MessageID
+      assessment: Schema.Schema.Type<typeof Assessment>
+    }) {
+      return Effect.gen(function* () {
+        const message = yield* session.updateMessage({
+          id: MessageID.ascending(),
+          parentID: input.parentID,
+          role: "assistant",
+          mode: "permission-reviewer",
+          agent: "permission-reviewer",
+          path: { cwd: input.session.directory, root: input.session.directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: input.model.id,
+          providerID: input.model.providerID,
+          sessionID: input.session.id,
+          time: { created: Date.now(), completed: Date.now() },
+          finish: "tool-calls",
+        } satisfies Assistant)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: input.session.id,
+          messageID: message.id,
+          type: "tool",
+          // #208：callID 由 parentID 确定性生成——同一请求的决策轮次可追溯，避免随机 ID 在 transcript 重放时漂移
+          callID: `permission-review-${input.parentID}`,
+          tool: "permission_review_decision",
+          state: {
+            status: "completed",
+            input: input.assessment,
+            output: JSON.stringify(input.assessment),
+            title: input.assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+            metadata: input.assessment,
+            time: { start: message.time.created, end: message.time.completed ?? Date.now() },
+          },
+        } satisfies ToolPart)
+      })
+    }
+
+    // #208：标记工具状态为 reviewing——UI 展示 precheck 到 reviewer 的进度
+    function markToolReviewing(input: PermissionAuto.ReviewInput) {
+      // #208：无 sessionID 或 tool 绑定时跳过标记——非工具触发的审查无需 UI 进度展示
+      const sessionID = input.sessionID
+      const tool = input.tool
+      if (!sessionID || !tool) return Effect.void
+      return Effect.gen(function* () {
+        // #208：用 session.messages 替代 MessageV2.get——避免 Database.Service 泄漏到 review 类型
+        const messages = yield* session.messages({ sessionID: SessionID.make(sessionID), limit: 50 })
+        const message = messages.find((m) => m.info.id === tool.messageID)
+        if (!message) return
+        const part = message.parts.find(
+          (item): item is ToolPart => item.type === "tool" && item.callID === tool.callID,
+        )
+        if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
+        yield* session.updatePart({
+          ...part,
+          state: {
+            status: "running",
+            input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
+            title: `Auto review: ${input.precheck.level}`,
+            metadata: {
+              ...(part.state.status === "running" ? part.state.metadata : {}),
+              // #208：metadata 小而稳定——客户端可展示 precheck 交接而不渲染隐藏 reviewer prompt
+              autoReview: {
+                reviewID: input.reviewID,
+                precheck: input.precheck,
+              },
+            },
+            time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
+          },
+        } satisfies ToolPart)
+      }).pipe(
+        // #208：review 展示是 best-effort——过期工具引用不应将有效 reviewer 决策转为 fail-closed deny
+        Effect.catch(() => Effect.void),
+      )
+    }
   }),
 )
 

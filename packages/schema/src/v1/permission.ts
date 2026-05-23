@@ -69,6 +69,21 @@ const Replied = define({
 // #199：仍通过原有 Asked/Replied 路径返回，订阅者无需监听这些新事件即可保持行为不变。
 // #199：ReviewCompleted 在 reviewer 给出 allow/deny 时发布，绑定 reviewID 供审计
 // #199：追溯；outcome 与 reviewer 决议一致，但 permission 层仍独立执行 cache/circuit。
+// #208：ReviewStarted 在 reviewer 调用前发布——UI 可展示确定性 precheck 到模型审查的边界，不泄露隐藏 prompt
+const ReviewStarted = define({
+  type: "permission.review.started",
+  // #208：内联 Schema.Literals 而非引用 PermissionPrecheck.LEVELS——schema 包不依赖 opencode 包
+  schema: {
+    sessionID: SessionID,
+    reviewID: Schema.String,
+    permission: Schema.String,
+    patterns: Schema.Array(Schema.String),
+    precheck: Schema.Struct({
+      level: Schema.Literals(["safe", "general", "cautious", "dangerous"]),
+      reason: Schema.String,
+    }),
+  },
+})
 const ReviewCompleted = define({
   type: "permission.review.completed",
   schema: { sessionID: SessionID, reviewID: Schema.String, outcome: Schema.Literals(["allow", "deny"]), rationale: Schema.String },
@@ -88,8 +103,9 @@ const CircuitBroken = define({
 export const Event = {
   Asked,
   Replied,
+  ReviewStarted,
   ReviewCompleted,
   ReviewFailed,
   CircuitBroken,
-  Definitions: inventory(Asked, Replied, ReviewCompleted, ReviewFailed, CircuitBroken),
+  Definitions: inventory(Asked, Replied, ReviewStarted, ReviewCompleted, ReviewFailed, CircuitBroken),
 }

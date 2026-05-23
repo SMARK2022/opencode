@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Fiber, Layer, Schema } from "effect"
+import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -353,6 +354,12 @@ describe("PermissionV2", () => {
     yield* setup([{ action: "*", resource: "*", effect: "auto" }])
     const service = yield* PermissionV2.Service
     const sessions = yield* SessionStore.Service
+    const progress: { type: string; reviewID: string }[] = []
+    const events = yield* EventV2.Service
+    const unsubscribe = yield* events.listen((event) => Effect.sync(() => {
+      if (Schema.is(PermissionV1.Event.ReviewStarted)(event) || Schema.is(PermissionV1.Event.ReviewCompleted)(event)) progress.push({ type: event.type, reviewID: event.data.reviewID })
+    }))
+    yield* Effect.addFinalizer(() => unsubscribe)
     const evidence = yield* Database.Service
     const evidenceRows = [
       ...Array.from({ length: 45 }, (_, index) => ({
@@ -374,6 +381,20 @@ describe("PermissionV2", () => {
     const automatic = assertion({ agent: AgentV2.ID.make("Auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
+    expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
+    expect(progress[0]?.reviewID).toBeDefined()
+    expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
+    const reviewDb = (yield* Database.Service).db
+    const children = yield* reviewDb.select().from(SessionTable).where(eq(SessionTable.parent_id, automatic.sessionID)).all().pipe(Effect.orDie)
+    expect(children).toHaveLength(1)
+    const child = children[0]
+    if (!child) return yield* Effect.die("Expected a durable reviewer child")
+    const audit = yield* sessions.context(SessionV2.ID.make(child.id))
+    expect(audit.some((message) => message.type === "synthetic" && message.text.includes(String(progress[0]?.reviewID)) && message.text.includes("FIRST AUTHORIZATION"))).toBe(true)
+    // 审查助手明确引用真实请求，不能由同一child中消息的到达顺序推断。
+    expect(audit.find((message) => message.type === "assistant")).toMatchObject({ metadata: { permissionReviewerRequestID: audit.find((message) => message.type === "synthetic")?.id, reviewID: progress[0]?.reviewID } })
+    const decision = audit.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")
+    expect(decision).toMatchObject({ name: "permission_review_decision", state: { status: "completed", input: assessment, structured: assessment } })
     const reviewText = JSON.stringify(reviewRequests[0]?.messages)
     expect(reviewText).toContain("FIRST AUTHORIZATION")
     expect(reviewText).toContain("Follow-up 44")
@@ -439,11 +460,12 @@ describe("PermissionV2", () => {
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
     expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
     assessment = { ...assessment, risk_level: "low" }
-    // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
+    // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
     reviewGate = yield* Deferred.make<void>()
     reviewStarted = yield* Deferred.make<void>()
     const fiber = yield* service.assert({ ...edit, metadata: { diff: "cancel" } }).pipe(Effect.forkScoped)
     yield* Deferred.await(reviewStarted)
+    expect(progress.at(-1)?.type).toBe("permission.review.started")
     yield* Fiber.interrupt(fiber)
     reviewGate = undefined
     reviewStarted = undefined

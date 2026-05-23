@@ -8,6 +8,7 @@ import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { PermissionAuto } from "./auto"
+import { PermissionPrecheck } from "./precheck"
 import { PermissionReviewer } from "./reviewer/service"
 import { PermissionSessionCache } from "./cache/session-cache"
 import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
@@ -132,6 +133,17 @@ const layer = Layer.effect(
           const decision = yield* PermissionAuto.evaluate(
             { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
             reviewer,
+            // #208：onReviewStart 发布 ReviewStarted 事件——确定性 precheck 到模型审查的可见边界
+            // #208：events.publish 而非 bus.publish——复用 EventV2Bridge 统一事件发布路径
+            // #208：事件仅携带 auto patterns 和 precheck rationale——不泄露隐藏 reviewer prompt
+            (review) =>
+              events.publish(Event.ReviewStarted, {
+                sessionID: request.sessionID,
+                reviewID: review.reviewID,
+                permission: autoRequest.permission,
+                patterns: [...autoRequest.patterns],
+                precheck: review.precheck,
+              }),
           )
           yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
           if (decision.action === "allow") {
