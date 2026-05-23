@@ -452,6 +452,8 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
+  // #212：记录上一次最大滚动位置——用于判断流式内容增长时视口是否原本贴底
+  let lastMaxScrollTop = 0
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
@@ -463,6 +465,18 @@ export function Session() {
   const keymap = useOpencodeKeymap()
   const dialog = useDialog()
   const renderer = useRenderer()
+
+  // #212：布局后读取滚动范围，避免文本更新早于原生尺寸刷新。
+  function syncSessionViewportStuckToBottom() {
+    if (!scroll || scroll.isDestroyed) return
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
+    // #212：scrollTop 是滚动偏移；y 是屏幕位置，不能用于贴底判断。
+    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
+    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
+    lastMaxScrollTop = maxScrollTop
+    // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
+    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
+  }
 
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
@@ -1259,6 +1273,8 @@ export function Session() {
             <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
+                // #212：由原生 renderAfter 在布局后跟随增长，无需 part 长度信号。
+                renderAfter={syncSessionViewportStuckToBottom}
                 // #135：流式时禁用 viewportCulling，避免裁剪抖动
                 viewportCulling={!streamingActive()}
                 viewportOptions={{
