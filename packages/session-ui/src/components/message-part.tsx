@@ -66,6 +66,7 @@ import { animate } from "motion"
 import { attached, inline, kind, typeLabel } from "./message-file"
 import { readPartText } from "./message-part-text"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
+import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
 
 async function writeClipboard(text: string): Promise<boolean> {
   const body = typeof document === "undefined" ? undefined : document.body
@@ -1547,6 +1548,7 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
   const input = () => part().state?.input ?? emptyInput
   // @ts-expect-error
   const partMetadata = () => part().state?.metadata ?? emptyMetadata
+  const review = createMemo(() => autoReviewMetadata(partMetadata().autoReview))
   const taskId = createMemo(() => {
     if (part().tool !== "task") return
     const value = partMetadata().sessionId
@@ -1627,6 +1629,9 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
             />
           </Match>
         </Switch>
+        <Show when={review()}>
+          {(value) => <AutoReviewLine review={value()} />}
+        </Show>
       </div>
     </Show>
   )
@@ -2078,6 +2083,62 @@ ToolRegistry.register({
         onTriggerClick={navigate}
         onTriggerKeyDown={navigateKey}
       />
+    )
+  },
+})
+
+function AutoReviewLine(props: { review: NonNullable<ReturnType<typeof autoReviewMetadata>> }) {
+  const data = useData()
+  const i18n = useI18n()
+  const href = createMemo(() => sessionLink(props.review.sessionID, data.sessionHref))
+  const clickable = () => !!(props.review.sessionID && (data.navigateToSession || href()))
+  // 使用已有会话导航口；位于工具wrapper，拒绝/失败卡和折叠态也能保留审查入口。
+  return (
+    <a
+      data-component="auto-review-line"
+      href={href()}
+      role={!href() && clickable() ? "button" : undefined}
+      tabIndex={!href() && clickable() ? 0 : undefined}
+      class="text-12-regular text-text-weak"
+      onClick={(event) => {
+        const id = props.review.sessionID
+        if (!id || !data.navigateToSession || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+        event.preventDefault()
+        data.navigateToSession(id)
+      }}
+      onKeyDown={(event) => {
+        const id = props.review.sessionID
+        if (!id || !data.navigateToSession || href() || (event.key !== "Enter" && event.key !== " ")) return
+        event.preventDefault()
+        data.navigateToSession(id)
+      }}
+    >
+      {autoReviewLabel(props.review, i18n)}
+    </a>
+  )
+}
+
+ToolRegistry.register({
+  name: "permission_review_decision",
+  render(props) {
+    const i18n = useI18n()
+    const decision = createMemo(() => ({ ...props.input, ...props.metadata }))
+    const fields = [
+      ["outcome", "ui.permission.review.outcome"],
+      ["risk_level", "ui.permission.review.risk"],
+      ["user_authorization", "ui.permission.review.authorization"],
+      ["rationale", "ui.permission.review.rationale"],
+    ] as const
+    // 四个必需裁决字段完整显示，不经过GenericTool的三参数预览或正文截短。
+    return (
+      <BasicTool {...props} icon="task" defaultOpen trigger={{ title: i18n.t("ui.permission.review.title") }}>
+        <dl data-component="permission-review-decision" class="text-13-regular">
+          <For each={fields}>{([field, label]) => <>
+            <dt>{i18n.t(label)}</dt>
+            <dd style={{ "white-space": "pre-wrap" }}>{String(decision()[field] ?? i18n.t("ui.permission.review.unknown"))}</dd>
+          </>}</For>
+        </dl>
+      </BasicTool>
     )
   },
 })

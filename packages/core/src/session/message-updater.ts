@@ -158,6 +158,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             text: event.data.text,
             id: event.data.messageID,
             type: "synthetic",
+            // 与其他消息同样保存既有事件metadata，展示标记不改变synthetic授权身份。
+            metadata: event.metadata,
             time: { created: event.data.timestamp },
           }),
         )
@@ -303,7 +305,11 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           const match = latestTool(draft, event.data.callID)
           if (match && match.state.status === "running") {
-            match.state.structured = event.data.structured
+            // 普通工具进度不能擦掉已完成的权限审查；reviewer自己的新状态仍可覆盖旧状态。
+            match.state.structured = { ...event.data.structured,
+              ...(event.data.structured.autoReview === undefined && match.state.structured.autoReview !== undefined
+                ? { autoReview: match.state.structured.autoReview } : {}),
+            }
             match.state.content = [...event.data.content]
           }
         })
@@ -327,7 +333,11 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
                 status: "completed",
                 input: formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent },
                 // 完成投影后去掉临时整文，避免在 input 与 structured 重复保存。
-                structured: formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent")),
+                structured: {
+                  ...(formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent"))),
+                  // 终态继续保留本轮reviewID/导航/裁决，不由工具返回值抹去或替换审批事实。
+                  ...(match.state.structured.autoReview === undefined ? {} : { autoReview: match.state.structured.autoReview }),
+                },
                 content: [...event.data.content],
                 outputPaths: event.data.outputPaths ? [...event.data.outputPaths] : [],
                 result: event.data.result,

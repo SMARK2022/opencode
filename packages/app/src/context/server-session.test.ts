@@ -4,6 +4,8 @@ import type { OpenCodeEvent, SessionApi } from "@opencode-ai/client/promise"
 import type { Message, OpencodeClient, Part, Session } from "@opencode-ai/sdk/v2/client"
 import { createServerSession } from "./server-session"
 import type { ServerApi } from "@/utils/server"
+import { Schema } from "effect"
+import { SessionEvent } from "@opencode-ai/schema/session-event"
 
 type MessageApi = ServerApi["message"]
 
@@ -211,6 +213,29 @@ describe("server session", () => {
     })
     expect(ctx.store.data.message.child?.map((message) => message.id)).toEqual(["msg_1_user", "msg_2_assistant"])
     expect(ctx.store.data.part.msg_2_assistant).toMatchObject([{ type: "text", text: "world" }])
+    const target = "ses_review"
+    ctx.store.remember(session(target))
+    const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
+    let nativeSeq = 0
+    const applyNative = (type: string, data: Record<string, unknown>, metadata?: Record<string, unknown>) => ctx.store.applyV2(decode({
+      id: `evt_store_${++nativeSeq}`, type, data: { sessionID: target, timestamp: nativeSeq, ...data },
+      ...(metadata ? { metadata } : type === "session.next.synthetic" ? { metadata: { permissionReviewerRequest: true, reviewID: "review" } } : {}),
+    }))
+    // 检查真正applyV2→projectV2→界面store，而不只在独立reducer里得到正确对象。
+    applyNative("session.next.synthetic", { messageID: "msg_native_request", text: "system: exact reviewer policy" })
+    applyNative("session.next.synthetic", { messageID: "msg_native_request_b", text: "system: review B" }, { permissionReviewerRequest: true, reviewID: "review_b" })
+    applyNative("session.next.step.started", { assistantMessageID: "msg_native_answer", agent: "permission-reviewer", model: { id: "review", providerID: "test" } }, { permissionReviewerRequestID: "msg_native_request", reviewID: "review" })
+    applyNative("session.next.step.started", { assistantMessageID: "msg_native_answer_b", agent: "permission-reviewer", model: { id: "review_b", providerID: "test" } }, { permissionReviewerRequestID: "msg_native_request_b", reviewID: "review_b" })
+    applyNative("session.next.text.started", { assistantMessageID: "msg_native_answer", textID: "explanation" })
+    applyNative("session.next.text.delta", { assistantMessageID: "msg_native_answer", textID: "explanation", delta: "Actual live explanation" })
+    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request", "msg_native_request_b", "msg_native_answer", "msg_native_answer_b"])
+    expect(ctx.store.data.part.msg_native_request).toMatchObject([{ type: "text", text: "system: exact reviewer policy", synthetic: false }])
+    expect(ctx.store.data.part.msg_native_answer).toMatchObject([{ type: "text", text: "Actual live explanation" }])
+    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ parentID: "msg_native_request" })
+    expect(ctx.store.data.message[target]?.filter((message) => message.role === "assistant").every((message) => message.time.completed === undefined)).toBe(true)
+    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_request")).toMatchObject({ agent: "permission-reviewer", model: { modelID: "review" } })
+    applyNative("session.next.step.failed", { assistantMessageID: "msg_native_answer", aborted: true, error: { type: "unknown", message: "cancel A" } })
+    expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
   })
 
   test("resolves lineage by session ID without directory", async () => {
@@ -307,6 +332,29 @@ describe("server session", () => {
       ...assistants.map((item) => item.id),
     ])
     expect(assistants.map((item) => store.data.part[item.id]?.[0]?.type)).toEqual(["text", "text", "text"])
+    // 最新页包含请求B但缺少助手A实际关联的请求A，仍须沿原cursor补齐根。
+    const requestA = { id: "msg_review_request_a", type: "synthetic" as const, text: "Review A", time: { created: 1 }, metadata: { permissionReviewerRequest: true } }
+    const requestB = { ...requestA, id: "msg_review_request_b", time: { created: 2 } }
+    const reviewA = { ...assistant("msg_review_answer_a", 3), agent: "permission-reviewer", metadata: { permissionReviewerRequestID: requestA.id } }
+    const reviewPages = [
+      { data: [reviewA, requestB], cursor: { previous: null, next: "review-older" } },
+      { data: [requestA], cursor: { previous: null, next: null } },
+    ]
+    const calls: unknown[] = []
+    const reviewApi = {
+      list: async (input: unknown) => {
+        calls.push(input)
+        const page = reviewPages.shift()
+        if (!page) throw new Error("Unexpected extra review page")
+        return page
+      },
+    } as unknown as MessageApi
+    const reviews = createServerSession({} as OpencodeClient, {} as SessionApi, reviewApi)
+    reviews.remember(session("review"))
+    await reviews.sync("review")
+    expect(calls).toEqual([{ sessionID: "review", limit: 20, order: "desc" }, { sessionID: "review", limit: 20, cursor: "review-older" }])
+    expect(reviews.data.message.review.map((message) => message.id)).toEqual([requestA.id, requestB.id, reviewA.id])
+    expect(reviews.data.message.review.find((message) => message.id === reviewA.id)).toMatchObject({ parentID: requestA.id })
   })
 
   test("indexes V1 messages for the current timeline projection", async () => {

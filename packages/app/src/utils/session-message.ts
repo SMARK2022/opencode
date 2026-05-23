@@ -45,6 +45,22 @@ function normalizeToolMetadata(name: string, metadata: Record<string, unknown>) 
   }
 }
 
+export function reviewerRequestID(message: SessionMessageInfo) {
+  if (message.type !== "assistant" || message.agent !== "permission-reviewer") return
+  const id = message.metadata?.permissionReviewerRequestID
+  // 并发审查共享child，助手归属以请求ID为准而非最近一条synthetic。
+  return typeof id === "string" ? id : undefined
+}
+
+export function syntheticTurn(message: SessionMessageInfo) {
+  if (message.type !== "synthetic") return
+  const reviewer = "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
+  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text : message.description
+  if (!text?.trim()) return
+  // 只展示明确标记的审查协议原文；普通synthetic仍遵循原有description展示约定。
+  return { text, reviewer }
+}
+
 export function normalizeSessionMessages(sessionID: string, source: readonly SessionMessageInfo[]) {
   const messages: Message[] = []
   const parts = new Map<string, Part[]>()
@@ -67,7 +83,9 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
       parts.set(message.id, userParts(sessionID, message))
       return
     }
-    if (message.type === "synthetic" && message.description?.trim()) {
+    // 显示轮次不改变服务端synthetic身份；分页和增量也共用同一根识别。
+    const synthetic = syntheticTurn(message)
+    if (synthetic) {
       parentID = message.id
       messages.push({
         id: message.id,
@@ -77,7 +95,9 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
         agent,
         model: { providerID: model.providerID, modelID: model.id, variant: model.variant },
       })
-      parts.set(message.id, [textPart(sessionID, message.id, 0, message.description, true)])
+      parts.set(message.id, [{
+        ...textPart(sessionID, message.id, 0, synthetic.text, synthetic.reviewer ? false : true), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
+      }])
       return
     }
     if (message.type === "shell") {
@@ -90,8 +110,9 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
     if (message.type === "assistant") {
       agent = message.agent
       model = message.model
-      if (!parentID) return
-      const parent = messages.findLast((item) => item.id === parentID)
+      const rootID = reviewerRequestID(message) ?? parentID
+      if (!rootID) return
+      const parent = messages.findLast((item) => item.id === rootID)
       if (parent?.role === "user") {
         parent.agent = message.agent
         parent.model = {
@@ -100,7 +121,7 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
           variant: message.model.variant,
         }
       }
-      messages.push(assistantMessage(sessionID, parentID, message))
+      messages.push(assistantMessage(sessionID, rootID, message))
       parts.set(message.id, assistantParts(sessionID, message))
       return
     }
@@ -289,7 +310,7 @@ function assistantParts(sessionID: string, message: SessionMessageAssistant): Pa
   })
 }
 
-function textPart(sessionID: string, messageID: string, ordinal: number, text: string, synthetic?: boolean): Part {
+function textPart(sessionID: string, messageID: string, ordinal: number, text: string, synthetic?: boolean): Extract<Part, { type: "text" }> {
   return {
     id: sessionMessagePartID(messageID, "text", ordinal),
     sessionID,
@@ -300,20 +321,26 @@ function textPart(sessionID: string, messageID: string, ordinal: number, text: s
   }
 }
 
+export function toolMetadata(tool: SessionMessageAssistantTool) {
+  // 当前原生wire使用structured，仍保留实际在用的vendor客户端metadata快照兼容。
+  return "structured" in tool.state && record(tool.state.structured)
+    ? tool.state.structured : tool.state.status === "streaming" ? {} : tool.state.metadata ?? {}
+}
+
 function toolPart(sessionID: string, messageID: string, tool: SessionMessageAssistantTool): ToolPart {
+  const metadata = toolMetadata(tool)
   const start = tool.time.ran ?? tool.time.created
   const state = (() => {
-    if (tool.state.status === "streaming") {
+    if (tool.state.status === "streaming" || typeof tool.state.input === "string") {
       const value = Option.getOrUndefined(decodeToolInput(tool.state.input))
       const input = normalizeToolInput(tool.name, record(value) ? value : {})
-      return { status: "pending" as const, input, raw: tool.state.input }
+      return { status: "pending" as const, input, raw: String(tool.state.input) }
     }
     if (tool.state.status === "running") {
       return {
         status: "running" as const,
         input: normalizeToolInput(tool.name, tool.state.input),
-        // metadata: normalizeToolMetadata(tool.name, tool.state.structured),
-        metadata: normalizeToolMetadata(tool.name, tool.state.metadata ?? {}),
+        metadata: normalizeToolMetadata(tool.name, metadata),
         time: { start },
       }
     }
@@ -322,8 +349,7 @@ function toolPart(sessionID: string, messageID: string, tool: SessionMessageAssi
         status: "error" as const,
         input: normalizeToolInput(tool.name, tool.state.input),
         error: tool.state.error.message,
-        // metadata: normalizeToolMetadata(tool.name, tool.state.structured),
-        metadata: normalizeToolMetadata(tool.name, tool.state.metadata ?? {}),
+        metadata: normalizeToolMetadata(tool.name, metadata),
         time: { start, end: tool.time.completed ?? start },
       }
     }
@@ -347,8 +373,7 @@ function toolPart(sessionID: string, messageID: string, tool: SessionMessageAssi
       input: normalizeToolInput(tool.name, tool.state.input),
       output: tool.state.content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n"),
       title: tool.name,
-      // metadata: normalizeToolMetadata(tool.name, tool.state.structured),
-      metadata: normalizeToolMetadata(tool.name, tool.state.metadata ?? {}),
+      metadata: normalizeToolMetadata(tool.name, metadata),
       time: { start, end: tool.time.completed ?? start },
       attachments: attachments.length ? attachments : undefined,
     }
