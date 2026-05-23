@@ -17,6 +17,7 @@ import { Tools } from "./tools"
 import { SystemContext } from "../system-context/index"
 import { SystemContextRegistry } from "../system-context/registry"
 import { Shell } from "../shell"
+import { ShellRemote } from "../shell-remote"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
 import { createAutoTextDecoder } from "../text-decoding"
@@ -187,6 +188,7 @@ const layer = Layer.effectDiscard(
               // 配置只采样一次，兼容检查和最终 spawn 必须使用同一个实际 shell。
               const entries = yield* config.entries()
               const shell = selectedShell(entries)
+              const remote = ShellRemote.ranges(input.command, Shell.name(shell))
               // Windows PowerShell 递归检查命令节点；解析失败不能退回浅层扫描，Tree 在检查后释放。
               const heads = process.platform === "win32" && Shell.ps(shell)
                 ? yield* Effect.gen(function* () {
@@ -201,6 +203,7 @@ const layer = Layer.effectDiscard(
                       .descendantsOfType("command")
                       .flatMap((node) => {
                         if (!node) return []
+                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
                         // 引号与内部 ERROR 恢复出的远程脚本片段不是本地 PowerShell 命令。
                         let parent = node.parent
                         while (parent && parent.id !== tree.rootNode.id) {
@@ -232,7 +235,9 @@ const layer = Layer.effectDiscard(
                   metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
                   source,
                 })
-              const warnings = (yield* externalCommandDirectories(fs, input.command, target.canonical)).map(
+              // 路径提示只看宿主片段；掩去客体载荷时保持偏移和后续本地命令。
+              const local = remote.reduce((text, range) => text.slice(0, range.start) + " ".repeat(range.end - range.start) + text.slice(range.end), input.command)
+              const warnings = (yield* externalCommandDirectories(fs, local, target.canonical)).map(
                 (directory) =>
                   `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.`,
               )
