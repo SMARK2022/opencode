@@ -3,28 +3,62 @@ import type { PermissionReviewerPrompt } from "./prompt"
 
 const ENTRY_LIMIT = 40
 const PART_CHAR_LIMIT = 4000
+const ENTRY_CHAR_LIMIT = 1000
+type RenderedEntry = PermissionReviewerPrompt.TranscriptEntry & { truncated: boolean }
 
 export function fromMessages(messages: readonly MessageV2.WithParts[]): PermissionReviewerPrompt.TranscriptDelta {
-  // Only send the recent tail. Auto review answers one current permission
-  // question; older context increases prompt-injection surface and token cost
-  // without reliably improving authorization evidence.
-  const recent = messages.slice(-ENTRY_LIMIT)
+  // Codex-style review context keeps user intent anchors plus recent tool
+  // evidence instead of blindly sending the last N messages. The first user turn
+  // often contains the original authorization, while the latest turns explain
+  // retries and current scope; preserving both keeps context useful without
+  // expanding reviewer input cost.
+  const visibleMessages = messages.filter((message) => !message.info.hidden)
+  const rendered = visibleMessages.map((message) => {
+      const text = message.parts.map(renderPart).filter((part): part is string => Boolean(part?.trim())).join("\n")
+      const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
+      return {
+        role: message.info.role,
+        text: entry.text,
+        truncated: entry.truncated,
+      }
+    })
+  const visibleRendered = rendered.filter((entry) => entry.text.trim())
+  const entries = selectEntries(visibleRendered)
   return {
-    entries: recent.map((message) => ({
-      role: message.info.role,
-      text: message.parts.map(renderPart).filter(Boolean).join("\n"),
-    })),
-    truncated: messages.length > recent.length,
+    entries: entries.items.map((entry) => ({ role: entry.role, text: entry.text })),
+    truncated: entries.truncated,
+    entryTruncated: entries.items.some((entry) => entry.truncated),
+    emptyEntries: visibleMessages.length > visibleRendered.length,
+  }
+}
+
+function selectEntries(entries: readonly RenderedEntry[]) {
+  if (entries.length <= ENTRY_LIMIT) return { items: entries, truncated: false }
+  const keep = new Set<number>()
+  const userIndexes = entries.flatMap((entry, index) => (entry.role === "user" ? [index] : []))
+  if (userIndexes[0] !== undefined) keep.add(userIndexes[0])
+  const latestUserIndex = userIndexes.at(-1)
+  if (latestUserIndex !== undefined) keep.add(latestUserIndex)
+  for (let index = entries.length - 1; index >= 0 && keep.size < ENTRY_LIMIT; index--) {
+    keep.add(index)
+  }
+  return {
+    items: Array.from(keep)
+      .sort((left, right) => left - right)
+      .map((index) => entries[index]),
+    truncated: true,
   }
 }
 
 function renderPart(part: MessageV2.Part) {
-  // Hidden parts stay hidden from the reviewer. Visible non-text parts are
-  // rendered as metadata tags so the reviewer sees that context exists without
-  // executing tools or expanding large binary/file payloads.
+  // Hidden, synthetic, and reasoning parts are not user authorization evidence.
+  // This mirrors Codex guardian: review sees visible conversation plus tool
+  // evidence, not internal thinking or generated scaffolding that can make the
+  // reviewer over-trust the agent's own rationale.
   if (part.hidden) return ""
+  if (part.type === "text" && part.synthetic) return ""
+  if (part.type === "reasoning") return ""
   if (part.type === "text") return truncate(part.text)
-  if (part.type === "reasoning") return `<reasoning>${truncate(part.text)}</reasoning>`
   if (part.type === "tool") return renderTool(part)
   if (part.type === "file") return `<file mime="${part.mime}" filename="${part.filename ?? ""}" />`
   if (part.type === "subtask") return `<subtask agent="${part.agent}" description="${truncate(part.description, 400)}" />`
@@ -48,10 +82,14 @@ function renderTool(part: MessageV2.ToolPart) {
 }
 
 function truncate(text: string, limit = PART_CHAR_LIMIT) {
+  return truncateWithFlag(text, limit).text
+}
+
+function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT) {
   // The marker records exactly how much was omitted so policy can treat missing
   // evidence conservatively instead of assuming the hidden tail was benign.
-  if (text.length <= limit) return text
-  return text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
+  if (text.length <= limit) return { text, truncated: false }
+  return { text: text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`, truncated: true }
 }
 
 export * as PermissionReviewerTranscript from "./transcript"

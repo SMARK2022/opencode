@@ -1,6 +1,7 @@
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
+import { MessageV2 } from "@/session/message-v2"
 import { generateObject, type ModelMessage } from "ai"
 import { Context, Effect, Layer, Schema } from "effect"
 import { PermissionReviewerPrompt } from "./prompt"
@@ -43,6 +44,8 @@ export interface Interface extends PermissionAuto.Reviewer {}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PermissionReviewer") {}
 
+const REVIEWER_MESSAGE_FETCH_LIMIT = 120
+
 // The reviewer layer is provider-backed but intentionally receives only a bounded
 // transcript projection plus the planned action JSON. It never reuses the main
 // agent's model messages, tools, or scratchpad as reviewer context.
@@ -51,7 +54,6 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const provider = yield* Provider.Service
-    const session = yield* Session.Service
 
     const review: Interface["review"] = (input) => Effect.gen(function* () {
       const cfg = yield* config.get()
@@ -67,17 +69,21 @@ export const layer = Layer.effect(
           precheck: input.precheck,
         })
         const tenantPolicy = yield* loadTenantPolicy(autoReview)
-        // Transcript collection is best-effort and bounded. Missing sessions or
-        // storage issues should not block the permission path; the reviewer can
-        // still decide from the planned action and policy, or deny via policy.
+        // Transcript collection is best-effort and bounded twice: fetch a wider
+        // recent window than the final reviewer prompt, then let transcript
+        // selection preserve user anchors and cap entries/chars. This avoids
+        // walking very old sessions on the permission path while still keeping
+        // substantially more authorization context than the final prompt size.
         const transcript = input.sessionID
-          ? yield* session
-              .messages({ sessionID: input.sessionID, limit: 40 })
+          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
               .pipe(
-                Effect.map(PermissionReviewerTranscript.fromMessages),
-                Effect.catch(() => Effect.succeed({ entries: [], truncated: false })),
+                Effect.map((page) => {
+                  const transcript = PermissionReviewerTranscript.fromMessages(page.items)
+                  return { ...transcript, truncated: transcript.truncated || page.more }
+                }),
+                Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
               )
-          : { entries: [], truncated: false }
+          : { entries: [], truncated: false, entryTruncated: false }
         const messages = buildMessages({
           system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
           userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
