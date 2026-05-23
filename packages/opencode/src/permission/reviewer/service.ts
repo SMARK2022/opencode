@@ -3,6 +3,9 @@ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
+import { MessageV2 } from "@/session/message-v2"
+import { Database } from "@opencode-ai/core/database/database"
+
 import { SessionID } from "@/session/schema"
 import { generateObject, type ModelMessage } from "ai"
 import { Context, Effect, Layer, Schema } from "effect"
@@ -54,11 +57,16 @@ export interface Interface extends PermissionAuto.Reviewer {}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PermissionReviewer") {}
 
+// #206：拉取比最终 reviewer prompt 更宽的最近窗口——transcript 选择再保留用户锚点并限制条目/字符，避免在权限路径遍历过旧会话
+const REVIEWER_MESSAGE_FETCH_LIMIT = 120
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
     const provider = yield* Provider.Service
+    // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
+    const database = yield* Database.Service
     const session = yield* Session.Service
 
     const review: Interface["review"] = (input) => Effect.gen(function* () {
@@ -76,16 +84,23 @@ export const layer = Layer.effect(
           precheck: input.precheck,
         })
         const tenantPolicy = yield* loadTenantPolicy(autoReview)
-        // #198：transcript 从 session 消息提取——有 sessionID 时取最近 40 条，失败时返回空 transcript 而非中断
-        // #198：transcript 失败不阻断审查——空 transcript 仍允许 reviewer 基于 planned action 和策略做决策
+        // #206：transcript 收集双重有界——先拉 120 条宽窗口再由 transcript 选择保留用户锚点和截短条目
+        // #206：page.more 表示获取窗口外还有更早消息（含 hidden 行的原始窗口探测）——hidden 挤占
+        // #206：窗口时可见条目可能 ≤ENTRY_LIMIT，必须与 selectEntries 截短合并披露，否则 reviewer
+        // #206：会把部分历史当作完整对话评估 user_authorization（修复 page.more 语义丢失）
         const transcript = input.sessionID
-          ? yield* session
-              .messages({ sessionID: SessionID.make(input.sessionID), limit: 40 })
-              .pipe(
-                Effect.map(PermissionReviewerTranscript.fromMessages),
-                Effect.catch(() => Effect.succeed({ entries: [], truncated: false })),
+          ? yield* MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
+              // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
+              Effect.provideService(Database.Service, database),
+              Effect.map((page) => {
+                const transcript = PermissionReviewerTranscript.fromMessages(page.items)
+                // #206：窗口溢出与条目截短任一存在都置 truncated——省略标记是 reviewer 的缺失证据
+                return { ...transcript, truncated: transcript.truncated || page.more }
+              }),
+              // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
+              Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
               )
-          : { entries: [], truncated: false }
+          : { entries: [], truncated: false, entryTruncated: false }
         const messages = buildMessages({
           system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
           userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
@@ -205,6 +220,7 @@ export const defaultLayer = layer.pipe(
 export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))))
 
 // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node] })
+// #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Database.node] })
 
 export * as PermissionReviewer from "./service"
