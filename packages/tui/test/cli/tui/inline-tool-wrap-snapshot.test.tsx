@@ -277,6 +277,40 @@ describe("TUI inline tool wrapping", () => {
     // #187：pending 态 label 未就绪；JSX 片段与 ~ 前缀同行渲染
   })
 
+  test("keeps boxed auto review below pending and completed tool text", async () => {
+    const [complete, setComplete] = createSignal(false)
+    // 审查行使用真实 box，原生渲染器会拒绝把它嵌入正文 text。
+    const frame = await renderFrame(
+      () => (
+        <InlineToolRow
+          icon="$"
+          complete={complete()}
+          pending="Writing command"
+          review={
+            <box>
+              <text>auto review</text>
+            </box>
+          }
+        >
+          echo hello
+        </InlineToolRow>
+      ),
+      { width: 72, height: 4 },
+    )
+    expect(frame.split("\n").map((line) => line.trim())).toEqual(["~ Writing command", "auto review"])
+
+    setComplete(true)
+    await testSetup!.renderOnce()
+    await testSetup!.renderOnce()
+    expect(
+      testSetup!
+        .captureCharFrame()
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+    ).toEqual(["$ echo hello", "auto review"])
+  })
+
   test("preserves useful completed copy when a tool fails", async () => {
     const frame = await renderFrame(() => <FailedCompleteToolFixture />, { width: 72, height: 3 })
     expect(frame).toContain("Read src/index.ts")

@@ -1955,57 +1955,60 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   return (
     <Show when={!shouldHide()}>
-      <Switch>
-        <Match when={display() === "bash"}>
-          <Shell {...toolprops} />
-        </Match>
-        <Match when={display() === "glob"}>
-          <Glob {...toolprops} />
-        </Match>
-        <Match when={display() === "read"}>
-          <Read {...toolprops} />
-        </Match>
-        <Match when={display() === "grep"}>
-          <Grep {...toolprops} />
-        </Match>
-        <Match when={display() === "webfetch"}>
-          <WebFetch {...toolprops} />
-        </Match>
-        <Match when={display() === "websearch"}>
-          <WebSearch {...toolprops} />
-        </Match>
-        <Match when={display() === "write"}>
-          <Write {...toolprops} />
-        </Match>
-        <Match when={display() === "edit"}>
-          <Edit {...toolprops} />
-        </Match>
-        <Match when={display() === "task"}>
-          <Task {...toolprops} />
-        </Match>
-        <Match when={display() === "execute"}>
-          <Execute {...toolprops} />
-        </Match>
-        <Match when={display() === "apply_patch"}>
-          <ApplyPatch {...toolprops} />
-        </Match>
-        <Match when={display() === "todowrite"}>
-          <TodoWrite {...toolprops} />
-        </Match>
-        <Match when={display() === "question"}>
-          <Question {...toolprops} />
-        </Match>
-        {/* #209：permission_review_decision 渲染为 reviewer 决策 cell */}
-        <Match when={display() === "permission_review_decision"}>
-          <PermissionReviewDecision {...toolprops} />
-        </Match>
-        <Match when={display() === "skill"}>
-          <Skill {...toolprops} />
-        </Match>
-        <Match when={true}>
-          <GenericTool {...toolprops} />
-        </Match>
-      </Switch>
+      {/* #214：ToolAutoReview.Provider 提供 autoReview metadata——InlineTool/BlockTool 从 context 渲染共享审查状态行 */}
+      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata)}>
+        <Switch>
+          <Match when={display() === "bash"}>
+            <Shell {...toolprops} />
+          </Match>
+          <Match when={display() === "glob"}>
+            <Glob {...toolprops} />
+          </Match>
+          <Match when={display() === "read"}>
+            <Read {...toolprops} />
+          </Match>
+          <Match when={display() === "grep"}>
+            <Grep {...toolprops} />
+          </Match>
+          <Match when={display() === "webfetch"}>
+            <WebFetch {...toolprops} />
+          </Match>
+          <Match when={display() === "websearch"}>
+            <WebSearch {...toolprops} />
+          </Match>
+          <Match when={display() === "write"}>
+            <Write {...toolprops} />
+          </Match>
+          <Match when={display() === "edit"}>
+            <Edit {...toolprops} />
+          </Match>
+          <Match when={display() === "task"}>
+            <Task {...toolprops} />
+          </Match>
+          <Match when={display() === "execute"}>
+            <Execute {...toolprops} />
+          </Match>
+          <Match when={display() === "apply_patch"}>
+            <ApplyPatch {...toolprops} />
+          </Match>
+          <Match when={display() === "todowrite"}>
+            <TodoWrite {...toolprops} />
+          </Match>
+          <Match when={display() === "question"}>
+            <Question {...toolprops} />
+          </Match>
+          {/* #209：permission_review_decision 渲染为 reviewer 决策 cell */}
+          <Match when={display() === "permission_review_decision"}>
+            <PermissionReviewDecision {...toolprops} />
+          </Match>
+          <Match when={display() === "skill"}>
+            <Skill {...toolprops} />
+          </Match>
+          <Match when={true}>
+            <GenericTool {...toolprops} />
+          </Match>
+        </Switch>
+      </ToolAutoReview.Provider>
     </Show>
   )
 }
@@ -2069,6 +2072,8 @@ function GenericTool(props: ToolProps) {
 
 // #209：auto-review metadata 类型——reviewID/sessionID/status/precheck/result 描述 reviewer 状态
 // #209：AutoReviewMetadata 由 service.ts updateToolAutoReview 写入工具 part 的 state.metadata.autoReview
+// #214：ToolAutoReview context——BlockTool/InlineTool 共享一行审查状态，无需各工具显式传 prop
+const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
 type AutoReviewMetadata = {
   reviewID: string
   sessionID?: string
@@ -2091,8 +2096,9 @@ export function autoReviewMetadata(metadata: Record<string, unknown>): AutoRevie
 // #209：auto-review 状态标签——两行合约：命令 + 一行紧凑审查状态
 export function autoReviewLabel(review: AutoReviewMetadata) {
   const agent = "@permission-reviewer"
-  // #209：◌/✓/! 三态字形——reviewing 进行中、allowed 通过、其余终态均为 ! 提示用户注意
-  // ◌ reviewing, ✓ allowed, ! all non-allow terminal outcomes
+// #214：autoReviewLabel 注释更新——placement 归 InlineTool/BlockTool，此函数仅拥有紧凑状态文案
+// #214：◌/✓/! 三态字形是协议状态——reviewing 进行中、allowed 通过、! 覆盖所有非 allow 终态
+// ◌ reviewing, ✓ allowed, ! all non-allow terminal outcomes
   switch (review.status) {
     case "allowed":
       return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
@@ -2129,11 +2135,14 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
     <box
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt?: MouseEvent) => {
         // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
         if (!props.review.sessionID) return
         // 拖选审查结论时保留复制行为，不将选择动作当作导航。
         if (renderer.getSelection()?.getSelectedText()) return
+        // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
+        evt?.preventDefault()
+        evt?.stopPropagation()
         navigate({ type: "session", sessionID: props.review.sessionID })
       }}
     >
@@ -2142,6 +2151,12 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
       </text>
     </box>
   )
+}
+
+// #214：ToolAutoReviewLine——从 context 读取 autoReview 并渲染共享审查状态行
+function ToolAutoReviewLine() {
+  const review = useContext(ToolAutoReview)
+  return <Show when={review()}>{(item) => <AutoReviewLine review={item()} />}</Show>
 }
 
 // #209：PermissionReviewDecision——reviewer 决策 tool cell，展示 outcome/risk/auth/rationale
@@ -2254,6 +2269,8 @@ function InlineTool(props: {
   children: JSX.Element
   part: ToolPart
   onClick?: () => void
+  // #214：autoReview=false 时跳过共享审查状态行——shell inline 等布局需要 bespoke 位置
+  autoReview?: false
 }) {
   const { theme } = useTheme()
   const ctx = use()
@@ -2314,6 +2331,11 @@ function InlineTool(props: {
         }
         props.onClick?.()
       }}
+      review={
+        <Show when={props.autoReview !== false}>
+          <ToolAutoReviewLine />
+        </Show>
+      }
     >
       {props.children}
     </InlineToolRow>
@@ -2336,6 +2358,8 @@ export function InlineToolRow(props: {
   spinner?: boolean
   separate?: boolean
   children: JSX.Element
+  // 审查行含 box，必须独立于 text/Spinner 的正文 children。
+  review?: JSX.Element
   onMouseOver?: () => void
   onMouseOut?: () => void
   onMouseUp?: () => void
@@ -2393,6 +2417,7 @@ export function InlineToolRow(props: {
           </Show>
         </Match>
       </Switch>
+      {props.review}
       <Show when={props.failed && props.errorExpanded}>
         <box paddingLeft={INLINE_TOOL_ICON_WIDTH}>
           <text fg={props.errorColor}>{props.error}</text>
@@ -2414,6 +2439,8 @@ function BlockTool(props: {
   contextLabel?: string
   // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
   preview?: JSX.Element
+  // #214：autoReview=false 时跳过共享审查状态行——apply_patch 内部 BlockTool 由外部统一渲染
+  autoReview?: false
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -2467,6 +2494,10 @@ function BlockTool(props: {
           </Show>
         )}
       </Show>
+      {/* #214：共享审查状态行——autoReview !== false 时从 context 渲染，位于标题与内容之间 */}
+      <Show when={props.autoReview !== false}>
+        <ToolAutoReviewLine />
+      </Show>
       {/* 预览是否存在由原有外层展开状态决定，容器不维护第二套折叠状态。 */}
       <box marginTop={1}>{props.preview ?? props.children}</box>
       <Show when={props.preview}>
@@ -2485,12 +2516,7 @@ function Shell(props: ToolProps) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
   const ctx = use()
-  // #209：navigate 用于点击 auto-review 行导航到 reviewer 子会话
-  const { navigate } = useRoute()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  // #209：autoReview 从工具 metadata 提取——reviewing/allowed/denied 状态驱动 UI
-  // #209：createMemo 缓存提取结果——metadata 仅在 part 更新时变化，避免每帧重复解析
-  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
   const [showContextOutput, setShowContextOutput] = createSignal(false)
   // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
@@ -2550,19 +2576,15 @@ function Shell(props: ToolProps) {
           // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
           preview={
             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
-              // #209：Shell 预览带命令前缀和 auto-review 状态行——折叠时也保留两行审查合约
-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
+              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
+              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
             ) : undefined
           }
         >
           <box gap={1}>
-            {/* 命令与审查行相邻，其余输出仍沿用上游段间距。 */}
-            <box>
             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
             </Show>
-            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
-            </box>
             {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
             <Show when={showContextOutput() && contextOutputAvailable()}>
               <text fg={theme.info}>Model context output</text>
@@ -2577,22 +2599,9 @@ function Shell(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <>
-          <InlineTool
-          icon="$"
-          pending="Writing command…"
-          complete={stringValue(props.input.command)}
-          part={props.part}
-          onClick={() => {
-            const sessionID = autoReview()?.sessionID
-            if (sessionID) navigate({ type: "session", sessionID })
-          }}
-          >
-            {stringValue(props.input.command)}
-          </InlineTool>
-          {/* 独立审查行保留导航，命令行仍使用原有错误详情展开。 */}
-          <Show when={autoReview()}>{(review) => <box paddingLeft={5}><AutoReviewLine review={review()} /></box>}</Show>
-        </>
+        <InlineTool icon="$" pending="Writing command…" complete={stringValue(props.input.command)} part={props.part}>
+          {stringValue(props.input.command)}
+        </InlineTool>
       </Match>
     </Switch>
   )
@@ -3105,6 +3114,8 @@ function ApplyPatch(props: ToolProps) {
   })
 
   const files = createMemo(() => parseApplyPatchFiles(props.metadata.files))
+  // #214：从 context 读取 autoReview——多文件 patch 共享一行审查状态
+  const review = useContext(ToolAutoReview)
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -3138,7 +3149,18 @@ function ApplyPatch(props: ToolProps) {
   return (
     <Switch>
       <Match when={files().length > 0}>
-        <For each={files()}>
+        {/* #214：多文件 patch 审查状态行——位于文件块之上，整 patch 共享一行 */}
+        {/* #214：每个内部 BlockTool 设 autoReview={false}——避免审查状态行在每文件块重复渲染 */}
+        <box>
+          <Show when={review()}>
+            <box paddingLeft={3} marginTop={1}>
+              <text paddingLeft={3} fg={theme.textMuted} wrapMode="none">
+                % Patch {files().length} file{files().length === 1 ? "" : "s"}
+              </text>
+              <ToolAutoReviewLine />
+            </box>
+          </Show>
+          <For each={files()}>
           {(file) => {
             // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
             const [patchExpanded, setPatchExpanded] = createSignal(false)
@@ -3148,6 +3170,8 @@ function ApplyPatch(props: ToolProps) {
             return (
             <BlockTool
               // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
+          // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
+          autoReview={false}
               preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
               title={title(file)}
               part={props.part}
@@ -3172,6 +3196,7 @@ function ApplyPatch(props: ToolProps) {
             )
           }}
         </For>
+        </box>
       </Match>
       <Match when={true}>
         <InlineTool icon="%" pending={patchPending()} failure="Patch failed" complete={false} part={props.part}>

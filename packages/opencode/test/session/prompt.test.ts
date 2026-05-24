@@ -1727,6 +1727,13 @@ it.instance(
       )
       // #209：maxOutputTokens 返回 model.limit.output=10000
       expect(inputs[0].max_tokens).toBe(10000)
+      // #214：reviewID 从父工具 autoReview metadata mirror 到 reviewer 子会话 request part
+      const requestPart = msgs
+        .flatMap((msg) => msg.parts)
+        .find((part) => part.type === "text" && (part as { metadata?: Record<string, unknown> }).metadata?.permissionReviewerRequest === true)
+      const requestID = (requestPart as { metadata?: Record<string, unknown> })?.metadata?.reviewID
+      // #214：reviewID 是审计 join key——UI/导出代码可按逻辑审查定位精确请求，无需解析 prompt 文本
+      expect(typeof requestID).toBe("string")
       // #209：reviewer 请求 cell 带 permissionReviewerRequest metadata
       expect(
         msgs.some((msg) =>
@@ -1748,12 +1755,153 @@ it.instance(
               part.type === "tool" &&
               part.tool === "permission_review_decision" &&
               part.state.status === "completed" &&
+              // #214：决策 part metadata mirror reviewID——子会话可按逻辑审查搜索/导出
+              part.state.metadata?.reviewID === requestID &&
               part.state.metadata?.rationale === "private key read was not explicitly authorized",
           ),
         ),
       ).toBe(true)
     }),
   { git: true },
+)
+
+// #214：reviewer 子代理流重试瞬时 provider 故障后记录决策
+it.instance(
+  "auto permission reviewer retries transient provider failures before recording the decision",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer retry" })
+      const command = "cat ~/.ssh/id_rsa"
+      // #214：先推一个 503 错误模拟瞬时 reviewer 故障
+      yield* llm.error(503, { error: "temporary reviewer outage" })
+      yield* llm.push(
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "retry recovered and found explicit authorization",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "Auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      // #214：重试后 provider 被调用 2 次——第一次 503，第二次成功
+      expect(yield* llm.calls).toBe(2)
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.rationale === "retry recovered and found explicit authorization",
+          ),
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+  10_000,
+)
+
+// #214：shell autoReview metadata 在实时输出更新和完成时存活
+it.instance(
+  "shell auto review metadata survives live output updates and completion",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        // 本例验证权限与工具metadata，独立关闭不相关的Git快照采集。
+        snapshot: false,
+        permission: { approvals_reviewer: "auto_review" },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Shell review metadata",
+        permission: [
+          { permission: "bash", pattern: "*", action: "auto" },
+          // #214：此测试针对 bash 审查包络——敏感路径会创建单独的 external_directory prompt 并阻止 shell
+          { permission: "external_directory", pattern: "*", action: "allow" },
+        ],
+      })
+      const key = path.join(chat.directory, ".ssh", "id_rsa")
+      yield* Effect.promise(() => Bun.write(key, "fixture-key"))
+      const command = process.platform === "win32" ? `Get-Content -LiteralPath "${key}"` : `cat "${key}"`
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "read the key" }],
+      })
+      yield* llm.push(
+        reply().tool("bash", { command, description: "Read SSH private key via shell" }).item(),
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly asked for this key read",
+          })
+          .item(),
+        reply().text("done").stop().item(),
+      )
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role).toBe("assistant")
+
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const shell = msgs
+        .flatMap((msg) => msg.parts)
+        .find((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "bash")
+      expect(shell?.state.status).toBe("completed")
+      if (shell?.state.status !== "completed") return
+      // #214：shell 流式输出反复覆盖自身 output 预览 metadata——审查包络必须存活
+      // #214：最终卡片仍链接到 reviewer 子会话而非静默丢失审计状态
+      expect(shell.state.metadata?.output).toBeDefined()
+      expect(shell.state.metadata?.autoReview?.status).toBe("allowed")
+      expect(shell.state.metadata?.autoReview?.result?.rationale).toBe("user explicitly asked for this key read")
+      const reviewID = shell.state.metadata?.autoReview?.reviewID
+      expect(typeof reviewID).toBe("string")
+
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
+      // #214：断言完整 parent-tool-to-child-transcript join——每次审查轮次需带父 autoReview.reviewID
+      expect(
+        reviewerParts.some(
+          (part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true && part.metadata.reviewID === reviewID,
+        ),
+      ).toBe(true)
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.reviewID === reviewID,
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+  15_000,
 )
 
 it.instance("failed subtask preserves metadata on error tool state", () =>
