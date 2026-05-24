@@ -19,6 +19,11 @@ describe("permission precheck bash classifier", () => {
     expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
     expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
     expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
+    // #222：find/Python 删除模式出现在 rg 搜索文本中不应被误判为删除命令
+    expect(bash("rg \"find . -name stale.tmp -delete\" src").level).toBe("safe")
+    expect(bash("rg \"python -c import os; os.remove('stale.tmp')\" src").level).toBe("safe")
+    expect(bash("find src -type f -print; rg \"find . -name stale.tmp -delete\" src").level).toBe("safe")
+    expect(bash("python --version; rg \"python -c import os; os.remove('stale.tmp')\" src").level).toBe("safe")
   })
 
   // #202：read-looking 但可执行外部程序的命令不能进入 safe——rg --pre/git --ext-diff 等
@@ -95,6 +100,19 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
     // #217：POSIX 单引号内反斜杠为字面量——格式错误的单引号后的可见删除仍需 cautious
     expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
+    // #222：git rm 删除跟踪文件——与 add/commit 同级 cautious
+    expect(bash("git rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git rm \"path with spaces/stale.tmp\"")).toMatchObject({ level: "cautious" })
+    // #222：find -delete / -exec rm 在 token 层和 raw 层都需要捕获
+    expect(bash("find . -name stale.tmp -delete")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp \"-delete\"")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp -exec rm {} \\;")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp -exec 'rm' {} \\;")).toMatchObject({ level: "cautious" })
+    // #222：python -c os.remove 在 token 层和 raw 层都需要捕获
+    expect(bash("python -c 'import os; os.remove(\"stale.tmp\")'")).toMatchObject({ level: "cautious" })
+    expect(bash(`python -c "import os; os.remove('stale.tmp')"`)).toMatchObject({ level: "cautious" })
+    // #222：trash-put 是 trash-cli 的删除命令
+    expect(bash("trash-put stale.tmp")).toMatchObject({ level: "cautious" })
     expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
     expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
     expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
@@ -286,10 +304,14 @@ describe("permission precheck bash classifier", () => {
   })
 
   // #220：持久化后门写入
-  test("marks SSH authorized_keys writes dangerous as backdoor persistence", () => {
-    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
-    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
-    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
+  // #222：authorized_keys 写入降级为 cautious——reviewer 可判断是否为合法 SSH 密钥设置
+  test("marks SSH authorized_keys writes cautious so reviewer can judge legitimate access setup", () => {
+    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    // #222：扩展正则覆盖绝对家目录路径
+    expect(bash("echo 'ssh-rsa AAAA...' >> /home/alice/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'ssh-rsa AAAA...' >> /root/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
   })
 
   test("marks sudoers modification dangerous as privilege escalation", () => {
@@ -344,13 +366,14 @@ describe("permission precheck bash classifier", () => {
   })
 
   // #220：防火墙规则——flush/disable dangerous，修改 cautious
-  test("marks firewall rule flush dangerous as network protection removal", () => {
-    expect(bash("iptables -F")).toMatchObject({ level: "dangerous" })
-    expect(bash("iptables -X")).toMatchObject({ level: "dangerous" })
-    expect(bash("ip6tables --flush")).toMatchObject({ level: "dangerous" })
-    expect(bash("iptables --delete-chain")).toMatchObject({ level: "dangerous" })
-    expect(bash("ufw disable")).toMatchObject({ level: "dangerous" })
-    expect(bash("nft flush ruleset")).toMatchObject({ level: "dangerous" })
+  // #222：防火墙保护移除降级为 cautious——reviewer 可判断是否为合法运维操作
+  test("marks firewall protection removal cautious for reviewer approval", () => {
+    expect(bash("iptables -F")).toMatchObject({ level: "cautious" })
+    expect(bash("iptables -X")).toMatchObject({ level: "cautious" })
+    expect(bash("ip6tables --flush")).toMatchObject({ level: "cautious" })
+    expect(bash("iptables --delete-chain")).toMatchObject({ level: "cautious" })
+    expect(bash("ufw disable")).toMatchObject({ level: "cautious" })
+    expect(bash("nft flush ruleset")).toMatchObject({ level: "cautious" })
   })
 
   test("marks non-flush firewall modifications cautious", () => {
