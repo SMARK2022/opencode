@@ -167,7 +167,13 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
       description: VscodeNotebookDescriptions.edit,
       args: editArgs,
       execute: async (args, context) => {
-        // 权限检查：在 V2 中通过 Effect 系统执行
+        // #223：notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
+        // mode 对 vscode_notebook_edit 的 deny 不会覆盖到这里，只会落到通用
+        // edit 规则，导致 notebook 写入权限和普通文件编辑权限混在一起。
+        await ask(context, "vscode_notebook_edit", args)
+        // #223：继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
+        // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
+        // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
         await ask(context, "edit", args)
         return {
           output: await call("/notebook/edit", args, context, 30_000),
@@ -182,10 +188,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
         operation: z.enum(["info", "configure", "restart", "save"]).describe("Which notebook environment operation to perform."),
         reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
       },
-      execute: async (args, context) => ({
-        output: await call("/notebook/env", args, context, 120_000),
-        metadata: { endpoint: "/notebook/env", operation: args.operation },
-      }),
+      execute: async (args, context) => {
+        // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
+        await ask(context, "vscode_notebook_env", args)
+        return {
+          output: await call("/notebook/env", args, context, 120_000),
+          metadata: { endpoint: "/notebook/env", operation: args.operation },
+        }
+      },
     }),
   },
 }

@@ -42,6 +42,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
   process.env.OPENCODE_IDE_REGISTRY_DIR = directory
   const received: Array<{ path: string; method: string; auth: string | null; body: unknown }> = []
   const permissions: PermissionV2.AssertInput[] = []
+  let deniedAction: string | undefined
   const started = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   const queued = Promise.withResolvers<void>()
@@ -174,8 +175,14 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     // 审批来自各自真实调用ID；被取消编辑不丢失已发生的审批事实。
     expect(permissions).toMatchObject([
       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-4" } },
+      { action: "vscode_notebook_edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
+      { action: "vscode_notebook_edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
+      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-8" } },
+      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-9" } },
+      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-10" } },
+      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-11" } },
       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
     ])
     // 只验证原生五态响应穿过真实CLI，不在fixture重演或伪造内核判态算法。
@@ -195,10 +202,25 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     }
     expect(received).toHaveLength(15)
     expect(received.slice(-5).map(item => item.body)).toEqual(["configured", "selected", "needs-selection", "selection-requested", "failed"].map(reason => ({ filePath, operation: "configure", reason })))
-    expect(permissions).toHaveLength(4)
+    expect(permissions).toHaveLength(15)
+    // 专属edit、通用edit和env各自拒绝都必须零RPC，不能靠registry广告隐藏替代执行授权。
+    for (const action of ["vscode_notebook_edit", "edit", "vscode_notebook_env"]) {
+      deniedAction = action
+      const beforeRPC = received.length
+      const beforePermissions = permissions.length
+      const name = action === "vscode_notebook_env" ? action : "vscode_notebook_edit"
+      const input = action === "vscode_notebook_env" ? { filePath, operation: "info" } : { filePath, cellId: "#VSC-a", editType: "edit", newCode: "denied" }
+      const result = yield* invoke(name, input)
+      expect(result.result.type).toBe("error")
+      expect(received).toHaveLength(beforeRPC)
+      expect(permissions.slice(beforePermissions).map((item) => item.action)).toEqual(action === "edit" ? ["vscode_notebook_edit", "edit"] : [action])
+    }
+    deniedAction = undefined
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
-    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }) })],
+    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(
+      Effect.andThen(input.action === deniedAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void),
+    ) })],
     [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
   ])))
 }))

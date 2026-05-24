@@ -94,9 +94,14 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
     vscode_notebook_output: Tool.make({ ...common, description: VscodeNotebookDescriptions.output, input: OutputInput,
       execute: (args, context) => call("/notebook/output", args, context, 30_000) }),
     vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common, description: VscodeNotebookDescriptions.edit, input: EditInput,
-      execute: (args, context) => ask("edit", args, context).pipe(Effect.andThen(call("/notebook/edit", args, context, 30_000))) }), "edit"),
+      // 专属权限先表达Notebook策略，再保留通用edit；两层拒绝均在发现/传输之前。
+      execute: (args, context) => ask("vscode_notebook_edit", args, context).pipe(
+        Effect.andThen(ask("edit", args, context)),
+        Effect.andThen(call("/notebook/edit", args, context, 30_000)),
+      ) }), "edit"),
     vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
-      execute: (args, context) => call("/notebook/env", args, context, 120_000) }),
+      // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
+      execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
   }).pipe(Effect.orDie)
 }))
 
