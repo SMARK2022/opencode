@@ -13,7 +13,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellRemote } from "@opencode-ai/core/shell-remote"
 import { ShellID } from "./shell/id"
-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -502,7 +502,9 @@ export const ShellTool = Tool.define(
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
-      let last = ""
+      // #215：屏幕独立于原始环形缓冲和写盘，先渲染再交给 Tool.wrap 消毒。
+      const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
+      let displayed = false
       const list: Chunk[] = []
       let used = 0
       let file = ""
@@ -561,6 +563,8 @@ export const ShellTool = Tool.define(
             if (!chunk) return Effect.void
             // 收集诊断信息用于压缩后的附录生成
             diag.push(chunk)
+            const visible = preview(display.push(chunk))
+            displayed = true
             const size = Buffer.byteLength(chunk, "utf-8")
             list.push({ text: chunk, size })
             used += size
@@ -570,8 +574,6 @@ export const ShellTool = Tool.define(
               used -= item.size
               cut = true
             }
-
-            last = preview(last + chunk)
 
             if (file) {
               sink?.write(chunk)
@@ -590,7 +592,7 @@ export const ShellTool = Tool.define(
                   Effect.andThen(
                     ctx.metadata({
                       metadata: {
-                        output: last,
+                        output: visible,
                       },
                     }),
                   ),
@@ -600,7 +602,7 @@ export const ShellTool = Tool.define(
 
             return ctx.metadata({
               metadata: {
-                output: last,
+                output: visible,
               },
             })
           }
@@ -681,7 +683,8 @@ export const ShellTool = Tool.define(
       return {
         title: input.command,
         metadata: {
-          output: last || preview(output),
+          // #215：清屏后的空字符串也是有效快照，仅无输出命令沿用原回退。
+          output: displayed ? preview(display.value()) : preview(output),
           exit: code,
           truncated: cut,
           ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
