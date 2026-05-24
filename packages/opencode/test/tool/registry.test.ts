@@ -476,6 +476,74 @@ describe("tool.registry", () => {
     }),
   )
 
+  // #223：插件工具的 execute 是普通 async 函数，会跨出当前 Effect fiber。
+  // V2 registry 的 fromPlugin 已通过 EffectBridge 把 ask 绑定到当前实例上下文；
+  // 这个测试验证插件内部 await context.ask(...) 仍使用正确的 InstanceState 目录。
+  it.instance("preserves instance context when plugin tools run permission asks inside async execute", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      // #223：自定义工具写到 .opencode/tools/ask.ts，registry 会发现并加载它
+      const customTools = path.join(test.directory, ".opencode", "tools")
+      // #223：plugin SDK 的 tool() 工厂从 plugin 包源码导入，保证和运行时一致
+      const pluginTool = pathToFileURL(path.resolve(import.meta.dir, "../../../plugin/src/tool.ts")).href
+      yield* Effect.promise(() => fs.mkdir(customTools, { recursive: true }))
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(customTools, "ask.ts"),
+          [
+            `import { tool } from ${JSON.stringify(pluginTool)}`,
+            "export default tool({",
+            "  description: 'ask tool',",
+            "  args: {},",
+            // #223：V2 的 context.ask 返回 Promise<void>，插件直接 await 即可
+            "  execute: async (_args, context) => {",
+            // #223：插件内部调用 ask 时传入 permission/patterns/always/metadata 四件套，
+            // registry 的 EffectBridge 会把它们转发到 V2 的 Tool.Context.ask Effect
+            "    await context.ask({ permission: 'plugin_ask', patterns: ['*'], always: ['*'], metadata: { reason: 'inside-plugin-promise' } })",
+            "    return 'asked'",
+            "  },",
+            "})",
+            "",
+          ].join("\n"),
+        ),
+      )
+
+      // #223：加载自定义工具并从 registry 查找 ask 工具定义
+      // #223：registry.all() 会扫描 .opencode/tools/ 并用 V2 的 fromPlugin 加载
+      const registry = yield* ToolRegistry.Service
+      const loaded = (yield* registry.all()).find((tool) => tool.id === "ask")
+      if (!loaded) throw new Error("custom ask tool was not loaded")
+      const agents = yield* Agent.Service
+      // #223：asked 捕获插件内部 ask 调用时传入的 permission 值
+      let asked: string | undefined
+      // #223：Tool.Context.ask 返回 Effect——registry 的 EffectBridge 会把它桥接到
+      // 插件的 Promise<void> ask；这里在 Effect 层直接检查 InstanceState.directory
+      // 是否等于当前测试目录，验证上下文没有在 async 边界丢失
+      const result = yield* loaded.execute({}, {
+        sessionID: SessionID.make("ses_test"),
+        messageID: MessageID.make("msg_test"),
+        agent: (yield* agents.defaultInfo()).name,
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => Effect.void,
+        ask: (req) =>
+          InstanceState.directory.pipe(
+            Effect.map((dir) => {
+              // #223：如果 EffectBridge 丢失了实例上下文，dir 不会等于 test.directory
+              expect(dir).toBe(test.directory)
+              asked = req.permission
+            }),
+          ),
+      } satisfies Tool.Context)
+
+      // #223：插件返回 'asked' 表示 ask 通过后继续执行；permission 精确匹配 'plugin_ask'
+      // #223：如果 EffectBridge 丢失上下文，asked 会是 undefined 或 dir 断言先失败
+      // #223：这个测试不 mock callBridge——它只验证权限上下文传递，不验证 bridge 返回
+      expect(result.output).toBe("asked")
+      expect(asked).toBe("plugin_ask")
+    }),
+  )
+
   it.instance("loads legacy JSON-schema-shaped custom tools with wire schema", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
