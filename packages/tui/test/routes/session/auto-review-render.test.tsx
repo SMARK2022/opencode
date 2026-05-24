@@ -224,8 +224,19 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
         }
         const row = lines.findIndex((line) => line.includes(command))
         expect(row).toBeGreaterThanOrEqual(0)
-        expect(lines[row + 1]).toContain(expected)
+        const reviewRow = lines.findIndex((line) => line.includes(expected))
+        expect(reviewRow).toBeGreaterThanOrEqual(0)
+        if (scenario === "completed" || scenario === "collapsed") expect(reviewRow).toBeLessThan(row)
+        if (scenario === "running" || scenario === "error") expect(reviewRow).toBe(row + 1)
+        expect(lines.filter((line) => line.includes(expected))).toHaveLength(1)
         if (scenario === "collapsed") expect(lines.join("\n")).toContain("Click to expand")
+        if (scenario === "running") {
+          await app.mockMouse.click(lines[row].indexOf(command), row)
+          expect(route.data).toMatchObject({ type: "session", sessionID })
+          await app.renderOnce()
+          await app.mockMouse.click(lines[reviewRow].indexOf("auto review"), reviewRow)
+          expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
+        }
         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
         if (scenario === "error") {
           const x = lines[row + 1].indexOf("auto review")
@@ -317,6 +328,73 @@ test.each([false, true])("task opens its current child after stale prefetch: %s"
       parts: [{ id: "part_child", sessionID: childID, messageID: "msg_child", type: "text", text: "child session refreshed" }] }]
   } })
 })
+
+// 覆盖源新增的共享槽位、无审查外观、多文件去重和非Shell导航，不复制生产组件布局。
+test.each(["read", "read-error", "generic", "edit", "write", "running-output", "plain-read", "patch", "plain-patch"] as const)(
+  "shared auto review is rendered by the real tool: %s", async (scenario) => {
+    const childID = "ses_reviewer_child"
+    const plain = scenario.startsWith("plain-")
+    const patch = scenario === "patch" || scenario === "plain-patch"
+    const toolName = patch ? "apply_patch" : scenario === "generic" ? "future_tool" : scenario === "running-output" ? "bash" : scenario.replace("plain-", "").replace("-error", "")
+    const review = { reviewID: "review_shared", sessionID: childID, status: scenario === "read-error" ? "denied" : "allowed",
+      result: { risk_level: "high", user_authorization: "high", rationale: "authorized" } }
+    const info: AssistantMessage = {
+      id: "msg_shared", sessionID, role: "assistant", parentID: "msg_user", time: { created: 1, completed: 2 },
+      modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
+    const files = (plain ? ["a"] : ["a", "b"]).map((name) => ({ filePath: `external/${name}.ts`, relativePath: `external/${name}.ts`,
+      type: "update", patch: `--- external/${name}.ts\n+++ external/${name}.ts\n@@ -1 +1 @@\n-old\n+new`, additions: 1, deletions: 1 }))
+    const metadata = {
+      ...(plain ? {} : { autoReview: review }),
+      ...(patch ? { files, diagnostics: {} } : {}),
+      ...(scenario === "edit" ? { diff: Array.from({ length: 30 }, (_, i) => `+line ${i}`).join("\n"), diagnostics: {} } : {}),
+      ...(scenario === "running-output" ? { output: "streamed output" } : {}),
+    }
+    const input = patch ? { patchText: "*** Begin Patch\n*** End Patch" } : scenario === "running-output" ? { command } : scenario === "edit" ? { filePath: "external/config.ts", oldString: "old", newString: "new" } : scenario === "write" ? { filePath: "external/config.ts", content: "created" } : { filePath: "external/config.ts" }
+    const part: Part = {
+      id: "part_shared", sessionID, messageID: info.id, type: "tool", tool: toolName, callID: "shared_call",
+      state: scenario === "read-error"
+        ? { status: "error", input, error: "auto reviewer denied", metadata, time: { start: 1, end: 2 } }
+        : scenario === "running-output"
+          ? { status: "running", input, metadata, title: "running", time: { start: 1 } }
+          : { status: "completed", input, metadata, output: "", title: "completed", time: { start: 1, end: 2 } },
+    }
+    await withRenderedReview([{ info, parts: [part] }], async (app) => {
+      await waitForReviewFrame(app, async (frame) => {
+        if (plain ? frame.includes(patch ? "a.ts" : "config.ts") : frame.includes("@permission-reviewer")) return true
+        await Bun.sleep(10)
+        return false
+      }, { maxPasses: 300 })
+      await app.renderOnce()
+      await app.renderOnce()
+      const lines = app.captureCharFrame().split("\n")
+      const reviewRows = lines.filter((line) => line.includes("auto review"))
+      expect(reviewRows).toHaveLength(plain ? 0 : 1)
+      if (plain) {
+        expect(lines.join("\n")).not.toContain("% Patch")
+        return
+      }
+      const row = lines.findIndex((line) => line.includes("auto review"))
+      if (patch) {
+        expect(lines.join("\n")).toContain("b.ts")
+        expect(row).toBeLessThan(lines.findIndex((line) => line.includes("a.ts")))
+      }
+      if (scenario === "running-output") expect(row).toBeLessThan(lines.findIndex((line) => line.includes(command)))
+      if (scenario === "read" || scenario === "read-error") expect(row).toBe(lines.findIndex((line) => line.includes("config.ts")) + 1)
+      if (scenario === "read" || scenario === "edit") {
+        await app.mockMouse.click(lines[row].indexOf("auto review"), row)
+        await waitForReviewFrame(app, async (frame) => {
+          if (frame.includes("reviewer child visible")) return true
+          await Bun.sleep(10)
+          return false
+        }, { maxPasses: 300 })
+        expect(app.captureCharFrame()).not.toContain("Click to collapse")
+      }
+    }, {}, { [childID]: () => [{ info: { ...info, id: "msg_reviewer_shared", sessionID: childID, agent: "permission-reviewer" },
+      parts: [{ id: "part_reviewer_shared", sessionID: childID, messageID: "msg_reviewer_shared", type: "text", text: "reviewer child visible" }] }] })
+  },
+)
 
 // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
 async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {

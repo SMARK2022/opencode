@@ -857,21 +857,21 @@ const layer = Layer.effect(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
             ),
-            Effect.retry(
-              SessionRetry.policy({
-                provider: input.model.providerID,
-                parse,
-                set: (info) => {
-                  return status.set(ctx.sessionID, {
-                    type: "retry",
-                    attempt: info.attempt,
-                    message: info.message,
-                    action: info.action,
-                    next: info.next,
-                  })
-                },
-              }),
-            ),
+            // #214：SessionRetry.retry 封装替代 Effect.retry(SessionRetry.policy(...))
+            // #214：processor 和 reviewer 子代理流共享同一重试策略和分类逻辑
+            SessionRetry.retry({
+              provider: input.model.providerID,
+              parse,
+              set: (info) => {
+                return status.set(ctx.sessionID, {
+                  type: "retry",
+                  attempt: info.attempt,
+                  message: info.message,
+                  action: info.action,
+                  next: info.next,
+                })
+              },
+            }),
             Effect.catch(halt),
             // #139：ensuring cleanup 必须尊重 aborted，跳过慢 snapshot
             Effect.ensuring(cleanup()),

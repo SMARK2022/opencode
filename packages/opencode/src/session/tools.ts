@@ -68,11 +68,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     metadata: (val) =>
       input.processor.updateToolCall(options.toolCallId, (match) => {
         if (!["running", "pending"].includes(match.state.status)) return match
+        // #214：工具 metadata 回调替换实时进度数据（如 shell 输出预览）
+        // #214：仅保留 permission-review 包络——它由 PermissionReviewer 拥有，链接父工具到隐藏子会话
+        // #214：shell/edit/write 进度更新不得丢弃 autoReview 审查状态
+        const autoReview = match.state.status === "running" ? match.state.metadata?.autoReview : undefined
         return {
           ...match,
           state: {
             title: val.title,
-            metadata: val.metadata,
+            metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
             status: "running",
             input: args,
             time: match.state.status === "running" ? match.state.time : { start: Date.now() },

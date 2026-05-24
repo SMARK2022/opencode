@@ -208,4 +208,11 @@ export function policy(opts: {
   )
 }
 
+// #214：retry 封装——将 policy 分类/延迟集中一处，供 processor 和 reviewer 子代理流复用
+// #214：hidden reviewer 子代理流无法进入 processor 而不创建依赖环——复用同一重试策略
+// #214：调用方仍拥有 set 副作用——主会话更新 status，reviewer 子代理流重试时不发明独立 UI 状态
+export function retry(opts: Parameters<typeof policy>[0]) {
+  return <A, E, R>(self: Effect.Effect<A, E, R>) => self.pipe(Effect.retry(policy(opts)))
+}
+
 export * as SessionRetry from "./retry"

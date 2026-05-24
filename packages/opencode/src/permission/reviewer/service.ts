@@ -5,6 +5,7 @@ import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
+import { SessionRetry } from "@/session/retry"
 import { Database } from "@opencode-ai/core/database/database"
 
 import { MessageID, PartID, SessionID } from "@/session/schema"
@@ -141,6 +142,8 @@ export const layer = Layer.effect(
             ? yield* recordReviewerRequest({
                 session: reviewerSession,
                 model,
+                // #214：reviewID 从父工具 autoReview metadata 传入——稳定 join key
+                reviewID: input.reviewID,
                 text: renderReviewerPrompt(messages),
               })
             : undefined
@@ -148,6 +151,8 @@ export const layer = Layer.effect(
           const assessment = yield* runReviewerAgent({
             session: reviewerSession,
             model,
+            // #214：reviewID 透传到 reviewer agent——最终决策 part 需 mirror 此 ID
+            reviewID: input.reviewID,
             parentID: reviewerUser?.id,
             messages,
           }).pipe(
@@ -225,7 +230,8 @@ export const layer = Layer.effect(
     }
 
     // #209：记录 reviewer 请求为可见用户消息——metadata 标记防止被误认为人类授权
-    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
+    // #214：reviewID 写入 metadata——审计/导出代码可按逻辑审查导航，无需解析安全敏感的合成 prompt
+    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; reviewID: string; text: string }) {
       return Effect.gen(function* () {
         const message = yield* session.updateMessage({
           id: MessageID.ascending(),
@@ -241,7 +247,8 @@ export const layer = Layer.effect(
           messageID: message.id,
           type: "text",
           // #209：metadata 标记替代 synthetic——reviewer 子会话请求 cell 可见但不可作为授权证据，transcript 投影据此排除
-          metadata: { permissionReviewerRequest: true },
+          // #214：reviewID 是从父工具 autoReview metadata 到此可见协议 prompt 的稳定 join key
+          metadata: { permissionReviewerRequest: true, reviewID: input.reviewID },
           text: input.text,
         } satisfies TextPart)
         return message
@@ -249,9 +256,11 @@ export const layer = Layer.effect(
     }
 
     // #209：runReviewerAgent——有子会话时持久化流式 part，无子会话时仅提取 assessment
+    // #214：reviewID 透传到 runReviewerStream——最终决策 part metadata 需 mirror 此 ID
     function runReviewerAgent(input: {
       session: Session.Info | undefined
       model: Provider.Model
+      reviewID: string
       parentID: MessageID | undefined
       messages: readonly ModelMessage[]
     }) {
@@ -279,6 +288,8 @@ export const layer = Layer.effect(
         const assessment = yield* runReviewerStream(input.messages, input.model, {
           sessionID: sessionInfo.id,
           messageID: message.id,
+          // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
+          reviewID: input.reviewID,
         }).pipe(
           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
           Effect.tapError((error) =>
@@ -298,10 +309,12 @@ export const layer = Layer.effect(
     }
 
     // #209：runReviewerStream——streamText + permission_review_decision tool，流式消费 fullStream 事件并逐 part 持久化
+    // #214：persist 新增 reviewID——最终决策 part metadata mirror 此 ID，供审计/导出按逻辑审查导航
+    // #214：persist 为 undefined 时（无子会话）不 mirror reviewID——纯流式提取不持久化决策 part
     function runReviewerStream(
       messages: readonly ModelMessage[],
       model: Provider.Model,
-      persist?: { sessionID: SessionID; messageID: MessageID },
+      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
     ) {
       return Effect.acquireUseRelease(
         // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
@@ -477,7 +490,9 @@ export const layer = Layer.effect(
                       status: "completed",
                       input: assessment,
                       title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
-                      metadata: assessment,
+                      // #214：reviewID mirror 到最终决策 part——子会话可按逻辑审查搜索/导出
+                      // #214：一个隐藏 reviewer 子会话可累积多次审查轮次，每次需带父 autoReview.reviewID
+                      metadata: persist ? { ...assessment, reviewID: persist.reviewID } : assessment,
                       output: JSON.stringify(assessment),
                       time: { start: Date.now(), end: Date.now() },
                     },
@@ -490,8 +505,9 @@ export const layer = Layer.effect(
                   return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
                 }
                 if (event.type === "error") {
-                  // #209：stream 级错误同样转为 RunError——保持单一 fail-closed 错误出口
-                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
+                  // #214：provider stream 错误必须保留原始形状直到 SessionRetry 分类
+                  // #214：此处包装会丢失 APICallError/status/header 细节，将瞬时 socket 故障转为即时 fallback
+                  return yield* Effect.fail(event.error)
                 }
               }),
             )
@@ -514,6 +530,17 @@ export const layer = Layer.effect(
           }),
         // #209：release 时中止 AbortController——确保 Effect 取消时 streamText 立即停止，不再消耗 provider 配额
         (abort) => Effect.sync(() => abort.abort()),
+      ).pipe(
+        // #214：SessionRetry.retry 封装——hidden reviewer 子代理流复用同一 provider 安全重试策略
+        // #214：reviewer 子代理流是审计 transcript，非活跃 SessionProcessor run——重试时不更新父工具 autoReview 状态
+        // #214：父工具 autoReview 保持在 reviewing 状态直到最终 allow/deny/fallback 结果确定
+        // #214：set 为 Effect.void——reviewer 无独立 UI 状态合约，重试仅影响 provider 调用
+        // #214：parse 使用 MessageV2.fromError 保留 APICallError/status/header 细节供分类
+        SessionRetry.retry({
+          provider: model.providerID,
+          parse: (error) => MessageV2.fromError(error, { providerID: model.providerID }),
+          set: () => Effect.void,
+        }),
       )
     }
 
