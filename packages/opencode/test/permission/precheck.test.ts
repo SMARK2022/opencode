@@ -13,6 +13,10 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git status --porcelain").level).toBe("safe")
     expect(bash("git branch --show-current").level).toBe("safe")
     expect(bash("rg \"path with spaces\" src").level).toBe("safe")
+    expect(bash("rg \"; rm stale.tmp\" src").level).toBe("safe")
+    expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
+    expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
+    expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
   })
 
   test("does not mark read commands safe when they can invoke external programs", () => {
@@ -58,12 +62,27 @@ describe("permission precheck bash classifier", () => {
   })
 
   test("marks unsupported shell separators general instead of safe", () => {
-    expect(bash("git status & rm -rf node_modules")).toMatchObject({ level: "general" })
-    expect(bash("git status\nrm -rf node_modules")).toMatchObject({ level: "general" })
+    expect(bash("git status & rg TODO src")).toMatchObject({ level: "general" })
+    expect(bash("git status\nrg TODO src")).toMatchObject({ level: "general" })
   })
 
   test("marks destructive but bounded commands cautious for reviewer/user approval", () => {
     expect(bash("rm -rf node_modules")).toMatchObject({ level: "cautious" })
+    expect(bash("rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("/bin/rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("rm -f 'path with spaces/file.txt'")).toMatchObject({ level: "cautious" })
+    expect(bash("unlink stale.sock")).toMatchObject({ level: "cautious" })
+    expect(bash("/usr/bin/unlink stale.sock")).toMatchObject({ level: "cautious" })
+    expect(bash("rmdir empty-dir")).toMatchObject({ level: "cautious" })
+    expect(bash("del /q C:\\Temp\\old.log")).toMatchObject({ level: "cautious" })
+    expect(bash("erase \"path with spaces\\old.log\"")).toMatchObject({ level: "cautious" })
+    expect(bash("Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force -ErrorAction SilentlyContinue")).toMatchObject({ level: "cautious" })
+    expect(bash(String.raw`Remove-Item -Path "$env:TEMP\old.log" -Force`)).toMatchObject({ level: "cautious" })
+    expect(bash("Remove-Item \"path with spaces\\old.log\" > deleted.log")).toMatchObject({ level: "cautious" })
+    expect(bash("git status & rm -f stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git status & /bin/rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
     expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
     expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
     expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
@@ -73,6 +92,31 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git branch feature/review")).toMatchObject({ level: "cautious" })
     expect(bash("git branch -D feature/review")).toMatchObject({ level: "cautious" })
     expect(bash("git branch -m old-name new-name")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks move and rename file mutations cautious because they can bypass delete review", () => {
+    expect(bash("mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("/bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("git status & /bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("move C:\\Temp\\old.log C:\\Temp\\archive\\old.log")).toMatchObject({ level: "cautious" })
+    expect(bash("ren old.log older.log")).toMatchObject({ level: "cautious" })
+    expect(bash("Rename-Item \"path with spaces\\old.log\" \"older.log\"")).toMatchObject({ level: "cautious" })
+    expect(bash(String.raw`Move-Item -LiteralPath "H:\DumpStack.log.tmp" -Destination "$env:TEMP\DumpStack.to_delete" -Force -ErrorAction Stop`)).toMatchObject({ level: "cautious" })
+    expect(bash("git mv old.txt new.txt")).toMatchObject({ level: "cautious" })
+  })
+
+  test("propagates bounded delete risks through shell, remote, and alternate OS wrappers", () => {
+    expect(bash("ssh example.com 'rm stale.tmp'")).toMatchObject({ level: "cautious" })
+    expect(bash("ssh -p 22 example.com rm -f 'path with spaces/stale.tmp'")).toMatchObject({ level: "cautious" })
+    expect(bash("wsl.exe -- rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("cmd /c del /q stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("cmd /c \"del /f /q H:\\DumpStack.log.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("git status; cmd /c \"del /f /q H:\\DumpStack.log.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("echo ok & cmd /c \"del /q stale.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("pwsh -Command 'Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force'")).toMatchObject({ level: "cautious" })
+    expect(bash("pwsh -Command \"Remove-Item stale.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("echo $(rm stale.tmp)")).toMatchObject({ level: "cautious" })
+    expect(bash("echo `rm stale.tmp`")).toMatchObject({ level: "cautious" })
   })
 
   test("marks protected-root deletes dangerous instead of treating them as opaque", () => {
@@ -85,6 +129,11 @@ describe("permission precheck bash classifier", () => {
     expect(bash("format C:")).toMatchObject({ level: "dangerous" })
     expect(bash("rmdir /s /q C:\\Users\\Alice")).toMatchObject({ level: "dangerous" })
     expect(bash("del /s /q %USERPROFILE%")).toMatchObject({ level: "dangerous" })
+    expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "dangerous" })
+    expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "dangerous" })
+    expect(bash("powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
+    expect(bash("git status; powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
+    expect(bash("echo `rm -rf /`")).toMatchObject({ level: "dangerous" })
   })
 
   test("marks dangerous command substitutions dangerous instead of treating wrappers as safe", () => {

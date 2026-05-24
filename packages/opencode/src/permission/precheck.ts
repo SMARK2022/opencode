@@ -59,6 +59,20 @@ const INTERPRETER_FLAGS = new Map([
 const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
 const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
 const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
+// These raw destructive patterns deliberately sit below dangerousRaw checks and
+// above tokenization. They catch visible file mutations in opaque shells such as
+// PowerShell env paths, redirection, command substitution, SSH/WSL payloads, and
+// unsupported separators without upgrading protected-root recursive deletes from
+// dangerous to merely cautious.
+const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
+const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
+const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
+const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
+// Token-level sets mirror the raw destructive patterns after command-name
+// normalization, so path-qualified binaries like `/bin/rm` cannot bypass review
+// once tokenization succeeds.
+const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
+const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
 // [local-smark] 敏感路径参数匹配开始
 // raw 扫描发生在 shell quote 被移除之前；允许敏感路径外侧有一层引号，避免
 // `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断。
@@ -207,6 +221,11 @@ function evaluateShell(command: string, depth: number): Decision {
   if (danger) return { level: "dangerous", reason: danger }
   const caution = cautiousRaw(command)
   if (caution) return { level: "cautious", reason: caution }
+
+  for (const wrapped of rawWrapperScripts(command)) {
+    const decision = evaluateShell(wrapped, depth + 1)
+    if (decision.level === "dangerous" || decision.level === "cautious") return decision
+  }
 
   const commands = splitCommands(command)
   if (!commands) return { level: "general", reason: "opaque shell command requires explicit approval" }
@@ -400,7 +419,7 @@ function unwrap(tokens: string[]): UnwrapResult {
     if (index >= 0 && tokens[index + 1]) {
       return {
         action: "script",
-        script: joinShellTokens(tokens.slice(index + 1)),
+        script: tokens[index + 1].includes(" ") ? tokens[index + 1] : joinShellTokens(tokens.slice(index + 1)),
         reason: "cmd wrapper requires explicit approval",
       }
     }
@@ -421,6 +440,59 @@ function unwrap(tokens: string[]): UnwrapResult {
     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
   }
   return { action: "none" }
+}
+
+function rawWrapperScripts(command: string) {
+  // Top-level redirection or unsupported separators can make the full command
+  // opaque before normal per-command unwrapping runs. Scan unquoted command
+  // segments for visible wrapper payloads so destructive script bodies still keep
+  // their cautious/dangerous layer; harmless payloads fall through to general.
+  return rawCommandSegments(command).flatMap((segment) => {
+    const script = rawWrapperScript(segment)
+    return script ? [script] : []
+  })
+}
+
+function rawWrapperScript(command: string) {
+  const tokens = tokenize(command)
+  if (!tokens) return
+  const unwrapped = unwrap(tokens)
+  if (unwrapped.action === "script") return unwrapped.script
+  const remote = remoteWrapper(tokens)
+  return remote.action === "remote" ? remote.script : undefined
+}
+
+function rawCommandSegments(command: string) {
+  const out: string[] = []
+  let start = 0
+  let quote = ""
+  let escaped = false
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true
+      continue
+    }
+    if (quote) {
+      if (char === quote) quote = ""
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      continue
+    }
+    if (char !== ";" && char !== "&" && char !== "|" && char !== "\n" && char !== "\r") continue
+    const segment = command.slice(start, i).trim()
+    if (segment) out.push(segment)
+    if ((char === "&" || char === "|") && command[i + 1] === char) i++
+    start = i + 1
+  }
+  const tail = command.slice(start).trim()
+  return tail ? [...out, tail] : out
 }
 
 function remoteWrapper(tokens: string[]): RemoteResult {
@@ -479,7 +551,7 @@ function dangerousRaw(command: string) {
   // `$HOME`, `~/`, `/*`, and wrapper-quoted forms cannot bypass the deny path.
   if (
     new RegExp(
-      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"]|$)|~\/?(?=[\s)'"]|$)|\$HOME\/?(?=[\s)'"]|$)|\/etc(?:\/|(?=[\s)'"]|$)))`,
+      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/etc(?:\/|(?=[\s)'"\x60]|$)))`,
     ).test(normalized)
   ) {
     return "critical recursive delete"
@@ -504,7 +576,7 @@ function dangerousRaw(command: string) {
   // 删除降级成 general 或 cautious。
   if (/\bformat\b\s+[A-Za-z]:/i.test(normalized)) return "Windows drive format"
   if (
-    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"]|$))/i.test(
+    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"\x60]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i.test(
       normalized,
     )
   ) {
@@ -541,7 +613,7 @@ function dangerousRaw(command: string) {
   // Common interpreter APIs and reverse shell idioms are scanned as raw text
   // because their dangerous target may be inside strings rather than tokens.
   if (
-    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(
+    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i.test(
       normalized,
     )
   ) {
@@ -576,6 +648,8 @@ function dangerousRaw(command: string) {
 
 function cautiousRaw(command: string) {
   const normalized = command.replace(/\s+/g, " ").trim()
+  if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
+  if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
   // [local-smark] raw 敏感读取谨慎扫描开始
   // `$HOME/.aws/credentials` 这类 env-expanded 路径会让 splitter 降级为 opaque，
   // 导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；这里仅把
@@ -589,6 +663,45 @@ function cautiousRaw(command: string) {
     return "sensitive file read requires explicit approval"
   }
   // [local-smark] raw 敏感读取谨慎扫描结束
+}
+
+function rawExecutableMatch(command: string, pattern: string) {
+  // Raw delete/move scans need shell-syntax context: separators inside quoted
+  // read-only search text are data. `$()` and backticks execute in unquoted or
+  // double-quoted shell text, but remain literal inside POSIX single quotes.
+  const quotes = quoteOffsets(command)
+  for (const match of command.matchAll(new RegExp(pattern, "gi"))) {
+    const index = match.index ?? 0
+    if (!quotes[index] || (quotes[index] === '"' && (command.startsWith("$(", index) || command[index] === "`"))) return true
+  }
+  return false
+}
+
+function quoteOffsets(command: string) {
+  const quotes = Array.from({ length: command.length }, () => "")
+  let quote = ""
+  let escaped = false
+  for (let i = 0; i < command.length; i++) {
+    quotes[i] = quote
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (command[i] === "\\") {
+      // POSIX single quotes treat backslash as literal text; marking it as an
+      // escape would incorrectly keep a following separator quoted and hide a
+      // visible delete after malformed single-quoted data.
+      if (quote === "'") continue
+      escaped = true
+      continue
+    }
+    if (quote) {
+      if (command[i] === quote) quote = ""
+      continue
+    }
+    if (command[i] === "'" || command[i] === '"') quote = command[i]
+  }
+  return quotes
 }
 
 function riskyTokens(tokens: string[]): Decision | undefined {
@@ -636,6 +749,10 @@ function riskyTokens(tokens: string[]): Decision | undefined {
     }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
+  if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
+    return { level: "cautious", reason: "file deletion requires explicit approval" }
+  if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
+    return { level: "cautious", reason: "file move or rename requires explicit approval" }
   if (["scp", "sftp", "rsync"].includes(cmd))
     return { level: "cautious", reason: "remote file transfer requires explicit approval" }
 }
@@ -648,7 +765,7 @@ function cautiousGitSubcommand(tokens: string[]) {
   const subcommand = tokens[1]
   if (!subcommand) return false
   if (
-    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)
+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(subcommand)
   )
     return true
   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
@@ -735,6 +852,8 @@ function protectedDeleteTarget(input: string) {
     normalized === "$HOME/" ||
     normalized === "$env:USERPROFILE" ||
     normalized === "$env:USERPROFILE/" ||
+    normalized === "$env:SystemDrive" ||
+    normalized === "$env:SystemDrive/" ||
     /^\w:\/?$/.test(normalized) ||
     normalized === "/etc" ||
     normalized.startsWith("/etc/")
