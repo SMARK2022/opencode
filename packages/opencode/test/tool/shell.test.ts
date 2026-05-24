@@ -1453,6 +1453,97 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
   )
 })
 
+describe("tool.shell display output", () => {
+  it.live(
+    "renders carriage-return progress in metadata without changing returned output",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          // #215：数字字节跨 shell 保留 one\rtwo\rthree\nfinal\n 的真实控制字符。
+          const progressBytes = [
+            111, 110, 101, 13, 116, 119, 111, 13, 116, 104, 114, 101, 101, 10, 102, 105, 110, 97,
+            108, 10,
+          ]
+          const script = `process.stdout.write(Buffer.from([${progressBytes.join(",")}]))`
+          const text = `${bin} -e ${evalarg(script)}`
+          const updates: string[] = []
+          const result = yield* run(
+            {
+              command: PS.has(sh()) ? `& ${text}` : text,
+              compress_output: false,
+            },
+            {
+              ...ctx,
+              metadata: (input) => Effect.sync(() => {
+                const output = input.metadata?.output
+                if (typeof output === "string") updates.push(output)
+              }),
+            },
+          )
+
+          expect(result.metadata.output).toContain("three")
+          expect(result.metadata.output).toContain("final")
+          expect(result.metadata.output).not.toContain("one")
+          expect(result.metadata.output).not.toContain("two")
+          expect(result.metadata.output).not.toContain("\r")
+          // #215：Tool.wrap 会把 CR 转成字面量，须同时检查真实流式快照与转义残留。
+          expect(result.metadata.output).not.toContain("\\x0d")
+          expect(updates).toContain("three\nfinal")
+          expect(updates.every((output) => !output.includes("\r") && !output.includes("\\x0d"))).toBe(true)
+          expect(result.output).toContain("one")
+          expect(result.output).toContain("two")
+          expect(result.output).toContain("three")
+        }),
+      ),
+    15_000,
+  )
+
+  it.live(
+    "keeps clear-line display metadata clean when command exits non-zero",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          // #215：boot\nworking\rESC[2Kdone\n 后退出 7，失败状态不改变屏幕语义。
+          const clearLineBytes = [
+            98, 111, 111, 116, 10, 119, 111, 114, 107, 105, 110, 103, 13, 27, 91, 50, 75, 100, 111,
+            110, 101, 10,
+          ]
+          const script = `process.stdout.write(Buffer.from([${clearLineBytes.join(",")}])); process.exit(7)`
+          const text = `${bin} -e ${evalarg(script)}`
+          const updates: string[] = []
+          const result = yield* run(
+            {
+              command: PS.has(sh()) ? `& ${text}` : text,
+              compress_output: false,
+            },
+            {
+              ...ctx,
+              metadata: (input) => Effect.sync(() => {
+                const output = input.metadata?.output
+                if (typeof output === "string") updates.push(output)
+              }),
+            },
+          )
+
+          expect(result.metadata.exit).toBe(7)
+          expect(result.metadata.output).toContain("boot")
+          expect(result.metadata.output).toContain("done")
+          expect(result.metadata.output).not.toContain("working")
+          expect(result.metadata.output).not.toContain("\r")
+          expect(result.metadata.output).not.toContain("\x1b")
+          expect(result.metadata.output).not.toContain("\\x0d")
+          expect(updates).toContain("boot\ndone")
+          expect(updates.every((output) => !output.includes("\r") && !output.includes("\x1b") && !output.includes("\\x0d"))).toBe(true)
+          expect(result.output).toContain("working")
+          expect(result.output).toContain("done")
+        }),
+      ),
+    15_000,
+  )
+})
+
 describe("tool.shell abort", () => {
   it.live(
     "preserves output when aborted",

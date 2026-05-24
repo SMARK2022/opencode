@@ -512,20 +512,41 @@ function compressLongLists(line: string, config: CompressionConfig) {
   return scoreReplacement(line, replacement, config).profitable ? { line: replacement, applied: true } : { line, applied: false }
 }
 
-function normalizeTerminalOutput(text: string, config: CompressionConfig) {
-  const lines = [""]
+type TerminalOptions = {
+  maxLines?: number
+  maxChars?: number
+  bufferPartialControl?: boolean
+}
+
+// #215：函数式渲染状态供显示与压缩共用，显示预算不进入模型正文。
+function createTerminalRenderer(options: TerminalOptions = {}) {
+  let lines = [""]
   let row = 0
   let col = 0
   let frames = 0
   let cells = 0
-  // 光标参数受输入窗口长度约束，不能让短 CSI 分配巨大空行或空格。
-  const position = (value: number) => Math.min(text.length, Math.max(0, value))
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i]
-    if (char === "\x1b") {
-      const match = /^\x1b\[([0-9;?]*)([A-Za-z])/.exec(text.slice(i))
-      // 未支持或不完整控制序列保留原文，不能无证据吞掉后面的日志。
-      if (!match) return { text, groups: 0 }
+  let inputLength = 0
+  let pendingControl = ""
+  const CSI_REGEX = /\x1b\[([0-9;?]*)([A-Za-z])/g
+  // #215：模型光标受输入窗口约束，显示光标沿用源终端坐标。
+  const position = (value: number) => options.bufferPartialControl ? Math.max(0, value) : Math.min(inputLength, Math.max(0, value))
+
+  function processChunk(input: string) {
+    inputLength += input.length
+    const chunk = pendingControl + input
+    pendingControl = ""
+    let pos = 0
+    while (pos < chunk.length) {
+      CSI_REGEX.lastIndex = pos
+      const match = CSI_REGEX.exec(chunk)
+      if (!match) {
+        const rest = chunk.slice(pos)
+        const partial = options.bufferPartialControl ? partialControl(rest) : ""
+        if (!writeText(rest.slice(0, rest.length - partial.length))) return false
+        pendingControl = partial
+        break
+      }
+      if (!writeText(chunk.slice(pos, match.index))) return false
       const nums = match[1].split(";").map((value) => Number.parseInt(value) || 0)
       const command = match[2]
       if (command === "A") row = position(row - (nums[0] || 1))
@@ -535,30 +556,170 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig) {
       else if (command === "G") col = position((nums[0] || 1) - 1)
       else if (command === "H" || command === "f") { row = position((nums[0] || 1) - 1); col = position((nums[1] || 1) - 1) }
       else if (command === "K") {
-        const line = lines[row] ?? ""
-        // 清行不移动光标，后续字符仍写在终端指定列。
+        ensureLine()
+        if (options.maxChars !== undefined) col = Math.min(col, options.maxChars)
+        const line = lines[row]
+        // #215：清行保留目标的光标位置，字符预算在分配空格前生效。
         const replacement = nums[0] === 2 ? "" : nums[0] === 1 ? " ".repeat(col + 1) + line.slice(col + 1) : line.slice(0, col)
         cells += replacement.length - line.length
-        if (cells > text.length * 2) return { text, groups: 0 }
+        if (!options.bufferPartialControl && cells > inputLength * 2) return false
         lines[row] = replacement
       } else if (command === "J" && (nums[0] === 2 || nums[0] === 3)) { lines.length = 0; cells = 0; row = 0; col = 0 }
-      else if (command !== "m") return { text, groups: 0 }
+      else if (command !== "m") {
+        // 模型拒绝未知控制的压缩候选；显示跳过不支持的CSI，控制字节不应占据屏幕列。
+        if (!options.bufferPartialControl) return false
+        pos = CSI_REGEX.lastIndex
+        continue
+      }
       if (command !== "m") frames++
-      i += match[0].length - 1
-      continue
+      pos = CSI_REGEX.lastIndex
     }
-    if (char === "\r") { col = 0; frames++; continue }
-    if (char === "\n") { row = position(row + 1); col = 0; lines[row] ??= ""; continue }
-    if (char === "\b") { col = position(col - 1); frames++; continue }
-    const line = lines[row] ?? ""
-    cells += Math.max(0, col + 1 - line.length)
-    // 总单元限制覆盖多行远列写入，逐轴上限本身不能防止二维放大。
-    if (cells > text.length * 2) return { text, groups: 0 }
-    lines[row] = line.padEnd(col, " ").slice(0, col) + char + line.slice(col + 1)
-    col = position(col + 1)
+    trimDisplay()
+    return true
   }
-  // 保留空行位置，不把普通日志的排版当作进度噪声丢掉。
-  const stable = Array.from({ length: lines.length }, (_, i) => lines[i] ?? "").join("\n")
+
+  function partialControl(text: string) {
+    const esc = text.lastIndexOf("\x1b")
+    if (esc < 0) return ""
+    const suffix = text.slice(esc)
+    // #215：仅缓存仍可续成 CSI 的尾缀，前面的可见文字立即提交。
+    if (suffix === "\x1b" || /^\x1b\[[0-9;?]*$/.test(suffix)) return suffix
+    return ""
+  }
+
+  function trimDisplay() {
+    if (options.maxLines !== undefined && lines.length > options.maxLines) {
+      const drop = lines.length - options.maxLines
+      lines = lines.slice(drop)
+      row = Math.max(0, row - drop)
+    }
+    if (options.maxChars === undefined || lines.length === 0) return
+    let total = 0
+    let start = lines.length
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      const size = line.length + (start === lines.length ? 0 : 1)
+      if (total + size > options.maxChars) {
+        if (start === lines.length) {
+          const drop = Math.max(0, line.length - options.maxChars)
+          lines[i] = line.slice(drop)
+          if (row === i) col = Math.max(0, col - drop)
+          start = i
+        }
+        break
+      }
+      total += size
+      start = i
+    }
+    if (start > 0 && start < lines.length) {
+      lines = lines.slice(start)
+      row = Math.max(0, row - start)
+    }
+  }
+
+  function writeText(text: string) {
+    if (!options.bufferPartialControl && text.includes("\x1b")) return false
+    for (let pos = 0; pos < text.length;) {
+      const char = text[pos]
+      if (char === "\r") {
+        col = 0
+        frames++
+        pos++
+        continue
+      }
+      if (char === "\n") {
+        row = position(row + 1)
+        col = 0
+        if (!options.bufferPartialControl) ensureLine()
+        trimDisplay()
+        pos++
+        continue
+      }
+      if (char === "\b") {
+        col = position(col - 1)
+        frames++
+        pos++
+        continue
+      }
+      let end = pos + 1
+      while (end < text.length && text[end] !== "\r" && text[end] !== "\n" && text[end] !== "\b") end++
+      if (!writeRun(text.slice(pos, end))) return false
+      pos = end
+    }
+    return true
+  }
+
+  function writeRun(input: string) {
+    // #215：普通大块只批量写入可显示尾缀，避免先构造无界行再 preview。
+    const text = options.maxChars === undefined ? input : input.slice(Math.max(0, input.length - options.maxChars))
+    ensureLine()
+    if (options.maxChars !== undefined && col > options.maxChars) {
+      lines[row] = ""
+      col = options.maxChars
+    }
+    const line = lines[row]
+    // #215：批量写入仍模拟目标列上限处的反复覆写，并保留总单元限制。
+    const available = inputLength - col
+    const run = !options.bufferPartialControl && text.length > available ? text.slice(0, available) + text.slice(-1) : text
+    cells += Math.max(0, col + run.length - line.length)
+    if (!options.bufferPartialControl && cells > inputLength * 2) return false
+    lines[row] = line.padEnd(col, " ").slice(0, col) + run + line.slice(col + run.length)
+    col = position(col + text.length)
+    trimDisplay()
+    return true
+  }
+
+  function ensureLine() {
+    if (!options.bufferPartialControl) {
+      lines[row] ??= ""
+      return
+    }
+    // #215：先丢弃屏幕外空行再分配，跨多次 LF/远行光标也保持显示有界。
+    const maximum = options.maxLines ?? (options.maxChars === undefined ? undefined : options.maxChars + 1)
+    if (maximum !== undefined && row >= maximum) {
+      const drop = row - maximum + 1
+      lines = lines.slice(drop)
+      row = Math.max(0, row - drop)
+    }
+    while (lines.length <= row) lines.push("")
+  }
+
+  function getDisplayOutput() {
+    // #215：显示保留内部空行，尾随换行或清屏留下的空屏不回退到原文。
+    const last = lines.findLastIndex((line) => line.trim().length > 0)
+    return last < 0 ? "" : lines.slice(0, last + 1).join("\n")
+  }
+
+  return {
+    processChunk,
+    getDisplayOutput,
+    getStableOutput() {
+      return Array.from({ length: lines.length }, (_, i) => lines[i] ?? "").join("\n")
+    },
+    getFrameCount() {
+      return frames
+    },
+  }
+}
+
+export function createTerminalDisplay(options?: Pick<TerminalOptions, "maxLines" | "maxChars">) {
+  const terminal = createTerminalRenderer({ ...options, bufferPartialControl: true })
+  return {
+    push(chunk: string) {
+      terminal.processChunk(chunk)
+      return terminal.getDisplayOutput()
+    },
+    value() {
+      return terminal.getDisplayOutput()
+    },
+  }
+}
+
+function normalizeTerminalOutput(text: string, config: CompressionConfig) {
+  const terminal = createTerminalRenderer()
+  if (!terminal.processChunk(text)) return { text, groups: 0 }
+  const frames = terminal.getFrameCount()
+  const stable = terminal.getStableOutput()
   const replacement = `... [terminal progress collapsed: ${frames} frames]\n${stable}`
   return frames >= config.minCarriageReturnFrames && scoreReplacement(text, replacement, config).profitable
     ? { text: replacement, groups: 1 } : { text, groups: 0 }

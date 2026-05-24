@@ -1,8 +1,61 @@
 import { describe, expect, test } from "bun:test"
-import { compressVisibleOutput, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
+import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
 
 // #129：CLIXML 纯块解码与混合块保留
 describe("tool.bash-compress", () => {
+  test("renders split terminal clear-line sequences without leaking partial escapes", () => {
+    const display = createTerminalDisplay()
+
+    expect(display.push("boot\nworking\r\x1b[")).toBe("boot\nworking")
+    display.push("2Kdone\n")
+
+    expect(display.value()).toBe("boot\ndone")
+  })
+
+  test("bounds large single-line display chunks", () => {
+    const display = createTerminalDisplay({ maxChars: 12 })
+
+    expect(display.push("x".repeat(10_000))).toBe("x".repeat(12))
+    display.push("y".repeat(10_000))
+
+    expect(display.value()).toBe("y".repeat(12))
+  })
+
+  test("preserves display layout and conservative compression boundaries", () => {
+    const display = createTerminalDisplay({ maxLines: 3, maxChars: 8 })
+    expect(display.push("old\n")).toBe("old")
+    expect(display.push("\nend\n")).toBe("old\n\nend")
+    expect(display.push("\x1b[2J")).toBe("")
+    expect(display.value()).toBe("")
+    expect(display.push("a\nb\nc\nd")).toBe("b\nc\nd")
+    expect(display.push("\r\x1b[2K")).toBe("b\nc")
+    expect(display.push("\x1b[2J")).toBe("")
+
+    const cursor = createTerminalDisplay({ maxLines: 3, maxChars: 20 })
+    expect(cursor.push("\x1b[10G")).toBe("")
+    expect(cursor.push("ok")).toBe(" ".repeat(9) + "ok")
+    // 隐藏光标指令不写入文本列，否则后续覆写ESC后会泄漏控制序列残片。
+    const control = createTerminalDisplay()
+    expect(control.push("ab\x1b[?25l\x1b[3GX")).toBe("abX")
+
+    const raw = ("working ".repeat(20) + "\r\x1b[2Kdone").repeat(10)
+    expect(compressVisibleOutput(raw).stats.carriageReturnGroups).toBe(1)
+    expect(compressVisibleOutput(raw, { minSavedBytes: 100_000 }).text).toBe(raw)
+    expect(compressVisibleOutput(raw, { enabled: false }).text).toBe(raw)
+    // #215：未知/未闭合 CSI 与二维放大均须拒绝渲染候选，不能误报压缩收益。
+    for (const suffix of ["\x1b[99qtail", "\x1b["]) {
+      expect(compressVisibleOutput(raw + suffix)).toMatchObject({
+        text: raw + suffix,
+        stats: { carriageReturnGroups: 0, applied: false },
+      })
+    }
+    const expanded = "\x1b[999999999Gx\n".repeat(3) + "\x1b[2Jdone"
+    expect(compressVisibleOutput(expanded, { minSavedBytes: 0, minSavingRatio: 0 })).toMatchObject({
+      text: expanded,
+      stats: { carriageReturnGroups: 0, applied: false },
+    })
+  })
+
   // #129：标准 #< CLIXML 头 + Message 节点
   test("decodes PowerShell CLIXML with the standard header", () => {
     const clixml = [
