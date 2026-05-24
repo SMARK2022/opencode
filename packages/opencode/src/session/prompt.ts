@@ -230,7 +230,8 @@ const layer = Layer.effect(
       } satisfies TaskPromptOps
     })
 
-    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+    // #216：复用取消owner递归收尾子会话，保留冻结ID、runner等待与原子结算順序。
+    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       // #173：每 session 一把信号量，合并并发 cancel
       let lock = cancelLocks.get(sessionID)
       if (!lock) {
@@ -243,6 +244,8 @@ const layer = Layer.effect(
         Effect.gen(function* () {
           yield* Effect.logInfo("cancel", { "session.id": sessionID })
           // 冻结 ID 在同会话锁内完成，不能在 idle 发布后重新扫描新运行的消息。
+          // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
+          const children = yield* sessions.children(sessionID)
           const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
             .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
             .map((msg) => msg.info.id)
@@ -250,6 +253,7 @@ const layer = Layer.effect(
           yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
             discard: true,
           })
+          yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
         }),
       )
     })
@@ -288,8 +292,9 @@ const layer = Layer.effect(
               state: {
                 status: "error",
                 input: part.state.input,
-                error: "Tool execution aborted",
-                metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
+                // #216：空闲修复与活动processor共用中止信封，reviewing必须变成aborted。
+                error: SessionProcessor.TOOL_ABORTED_ERROR,
+                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined),
                 // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
                 time: {
                   start: part.state.status === "running" ? part.state.time.start : now,

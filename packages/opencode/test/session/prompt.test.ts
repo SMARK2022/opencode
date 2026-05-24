@@ -1904,6 +1904,139 @@ it.instance(
   15_000,
 )
 
+// #216：cancel 在 auto-review 进行中触发——验证中止状态正确传播到工具和 reviewer 子会话
+it.instance(
+  "cancel aborts an in-flight shell auto review",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        // 审批中止不验证Git快照；隔离真实Windows快照I/O，确保进入目标审查边界。
+        snapshot: false,
+        permission: { approvals_reviewer: "auto_review" },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      // #216：gate 控制 permission_review_decision 的推送——cancel 必须在 reviewer 响应前到达
+      const gate = defer<void>()
+      // #216：bash auto 权限触发 auto-review——cancel 须在 reviewer 审查期间到达
+      const chat = yield* sessions.create({
+        title: "Shell review cancel",
+        permission: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      const command = "cat id_rsa"
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "review then cancel" }],
+      })
+      // #216：三段回复——bash 工具调用、gate 阻塞的审查决策、最终文本
+      yield* llm.push(
+        reply().tool("bash", { command, description: "Read SSH private key via shell" }).item(),
+        reply()
+          .wait(gate.promise)
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "this decision must not be recorded after cancel",
+          })
+          .item(),
+        reply().text("done").stop().item(),
+      )
+
+      // #216：fork loop 使 cancel 可在 review 进行中并发触发
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      // 以真实请求到达作为就绪信号，短状态轮询不承担首次模型准备的等待。
+      yield* llm.wait(2)
+
+      // #216：等待 shell 工具进入 reviewing 状态——确认 auto-review 已启动
+      const reviewing = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const part = (yield* MessageV2.filterCompactedEffect(chat.id))
+            .flatMap((msg) => msg.parts)
+            .find((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "bash")
+          // 审查前已失败时直接呈现真实工具错误，不能用轮询超时掩盖入口故障。
+          if (part?.state.status === "error") return yield* Effect.die(new Error(JSON.stringify(part)))
+          if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
+        }),
+        "shell auto review never started",
+      )
+      const reviewID = reviewing.state.status === "running" ? reviewing.state.metadata?.autoReview?.reviewID : undefined
+      expect(typeof reviewID).toBe("string")
+      // #216：等待 reviewer 子会话出现——确认 permission-reviewer 已被创建
+      const reviewer = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          return (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+        }),
+        "reviewer child session never started",
+      )
+      yield* pollWithTimeout(
+        Effect.gen(function* () {
+          return (yield* MessageV2.filterCompactedEffect(reviewer.id)).find(
+            (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
+              msg.info.role === "assistant" && !msg.info.time.completed,
+          )
+        }),
+        "reviewer child assistant never started",
+      )
+
+      // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
+      yield* prompt.cancel(chat.id)
+      gate.resolve()
+      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
+
+      const shell = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const part = (yield* MessageV2.filterCompactedEffect(chat.id))
+            .flatMap((msg) => msg.parts)
+            .find((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "bash")
+          return part?.state.status === "error" ? part : undefined
+        }),
+        "shell tool never recorded the review cancellation",
+      )
+      expect(shell.state.status).toBe("error")
+      if (shell.state.status !== "error") return
+      // Cancel happens while the tool is still waiting for reviewer approval. The
+      // parent tool must therefore expose one terminal abort state instead of a
+      // stale "reviewing" line that looks live after the command has stopped.
+      // #216：中止后 shell 工具必须终态化为 error 且携带 aborted 审查状态
+      expect(shell.state.error).toBe("Tool execution aborted")
+      expect(shell.state.metadata?.interrupted).toBe(true)
+      expect(shell.state.metadata?.autoReview?.status).toBe("aborted")
+      expect(shell.state.metadata?.autoReview?.error).toBe("Tool execution aborted")
+
+      const reviewerMessages = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const messages = yield* MessageV2.filterCompactedEffect(reviewer.id)
+          const assistants = messages.filter(
+            (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } => msg.info.role === "assistant",
+          )
+          return assistants.every((msg) => msg.info.time.completed) ? messages : undefined
+        }),
+        "reviewer child assistant remained active after cancellation",
+      )
+      const reviewerParts = reviewerMessages.flatMap((msg) => msg.parts)
+      // #216：reviewer 的 permission_review_decision 不得在 cancel 后完成——中止须阻止延迟到达的审查决策
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.reviewID === reviewID,
+        ),
+      ).toBe(false)
+      // #216：reviewer 不应执行 bash——中止阻止了 reviewer 代理执行被审查的命令
+      expect(
+        reviewerParts.some((part) => part.type === "tool" && part.tool === "bash"),
+      ).toBe(false)
+    }),
+  { git: true },
+  15_000,
+)
+
 it.instance("failed subtask preserves metadata on error tool state", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

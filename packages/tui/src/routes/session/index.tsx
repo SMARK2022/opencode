@@ -2077,7 +2077,8 @@ const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() =>
 type AutoReviewMetadata = {
   reviewID: string
   sessionID?: string
-  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
+  // #216：aborted 状态——工具执行被取消时审查终止，与 reviewing/allowed/denied 等终态并列
+  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user" | "aborted"
   precheck?: { level: string; reason: string }
   result?: { risk_level: string; user_authorization: string; rationale: string }
 }
@@ -2110,6 +2111,9 @@ export function autoReviewLabel(review: AutoReviewMetadata) {
       return `! auto review · failed · failed closed · ${agent}`
     case "fallback_user":
       return `! auto review · unavailable · asking user · ${agent}`
+    // #216：aborted 状态——工具执行被取消时审查终止，展示 ! + aborted + @permission-reviewer
+    case "aborted":
+      return `! auto review · aborted · ${agent}`
     default:
       return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
   }

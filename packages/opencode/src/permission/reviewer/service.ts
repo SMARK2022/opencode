@@ -377,9 +377,17 @@ export const layer = Layer.effect(
             const toolParts = new Map<string, ToolPart>()
             const toolInput = new Map<string, string>()
 
+            const iterator = result.fullStream[Symbol.asyncIterator]()
+            const close = iterator.return
+            if (close) iterator.return = (value) => {
+              // SDK的tee分支关闭要等待底层流结束，必须先中止请求再等待迭代器释放。
+              abort.abort()
+              return close.call(iterator, value)
+            }
+
             yield* Stream.runForEach(
               // #209：fullStream 聚合 reasoning/text/tool 全部事件——逐事件持久化使子会话 transcript 实时可审计
-              Stream.fromAsyncIterable(result.fullStream, (error) => error),
+              Stream.fromAsyncIterable({ [Symbol.asyncIterator]: () => iterator }, (error) => error),
               // #209：fnUntraced 避免每个 stream 事件创建 span——fullStream 事件高频，tracing 噪声远大于诊断价值
               Effect.fnUntraced(function* (event) {
                 // #209：无 persist 时仅提取 assessment——不持久化中间 part，用于无子会话的纯判定路径
