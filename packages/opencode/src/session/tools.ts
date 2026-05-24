@@ -39,6 +39,18 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/webp",
 ])
 
+// #216：把 AbortSignal 包裹成 Effect——permission.ask 与之竞速，cancel 时不再阻塞在权限询问
+function waitForAbort(signal?: AbortSignal) {
+  // #216：无 abort 信号时返回 never——raceFirst 中 permission.ask 独占完成，不引入空竞速
+  if (!signal) return Effect.never
+  return Effect.callback<never, Error>((resume) => {
+    const onabort = () => resume(Effect.fail(Object.assign(new Error("Aborted"), { name: "AbortError" })))
+    if (signal.aborted) return onabort()
+    signal.addEventListener("abort", onabort, { once: true })
+    return Effect.sync(() => signal.removeEventListener("abort", onabort))
+  })
+}
+
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
@@ -91,7 +103,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
           ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
         })
-        .pipe(Effect.orDie),
+        // #216：权限询问与 abort 信号竞速——cancel 时不再阻塞在 permission.ask 而是立即失败
+        .pipe(Effect.raceFirst(waitForAbort(options.abortSignal)), Effect.orDie),
   })
 
   for (const item of yield* registry.tools({

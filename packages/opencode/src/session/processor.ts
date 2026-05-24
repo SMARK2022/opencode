@@ -36,6 +36,17 @@ import { Token } from "@opencode-ai/core/util/token"
 const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
 
 const DOOM_LOOP_THRESHOLD = 3
+// #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
+export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+
+// #216：中断工具 metadata 构造——保留已有 autoReview 信封并标记 aborted 状态，供 UI 渲染审查终止行
+export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined) {
+  const base = metadata ?? {}
+  const autoReview = base.autoReview
+  if (!isRecord(autoReview)) return { ...base, interrupted: true }
+  return { ...base, interrupted: true, autoReview: { ...autoReview, status: "aborted", error: TOOL_ABORTED_ERROR } }
+}
+
 export type Result = "compact" | "stop" | "continue"
 
 export const publishAssistant = Effect.fnUntraced(function* (message: SessionV1.Assistant, events: EventV2.Interface, finalizer = false) {
@@ -256,16 +267,20 @@ const layer = Layer.effect(
           yield* settleToolCall(toolCallID)
           return false
         }
+        // #216：提取中止判定——aborted 标志、Aborted 文案和 TOOL_ABORTED_ERROR 三源合一
+        const reason = errorMessage(error)
+        const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
         yield* session.updatePart({
           ...match.part,
           state: {
             status: "error",
             input: match.part.state.input,
-            error: errorMessage(error),
+            // #216：中止路径统一用 TOOL_ABORTED_ERROR 文案——非中止路径保留原始错误原因
+            error: toolAborted ? TOOL_ABORTED_ERROR : reason,
             // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
             // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
-            // 保留完整运行态metadata，审查链接与上游子调用进度可同时追溯。
-            metadata: match.part.state.metadata,
+            // 中止时只更新审查终态，其他运行进度和普通错误metadata均保持完整。
+            metadata: toolAborted ? interruptedToolMetadata(match.part.state.metadata) : match.part.state.metadata,
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
@@ -732,8 +747,9 @@ const layer = Layer.effect(
               status: "error",
               // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
               // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
-              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
-              metadata: { ...metadata, ...(aborted ? { interrupted: true } : {}),
+              // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
+              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
+              metadata: { ...(aborted ? interruptedToolMetadata(metadata) : metadata),
                 ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
               },
               time: { start: "time" in part.state ? part.state.time.start : end, end },

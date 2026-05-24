@@ -121,6 +121,12 @@ describe("auto review rendering (#209)", () => {
     expect(label).toBe("! auto review · unavailable · asking user · @permission-reviewer")
   })
 
+  test("autoReviewLabel shows aborted state", () => {
+    // #216：aborted 状态展示 ! + aborted + @permission-reviewer——工具执行被取消时的审查终态
+    const label = autoReviewLabel({ reviewID: "review_9", status: "aborted" })
+    expect(label).toBe("! auto review · aborted · @permission-reviewer")
+  })
+
   test("autoReviewLabel defaults to reviewing when status is undefined", () => {
     // #209：无 status 时默认展示 reviewing + precheck level
     // #209：默认 reviewing 是安全假设——metadata 写入与状态更新非原子，读取时可能尚未标记终态
@@ -142,14 +148,14 @@ const sessionID = "ses_review_render"
 const command = "git push origin main"
 const rationale = "private key read was not explicitly authorized"
 
-// 六种源场景均挂载生产Session组件，纯标签测试不能证明实际卡片仍显示审查结果。
-test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
+// 中止与原六种场景共用真实Session，确保终态审查行仍可见且可以导航。
+test.each(["running", "completed", "collapsed", "error", "decision", "transcript", "aborted"] as const)(
   "renders the real review session: %s",
   async (scenario) => {
     const review = {
       reviewID: "review_render",
       sessionID: "ses_reviewer_child",
-      status: scenario === "running" ? "reviewing" : scenario === "error" ? "denied" : "allowed",
+      status: scenario === "aborted" ? "aborted" : scenario === "running" ? "reviewing" : scenario === "error" ? "denied" : "allowed",
       precheck: { level: "cautious", reason: "requires review" },
       result: { risk_level: "high", user_authorization: scenario === "error" ? "unknown" : "high", rationale },
     }
@@ -165,8 +171,8 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
       type: "tool",
       tool: scenario === "decision" || scenario === "transcript" ? "permission_review_decision" : "bash",
       callID: "call_review",
-      state: scenario === "error"
-        ? { status: "error", input, error: "auto reviewer denied", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
+      state: scenario === "error" || scenario === "aborted"
+        ? { status: "error", input, error: scenario === "aborted" ? "Tool execution aborted" : "auto reviewer denied", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
         : scenario === "running"
           ? { status: "running", input, title: "Review", metadata: { autoReview: review }, time: { start: 1 } }
           : { status: "completed", input, title: "Review", metadata, output: "", time: { start: 1, end: 2 } },
@@ -196,7 +202,8 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
         ? [{ info: user, parts: [request] }, { info: assistant, parts: [explanation, tool] }]
         : [{ info: assistant, parts: [tool] }],
       async (app, route) => {
-        const expected = scenario === "running" ? "◌ auto review"
+        const expected = scenario === "aborted" ? "! auto review · aborted · @permission-reviewer"
+          : scenario === "running" ? "◌ auto review"
           : scenario === "error" ? "! auto review"
           : scenario === "decision" || scenario === "transcript" ? rationale : "✓ auto review"
         // 等待真实帧达到可观察条件，不用固定sleep冒充组件已完成异步水合。
@@ -227,7 +234,7 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
         const reviewRow = lines.findIndex((line) => line.includes(expected))
         expect(reviewRow).toBeGreaterThanOrEqual(0)
         if (scenario === "completed" || scenario === "collapsed") expect(reviewRow).toBeLessThan(row)
-        if (scenario === "running" || scenario === "error") expect(reviewRow).toBe(row + 1)
+        if (scenario === "running" || scenario === "error" || scenario === "aborted") expect(reviewRow).toBe(row + 1)
         expect(lines.filter((line) => line.includes(expected))).toHaveLength(1)
         if (scenario === "collapsed") expect(lines.join("\n")).toContain("Click to expand")
         if (scenario === "running") {
@@ -238,7 +245,7 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
           expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
         }
         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
-        if (scenario === "error") {
+        if (scenario === "error" || scenario === "aborted") {
           const x = lines[row + 1].indexOf("auto review")
           await app.mockMouse.drag(x, row + 1, x + 6, row + 1)
           expect(route.data).toMatchObject({ type: "session", sessionID })
