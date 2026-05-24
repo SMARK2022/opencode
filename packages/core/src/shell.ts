@@ -188,8 +188,9 @@ export function cmd(file: string, command: string, platform: string = process.pl
     "$ProgressPreference = 'SilentlyContinue'",
     "$InformationPreference = 'Continue'",
     "$WarningPreference = 'Continue'",
-    "$VerbosePreference = 'Continue'",
-    "$DebugPreference = 'Continue'",
+    // #221：默认静默模块加载噪声；用户可在命令中显式开启verbose/debug，信息和警告流保持。
+    "$VerbosePreference = 'SilentlyContinue'",
+    "$DebugPreference = 'SilentlyContinue'",
     "& {",
     command,
     // stderr 必须保持原生字节，避免 PowerShell 按控制台编码提前解释 CP936。
