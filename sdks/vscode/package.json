@@ -3,6 +3,7 @@
   "displayName": "OpenCode IDE Bridge",
   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
   "version": "1.19.11",
+  "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3，目标 1.19.11 已为规范三段格式无需改动",
   "homepage": "https://github.com/anomalyco/opencode",
   "publisher": "SMARK2022",
   "repository": {
