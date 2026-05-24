@@ -977,6 +977,121 @@ it.instance(
 )
 
 it.instance(
+  "cancel aborts an in-flight shell auto review",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        permission: { approvals_reviewer: "auto_review" },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const gate = defer<void>()
+      const chat = yield* sessions.create({
+        title: "Shell review cancel",
+        permission: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      const command = "cat id_rsa"
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "review then cancel" }],
+      })
+      yield* llm.push(
+        reply().tool("bash", { command, description: "Read SSH private key via shell" }).item(),
+        reply()
+          .wait(gate.promise)
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "this decision must not be recorded after cancel",
+          })
+          .item(),
+        reply().text("done").stop().item(),
+      )
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const reviewing = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const part = (yield* MessageV2.filterCompactedEffect(chat.id))
+            .flatMap((msg) => msg.parts)
+            .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "bash")
+          if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
+        }),
+        "shell auto review never started",
+      )
+      const reviewID = reviewing.state.status === "running" ? reviewing.state.metadata?.autoReview?.reviewID : undefined
+      expect(typeof reviewID).toBe("string")
+      const reviewer = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          return (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+        }),
+        "reviewer child session never started",
+      )
+      yield* pollWithTimeout(
+        Effect.gen(function* () {
+          return (yield* MessageV2.filterCompactedEffect(reviewer.id)).find(
+            (msg): msg is MessageV2.WithParts & { info: MessageV2.Assistant } =>
+              msg.info.role === "assistant" && !msg.info.time.completed,
+          )
+        }),
+        "reviewer child assistant never started",
+      )
+
+      yield* prompt.cancel(chat.id)
+      gate.resolve()
+      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
+
+      const shell = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const part = (yield* MessageV2.filterCompactedEffect(chat.id))
+            .flatMap((msg) => msg.parts)
+            .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "bash")
+          return part?.state.status === "error" ? part : undefined
+        }),
+        "shell tool never recorded the review cancellation",
+      )
+      expect(shell.state.status).toBe("error")
+      if (shell.state.status !== "error") return
+      // Cancel happens while the tool is still waiting for reviewer approval. The
+      // parent tool must therefore expose one terminal abort state instead of a
+      // stale "reviewing" line that looks live after the command has stopped.
+      expect(shell.state.error).toBe("Tool execution aborted")
+      expect(shell.state.metadata?.interrupted).toBe(true)
+      expect(shell.state.metadata?.autoReview?.status).toBe("aborted")
+      expect(shell.state.metadata?.autoReview?.error).toBe("Tool execution aborted")
+
+      const reviewerMessages = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const messages = yield* MessageV2.filterCompactedEffect(reviewer.id)
+          const assistants = messages.filter(
+            (msg): msg is MessageV2.WithParts & { info: MessageV2.Assistant } => msg.info.role === "assistant",
+          )
+          return assistants.every((msg) => msg.info.time.completed) ? messages : undefined
+        }),
+        "reviewer child assistant remained active after cancellation",
+      )
+      const reviewerParts = reviewerMessages.flatMap((msg) => msg.parts)
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.reviewID === reviewID,
+        ),
+      ).toBe(false)
+      expect(
+        reviewerParts.some((part) => part.type === "tool" && part.tool === "bash"),
+      ).toBe(false)
+    }),
+  { git: true },
+  15_000,
+)
+
+it.instance(
   "failed subtask preserves metadata on error tool state",
   () =>
     Effect.gen(function* () {

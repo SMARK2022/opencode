@@ -2036,7 +2036,7 @@ function GenericTool(props: ToolProps<any>) {
 type AutoReviewMetadata = {
   reviewID: string
   sessionID?: string
-  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
+  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user" | "aborted"
   precheck?: { level: string; reason: string }
   result?: { risk_level: string; user_authorization: string; rationale: string }
 }
@@ -2067,6 +2067,8 @@ function autoReviewLabel(review: AutoReviewMetadata) {
       return `! auto review · failed · failed closed · ${agent}`
     case "fallback_user":
       return `! auto review · unavailable · asking user · ${agent}`
+    case "aborted":
+      return `! auto review · aborted · ${agent}`
     default:
       return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
   }

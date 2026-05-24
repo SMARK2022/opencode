@@ -32,7 +32,15 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 
 const DOOM_LOOP_THRESHOLD = 3
 const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
+export const TOOL_ABORTED_ERROR = "Tool execution aborted"
 const log = Log.create({ service: "session.processor" })
+
+export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined) {
+  const base = metadata ?? {}
+  const autoReview = base.autoReview
+  if (!isRecord(autoReview)) return { ...base, interrupted: true }
+  return { ...base, interrupted: true, autoReview: { ...autoReview, status: "aborted", error: TOOL_ABORTED_ERROR } }
+}
 
 export type Result = "compact" | "stop" | "continue"
 
@@ -222,16 +230,22 @@ export const layer = Layer.effect(
           yield* settleToolCall(toolCallID)
           return false
         }
+        const reason = errorMessage(error)
+        const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
         yield* session.updatePart({
           ...match.part,
           state: {
             status: "error",
             input: match.part.state.input,
-            error: errorMessage(error),
+            error: toolAborted ? TOOL_ABORTED_ERROR : reason,
             // Denied/failed auto reviews terminalize the shell as an error, but
             // the UI still needs the review result line and reviewer-session link
             // that were attached while the tool was running.
-            metadata: match.part.state.metadata?.autoReview ? { autoReview: match.part.state.metadata.autoReview } : undefined,
+            metadata: match.part.state.metadata?.autoReview
+              ? toolAborted
+                ? interruptedToolMetadata(match.part.state.metadata)
+                : { autoReview: match.part.state.metadata.autoReview }
+              : undefined,
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
@@ -767,8 +781,8 @@ export const layer = Layer.effect(
                 ? { raw: part.state.raw + pendingRaw }
                 : {}),
               status: "error",
-              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
-              metadata: aborted ? { ...metadata, interrupted: true } : metadata,
+              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
+              metadata: aborted ? interruptedToolMetadata(metadata) : metadata,
               time: { start: "time" in part.state ? part.state.time.start : end, end },
             },
           })

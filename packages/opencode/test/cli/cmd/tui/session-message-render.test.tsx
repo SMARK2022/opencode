@@ -567,6 +567,41 @@ test("errored shell tool keeps the denied auto review result line", async () => 
   )
 })
 
+test("aborted shell auto review renders as a terminal review line", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_auto_review_aborted", 1)],
+    {
+      msg_auto_review_aborted: [
+        errorToolPart(
+          "part_shell_review_aborted",
+          "msg_auto_review_aborted",
+          "bash",
+          { command: "cat id_rsa" },
+          "Tool execution aborted",
+          {
+            interrupted: true,
+            autoReview: {
+              reviewID: "review_shell_aborted",
+              sessionID: "ses_reviewer_child",
+              status: "aborted",
+              precheck: { level: "cautious", reason: "sensitive file read requires explicit approval" },
+              error: "Tool execution aborted",
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("cat id_rsa")))
+      const command = findRow(frame, "cat id_rsa")
+      // Aborted reviews are terminal, not a still-running reviewer. The parent
+      // shell card should keep the compact review row but switch from the ◌
+      // reviewing marker to the same non-allow marker used by failed/denied rows.
+      expect(frame[command + 1]).toContain("! auto review · aborted · @permission-reviewer")
+    },
+  )
+})
+
 test("read tool shows auto review status below its inline row", async () => {
   await withRenderedSession(
     [assistantMessage("msg_read_auto_review", 1)],

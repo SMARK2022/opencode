@@ -236,10 +236,20 @@ function interruptedToolState(
   return {
     status: "error",
     input: state.input,
-    error: "Tool execution aborted",
-    metadata: state.status === "running" ? { ...state.metadata, interrupted: true } : { interrupted: true },
+    error: SessionProcessor.TOOL_ABORTED_ERROR,
+    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined),
     time: { start: state.status === "running" ? state.time.start : now, end: now },
   }
+}
+
+function waitForAbort(signal?: AbortSignal) {
+  if (!signal) return Effect.never
+  return Effect.callback<never, Error>((resume) => {
+    const onabort = () => resume(Effect.fail(Object.assign(new Error("Aborted"), { name: "AbortError" })))
+    if (signal.aborted) return onabort()
+    signal.addEventListener("abort", onabort, { once: true })
+    return Effect.sync(() => signal.removeEventListener("abort", onabort))
+  })
 }
 
 type OpenToolPart = MessageV2.ToolPart & { state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning }
@@ -320,14 +330,17 @@ export const layer = Layer.effect(
       )
     })
 
-    const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
+    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
       const pending = [] as (MessageV2.WithParts & { info: MessageV2.Assistant })[]
       for (const msg of MessageV2.stream(sessionID)) {
         if (msg.info.role !== "assistant") continue
         if (msg.info.time.completed) continue
         pending.push(msg as MessageV2.WithParts & { info: MessageV2.Assistant })
       }
-      if (pending.length === 0) return
+      const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
+        discard: true,
+      })
+      if (pending.length === 0) return yield* abortChildren
 
       const now = Date.now()
       const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
@@ -346,6 +359,7 @@ export const layer = Layer.effect(
         }),
         { discard: true },
       )
+      yield* abortChildren
     })
 
     const abortPendingToolParts = Effect.fn("SessionPrompt.abortPendingToolParts")(function* (
@@ -721,7 +735,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               tool: { messageID: input.processor.message.id, callID: options.toolCallId },
               ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
             })
-            .pipe(Effect.orDie),
+            .pipe(Effect.raceFirst(waitForAbort(options.abortSignal)), Effect.orDie),
       })
 
       for (const item of yield* registry.tools({
