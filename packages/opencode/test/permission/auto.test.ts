@@ -67,6 +67,27 @@ describe("permission auto routing", () => {
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
+  // #217：bounded file deletion 路由到 reviewer 而非 shell general allow——precheck cautious 层确保删除操作不自动放行
+  test("routes bounded file deletion to reviewer instead of shell general allow", async () => {
+    let called = false
+    await expect(
+      bash(String.raw`Remove-Item -LiteralPath "H:\\DumpStack.log.tmp" -Force -ErrorAction SilentlyContinue`, {
+        review: () =>
+          Effect.sync(() => {
+            called = true
+            return {
+              action: "deny" as const,
+              reason: "reviewer rejected unrequested file deletion",
+              reviewID: "review_delete_file",
+              risk_level: "high" as const,
+              user_authorization: "unknown" as const,
+            }
+          }),
+      }),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
   // #208：验证 onReviewStart 在 reviewer 完成前报告确定性 precheck 边界
   test("reports the deterministic precheck boundary before reviewer completion", async () => {
     const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
