@@ -29,6 +29,7 @@ import {
   BashDiagnosticCollector,
   bashCompressionMetadata,
   compressVisibleOutput,
+  createTerminalDisplay,
   normalizePowerShellOutput,
   renderDiagnosticAppendix,
 } from "./bash-compress"
@@ -792,7 +793,6 @@ export const ShellTool = Tool.define(
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
-      let last = ""
       const list: Chunk[] = []
       let used = 0
       let file = ""
@@ -836,9 +836,13 @@ export const ShellTool = Tool.define(
       })
 
       const decoder = createAutoTextDecoder({ encoding: input.encoding })
+      const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
+      let displayed = false
       const onChunk = (chunk: string) => {
         if (!chunk) return Effect.void
         diag.push(chunk)
+        const visible = preview(display.push(chunk))
+        displayed = true
         const size = Buffer.byteLength(chunk, "utf-8")
         list.push({ text: chunk, size })
         used += size
@@ -848,9 +852,6 @@ export const ShellTool = Tool.define(
           used -= item.size
           cut = true
         }
-
-        last = preview(last + chunk)
-
         if (file) {
           sink?.write(chunk)
         } else {
@@ -868,7 +869,11 @@ export const ShellTool = Tool.define(
               Effect.andThen(
                 ctx.metadata({
                   metadata: {
-                    output: last,
+                    // `metadata.output` is the default live UI surface. Keep it
+                    // as a terminal display snapshot so CR progress and clear-line
+                    // redraws do not leak control bytes into TUI/OpenTUI, while the
+                    // raw chunks below still feed truncation and the model output.
+                    output: visible,
                     description: input.description,
                   },
                 }),
@@ -879,7 +884,11 @@ export const ShellTool = Tool.define(
 
         return ctx.metadata({
           metadata: {
-            output: last,
+            // Same invariant as the truncated branch above: metadata is the
+            // default display channel, not the faithful model-return channel. An
+            // empty terminal screen after a clear-line/clear-screen sequence is a
+            // valid display state, so never fall back to the raw chunk preview here.
+            output: visible,
             description: input.description,
           },
         })
@@ -980,10 +989,15 @@ export const ShellTool = Tool.define(
       }
 
       const durationMs = Date.now() - started
+      const displayOutput = preview(display.value())
       return {
         title: input.description,
         metadata: {
-          output: last || preview(output),
+          // Completion metadata preserves the final terminal screen for default
+          // UI rendering. The `output` field returned alongside this metadata is
+          // intentionally left on the existing raw/compressed/truncated path so
+          // right-click "model context output" and provider input stay unchanged.
+          output: displayed ? displayOutput : preview(output),
           exit: code,
           description: input.description,
           truncated: cut,

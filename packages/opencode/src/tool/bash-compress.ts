@@ -329,16 +329,27 @@ function redactSecrets(text: string): { text: string; redacted: number } {
  * 虚拟终端渲染器 - 处理 ANSI 控制序列
  * 支持光标移动、清屏、清行等操作，将终端重绘输出转换为稳定的文本
  */
+type VirtualTerminalOptions = {
+  maxLines?: number
+  maxChars?: number
+  bufferPartialControl?: boolean
+}
+
 class VirtualTerminal {
   private lines: string[] = []
   private cursorRow = 0
   private cursorCol = 0
   private frameCount = 0
+  private pendingControl = ''
+
+  constructor(private readonly options: VirtualTerminalOptions = {}) {}
   
   // ANSI CSI 序列解析正则
   private readonly CSI_REGEX = /\x1b\[([0-9;?]*)([A-Za-z])/g
   
-  processChunk(chunk: string): void {
+  processChunk(input: string): void {
+    const chunk = this.pendingControl + input
+    this.pendingControl = ''
     let pos = 0
     
     while (pos < chunk.length) {
@@ -348,7 +359,18 @@ class VirtualTerminal {
       
       if (!match) {
         // 没有更多控制序列，处理剩余文本
-        this.writeText(chunk.slice(pos))
+        const rest = chunk.slice(pos)
+        const partial = this.options.bufferPartialControl ? this.partialControl(rest) : ''
+        if (partial) {
+          // Live shell chunks may split ESC or ESC[2K across arbitrary byte
+          // boundaries. Buffer only a suffix that can still become one of the CSI
+          // controls this renderer understands; complete or unknown sequences keep
+          // following the existing parse path instead of hiding visible text.
+          this.writeText(rest.slice(0, rest.length - partial.length))
+          this.pendingControl = partial
+        } else {
+          this.writeText(rest)
+        }
         break
       }
       
@@ -363,6 +385,55 @@ class VirtualTerminal {
       this.handleCSI(params, command)
       
       pos = this.CSI_REGEX.lastIndex
+    }
+
+    this.trimDisplay()
+  }
+
+  private partialControl(text: string) {
+    const esc = text.lastIndexOf('\x1b')
+    if (esc < 0) return ''
+    const suffix = text.slice(esc)
+    if (suffix === '\x1b') return suffix
+    if (/^\x1b\[[0-9;?]*$/.test(suffix)) return suffix
+    return ''
+  }
+
+  private trimDisplay(): void {
+    // Live metadata used to be bounded by `preview(last + chunk)`. Keep that
+    // invariant for the terminal-display path too; otherwise long-running tools
+    // would trade clean CR rendering for unbounded screen storage and repeated
+    // whole-buffer joins. Compression uses an unbounded VirtualTerminal by not
+    // passing these display-only limits.
+    if (this.options.maxLines !== undefined && this.lines.length > this.options.maxLines) {
+      const drop = this.lines.length - this.options.maxLines
+      this.lines = this.lines.slice(drop)
+      this.cursorRow = Math.max(0, this.cursorRow - drop)
+    }
+
+    if (this.options.maxChars === undefined || this.lines.length === 0) return
+
+    let total = 0
+    let start = this.lines.length
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      const line = this.lines[i]
+      const size = line.length + (start === this.lines.length ? 0 : 1)
+      if (total + size > this.options.maxChars) {
+        if (start === this.lines.length) {
+          const drop = Math.max(0, line.length - this.options.maxChars)
+          this.lines[i] = line.slice(drop)
+          if (this.cursorRow === i) this.cursorCol = Math.max(0, this.cursorCol - drop)
+          start = i
+        }
+        break
+      }
+      total += size
+      start = i
+    }
+
+    if (start > 0 && start < this.lines.length) {
+      this.lines = this.lines.slice(start)
+      this.cursorRow = Math.max(0, this.cursorRow - start)
     }
   }
   
@@ -421,31 +492,57 @@ class VirtualTerminal {
   }
   
   private writeText(text: string): void {
-    for (const char of text) {
+    for (let pos = 0; pos < text.length;) {
+      const char = text[pos]
       if (char === '\r') {
         this.cursorCol = 0
         this.frameCount++
-      } else if (char === '\n') {
+        pos++
+        continue
+      }
+
+      if (char === '\n') {
         this.cursorRow++
         this.cursorCol = 0
-      } else if (char === '\b') {
-        this.cursorCol = Math.max(0, this.cursorCol - 1)
-      } else {
-        // 确保行存在
-        this.ensureLine(this.cursorRow)
-        
-        // 扩展行到光标位置
-        while (this.lines[this.cursorRow].length < this.cursorCol) {
-          this.lines[this.cursorRow] += ' '
-        }
-        
-        // 写入字符
-        const line = this.lines[this.cursorRow]
-        this.lines[this.cursorRow] = 
-          line.slice(0, this.cursorCol) + char + line.slice(this.cursorCol + 1)
-        this.cursorCol++
+        this.trimDisplay()
+        pos++
+        continue
       }
+
+      if (char === '\b') {
+        this.cursorCol = Math.max(0, this.cursorCol - 1)
+        pos++
+        continue
+      }
+
+      let end = pos + 1
+      while (end < text.length && text[end] !== '\r' && text[end] !== '\n' && text[end] !== '\b') {
+        end++
+      }
+      this.writeRun(text.slice(pos, end))
+      pos = end
     }
+  }
+
+  private writeRun(input: string): void {
+    // Plain output can arrive as very large chunks. Batch normal text and, in
+    // live-display mode, keep only the suffix that metadata can ever show so the
+    // terminal renderer stays bounded before the final preview() call.
+    const text = this.options.maxChars === undefined ? input : input.slice(-this.options.maxChars)
+    this.ensureLine(this.cursorRow)
+
+    if (this.options.maxChars !== undefined && this.cursorCol > this.options.maxChars) {
+      this.lines[this.cursorRow] = ''
+      this.cursorCol = this.options.maxChars
+    }
+    while (this.lines[this.cursorRow].length < this.cursorCol) {
+      this.lines[this.cursorRow] += ' '
+    }
+
+    const line = this.lines[this.cursorRow]
+    this.lines[this.cursorRow] = line.slice(0, this.cursorCol) + text + line.slice(this.cursorCol + text.length)
+    this.cursorCol += text.length
+    this.trimDisplay()
   }
   
   private ensureLine(row: number): void {
@@ -457,9 +554,36 @@ class VirtualTerminal {
   getStableOutput(): string {
     return this.lines.filter(line => line.trim().length > 0).join('\n')
   }
+
+  getDisplayOutput(): string {
+    // Display snapshots model what the user sees in a terminal, not what the
+    // model receives. Preserve intentional blank rows inside the visible screen,
+    // but trim the implicit empty rows created only by a trailing newline or clear.
+    const last = this.lines.findLastIndex(line => line.trim().length > 0)
+    if (last < 0) return ''
+    return this.lines.slice(0, last + 1).join('\n')
+  }
   
   getFrameCount(): number {
     return this.frameCount
+  }
+}
+
+export function createTerminalDisplay(options?: Pick<VirtualTerminalOptions, 'maxLines' | 'maxChars'>) {
+  const terminal = new VirtualTerminal({ ...options, bufferPartialControl: true })
+
+  return {
+    push(chunk: string) {
+      // Reuse the same terminal renderer as compression so live metadata and
+      // final compression cannot diverge on CR redraws, clear-line sequences, or
+      // cursor movement. This helper intentionally returns only the display view;
+      // callers that need faithful model output must keep their own raw stream.
+      terminal.processChunk(chunk)
+      return terminal.getDisplayOutput()
+    },
+    value() {
+      return terminal.getDisplayOutput()
+    },
   }
 }
 

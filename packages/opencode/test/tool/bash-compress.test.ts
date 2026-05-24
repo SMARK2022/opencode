@@ -1,7 +1,31 @@
 import { describe, expect, test } from "bun:test"
-import { compressVisibleOutput, normalizePowerShellOutput } from "../../src/tool/bash-compress"
+import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "../../src/tool/bash-compress"
 
 describe("tool.bash-compress", () => {
+  test("renders split terminal clear-line sequences without leaking partial escapes", () => {
+    const display = createTerminalDisplay()
+
+    display.push("boot\nworking\r\x1b[")
+    display.push("2Kdone\n")
+
+    // Child-process chunks can split CSI bytes anywhere. The display renderer
+    // must buffer the partial ESC[ prefix so the default live tool output never
+    // shows raw escape fragments while still applying the completed clear-line.
+    expect(display.value()).toBe("boot\ndone")
+  })
+
+  test("bounds large single-line display chunks", () => {
+    const display = createTerminalDisplay({ maxChars: 12 })
+
+    display.push("x".repeat(10_000))
+    display.push("y".repeat(10_000))
+
+    // Live shell metadata is a preview surface. Very large plain chunks should
+    // stay bounded before and after rendering instead of building an unbounded
+    // virtual terminal line that preview() would immediately truncate.
+    expect(display.value()).toBe("y".repeat(12))
+  })
+
   test("decodes PowerShell CLIXML with the standard header", () => {
     const clixml = [
       "#< CLIXML",

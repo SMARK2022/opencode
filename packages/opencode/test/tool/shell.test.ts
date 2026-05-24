@@ -1575,6 +1575,82 @@ describe("tool.shell permissions", () => {
   )
 })
 
+describe("tool.shell display output", () => {
+  it.live(
+    "renders carriage-return progress in metadata without changing returned output",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          // Decimal ASCII bytes keep the Bun snippet quote-free across pwsh,
+          // Windows cmd, and POSIX shells. They spell "one\rtwo\rthree\nfinal\n",
+          // the minimal terminal-progress shape where two frames are overwritten.
+          const progressBytes = [
+            111, 110, 101, 13, 116, 119, 111, 13, 116, 104, 114, 101, 101, 10, 102, 105, 110, 97,
+            108, 10,
+          ]
+          const script = `process.stdout.write(Buffer.from([${progressBytes.join(",")}]))`
+          const text = `${bin} -e ${evalarg(script)}`
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${text}` : text,
+            description: "Emit carriage-return progress",
+            compress_output: false,
+          })
+
+          // Default shell metadata is the live UI surface. It must match terminal
+          // redraw semantics so OpenTUI does not expose raw CR bytes as `\\x0d`,
+          // while `result.output` below remains the faithful model-return value.
+          expect(result.metadata.output).toContain("three")
+          expect(result.metadata.output).toContain("final")
+          expect(result.metadata.output).not.toContain("one")
+          expect(result.metadata.output).not.toContain("two")
+          expect(result.metadata.output).not.toContain("\r")
+          expect(result.output).toContain("one")
+          expect(result.output).toContain("two")
+          expect(result.output).toContain("three")
+        }),
+      ),
+    15_000,
+  )
+
+  it.live(
+    "keeps clear-line display metadata clean when command exits non-zero",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          // The byte sequence is "boot\nworking\r\x1b[2Kdone\n". 27,91,50,75 is
+          // ESC[2K, the ANSI clear-line command used by progress renderers before
+          // repainting the current line; exit 7 covers non-zero tool completion.
+          const clearLineBytes = [
+            98, 111, 111, 116, 10, 119, 111, 114, 107, 105, 110, 103, 13, 27, 91, 50, 75, 100, 111,
+            110, 101, 10,
+          ]
+          const script = `process.stdout.write(Buffer.from([${clearLineBytes.join(",")}])); process.exit(7)`
+          const text = `${bin} -e ${evalarg(script)}`
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${text}` : text,
+            description: "Emit clear-line progress then fail",
+            compress_output: false,
+          })
+
+          // Non-zero exits still render the same default terminal snapshot; the
+          // failure status belongs to metadata.exit and must not force the UI back
+          // to raw control sequences or discard the returned model output.
+          expect(result.metadata.exit).toBe(7)
+          expect(result.metadata.output).toContain("boot")
+          expect(result.metadata.output).toContain("done")
+          expect(result.metadata.output).not.toContain("working")
+          expect(result.metadata.output).not.toContain("\r")
+          expect(result.metadata.output).not.toContain("\x1b")
+          expect(result.output).toContain("working")
+          expect(result.output).toContain("done")
+        }),
+      ),
+    15_000,
+  )
+})
+
 describe("tool.shell abort", () => {
   it.live(
     "preserves output when aborted",
