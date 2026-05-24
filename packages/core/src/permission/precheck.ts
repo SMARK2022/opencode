@@ -1,3 +1,7 @@
+// #220：precheck.ts — shell 命令静态启发式预分类器
+// #220：设计哲学：fail-closed。无法理解的语法/动态展开/编码混淆都降级为 general 或更高风险层级
+// #220：分层：raw 扫描 → 包装器递归 → 结构解析 → token 分类 → 聚合
+// #220：不变量：包装器永不 safe；splitCommands 未建模语法降级；dangerous 短路
 // #202：四级预审分层——safe/general/cautious/dangerous 替代 allow/prompt/deny 三态
 export const LEVELS = ["safe", "general", "cautious", "dangerous"] as const
 export type Level = (typeof LEVELS)[number]
@@ -36,19 +40,70 @@ const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_
 const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
 // #202：敏感路径正则放宽——允许 ~ 之外的非空白前缀路径，使 /home/alice/.aws/credentials、$HOME 展开后的
 // #202：绝对路径也能被 raw 扫描命中；护栏而非密钥扫描器，需足够精确避免拦截普通项目文件
-const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
+// #220：核心敏感路径模式（不含 .pem/.key）——本地读取检测用
+const SENSITIVE_PATH_CORE_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN})`
+// #220：完整敏感路径模式（含 .pem/.key）——仅用于外传检测
+const SENSITIVE_PATH_PATTERN = SENSITIVE_PATH_CORE_PATTERN + String.raw`|[^\s|;]+\.pem|[^\s|;]+\.key`
 // #202：敏感路径参数匹配——raw 扫描发生在 shell quote 移除之前，允许敏感路径外侧有一层引号，
 // #202：避免 `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断
 const SENSITIVE_PATH_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_PATTERN}["']?`
+// #220：本地读取用窄版参数模式（不含 .pem/.key）——减少误报
+const SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_CORE_PATTERN}["']?`
 // #217：raw 层文件删除/移动模式——在 dangerousRaw 之后、token 化之前运行，
 // #217：捕获不透明 shell（重定向、命令替换、SSH/WSL 载荷、不支持分隔符）中的可见文件变更
 const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
 const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
 const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
+
+// #220：预编译正则常量——dangerous raw 层，模块加载时编译一次
+const POSIX_ROOT_ALTERNATION = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users`
+const RE_D_RM_RF_ROOT = /\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/(?:etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users)(?:\/|(?=[\s)'"\x60]|$)))/
+const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i
+const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
+const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
+const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
+const RE_D_WINDOWS_PROTECTED_DELETE = /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Windows|Program Files|Documents and Settings)(?:[\\/][^\s)'"\x60]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i
+const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
+const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
+const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,"i",)
+const RE_D_PS_RECURSIVE_DELETE_ROOT = /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
+const RE_D_PYTHON_RMTREE = /\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+const RE_D_PYTHON_REMOVE = /\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+const RE_D_NODE_REMOVE = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+const RE_D_SUBPROCESS_RM = /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+const RE_D_REVERSE_SHELL = /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+(?:-i\s+)?[>&]+\s*\/dev\/tcp\/|\bmkfifo\b[^|;]*\b(?:sh|bash)\b|\bNew-Object\s+System\.Net\.Sockets\.TCPClient\b/i
+const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:~|\$HOME)?[\\/]?\.ssh[\\/]authorized_keys/i
+const RE_D_SUDOERS_WRITE = /(?:>>?\s*["']?\/etc\/sudoers|\bvisudo\b)/i
+const RE_D_CHMOD_SETUID = /\bchmod\b[^|;]*\b[ug]\+s\b/i
+const RE_D_IPTABLES_FLUSH = /\b(?:iptables|ip6tables)\b[^|;]*(?:\s-F\b|\s-X\b|\s--flush\b|\s--delete-chain\b)/i
+const RE_D_UFW_DISABLE = /\bufw\s+disable\b/i
+const RE_D_KILL_ALL = /\bkill\b[^|;]*\s-9\b[^|;]*\s-1\b/i
+
+// #220：预编译正则常量——cautious raw 层
+const RE_C_SHELL_RC_WRITE = />>?\s*["']?(?:~|\$HOME)?[\\/]?\.(?:bash(?:rc|_profile|_login|_logout)|zshrc|zprofile|zlogin|profile|login|cshrc|tcshrc)["']?(?:\s|$)/i
+const RE_C_GIT_HOOKS_WRITE = />>?\s*["']?[^\s]*\.git[\\/]hooks[\\/]/i
+const RE_C_SCHTASKS_CREATE = /\bschtasks\b[^|;]*\/create\b/i
+const RE_C_REGISTER_SCHEDULED_TASK = /\bRegister-ScheduledTask\b/i
+const RE_C_CRON_WRITE = />>?\s*["']?\/(?:etc\/cron|var\/spool\/cron)/i
+const RE_C_SYSTEMD_WRITE = />>?\s*["']?(?:\/etc\/systemd|~\/\.config\/systemd)[\\/]/i
+const RE_C_ECHO_PIPE_INTERPRETER = /\b(?:echo|printf)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
+const RE_C_SENSITIVE_READ = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN})`,"i",)
 // #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
 const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
 const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
+// #220：系统级破坏性命令——执行即不可逆，直接 dangerous
+const SYSTEM_DESTRUCTIVE_COMMANDS = new Set([
+  "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs",
+  "fdisk", "parted", "wipefs",
+  "shutdown", "reboot", "halt", "poweroff",
+])
+// #220：用户/组账号管理命令——修改系统用户数据库
+const USER_ACCOUNT_COMMANDS = new Set([
+  "useradd", "userdel", "groupadd", "groupdel", "chpasswd", "passwd",
+  "usermod", "adduser", "deluser", "addgroup", "delgroup",
+])
+
 
 // #197：禁止 always-allow 的宽泛前缀——授权后可隐藏未来任意载荷文本，用户点击 Always 时 precheck 从未见过这些未来载荷
 const BANNED_AUTO_ALLOW_PREFIXES = [
@@ -132,6 +187,11 @@ const BANNED_AUTO_ALLOW_PREFIXES = [
   ["scp"],
   ["sftp"],
   ["rsync"],
+  // #220: 包执行器前缀——npx/pipx/uvx 可下载并运行不受信任的代码
+  ["npx"],
+  ["pipx"],
+  ["pipx", "run"],
+  ["uvx"],
 ]
 
 export function evaluate(input: {
@@ -229,7 +289,8 @@ function evaluateCommand(command: string, depth: number): Decision {
   }
 
   // #197：安全 token 判定——先检风险 token（dangerous/cautious），再检安全 token（safe），最后默认 general
-  const risk = riskyTokens(tokens)
+  // #220: token 层启发式分类——按威胁类别逐项检查
+  const risk = classifyTokens(tokens)
   // #197：风险判定优先于安全判定——已知破坏性命令即使用只读子命令形式也不自动放行
   if (risk) return risk
   // #197：通过只读不变量验证的命令才 safe——安全命令必须直接、本地且只读
@@ -251,7 +312,8 @@ function splitCommands(command: string) {
       escaped = false
       continue
     }
-    if (char === "\\") {
+    // #220：POSIX 单引号内反斜材是字面量，不应作为转义符处理
+    if (char === "\\" && quote !== "'") {
       escaped = true
       continue
     }
@@ -314,7 +376,8 @@ function tokenize(command: string) {
       escaped = false
       continue
     }
-    if (char === "\\") {
+    // #220：POSIX 单引号内反斜材是字面量，不应作为转义符处理
+    if (char === "\\" && quote !== "'") {
       escaped = true
       continue
     }
@@ -376,9 +439,8 @@ function unwrap(tokens: string[]): UnwrapResult {
   if (cmd === "cmd") {
     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
     if (index >= 0 && tokens[index + 1]) {
-      // #197：重组 /c 后的载荷用于递归原始扫描——cmd 语法与 POSIX shell 不同但仍可隐藏危险命令
-      // #217：cmd /c 载荷可能含空格的引号段——保留原始 token 避免 joinShellTokens 重组后改变语义
-      return { action: "script", script: tokens[index + 1].includes(" ") ? tokens[index + 1] : joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
+      // #220：cmd /c 语义是将 /c 之后所有参数拼成一条命令执行，统一使用空格拼接以保留内容完整性
+      return { action: "script", script: tokens.slice(index + 1).join(" "), reason: "cmd wrapper requires explicit approval" }
     }
     // #197：无载荷的 cmd 可能进入交互式命令解释器——无法预检后续输入
     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
@@ -393,8 +455,7 @@ function unwrap(tokens: string[]): UnwrapResult {
   if (["pythonw", "pyw", "pypy", "pypy3", "deno", "osascript"].includes(cmd)) {
     return { action: "ask", reason: "script interpreter requires explicit approval" }
   }
-  // #197：bun x 可运行任意远程 npm 包——包内容和网络拉取不在预检范围内
-  if (cmd === "bun" && tokens[1] === "x") return { action: "ask", reason: "package executor requires explicit approval" }
+  // #220：bun x 移至 classifyTokens 中处理为 cautious，不再在 unwrap 中损害为 ask
   // #197：env 可修改环境变量后执行命令——修改后的环境可改变程序行为和安全边界
   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
   // #197：提权 wrapper 放大命令影响范围——sudo/doas/su/pkexec 后的命令以更高权限执行
@@ -508,120 +569,75 @@ function wslScript(tokens: string[]) {
   }
 }
 
-function dangerousRaw(command: string) {
+// #220：dangerousRaw——使用预编译正则常量，在 token 化之前拦截跨管道/编码/命令替换内的危险载荷
+function dangerousRaw(command: string): string | undefined {
   const normalized = command.replace(/\s+/g, " ").trim()
-  // #197：原始扫描刻意狭窄——捕获隐藏在不透明 shell 特性中的危险载荷，非 dangerous 的模糊性回退到 general/cautious
-  if (
-    new RegExp(
-      // #197：rm 同时带 -r/-R/--recursive 和 -f/--force 且目标为根/home/etc——递归强制删除保护目录不可恢复
-      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/etc(?:\/|(?=[\s)'"\x60]|$)))`,
-    ).test(normalized)
-  ) {
-    // #197：递归强制删除根文件系统或 home 目录——系统不可恢复，直接 dangerous 防止重试绕过
-    return "critical recursive delete"
-  }
-  // #197：远程下载管道到解释器执行未审查的网络字节——特权/env wrapper 包含在内因它们是常见安装脚本间接调用
-  // #202：reason 追加本地审查提示，便于区分"远程脚本本身"与"本地 safe 命令"
-  if (/\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(normalized)) {
+  if (RE_D_RM_RF_ROOT.test(normalized)) return "critical recursive delete"
+  if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
     return "remote download piped to interpreter; review the script locally before running safe commands"
-  }
-  // #197：PowerShell Web 下载别名加 iex 等价于 curl|sh
-  if (/\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i.test(normalized)) {
+  if (RE_D_PS_DOWNLOAD_EXEC.test(normalized))
     return "remote PowerShell download executed as code; review the script locally before running safe commands"
-  }
-  // #202：Windows 保护目标危险扫描——format/rd/rmdir/del 可直接作用于盘符根或用户目录，不一定使用 rm 风格参数，
-  // #202：在 raw 层先拦截，避免 token 解析差异把整盘/用户目录删除降级成 general 或 cautious
-  if (/\bformat\b\s+[A-Za-z]:/i.test(normalized)) return "Windows drive format"
-  if (
-    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i.test(
-      normalized,
-    )
-  ) {
-    return "Windows protected directory delete"
-  }
-  // #202：凭证外泄仅在敏感读取可见连接到网络传输时 dangerous——直接敏感读取由 cautiousRaw/readsSensitivePath 处理为 cautious
-  // #202：扩展读取器集合（rg/grep/head/tail/sed/awk）并使用 SENSITIVE_PATH_ARGUMENT_PATTERN 容忍外侧引号
-  if (
-    new RegExp(
-      String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,
-      "i",
-    ).test(normalized)
-  ) {
-    return "credential read piped to network transfer"
-  }
-  // #197：上传标志引用敏感文件视为外泄——文件即出站请求体/表单/上传
-  // #202：扩展上传标志（--data-urlencode/--data-raw/-F/--form 等）并容忍 name@path 与外侧引号
-  if (
-    new RegExp(
-      String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
-      "i",
-    ).test(normalized)
-  ) {
-    return "credential file sent with network transfer"
-  }
-  // #197：scp/sftp/rsync 使用 host:path 语法而非管道/标志
-  // #202：加 i 标志并使用 SENSITIVE_PATH_ARGUMENT_PATTERN，捕获大写 SCP 及带引号路径
-  if (new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)) {
-    return "credential file sent with remote transfer"
-  }
-  // #197：解释器 API 和反向 shell 惯用法作为原始文本扫描——危险目标可能在字符串内而非 token 中
-  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i.test(normalized)) {
-    return "critical PowerShell recursive delete"
-  }
-  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
-    // #197：Python shutil.rmtree 删除整个目录树——针对根/home/etc 的调用等同于 rm -rf /
-    return "critical Python recursive delete"
-  }
-  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
-    // #197：Python os.remove/unlink/rmdir 针对保护路径——删除系统关键文件可破坏系统
-    return "critical Python file removal"
-  }
-  if (/(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
-    // #197：Node.js fs 同步删除 API 针对保护路径——与 Python os.remove 等价的不可逆破坏
-    return "critical Node.js file removal"
-  }
-  if (/\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
-    // #197：解释器通过 subprocess 调用 rm -rf——绕过 shell 层的危险载荷仍需 dangerous
-    return "critical recursive delete through interpreter"
-  }
-  if (/\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(normalized)) {
-    // #197：反向 shell 惯用法——/dev/tcp、nc -e、socat EXEC 建立入站连接使攻击者获得交互式访问
-    return "reverse shell pattern"
-  }
+  // #220：解码/解压载荷管道到解释器——载荷不可见，必须阻止
+  if (RE_D_DECODE_PIPE_INTERPRETER.test(normalized))
+    return "decoded/decompressed payload piped to interpreter"
+  if (RE_D_WINDOWS_FORMAT.test(normalized)) return "Windows drive format"
+  if (RE_D_WINDOWS_PROTECTED_DELETE.test(normalized)) return "Windows protected directory delete"
+  // #220：凭据外传——敏感文件读取管道到网络传输是 dangerous
+  if (RE_D_CREDENTIAL_PIPE_NETWORK.test(normalized)) return "credential read piped to network transfer"
+  if (RE_D_CREDENTIAL_UPLOAD_FLAG.test(normalized)) return "credential file sent with network transfer"
+  if (RE_D_CREDENTIAL_REMOTE_TRANSFER.test(normalized)) return "credential file sent with remote transfer"
+  if (RE_D_PS_RECURSIVE_DELETE_ROOT.test(normalized)) return "critical PowerShell recursive delete"
+  if (RE_D_PYTHON_RMTREE.test(normalized)) return "critical Python recursive delete"
+  if (RE_D_PYTHON_REMOVE.test(normalized)) return "critical Python file removal"
+  if (RE_D_NODE_REMOVE.test(normalized)) return "critical Node.js file removal"
+  if (RE_D_SUBPROCESS_RM.test(normalized)) return "critical recursive delete through interpreter"
+  // #220：反弹 shell——含扩展变体（/dev/tcp、nc -e、socat、bash >&/dev/tcp、mkfifo、PowerShell TCPClient）
+  if (RE_D_REVERSE_SHELL.test(normalized)) return "reverse shell pattern"
+  // #220：持久化后门——SSH authorized_keys 写入是最常见的持久化攻击向量
+  if (RE_D_AUTHORIZED_KEYS_WRITE.test(normalized)) return "SSH authorized_keys modification enables persistent backdoor"
+  if (RE_D_SUDOERS_WRITE.test(normalized)) return "sudoers modification grants privilege escalation"
+  // #220：特权升级——setuid/setgid 位创建特权升级面
+  if (RE_D_CHMOD_SETUID.test(normalized)) return "setuid/setgid bit creates privilege escalation surface"
+  // #220：防火墙/网络保护移除
+  if (RE_D_IPTABLES_FLUSH.test(normalized)) return "firewall rule flush removes network protection"
+  if (RE_D_UFW_DISABLE.test(normalized)) return "disabling firewall removes network protection"
+  // #220：全进程终止
+  if (RE_D_KILL_ALL.test(normalized)) return "mass process kill"
 }
 
-// #202：cautiousRaw——raw 层敏感读取谨慎扫描。$HOME/.aws/credentials 等 env-expanded 路径会让 splitter
-// #202：降级为 opaque，导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；此处仅把本地敏感
-// #202：读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审
-function cautiousRaw(command: string) {
-  const normalized = command.replace(/\s+/g, " ").trim()
-  // #217：raw 层文件删除/移动扫描——引号感知匹配确保只在 shell 可执行上下文中命中
+// #220：cautiousRaw——引号感知的文件删除/移动 + 持久化写入 + 可见载荷管道 + 本地敏感读取
+function cautiousRaw(command: string): string | undefined {
   if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
   if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
-  if (
-    new RegExp(
-      // #209：去掉 (?:^|[;&|]\s*) 锚点——if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符，锚点导致漏审
-      // #209：\b 词边界单独足以匹配块内读取命令——Get-Content 前的 { 或 ( 不构成词字符，\b 仍能在标识符边界命中
-      String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
-      // #209：[^|;]* 前瞻仍把匹配限定在同一管道段内——去掉锚点不会让跨管道的读取命令误判为敏感读取
-      "i",
-    ).test(normalized)
-  ) {
-    return "sensitive file read requires explicit approval"
-  }
+  const normalized = command.replace(/\s+/g, " ").trim()
+  // #220：持久化写入（重定向目标）——splitCommands 遇重定向返回 undefined，必须在 raw 层捕获
+  if (RE_C_SHELL_RC_WRITE.test(normalized)) return "shell RC file modification enables persistent code execution"
+  if (RE_C_GIT_HOOKS_WRITE.test(normalized)) return "git hook modification runs code on git operations"
+  if (RE_C_CRON_WRITE.test(normalized)) return "cron directory write enables persistent scheduled execution"
+  if (RE_C_SYSTEMD_WRITE.test(normalized)) return "systemd unit file write enables persistent service execution"
+  if (RE_C_SCHTASKS_CREATE.test(normalized)) return "Windows scheduled task creation enables persistent execution"
+  if (RE_C_REGISTER_SCHEDULED_TASK.test(normalized)) return "PowerShell scheduled task registration enables persistent execution"
+  // #220：可见载荷管道到解释器——echo/printf 内容可审查但仍需人工确认
+  if (RE_C_ECHO_PIPE_INTERPRETER.test(normalized)) return "visible payload piped to interpreter requires review"
+  // #220：本地敏感路径读取——使用不含 .pem/.key 的窄版模式减少误报
+  if (RE_C_SENSITIVE_READ.test(normalized)) return "sensitive file read requires explicit approval"
 }
 
-// #217：rawExecutableMatch——引号感知的文件删除/移动匹配。shell 语法上下文中分隔符在引号内是数据，
-// #217：$() 和反引号在未引用或双引号文本中执行，但在 POSIX 单引号中保持字面量
+// #220：rawExecutableMatch——引号感知的文件删除/移动匹配，委托 isShellActive 判断可执行上下文
 function rawExecutableMatch(command: string, pattern: string) {
   const quotes = quoteOffsets(command)
-  // #217：matchAll 遍历所有匹配——仅当匹配位置处于 shell 可执行上下文时才返回 true
   for (const match of command.matchAll(new RegExp(pattern, "gi"))) {
     const index = match.index ?? 0
-    // #217：未引用或双引号内的 $()、反引号启动命令替换——单引号内为字面量，不计为可执行
-    if (!quotes[index] || (quotes[index] === '"' && (command.startsWith("$(", index) || command[index] === "`"))) return true
+    if (isShellActive(quotes[index], command, index)) return true
   }
   return false
+}
+
+// #220：isShellActive——无引号总是可执行，单引号内总是字面量，双引号内 $()、反引号、$ 仍然活跃
+function isShellActive(quote: string, command: string, index: number) {
+  if (!quote) return true
+  if (quote === "'") return false
+  return command.startsWith("$(", index) || command[index] === "`" || command[index] === "$"
 }
 
 // #217：quoteOffsets——为命令中每个字符位置记录其所在的引号状态。
@@ -650,79 +666,157 @@ function quoteOffsets(command: string) {
   return quotes
 }
 
-function riskyTokens(tokens: string[]): Decision | undefined {
-  // #202：token 级风险——critical 保护目标 dangerous；破坏性但有限操作 cautious，仅该层到达 reviewer
+// #220：classifyTokens——token 层启发式分类，按威胁类别逐项检查
+function classifyTokens(tokens: string[]): Decision | undefined {
   const cmd = normalizeCommandName(tokens[0])
-  // #202：敏感读取谨慎分层——读取 .env/SSH key/云凭据不是立即外传（非 dangerous），但会把密钥内容
-  // #202：暴露给 shell 输出和模型上下文，所以从 safe 提升为 cautious，交 reviewer/user 判断
+  // #220: 敏感路径读取——读取 .env/SSH key/云凭据会暴露密钥内容给 shell 输出/模型上下文
   if (readsSensitivePath(tokens)) return { level: "cautious", reason: "sensitive file read requires explicit approval" }
-  // #202：rm -rf 针对保护目录 dangerous——其他目标 cautious 因虽危险但可能是有意操作
+  // #220: 文件删除——rm -rf 保护根 dangerous，其他 cautious
   if (cmd === "rm" && hasRecursiveForceDeleteFlags(tokens.slice(1))) {
-    if (tokens.slice(1).some((item) => protectedDeleteTarget(item))) {
-      // #197：rm -rf 针对根/home/etc 的 dangerous——递归强制删除保护目录不可恢复
+    if (tokens.slice(1).some(protectedDeleteTarget))
       return { level: "dangerous", reason: "critical recursive delete" }
-    }
-    // #202：rm -rf 针对非保护目录 cautious——虽危险但可能是有意清理操作
     return { level: "cautious", reason: "recursive force delete requires explicit approval" }
   }
-  // #197：dd 写裸盘/mkfs 格式化/shutdown 停机——均为不可逆系统级破坏，直接 dangerous
-  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/"))) return { level: "dangerous", reason: "raw disk write" }
-  // #197：磁盘格式化和系统停机命令——不可逆系统级操作直接 dangerous
-  if (["mkfs", "mkfs.ext4", "fdisk", "parted", "wipefs", "shutdown", "reboot", "halt", "poweroff"].includes(cmd)) {
-    return { level: "dangerous", reason: "system destructive command" }
-  }
-  // #202：git reset --hard 可丢弃未提交工作区变更——cautious 需 reviewer/user 确认
-  if (cmd === "git" && tokens[1] === "reset" && tokens.includes("--hard")) {
-    return { level: "cautious", reason: "destructive git reset requires explicit approval" }
-  }
-  // #202：git clean -fd 删除未跟踪文件——cautious，不可逆且范围可能超出预期
-  if (cmd === "git" && tokens[1] === "clean" && tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))) {
-    return { level: "cautious", reason: "destructive git clean requires explicit approval" }
-  }
-  // #202：force push 覆盖远程历史——cautious，可导致他人提交丢失
-  if (cmd === "git" && tokens[1] === "push" && tokens.some((item) => item === "--force" || item === "-f")) {
-    return { level: "cautious", reason: "force push requires explicit approval" }
-  }
-  // #202：git 谨慎子命令——add/commit/merge/rebase/cherry-pick/revert/push/pull/reset/clean 及非安全 branch
-  // #202：会修改索引/历史/引用/远端状态且难以自动恢复，标为 cautious 仅由 reviewer/user 判断
-  if (cmd === "git" && cautiousGitSubcommand(tokens)) {
-    return { level: "cautious", reason: "git state-changing command requires explicit approval" }
-  }
-  // #202：chmod 777 或 -R 放宽权限——cautious，可导致敏感文件变为全局可写
-  if (cmd === "chmod" && tokens.some((item) => item === "777" || item === "-R")) {
-    return { level: "cautious", reason: "permission widening requires explicit approval" }
-  }
-  // #202：chown 到 root 改变所有权——cautious，可绕过文件权限模型
-  if (cmd === "chown" && tokens.some((item) => item.includes("root"))) {
-    return { level: "cautious", reason: "root ownership change requires explicit approval" }
-  }
   if (cmd === "remove-item" && tokens.some((item) => item.toLowerCase() === "-recurse")) {
-    if (tokens.slice(1).some((item) => protectedDeleteTarget(item))) {
-      // #197：PowerShell Remove-Item -Recurse 针对保护目录——与 rm -rf / 等价的不可逆删除 dangerous
+    if (tokens.slice(1).some(protectedDeleteTarget))
       return { level: "dangerous", reason: "critical PowerShell recursive delete" }
-    }
-    // #202：PowerShell 递归删除非保护目录——cautious，危险但可能有意
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
-  // #217：token 级文件删除——已知删除命令名但未达 dangerous 阈值，需 reviewer 确认是否为预期清理
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
-  // #217：token 级文件移动/重命名——可绕过删除审查，需 reviewer 确认目标路径
+  // #220: 文件移动/重命名
   if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file move or rename requires explicit approval" }
-  // #202：远程文件传输可移动凭证到外部主机——cautious，安全读取应用专用 read/glob/grep 工具
-  if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
+  // #220: 原始磁盘写入
+  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
+    return { level: "dangerous", reason: "raw disk write" }
+  // #220: 系统破坏性命令
+  if (SYSTEM_DESTRUCTIVE_COMMANDS.has(cmd))
+    return { level: "dangerous", reason: "system destructive command" }
+  // #220: Git 操作委托专项分类器
+  if (cmd === "git") return classifyGit(tokens)
+  // #220: 权限变更——setuid/setgid dangerous，777/-R cautious
+  if (cmd === "chmod") {
+    if (tokens.some((item) => /[ug]\+s/.test(item)))
+      return { level: "dangerous", reason: "setuid/setgid bit creates privilege escalation surface" }
+    if (tokens.some((item) => item === "777" || item === "-R"))
+      return { level: "cautious", reason: "permission widening requires explicit approval" }
+  }
+  if (cmd === "chown" && tokens.some((item) => item.includes("root")))
+    return { level: "cautious", reason: "root ownership change requires explicit approval" }
+  // #220: 特权升级——visudo/setcap
+  if (cmd === "visudo")
+    return { level: "dangerous", reason: "sudoers modification grants privilege escalation" }
+  if (cmd === "setcap")
+    return { level: "dangerous", reason: "file capability setting creates privilege escalation surface" }
+  // #220: 用户/组账号管理
+  if (USER_ACCOUNT_COMMANDS.has(cmd))
+    return { level: "cautious", reason: "user/group account management requires explicit approval" }
+  // #220: 防火墙与网络安全——flush/disable dangerous，修改 cautious
+  if (cmd === "iptables" || cmd === "ip6tables") {
+    if (tokens.some((item) => ["-F", "-X", "--flush", "--delete-chain"].includes(item)))
+      return { level: "dangerous", reason: "firewall rule flush removes network protection" }
+    return { level: "cautious", reason: "firewall rule modification requires explicit approval" }
+  }
+  if (cmd === "ufw") {
+    if (tokens[1] === "disable")
+      return { level: "dangerous", reason: "disabling firewall removes network protection" }
+    return { level: "cautious", reason: "firewall configuration change requires explicit approval" }
+  }
+  if (cmd === "nft" && tokens.some((item) => item === "flush"))
+    return { level: "dangerous", reason: "nftables rule flush removes network protection" }
+  // #220: 服务管理——mask dangerous，其他 cautious
+  if (cmd === "systemctl") {
+    if (tokens[1] === "mask")
+      return { level: "dangerous", reason: "service mask permanently prevents startup" }
+    if (["stop", "disable", "enable", "start", "restart"].includes(tokens[1]))
+      return { level: "cautious", reason: "service state change requires explicit approval" }
+  }
+  // #220: 全进程终止
+  if (cmd === "kill" && tokens.includes("-9") && tokens.includes("-1"))
+    return { level: "dangerous", reason: "mass process kill" }
+  // #220: 定时任务——crontab/schtasks/Register-ScheduledTask
+  if (cmd === "crontab") {
+    const args = tokens.slice(1)
+    const flags = args.filter((t) => t.startsWith("-"))
+    const isListing = flags.length > 0 && flags.every((f) => f === "-l" || f === "-u")
+    if (!isListing) return { level: "cautious", reason: "crontab modification creates persistent scheduled execution" }
+  }
+  if (cmd === "schtasks") {
+    if (tokens.some((t) => t.toLowerCase() === "/query")) return undefined
+    return { level: "cautious", reason: "Windows scheduled task operation requires explicit approval" }
+  }
+  if (cmd === "register-scheduledtask")
+    return { level: "cautious", reason: "PowerShell scheduled task registration enables persistent execution" }
+  // #220: 注册表操作——Run/RunOnce 键写入 dangerous
+  if (cmd === "reg") {
+    const sub = tokens[1]?.toLowerCase()
+    if (sub === "add" && tokens.some((t) => /(?:\\|n)(?:Run|RunOnce)$/i.test(t)))
+      return { level: "dangerous", reason: "registry Run key write creates persistent startup backdoor" }
+    if (sub === "add" || sub === "delete")
+      return { level: "cautious", reason: "registry modification requires explicit approval" }
+  }
+  // #220: 网络监听
+  if (cmd === "nc" || cmd === "ncat" || cmd === "netcat") {
+    if (tokens.some((t) => t === "-l" || /^-[A-Za-z]*l/.test(t)))
+      return { level: "cautious", reason: "network listener port requires explicit approval" }
+  }
+  if (cmd === "socat" && tokens.some((t) => t.startsWith("TCP-LISTEN:")))
+    return { level: "cautious", reason: "network listener port requires explicit approval" }
+  // #220: HTTP 服务器——暴露本地文件
+  if (cmd === "python" || cmd === "python3") {
+    if (tokens.includes("-m") && tokens.some((t) => t === "http.server" || t === "SimpleHTTPServer"))
+      return { level: "cautious", reason: "HTTP server exposes local files" }
+  }
+  // #220: 包管理器安装——postinstall 脚本是供应链攻击载体
+  if (["npm", "pnpm", "yarn"].includes(cmd)) {
+    if (["install", "i", "add", "ci"].includes(tokens[1]))
+      return { level: "cautious", reason: "package install executes postinstall scripts; verify dependencies" }
+  }
+  if (cmd === "bun") {
+    if (["install", "i", "add"].includes(tokens[1]))
+      return { level: "cautious", reason: "package install executes postinstall scripts; verify dependencies" }
+    // #220: bun x 是包执行器，可能下载并运行不受信任的代码
+    if (tokens[1] === "x")
+      return { level: "cautious", reason: "package executor may run untrusted code" }
+  }
+  if (["pip", "pip3"].includes(cmd) && tokens[1] === "install")
+    return { level: "cautious", reason: "Python package install requires explicit approval" }
+  if (cmd === "cargo" && tokens[1] === "install")
+    return { level: "cautious", reason: "Rust package install requires explicit approval" }
+  if (cmd === "gem" && tokens[1] === "install")
+    return { level: "cautious", reason: "Ruby package install requires explicit approval" }
+  // #220: 包执行器——npx/pipx/uvx 可从网络下载并立即执行任意包
+  if (cmd === "npx")
+    return { level: "cautious", reason: "package executor may run untrusted code" }
+  if (cmd === "pipx" && tokens[1] === "run")
+    return { level: "cautious", reason: "package executor may run untrusted code" }
+  if (cmd === "uvx")
+    return { level: "cautious", reason: "package executor may run untrusted code" }
+  // #220: 远程文件传输
+  if (["scp", "sftp", "rsync"].includes(cmd))
+    return { level: "cautious", reason: "remote file transfer requires explicit approval" }
 }
 
-// #202：cautiousGitSubcommand——识别修改索引/历史/引用/远端的 git 子命令。这些命令不应像 unknown 一样
-// #202：只走 general/user，也不应直接 dangerous；标为 cautious 后仅 auto 分支的 reviewer/user 判断
-function cautiousGitSubcommand(tokens: string[]) {
-  const subcommand = tokens[1]
-  if (!subcommand) return false
-  // #217：git mv 改变跟踪状态并可绕过删除审查——加入 cautious 子命令列表
-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(subcommand)) return true
-  return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
+// #220：classifyGit——Git 子命令专项分类器，替代 cautiousGitSubcommand
+function classifyGit(tokens: string[]): Decision | undefined {
+  const sub = tokens[1]
+  if (!sub) return undefined
+  // #220: 特定高风险 git 操作
+  if (sub === "reset" && tokens.includes("--hard"))
+    return { level: "cautious", reason: "destructive git reset requires explicit approval" }
+  if (sub === "clean" && tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d")))
+    return { level: "cautious", reason: "destructive git clean requires explicit approval" }
+  if (sub === "push" && tokens.some((item) => item === "--force" || item === "-f"))
+    return { level: "cautious", reason: "force push requires explicit approval" }
+  // #220: 通用状态变更命令
+  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(sub))
+    return { level: "cautious", reason: "git state-changing command requires explicit approval" }
+  if (sub === "branch" && !gitBranchSafe(tokens.slice(2)))
+    return { level: "cautious", reason: "git branch mutation requires explicit approval" }
+  return undefined
 }
+
 
 // #203：读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
 // #203：dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
@@ -754,26 +848,28 @@ function hasRecursiveForceDeleteFlags(tokens: string[]) {
   return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) && tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
 }
 
+// #220：protectedDeleteTarget——保护根目录覆盖 POSIX 根、家目录、Windows 盘符、系统目录和 macOS 特有目录
 function protectedDeleteTarget(input: string) {
-  // #197：保护根覆盖本地 POSIX 根、常见 home 别名、Windows 盘符根和 /etc——递归删除这些目标视为 dangerous 而非仅破坏性
-  const normalized = input.replaceAll("\\", "/")
-  return (
-    normalized === "/" ||
-    normalized === "/*" ||
-    normalized === "/." ||
-    normalized === "~" ||
-    normalized === "~/" ||
-    normalized === "$HOME" ||
-    normalized === "$HOME/" ||
-    normalized === "$env:USERPROFILE" ||
-    normalized === "$env:USERPROFILE/" ||
-    // #217：$env:SystemDrive 是 Windows 系统盘根——递归删除等同于格式化系统盘
-    normalized === "$env:SystemDrive" ||
-    normalized === "$env:SystemDrive/" ||
-    /^\w:\/?$/.test(normalized) ||
-    normalized === "/etc" ||
-    normalized.startsWith("/etc/")
-  )
+  const normalized = input.replaceAll("\\", "/").replace(/\/+$/, "")
+  if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
+  if (normalized === "~" || normalized === "$HOME") return true
+  // #220: Windows 环境变量家目录
+  if (normalized === "$env:USERPROFILE" || normalized === "$env:SystemDrive") return true
+  if (/^\w:\/?$/.test(normalized)) return true
+  // #220: POSIX 系统根目录（扩展版）
+  const posixRoots = new Set([
+    "/etc", "/usr", "/var", "/lib", "/lib64", "/bin", "/sbin",
+    "/boot", "/sys", "/proc", "/dev", "/opt", "/root", "/home",
+    "/Library", "/Applications", "/System", "/Users",
+  ])
+  if (posixRoots.has(normalized)) return true
+  // #220: 检查以系统根目录开头的路径（如 /etc/passwd）
+  for (const root of posixRoots) {
+    if (normalized.startsWith(root + "/")) return true
+  }
+  // #220: Windows 系统目录
+  if (/^[A-Za-z]:\/(?:Windows|Program Files|Users)(?:\/|$)/i.test(normalized)) return true
+  return false
 }
 
 function safeTokens(tokens: string[]) {
@@ -795,6 +891,8 @@ function safeTokens(tokens: string[]) {
   if (cmd === "git") return gitSafe(tokens)
   // #197：包管理器仅只读查询子命令安全——install/run/exec 可执行任意代码
   if (["npm", "pnpm", "yarn"].includes(cmd)) return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
+  // #220：bun 总是返回 false——install/x 移至 classifyTokens 处理为 cautious
+  if (cmd === "bun") return false
   // #197：版本探测安全——但仅当所有参数为版本标志时
   return versionSafe(tokens)
 }
@@ -844,11 +942,10 @@ function versionSafe(tokens: string[]) {
 }
 
 function hasSensitivePath(tokens: string[]) {
-  // #197：镜像 SENSITIVE_PATH_PATTERN 用于 token 化直接读取——原始模式捕获外泄语法，token 模式将本地密钥读取从 safe 降级为 cautious
-  // #202：扩展endsWith/精确匹配，覆盖 /home/alice/.aws/credentials、credentials.json、id_rsa 等非 ~ 前缀路径
+  // #220: .pem/.key 仅在路径含安全相关上下文时才判定为敏感
   return tokens.slice(1).some((item) => {
     const normalized = item.replaceAll("\\", "/")
-    return (
+    if (
       normalized === ".env" ||
       normalized.startsWith(".env.") ||
       normalized.includes("/.env") ||
@@ -869,23 +966,24 @@ function hasSensitivePath(tokens: string[]) {
       normalized === "~/.git-credentials" ||
       normalized.endsWith("/.git-credentials") ||
       normalized === "credentials.json" ||
-      normalized.endsWith("/credentials.json") ||
-      normalized === "id_rsa" ||
-      normalized.endsWith("/id_rsa") ||
-      normalized === "id_dsa" ||
-      normalized.endsWith("/id_dsa") ||
-      normalized === "id_ecdsa" ||
-      normalized.endsWith("/id_ecdsa") ||
-      normalized === "id_ed25519" ||
-      normalized.endsWith("/id_ed25519") ||
-      normalized === "id_ecdsa_sk" ||
-      normalized.endsWith("/id_ecdsa_sk") ||
-      normalized === "id_ed25519_sk" ||
-      normalized.endsWith("/id_ed25519_sk") ||
-      normalized.endsWith(".pem") ||
-      normalized.endsWith(".key")
-    )
+      normalized.endsWith("/credentials.json")
+    ) {
+      return true
+    }
+    // #220: SSH 私钥文件名匹配
+    const basename = normalized.split("/").at(-1) ?? ""
+    if (/^id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?$/.test(basename)) return true
+    // #220: .pem/.key 仅在路径含安全相关上下文时才判定为敏感
+    if (normalized.endsWith(".pem") || normalized.endsWith(".key")) {
+      return isSensitiveKeyFile(normalized)
+    }
+    return false
   })
+}
+
+// #220：isSensitiveKeyFile——仅在路径含 ssl/tls/cert/pki/private/secret/.ssh/.gnupg 时才将 .pem/.key 视为密钥文件
+function isSensitiveKeyFile(normalizedPath: string) {
+  return /(?:ssl|tls|cert|pki|private|secret|\.ssh|\.gnupg)/i.test(normalizedPath)
 }
 
 function normalizeCommandName(input: string) {
