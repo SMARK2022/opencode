@@ -421,8 +421,9 @@ function psEncoded(command: string) {
       "$ProgressPreference = 'SilentlyContinue'",
       "$InformationPreference = 'Continue'",
       "$WarningPreference = 'Continue'",
-      "$VerbosePreference = 'Continue'",
-      "$DebugPreference = 'Continue'",
+      // 默认静默 verbose/debug，避免 PowerShell 模块自动加载日志污染终端输出；用户仍可在命令内显式开启。
+      "$VerbosePreference = 'SilentlyContinue'",
+      "$DebugPreference = 'SilentlyContinue'",
       "& {",
       command,
       "} 3>&1 4>&1 5>&1 6>&1",
