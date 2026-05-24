@@ -28,38 +28,131 @@ test("selects registry bridge matching the requested file path", async () => {
     using first = await bridgeServer()
     using second = await bridgeServer()
     const dir = await tempRegistry()
-    await writeEntry(dir, "first", first.port, "/tmp/project-a")
-    await writeEntry(dir, "second", second.port, "/tmp/project-b")
+    const firstId = "11111111-1111-1111-1111-111111111111"
+    const secondId = "22222222-2222-2222-2222-222222222222"
+    // #219：fixture 使用 UUID 格式名称——生产发现只处理 VS Code 扩展 randomUUID 创建的清单
+    await writeEntry(dir, firstId, first.port, "/tmp/project-a")
+    await writeEntry(dir, secondId, second.port, "/tmp/project-b")
 
     const bridge = await VscodeBridge.resolveBridge({
       cwd: "/tmp/project-a",
       filePath: "/tmp/project-b/demo.ipynb",
     })
 
-    expect(bridge.id).toBe("second")
+    expect(bridge.id).toBe(secondId)
+  })
+
+  // #219：缓存隔离——切换 registry 目录后不得返回旧目录的缓存桥接
+  test("does not reuse a cached bridge after the registry directory changes", async () => {
+    using first = await bridgeServer()
+    using second = await bridgeServer()
+    const cwd = "/tmp/cache-project"
+    const filePath = "/tmp/cache-project/demo.ipynb"
+    const firstId = "11111111-1111-1111-1111-111111111111"
+    const secondId = "22222222-2222-2222-2222-222222222222"
+
+    // OPENCODE_IDE_REGISTRY_DIR is the supported escape hatch for tests and
+    // non-default state locations. Reusing the same cwd/filePath across two
+    // directories must not return a bridge from the previous registry cache.
+    await writeEntry(await tempRegistry(), firstId, first.port, cwd)
+    // #219：首次解析后缓存 5 秒——切换目录须使缓存失效而非返回旧桥
+    expect((await VscodeBridge.resolveBridge({ cwd, filePath })).id).toBe(firstId)
+
+    await writeEntry(await tempRegistry(), secondId, second.port, cwd)
+    expect((await VscodeBridge.resolveBridge({ cwd, filePath })).id).toBe(secondId)
+  })
+
+  // #219：损坏条目跳过且经宽限后清理——发现仍选择活桥
+  test("ignores corrupted registry entries", async () => {
+    using server = await bridgeServer()
+    const dir = await tempRegistry()
+    const cwd = "/tmp/corrupted-project"
+    const filePath = "/tmp/corrupted-project/demo.ipynb"
+    const corrupted = path.join(dir, "00000000-0000-0000-0000-000000000000.json")
+    const registryId = "22222222-2222-2222-2222-222222222222"
+    // #219：全 NUL 内容模拟 Windows 损坏——发现须跳过坏条目并仍选择活桥
+    // All-NUL content mirrors the observed Windows corruption while keeping the
+    // assertion behavioural: discovery must skip the bad entry and still select
+    // the live bridge, then cleanup only the abandoned corrupt manifest file.
+    await fs.writeFile(corrupted, Buffer.alloc(566))
+    await fs.utimes(corrupted, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+    await writeEntry(dir, registryId, server.port, cwd)
+
+    const bridge = await VscodeBridge.resolveBridge({
+      cwd,
+      filePath,
+    })
+
+    expect(bridge.id).toBe(registryId)
+    // #219：损坏文件经宽限后删除——仅在超过 CORRUPT_REGISTRY_GRACE_MS 后清理
+    await expect(fs.stat(corrupted)).rejects.toThrow()
+  })
+
+  // #219：安全边界——不删除非清单 JSON、目录、新鲜损坏文件或外来 JSON
+  test("does not remove non-manifest json files, directories, or recently modified corrupted manifests", async () => {
+    using server = await bridgeServer()
+    const dir = await tempRegistry()
+    const cwd = "/tmp/safety-project"
+    const filePath = "/tmp/safety-project/demo.ipynb"
+    const nonManifest = path.join(dir, "notes.json")
+    const shellLookingNonManifest = path.join(dir, "notes with spaces $(noop).json")
+    const manifestDirectory = path.join(dir, "00000000-0000-0000-0000-000000000000.json")
+    const recentCorrupted = path.join(dir, "11111111-1111-1111-1111-111111111111.json")
+    const registryId = "22222222-2222-2222-2222-222222222222"
+    const foreignJson = path.join(dir, "33333333-3333-3333-3333-333333333333.json")
+    // #219：覆盖删除边界而非实现形态——非 UUID JSON、shell 文件名、UUID 目录、新鲜损坏、外来 JSON 须保留
+    // These names cover the deletion boundary rather than implementation shape:
+    // non-UUID JSON, shell-looking filenames with spaces and `$()`, UUID-named
+    // directories, fresh corrupt files, and valid-but-foreign JSON must remain
+    // untouched even when OPENCODE_IDE_REGISTRY_DIR points at this directory.
+    await fs.writeFile(nonManifest, "not json")
+    await fs.writeFile(shellLookingNonManifest, "not json")
+    await fs.mkdir(manifestDirectory)
+    await fs.writeFile(recentCorrupted, Buffer.alloc(566))
+    await fs.writeFile(foreignJson, JSON.stringify({ ok: false }))
+    await writeEntry(dir, registryId, server.port, cwd)
+
+    const bridge = await VscodeBridge.resolveBridge({
+      cwd,
+      filePath,
+    })
+
+    expect(bridge.id).toBe(registryId)
+    // #219：非清单 JSON 不删——isRegistryManifestFile 排除非 UUID 格式
+    expect((await fs.stat(nonManifest)).isFile()).toBe(true)
+    expect((await fs.stat(shellLookingNonManifest)).isFile()).toBe(true)
+    // #219：UUID 命名的目录不删——stat.isFile() 守卫阻止删除目录
+    expect((await fs.stat(manifestDirectory)).isDirectory()).toBe(true)
+    // #219：新鲜损坏文件不删——宽限期内跳过以避免清理 VS Code 正在重写的文件
+    expect((await fs.stat(recentCorrupted)).isFile()).toBe(true)
+    // #219：外来 JSON 不删——解析成功但 schema 不匹配的条目不得删除
+    expect((await fs.stat(foreignJson)).isFile()).toBe(true)
   })
 
 test("rejects file paths that do not match any live VS Code workspace", async () => {
     using server = await bridgeServer()
     const dir = await tempRegistry()
-    await writeEntry(dir, "registry", server.port, "/tmp/project")
+    // #219：fixture ID 改为 UUID 格式——匹配生产发现过滤
+    await writeEntry(dir, "11111111-1111-1111-1111-111111111111", server.port, "/tmp/mismatch-project")
 
     await expect(
       VscodeBridge.resolveBridge({
-        cwd: "/tmp/project",
-        filePath: "/tmp/pro ject/demo.ipynb",
+        cwd: "/tmp/mismatch-project",
+        filePath: "/tmp/mis match-project/demo.ipynb",
       }),
     ).rejects.toThrow("No live VS Code bridge workspace matches filePath")
   })
 
 test("ignores and removes stale registry entries", async () => {
     const dir = await tempRegistry()
-    await writeEntry(dir, "stale", 9, "/tmp/project", Date.now() - 60_000)
+    // #219：fixture ID 改为 UUID 格式——过期文件名也须匹配 UUID 清单
+    const staleId = "11111111-1111-1111-1111-111111111111"
+    await writeEntry(dir, staleId, 9, "/tmp/stale-project", Date.now() - 60_000)
 
-    await expect(VscodeBridge.resolveBridge({ cwd: "/tmp/project", staleMs: 100 })).rejects.toThrow(
+    await expect(VscodeBridge.resolveBridge({ cwd: "/tmp/stale-project", staleMs: 100 })).rejects.toThrow(
       "No live VS Code bridge",
     )
-    await expect(fs.stat(path.join(dir, "stale.json"))).rejects.toThrow()
+    await expect(fs.stat(path.join(dir, `${staleId}.json`))).rejects.toThrow()
   })
 })
 

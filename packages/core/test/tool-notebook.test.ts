@@ -81,8 +81,9 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     })),
     server => Effect.promise(async () => { release.resolve(); await server.stop(true) }),
   )
-  yield* Effect.promise(() => fs.writeFile(path.join(directory, "fixture.json"), JSON.stringify({
-    schema: 1, id: "fixture", pid: process.pid, host: "127.0.0.1", port: server.port, token: "fixture-token",
+  // 原生fixture也使用扩展实际发布的UUID清单，不为测试另开非清单发现路径。
+  yield* Effect.promise(() => fs.writeFile(path.join(directory, "11111111-1111-1111-1111-111111111111.json"), JSON.stringify({
+    schema: 1, id: "11111111-1111-1111-1111-111111111111", pid: process.pid, host: "127.0.0.1", port: server.port, token: "fixture-token",
     transport: "http", ideKind: "vscode", ideName: "fixture", createdAt: Date.now(), updatedAt: Date.now(),
     workspaceFolders: [{ name: "fixture", fsPath: tmp.path, uri: pathToFileURL(tmp.path).href }],
   })))
