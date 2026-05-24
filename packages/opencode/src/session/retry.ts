@@ -197,4 +197,13 @@ export function policy(opts: {
   )
 }
 
+export function retry(opts: Parameters<typeof policy>[0]) {
+  // Keep retry classification/delay in one place for both normal session
+  // processor streams and internal child-agent streams that cannot enter the
+  // processor without creating dependency cycles. Callers still own the visible
+  // side effect in `set`, so primary sessions can update status while hidden
+  // reviewer streams can retry without inventing a separate UI state contract.
+  return <A, E, R>(self: Effect.Effect<A, E, R>) => self.pipe(Effect.retry(policy(opts)))
+}
+
 export * as SessionRetry from "./retry"

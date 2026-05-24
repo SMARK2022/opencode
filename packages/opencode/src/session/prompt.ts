@@ -696,11 +696,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         metadata: (val) =>
           input.processor.updateToolCall(options.toolCallId, (match) => {
             if (!["running", "pending"].includes(match.state.status)) return match
+            const autoReview = match.state.status === "running" ? match.state.metadata?.autoReview : undefined
             return {
               ...match,
               state: {
                 title: val.title,
-                metadata: val.metadata,
+                // Tool metadata callbacks replace live progress data such as shell
+                // output previews. Preserve only the permission-review envelope
+                // across those replacements: it is owned by PermissionReviewer,
+                // links the parent tool to the hidden child session, and must not
+                // be dropped by shell/edit/write progress updates.
+                metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
                 status: "running",
                 input: args,
                 time: { start: Date.now() },

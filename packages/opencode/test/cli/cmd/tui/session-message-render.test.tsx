@@ -167,9 +167,9 @@ test("pending edit tool shows streamed deletion and addition counts", async () =
     },
     async (app) => {
       const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Edit src/space file.ts +1 -2")),
+        lines.some((line) => line.includes("Edit src") && line.includes("space file.ts") && line.includes("+1 -2")),
       )
-      expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("+1 -2")
+      expect(frame[findRow(frame, "space file.ts")]).toContain("+1 -2")
     },
   )
 })
@@ -188,8 +188,8 @@ test("pending edit tool reports deletions before the JSON input is complete", as
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/partial.ts -2")))
-      const row = frame[findRow(frame, "Edit src/partial.ts")]
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("partial.ts") && line.includes("-2")))
+      const row = frame[findRow(frame, "partial.ts")]
 
       expect(row).toContain("-2")
       expect(row).not.toContain("+1")
@@ -243,8 +243,8 @@ test("pending write tool shows streamed addition counts", async () => {
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src/new file.ts +2")))
-      expect(frame[findRow(frame, "Write src/new file.ts")]).toContain("+2")
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src") && line.includes("new file.ts") && line.includes("+2")))
+      expect(frame[findRow(frame, "new file.ts")]).toContain("+2")
     },
   )
 })
@@ -270,7 +270,7 @@ test("task tool click opens its subagent session", async () => {
       const y = raw.findIndex((line) => line.includes("General Task") && line.includes("inspect files"))
       expect(y).toBeGreaterThanOrEqual(0)
 
-      await app.mockMouse.click(11, y + 1)
+      await app.mockMouse.click(35, y + 1)
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session visible")))
     },
@@ -339,7 +339,7 @@ test("task tool click refreshes a stale prefetched subagent session", async () =
       const y = raw.findIndex((line) => line.includes("inspect stale child"))
       expect(y).toBeGreaterThanOrEqual(0)
 
-      await app.mockMouse.click(11, y + 1)
+      await app.mockMouse.click(35, y + 1)
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session refreshed")))
       expect(childMessageRequests).toBeGreaterThan(1)
@@ -379,10 +379,10 @@ test("pending tool line counts update from streamed raw deltas", async () => {
 
       await Bun.sleep(50)
       await app.renderOnce()
-      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src/live.ts +1 -2"))).toBe(false)
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2"))).toBe(false)
 
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/live.ts +1 -2")))
-      expect(frame[findRow(frame, "Edit src/live.ts")]).toContain("+1 -2")
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2")))
+      expect(frame[findRow(frame, "live.ts")]).toContain("+1 -2")
     },
   )
 })
@@ -415,6 +415,59 @@ test("shell tool renders auto review as a second status line", async () => {
   )
 })
 
+test("pending shell auto review navigation is owned by the status line", async () => {
+  const childID = "ses_reviewer_child"
+  await withRenderedSession(
+    [assistantMessage("msg_shell_review_click", 1)],
+    {
+      msg_shell_review_click: [
+        runningToolPart("part_shell_review_click", "msg_shell_review_click", "bash", {
+          command: "git push origin main",
+          metadata: {
+            autoReview: {
+              reviewID: "review_shell_click",
+              sessionID: childID,
+              status: "reviewing",
+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
+            },
+          },
+        }),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
+      let raw = app.captureCharFrame().split("\n")
+      const commandY = raw.findIndex((line) => line.includes("git push origin main"))
+      const reviewY = raw.findIndex((line) => line.includes("◌ auto review · cautious"))
+      expect(commandY).toBeGreaterThanOrEqual(0)
+      expect(reviewY).toBeGreaterThanOrEqual(0)
+
+      await app.mockMouse.click(11, commandY + 1)
+      await app.renderOnce()
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("reviewer child visible"))).toBe(false)
+
+      await app.mockMouse.click(35, reviewY + 1)
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        messages: [
+          {
+            ...assistantMessage("msg_reviewer_child_shell", 2),
+            sessionID: childID,
+            agent: "permission-reviewer",
+          },
+        ],
+        parts: { msg_reviewer_child_shell: [textPart("part_reviewer_child_shell", "msg_reviewer_child_shell", "reviewer child visible", { sessionID: childID })] },
+      },
+    },
+  )
+})
+
 test("completed shell tool keeps the auto review result line", async () => {
   await withRenderedSession(
     [assistantMessage("msg_auto_review_done", 1)],
@@ -442,8 +495,9 @@ test("completed shell tool keeps the auto review result line", async () => {
       const frame = await waitForFrame(app, (lines) =>
         lines.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
       )
-      const command = findRow(frame, "$ git push origin main")
-      expect(frame[command + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+      expect(findRow(frame, "✓ auto review · allowed · auth high · @permission-reviewer")).toBeLessThan(
+        findRow(frame, "$ git push origin main"),
+      )
     },
   )
 })
@@ -473,10 +527,10 @@ test("collapsed completed shell preview keeps the auto review result line", asyn
     },
     async (app) => {
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
-      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toBe(
-        true,
-      )
+      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high"))).toBe(true)
     },
+    {},
+    { height: 24 },
   )
 })
 
@@ -509,6 +563,427 @@ test("errored shell tool keeps the denied auto review result line", async () => 
       )
       const command = findRow(frame, "git push origin main")
       expect(frame[command + 1]).toContain("! auto review · denied · high risk · auth unknown")
+    },
+  )
+})
+
+test("read tool shows auto review status below its inline row", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_read_auto_review", 1)],
+    {
+      msg_read_auto_review: [
+        completedToolPart(
+          "part_read_auto_review",
+          "msg_read_auto_review",
+          "read",
+          { filePath: "external folder/secret key.txt" },
+          {
+            autoReview: {
+              reviewID: "review_read_done",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
+      const row = findRow(frame, "Read external folder")
+      expect(frame[row + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+    },
+  )
+})
+
+test("edit block shows auto review status below its card title", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_edit_auto_review", 1)],
+    {
+      msg_edit_auto_review: [
+        completedToolPart(
+          "part_edit_auto_review",
+          "msg_edit_auto_review",
+          "edit",
+          { filePath: "external folder/config.json", oldString: "old", newString: "new" },
+          {
+            diff: ["--- external folder/config.json", "+++ external folder/config.json", "@@", "-old", "+new"].join("\n"),
+            diagnostics: {},
+            autoReview: {
+              reviewID: "review_edit_done",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external edit requires reviewer approval" },
+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this edit" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit external folder")))
+      const row = findRow(frame, "Edit external folder")
+      expect(frame[row + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+    },
+  )
+})
+
+test("tools without auto review metadata keep their original chrome", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_read_without_review", 1)],
+    {
+      msg_read_without_review: [completedToolPart("part_read_without_review", "msg_read_without_review", "read", { filePath: "src/local.ts" })],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read src")))
+      expect(frame.some((line) => line.includes("auto review"))).toBe(false)
+    },
+  )
+})
+
+test("errored non-shell tools keep auto review status below the inline row", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_read_auto_review_error", 1)],
+    {
+      msg_read_auto_review_error: [
+        errorToolPart(
+          "part_read_auto_review_error",
+          "msg_read_auto_review_error",
+          "read",
+          { filePath: "external folder/secret key.txt" },
+          "auto reviewer denied",
+          {
+            autoReview: {
+              reviewID: "review_read_error",
+              sessionID: "ses_reviewer_child",
+              status: "denied",
+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "unknown", rationale: "private key read was not authorized" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
+      const row = findRow(frame, "Read external folder")
+      expect(frame[row + 1]).toContain("! auto review · denied · high risk · auth unknown")
+    },
+  )
+})
+
+test("generic tools inherit the shared auto review chrome", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_future_tool_review", 1)],
+    {
+      msg_future_tool_review: [
+        completedToolPart(
+          "part_future_tool_review",
+          "msg_future_tool_review",
+          "future_tool",
+          { path: "external folder/secret key.txt" },
+          {
+            autoReview: {
+              reviewID: "review_future_tool",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "future tool external access requires reviewer approval" },
+              result: { risk_level: "medium", user_authorization: "high", rationale: "user approved this external access" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("future_tool")))
+      const row = findRow(frame, "future_tool")
+      expect(frame[row + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+    },
+  )
+})
+
+test("completed apply_patch without auto review keeps per-file blocks only", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_patch_without_review", 1)],
+    {
+      msg_patch_without_review: [
+        completedToolPart(
+          "part_patch_without_review",
+          "msg_patch_without_review",
+          "apply_patch",
+          { patchText: "*** Begin Patch\n*** End Patch" },
+          {
+            files: [
+              {
+                filePath: "src/a.ts",
+                relativePath: "src/a.ts",
+                type: "update",
+                patch: ["--- src/a.ts", "+++ src/a.ts", "@@", "-old", "+new"].join("\n"),
+                additions: 1,
+                deletions: 1,
+              },
+            ],
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched src/a.ts")))
+      expect(frame.some((line) => line.includes("% Patch"))).toBe(false)
+      expect(frame.some((line) => line.includes("auto review"))).toBe(false)
+    },
+  )
+})
+
+test("shell auto review status is not duplicated by generic tool chrome", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_shell_no_duplicate", 1)],
+    {
+      msg_shell_no_duplicate: [
+        completedToolPart(
+          "part_shell_no_duplicate",
+          "msg_shell_no_duplicate",
+          "bash",
+          { command: "git push origin main" },
+          {
+            output: "pushed",
+            autoReview: {
+              reviewID: "review_shell_no_duplicate",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
+      expect(frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toHaveLength(1)
+    },
+  )
+})
+
+test("shell block uses default review placement above the command", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_shell_default_review", 1)],
+    {
+      msg_shell_default_review: [
+        completedToolPart(
+          "part_shell_default_review",
+          "msg_shell_default_review",
+          "bash",
+          { command: 'Get-Content "$env:USERPROFILE\\.ssh\\id_rsa" 2>&1', description: "Read id_rsa via shell" },
+          {
+            output: "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret",
+            autoReview: {
+              reviewID: "review_shell_default",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read id_rsa via shell")))
+      const title = findRow(frame, "Read id_rsa via shell")
+      expect(frame[title + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+      expect(findRow(frame, "Get-Content")).toBeGreaterThan(title + 1)
+    },
+  )
+})
+
+test("running shell output card keeps review placement below the title", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_shell_running_review", 1)],
+    {
+      msg_shell_running_review: [
+        runningToolPart("part_shell_running_review", "msg_shell_running_review", "bash", {
+          command: 'Get-Content "$env:USERPROFILE\\.ssh\\id_rsa" 2>&1',
+          description: "Read SSH private key via shell",
+          metadata: {
+            output: "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret",
+            description: "Read SSH private key via shell",
+            autoReview: {
+              reviewID: "review_shell_running",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
+            },
+          },
+        }),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read SSH private key via shell")))
+      const title = findRow(frame, "Read SSH private key via shell")
+      // Running shell cards use the same BlockTool review slot as completed
+      // cards. This guards the real streaming state where shell output metadata
+      // already exists but the command has not reached a completed tool result.
+      expect(frame[title + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
+      expect(findRow(frame, "Get-Content")).toBeGreaterThan(title + 1)
+    },
+  )
+})
+
+test("multi-file apply_patch renders one auto review status for the whole patch", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_patch_auto_review", 1)],
+    {
+      msg_patch_auto_review: [
+        completedToolPart(
+          "part_patch_auto_review",
+          "msg_patch_auto_review",
+          "apply_patch",
+          { patchText: "*** Begin Patch\n*** End Patch" },
+          {
+            files: [
+              {
+                filePath: "external/a.ts",
+                relativePath: "external/a.ts",
+                type: "update",
+                patch: ["--- external/a.ts", "+++ external/a.ts", "@@", "-old", "+new"].join("\n"),
+                additions: 1,
+                deletions: 1,
+              },
+              {
+                filePath: "external/b.ts",
+                relativePath: "external/b.ts",
+                type: "add",
+                patch: ["--- external/b.ts", "+++ external/b.ts", "@@", "+created"].join("\n"),
+                additions: 1,
+                deletions: 0,
+              },
+            ],
+            autoReview: {
+              reviewID: "review_patch_done",
+              sessionID: "ses_reviewer_child",
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external patch requires reviewer approval" },
+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this patch" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched external/a.ts")))
+      const reviewRows = frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
+      expect(reviewRows).toHaveLength(1)
+      expect(findRow(frame, "✓ auto review · allowed · auth high · @permission-reviewer")).toBeLessThan(
+        findRow(frame, "Patched external/a.ts"),
+      )
+    },
+  )
+})
+
+test("non-shell auto review status opens the reviewer child session", async () => {
+  const childID = "ses_reviewer_child"
+  await withRenderedSession(
+    [assistantMessage("msg_read_review_click", 1)],
+    {
+      msg_read_review_click: [
+        completedToolPart(
+          "part_read_review_click",
+          "msg_read_review_click",
+          "read",
+          { filePath: "external folder/secret key.txt" },
+          {
+            autoReview: {
+              reviewID: "review_read_click",
+              sessionID: childID,
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
+      const raw = app.captureCharFrame().split("\n")
+      const y = raw.findIndex((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
+      expect(y).toBeGreaterThanOrEqual(0)
+
+      await app.mockMouse.click(35, y + 1)
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        messages: [
+          {
+            ...assistantMessage("msg_reviewer_child", 2),
+            sessionID: childID,
+            agent: "permission-reviewer",
+          },
+        ],
+        parts: { msg_reviewer_child: [textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID })] },
+      },
+    },
+  )
+})
+
+test("block auto review click opens reviewer without toggling the tool card", async () => {
+  const childID = "ses_reviewer_child"
+  await withRenderedSession(
+    [assistantMessage("msg_edit_review_click", 1)],
+    {
+      msg_edit_review_click: [
+        completedToolPart(
+          "part_edit_review_click",
+          "msg_edit_review_click",
+          "edit",
+          { filePath: "external folder/config.json", oldString: "old", newString: "new" },
+          {
+            diff: Array.from({ length: 30 }, (_, index) => `+line ${index}`).join("\n"),
+            diagnostics: {},
+            autoReview: {
+              reviewID: "review_edit_click",
+              sessionID: childID,
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external edit requires reviewer approval" },
+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this edit" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      const y = app.captureCharFrame().split("\n").findIndex((line) => line.includes("✓ auto review · allowed · auth high"))
+      expect(y).toBeGreaterThanOrEqual(0)
+
+      await app.mockMouse.click(35, y + 1)
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+      frame = rows(app.captureCharFrame())
+      expect(frame.some((line) => line.includes("Click to collapse"))).toBe(false)
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        messages: [
+          {
+            ...assistantMessage("msg_reviewer_child_block", 2),
+            sessionID: childID,
+            agent: "permission-reviewer",
+          },
+        ],
+        parts: { msg_reviewer_child_block: [textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", { sessionID: childID })] },
+      },
     },
   )
 })

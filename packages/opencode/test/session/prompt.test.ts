@@ -805,6 +805,14 @@ it.instance(
         ]),
       )
       expect(inputs[0].max_tokens).toBe(10000)
+      const requestPart = msgs
+        .flatMap((msg) => msg.parts)
+        .find((part): part is MessageV2.TextPart => part.type === "text" && part.metadata?.permissionReviewerRequest === true)
+      const requestID = requestPart?.metadata?.reviewID
+      // The parent tool already stores the same review id; mirroring it into the
+      // reviewer child transcript is the observable audit link that lets future
+      // UI/export code identify the exact request without parsing prompt text.
+      expect(typeof requestID).toBe("string")
       expect(
         msgs.some((msg) =>
           msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
@@ -822,12 +830,150 @@ it.instance(
               part.type === "tool" &&
               part.tool === "permission_review_decision" &&
               part.state.status === "completed" &&
+              part.state.metadata?.reviewID === requestID &&
               part.state.metadata?.rationale === "private key read was not explicitly authorized",
           ),
         ),
       ).toBe(true)
     }),
   { git: true },
+)
+
+it.instance(
+  "auto permission reviewer retries transient provider failures before recording the decision",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer retry" })
+      const command = "cat ~/.ssh/id_rsa"
+      yield* llm.error(503, { error: "temporary reviewer outage" })
+      yield* llm.push(
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "retry recovered and found explicit authorization",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "Auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      expect(yield* llm.calls).toBe(2)
+      expect(
+        msgs.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.rationale === "retry recovered and found explicit authorization",
+          ),
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+  10_000,
+)
+
+it.instance(
+  "shell auto review metadata survives live output updates and completion",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        permission: { approvals_reviewer: "auto_review" },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Shell review metadata",
+        permission: [
+          { permission: "bash", pattern: "*", action: "auto" },
+          // This test targets the bash review envelope. The sensitive path would
+          // otherwise create a separate external_directory prompt and block the
+          // shell before the reviewed bash permission can complete.
+          { permission: "external_directory", pattern: "*", action: "allow" },
+        ],
+      })
+      const command = "cat ~/.ssh/id_rsa"
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "read the key" }],
+      })
+      yield* llm.push(
+        reply().tool("bash", { command, description: "Read SSH private key via shell" }).item(),
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly asked for this key read",
+          })
+          .item(),
+        reply().text("done").stop().item(),
+      )
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role).toBe("assistant")
+
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const shell = msgs
+        .flatMap((msg) => msg.parts)
+        .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "bash")
+      expect(shell?.state.status).toBe("completed")
+      if (shell?.state.status !== "completed") return
+      // Shell streams overwrite its own output preview metadata repeatedly; the
+      // review envelope must survive those updates so the final card still links
+      // back to the reviewer child session instead of silently losing audit state.
+      expect(shell.state.metadata?.output).toBeDefined()
+      expect(shell.state.metadata?.autoReview?.status).toBe("allowed")
+      expect(shell.state.metadata?.autoReview?.result?.rationale).toBe("user explicitly asked for this key read")
+      const reviewID = shell.state.metadata?.autoReview?.reviewID
+      expect(typeof reviewID).toBe("string")
+
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
+      // This asserts the full parent-tool-to-child-transcript join, not just the
+      // child transcript's internal consistency. One reviewer child session can
+      // contain many review turns, so every persisted request/decision turn needs
+      // the exact parent autoReview.reviewID for unambiguous audit navigation.
+      expect(
+        reviewerParts.some(
+          (part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true && part.metadata.reviewID === reviewID,
+        ),
+      ).toBe(true)
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.reviewID === reviewID,
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+  15_000,
 )
 
 it.instance(

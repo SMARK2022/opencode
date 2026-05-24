@@ -843,37 +843,35 @@ export const layer = Layer.effect(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
             ),
-            Effect.retry(
-              SessionRetry.policy({
-                provider: input.model.providerID,
-                parse,
-                set: (info) => {
-                  // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-                  const event = flags.experimentalEventSystem
-                    ? events.publish(SessionEvent.Retried, {
-                        sessionID: ctx.sessionID,
-                        attempt: info.attempt,
-                        error: {
-                          message: info.message,
-                          isRetryable: true,
-                        },
-                        timestamp: DateTime.makeUnsafe(Date.now()),
-                      })
-                    : Effect.void
-                  return event.pipe(
-                    Effect.andThen(
-                      status.set(ctx.sessionID, {
-                        type: "retry",
-                        attempt: info.attempt,
+            SessionRetry.retry({
+              provider: input.model.providerID,
+              parse,
+              set: (info) => {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                const event = flags.experimentalEventSystem
+                  ? events.publish(SessionEvent.Retried, {
+                      sessionID: ctx.sessionID,
+                      attempt: info.attempt,
+                      error: {
                         message: info.message,
-                        action: info.action,
-                        next: info.next,
-                      }),
-                    ),
-                  )
-                },
-              }),
-            ),
+                        isRetryable: true,
+                      },
+                      timestamp: DateTime.makeUnsafe(Date.now()),
+                    })
+                  : Effect.void
+                return event.pipe(
+                  Effect.andThen(
+                    status.set(ctx.sessionID, {
+                      type: "retry",
+                      attempt: info.attempt,
+                      message: info.message,
+                      action: info.action,
+                      next: info.next,
+                    }),
+                  ),
+                )
+              },
+            }),
             Effect.catch(halt),
             Effect.ensuring(cleanup()),
           )

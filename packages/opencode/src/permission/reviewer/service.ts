@@ -3,6 +3,7 @@ import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
+import { SessionRetry } from "@/session/retry"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { toJsonSchema } from "@/util/effect-zod"
 import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } from "ai"
@@ -119,12 +120,14 @@ export const layer = Layer.effect(
             ? yield* recordReviewerRequest({
                 session: reviewerSession,
                 model,
+                reviewID: input.reviewID,
                 text: renderReviewerPrompt(messages),
               })
             : undefined
           const assessment = yield* runReviewerAgent({
             session: reviewerSession,
             model,
+            reviewID: input.reviewID,
             parentID: reviewerUser?.id,
             messages,
           }).pipe(
@@ -206,7 +209,7 @@ export const layer = Layer.effect(
       return next
     }
 
-    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
+    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; reviewID: string; text: string }) {
       return Effect.gen(function* () {
         const message = yield* sessions.updateMessage({
           id: MessageID.ascending(),
@@ -227,7 +230,11 @@ export const layer = Layer.effect(
           // subagent run instead of an opaque audit summary. The metadata marker
           // keeps this generated protocol cell out of future authorization
           // evidence if reviewer child transcripts are ever projected again.
-          metadata: { permissionReviewerRequest: true },
+          // `reviewID` is the stable join key from the parent tool's autoReview
+          // metadata to this visible protocol prompt. Keep it in metadata rather
+          // than prompt text so audit/export code can navigate without parsing a
+          // security-sensitive synthetic prompt body.
+          metadata: { permissionReviewerRequest: true, reviewID: input.reviewID },
           text: input.text,
         } satisfies MessageV2.TextPart)
         return message
@@ -237,6 +244,7 @@ export const layer = Layer.effect(
     function runReviewerAgent(input: {
       session: Session.Info | undefined
       model: Provider.Model
+      reviewID: string
       parentID: MessageID | undefined
       messages: readonly ModelMessage[]
     }) {
@@ -262,6 +270,7 @@ export const layer = Layer.effect(
         const assessment = yield* runReviewerStream(input.messages, input.model, {
           sessionID: session.id,
           messageID: message.id,
+          reviewID: input.reviewID,
         }).pipe(
           Effect.tapError((error) =>
             Effect.gen(function* () {
@@ -281,7 +290,7 @@ export const layer = Layer.effect(
     function runReviewerStream(
       messages: readonly ModelMessage[],
       model: Provider.Model,
-      persist?: { sessionID: SessionID; messageID: MessageID },
+      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
     ) {
       return Effect.acquireUseRelease(
         Effect.sync(() => new AbortController()),
@@ -441,7 +450,11 @@ export const layer = Layer.effect(
                       status: "completed",
                       input: assessment,
                       title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
-                      metadata: assessment,
+                      // Mirror reviewID onto the final decision part so the child
+                      // transcript can be searched or exported by logical review,
+                      // even though one hidden reviewer session accumulates many
+                      // request/decision turns over the parent session lifetime.
+                      metadata: { ...assessment, reviewID: persist.reviewID },
                       output: JSON.stringify(assessment),
                       time: { start: Date.now(), end: Date.now() },
                     },
@@ -453,7 +466,11 @@ export const layer = Layer.effect(
                   return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
                 }
                 if (event.type === "error") {
-                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
+                  // Provider stream errors must keep their original shape until
+                  // SessionRetry classifies them. Wrapping here would erase
+                  // APICallError/status/header details and turn transient socket
+                  // failures into immediate reviewer fallback/user prompts.
+                  return yield* Effect.fail(event.error)
                 }
               }),
             )
@@ -473,6 +490,17 @@ export const layer = Layer.effect(
             return assessment
           }),
         (abort) => Effect.sync(() => abort.abort()),
+      ).pipe(
+        SessionRetry.retry({
+          provider: model.providerID,
+          parse: (error) => MessageV2.fromError(error, { providerID: model.providerID }),
+          // The hidden reviewer child session is an audit transcript, not an
+          // active SessionProcessor run with a visible status line. Reuse the
+          // shared retry policy for provider safety while leaving parent tool
+          // autoReview metadata in its existing `reviewing` state until a final
+          // allow/deny/fallback result is known.
+          set: () => Effect.void,
+        }),
       )
     }
 

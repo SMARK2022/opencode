@@ -1548,6 +1548,11 @@ function UserMessage(props: {
 // from a previous non-tool part", and undefined leaves InlineTool's legacy
 // sibling measurement in charge for consecutive tools and external call sites.
 const ToolPartTopMargin = createContext<() => boolean | undefined>(() => undefined)
+// Auto review state is attached to every reviewed tool part by the permission
+// reviewer service. Keep the TUI lookup in a context so BlockTool/InlineTool can
+// render one shared status row without each concrete tool remembering to pass a
+// prop; shell and patch can opt out where their layouts need a bespoke position.
+const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
 
 function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean; index: number }) {
   const ctx = use()
@@ -1866,53 +1871,55 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   return (
     <Show when={!shouldHide()}>
-      <Switch>
-        <Match when={props.part.tool === ShellID.ToolID}>
-          <Shell {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "glob"}>
-          <Glob {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "read"}>
-          <Read {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "grep"}>
-          <Grep {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "webfetch"}>
-          <WebFetch {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "websearch"}>
-          <WebSearch {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "write"}>
-          <Write {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "edit"}>
-          <Edit {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "task"}>
-          <Task {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "apply_patch"}>
-          <ApplyPatch {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "todowrite"}>
-          <TodoWrite {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "question"}>
-          <Question {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "permission_review_decision"}>
-          <PermissionReviewDecision {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "skill"}>
-          <Skill {...toolprops} />
-        </Match>
-        <Match when={true}>
-          <GenericTool {...toolprops} />
-        </Match>
-      </Switch>
+      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata)}>
+        <Switch>
+          <Match when={props.part.tool === ShellID.ToolID}>
+            <Shell {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "glob"}>
+            <Glob {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "read"}>
+            <Read {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "grep"}>
+            <Grep {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "webfetch"}>
+            <WebFetch {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "websearch"}>
+            <WebSearch {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "write"}>
+            <Write {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "edit"}>
+            <Edit {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "task"}>
+            <Task {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "apply_patch"}>
+            <ApplyPatch {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "todowrite"}>
+            <TodoWrite {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "question"}>
+            <Question {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "permission_review_decision"}>
+            <PermissionReviewDecision {...toolprops} />
+          </Match>
+          <Match when={props.part.tool === "skill"}>
+            <Skill {...toolprops} />
+          </Match>
+          <Match when={true}>
+            <GenericTool {...toolprops} />
+          </Match>
+        </Switch>
+      </ToolAutoReview.Provider>
     </Show>
   )
 }
@@ -2044,10 +2051,11 @@ function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>): AutoRev
 
 function autoReviewLabel(review: AutoReviewMetadata) {
   const agent = "@permission-reviewer"
-  // Keep the main shell card to the agreed two-line contract: command first,
-  // then one compact review status line. The three glyphs are stable UI states:
-  // ◌ means the hidden reviewer agent is running, ✓ means the reviewer allowed
-  // execution, and ! covers all non-allow terminal outcomes.
+  // Keep the row text stable across inline and block tools: placement belongs to
+  // InlineTool/BlockTool, while this function owns only the compact status copy.
+  // The three glyphs are protocol states: ◌ means the hidden reviewer agent is
+  // running, ✓ means it allowed execution, and ! covers every non-allow terminal
+  // outcome without expanding sensitive reviewer details in the parent session.
   switch (review.status) {
     case "allowed":
       return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
@@ -2080,9 +2088,14 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
     <box
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt?: TuiMouseEvent) => {
         if (!props.review.sessionID) return
         if (renderer.getSelection()?.getSelectedText()) return
+        // Review rows can live inside clickable/collapsible tool cards. Stop the
+        // event here so opening @permission-reviewer does not also toggle the
+        // parent diff/output card or trigger a tool-specific click handler.
+        evt?.preventDefault()
+        evt?.stopPropagation()
         navigate({ type: "session", sessionID: props.review.sessionID })
       }}
     >
@@ -2091,6 +2104,11 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
       </text>
     </box>
   )
+}
+
+function ToolAutoReviewLine() {
+  const review = useContext(ToolAutoReview)
+  return <Show when={review()}>{(item) => <AutoReviewLine review={item()} />}</Show>
 }
 
 function InlineTool(props: {
@@ -2102,6 +2120,7 @@ function InlineTool(props: {
   children: JSX.Element
   part: ToolPart
   onClick?: () => void
+  autoReview?: false
 }) {
   const [margin, setMargin] = createSignal(0)
   const toolTopMargin = useContext(ToolPartTopMargin)
@@ -2184,6 +2203,9 @@ function InlineTool(props: {
           </text>
         </Match>
       </Switch>
+      <Show when={props.autoReview !== false}>
+        <ToolAutoReviewLine />
+      </Show>
       <Show when={error() && !denied()}>
         <text fg={theme.error}>{error()}</text>
       </Show>
@@ -2206,6 +2228,7 @@ function BlockTool(props: {
   totalChars?: number
   charThreshold?: number
   preview?: JSX.Element
+  autoReview?: false
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -2274,6 +2297,9 @@ function BlockTool(props: {
       >
         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
       </Show>
+      <Show when={props.autoReview !== false}>
+        <ToolAutoReviewLine />
+      </Show>
       <box
         marginTop={1}
         maxHeight={collapsed() && !props.preview ? previewLines() : undefined}
@@ -2299,10 +2325,8 @@ function BlockTool(props: {
 
 function Shell(props: ToolProps<typeof ShellTool>) {
   const { theme } = useTheme()
-  const { navigate } = useRoute()
   const pathFormatter = usePathFormatter()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
   const [showContextOutput, setShowContextOutput] = createSignal(false)
   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
   const output = createMemo(() => {
@@ -2310,13 +2334,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
     return stripAnsi(text?.trim() ?? "")
   })
   const shellPreviewText = createMemo(() => {
-    const review = autoReview()
-    const header = [`$ ${props.input.command ?? ""}`, review ? autoReviewLabel(review) : undefined].filter(Boolean)
-    // Collapsed shell previews must keep the same two-line review contract as
-    // the expanded body; otherwise long outputs hide the allow/deny reviewer
-    // result until the user expands the command card.
-    if (!output()) return header.join("\n")
-    return [...header, "", output()].join("\n")
+    const header = `$ ${props.input.command ?? ""}`
+    // Shell now uses BlockTool's default review slot like edit/write cards, so
+    // the body preview only accounts for command/output text. The review row is
+    // still visible while collapsed because BlockTool renders it above the body.
+    if (!output()) return header
+    return [header, "", output()].join("\n")
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2356,7 +2379,6 @@ function Shell(props: ToolProps<typeof ShellTool>) {
         >
           <box>
             <text fg={theme.text}>$ {props.input.command}</text>
-            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
             <Show when={showContextOutput()}>
               <text fg={theme.info}>Model context output</text>
             </Show>
@@ -2372,14 +2394,8 @@ function Shell(props: ToolProps<typeof ShellTool>) {
           pending="Writing command..."
           complete={props.input.command}
           part={props.part}
-          onClick={() => {
-            const sessionID = autoReview()?.sessionID
-            if (sessionID) navigate({ type: "session", sessionID })
-          }}
         >
-          {[props.input.command, autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
-            .filter(Boolean)
-            .join("\n")}
+          {props.input.command}
         </InlineTool>
       </Match>
     </Switch>
@@ -2797,6 +2813,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   })
 
   const files = createMemo(() => props.metadata.files ?? [])
+  const review = useContext(ToolAutoReview)
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2821,49 +2838,60 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   return (
     <Switch>
       <Match when={files().length > 0}>
-        <For each={files()}>
-          {(file) => (
-            <BlockTool
-              title={title(file)}
-              part={props.part}
-              maxLines={10}
-              threshold={20}
-              totalLines={(file.patch ?? "").split("\n").length}
-              totalChars={(file.patch ?? "").length}
-              preview={
-                <Show
-                  when={file.type !== "delete"}
-                  fallback={
-                    <text fg={theme.diffRemoved} paddingLeft={1}>
-                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                    </text>
-                  }
-                >
-                  <DiffPreview
-                    diff={previewDiff(file.patch || "", 10)}
-                    filePath={file.filePath}
-                    view={view()}
-                    maxLines={10}
-                  />
-                </Show>
-              }
-            >
-              <box gap={1} flexDirection="column">
-                <Show
-                  when={file.type !== "delete"}
-                  fallback={
-                    <text fg={theme.diffRemoved} paddingLeft={1}>
-                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                    </text>
-                  }
-                >
-                  <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-                </Show>
-                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-              </box>
-            </BlockTool>
-          )}
-        </For>
+        <box>
+          <Show when={review()}>
+            <box paddingLeft={3} marginTop={1}>
+              <text paddingLeft={3} fg={theme.textMuted} wrapMode="none">
+                % Patch {files().length} file{files().length === 1 ? "" : "s"}
+              </text>
+              <ToolAutoReviewLine />
+            </box>
+          </Show>
+          <For each={files()}>
+            {(file) => (
+              <BlockTool
+                title={title(file)}
+                part={props.part}
+                maxLines={10}
+                threshold={20}
+                totalLines={(file.patch ?? "").split("\n").length}
+                totalChars={(file.patch ?? "").length}
+                autoReview={false}
+                preview={
+                  <Show
+                    when={file.type !== "delete"}
+                    fallback={
+                      <text fg={theme.diffRemoved} paddingLeft={1}>
+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                      </text>
+                    }
+                  >
+                    <DiffPreview
+                      diff={previewDiff(file.patch || "", 10)}
+                      filePath={file.filePath}
+                      view={view()}
+                      maxLines={10}
+                    />
+                  </Show>
+                }
+              >
+                <box gap={1} flexDirection="column">
+                  <Show
+                    when={file.type !== "delete"}
+                    fallback={
+                      <text fg={theme.diffRemoved} paddingLeft={1}>
+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                      </text>
+                    }
+                  >
+                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
+                  </Show>
+                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+                </box>
+              </BlockTool>
+            )}
+          </For>
+        </box>
       </Match>
       <Match when={true}>
         <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>
