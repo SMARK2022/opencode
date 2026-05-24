@@ -17,6 +17,10 @@ describe("permission precheck bash classifier", () => {
     expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
     expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
     expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
+    expect(bash("rg \"find . -name stale.tmp -delete\" src").level).toBe("safe")
+    expect(bash("rg \"python -c import os; os.remove('stale.tmp')\" src").level).toBe("safe")
+    expect(bash("find src -type f -print; rg \"find . -name stale.tmp -delete\" src").level).toBe("safe")
+    expect(bash("python --version; rg \"python -c import os; os.remove('stale.tmp')\" src").level).toBe("safe")
   })
 
   test("does not mark read commands safe when they can invoke external programs", () => {
@@ -83,6 +87,15 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git status & /bin/rm stale.tmp")).toMatchObject({ level: "cautious" })
     expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
     expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git rm \"path with spaces/stale.tmp\"")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp -delete")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp \"-delete\"")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp -exec rm {} \\;")).toMatchObject({ level: "cautious" })
+    expect(bash("find . -name stale.tmp -exec 'rm' {} \\;")).toMatchObject({ level: "cautious" })
+    expect(bash("python -c 'import os; os.remove(\"stale.tmp\")'")).toMatchObject({ level: "cautious" })
+    expect(bash(`python -c "import os; os.remove('stale.tmp')"`)).toMatchObject({ level: "cautious" })
+    expect(bash("trash-put stale.tmp")).toMatchObject({ level: "cautious" })
     expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
     expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
     expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
@@ -270,10 +283,12 @@ describe("permission precheck bash classifier", () => {
   // ============================================================
   // 新增测试：持久化后门写入
   // ============================================================
-  test("marks SSH authorized_keys writes dangerous as backdoor persistence", () => {
-    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
-    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
-    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
+  test("marks SSH authorized_keys writes cautious so reviewer can judge legitimate access setup", () => {
+    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'ssh-rsa AAAA...' >> /home/alice/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("echo 'ssh-rsa AAAA...' >> /root/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
+    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
   })
 
   test("marks sudoers modification dangerous as privilege escalation", () => {
@@ -334,13 +349,13 @@ describe("permission precheck bash classifier", () => {
   // ============================================================
   // 新增测试：防火墙规则
   // ============================================================
-  test("marks firewall rule flush dangerous as network protection removal", () => {
-    expect(bash("iptables -F")).toMatchObject({ level: "dangerous" })
-    expect(bash("iptables -X")).toMatchObject({ level: "dangerous" })
-    expect(bash("ip6tables --flush")).toMatchObject({ level: "dangerous" })
-    expect(bash("iptables --delete-chain")).toMatchObject({ level: "dangerous" })
-    expect(bash("ufw disable")).toMatchObject({ level: "dangerous" })
-    expect(bash("nft flush ruleset")).toMatchObject({ level: "dangerous" })
+  test("marks firewall protection removal cautious for reviewer approval", () => {
+    expect(bash("iptables -F")).toMatchObject({ level: "cautious" })
+    expect(bash("iptables -X")).toMatchObject({ level: "cautious" })
+    expect(bash("ip6tables --flush")).toMatchObject({ level: "cautious" })
+    expect(bash("iptables --delete-chain")).toMatchObject({ level: "cautious" })
+    expect(bash("ufw disable")).toMatchObject({ level: "cautious" })
+    expect(bash("nft flush ruleset")).toMatchObject({ level: "cautious" })
   })
 
   test("marks non-flush firewall modifications cautious", () => {
@@ -566,4 +581,3 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
   })
 })
-

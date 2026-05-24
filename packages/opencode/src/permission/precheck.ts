@@ -69,7 +69,7 @@ const INTERPRETER_FLAGS = new Map([
 
 // token 级文件删除/移动集合：与 raw 层的破坏性模式镜像，这样路径限定的
 // 二进制文件（如 /bin/rm）在 token 化成功后也无法绕过审查。
-const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
+const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "trash-put"])
 const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
 
 // 系统级破坏性命令：执行即造成不可逆损害，直接判定 dangerous。
@@ -194,8 +194,9 @@ const RE_D_REVERSE_SHELL = /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\
 // 解码/解压载荷管道到解释器（内容不可见，必须阻止）
 const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
 
-// SSH authorized_keys 写入（后门持久化访问）
-const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:~|\$HOME)?[\\/]?\.ssh[\\/]authorized_keys/i
+// SSH authorized_keys 写入（后门持久化访问）。除 ~/$HOME 外，也覆盖常见
+// 绝对家目录；重定向会让结构解析降级，因此必须在 raw 层捕获。
+const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:(?:~|\$HOME)[\\/]|\/(?:home\/[^\/|;]+|root|Users\/[^\/|;]+)[\\/]|[A-Za-z]:[\\/]Users[\\/][^\\/|;]+[\\/])?\.ssh[\\/]authorized_keys/i
 
 // sudoers 直写（特权升级）
 const RE_D_SUDOERS_WRITE = /(?:>>?\s*["']?\/etc\/sudoers|\bvisudo\b)/i
@@ -240,6 +241,12 @@ const RE_C_SENSITIVE_READ = new RegExp(
   String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN})`,
   "i",
 )
+
+// find/Python 删除规则按可执行命令切出 token 后判断，避免第一个 safe `find`
+// 看穿到后续 quoted search 文本，也保留 `"-delete"`/`'rm'` 这类 shell
+// 引号移除后仍会执行的参数形态。
+const RAW_FIND_OR_PYTHON_COMMAND_PATTERN = String.raw`${RAW_COMMAND_START}(${RAW_COMMAND_PATH}\b(?:find|python|python3|py)\b)`
+const RE_C_PYTHON_FILE_REMOVE_CALL = /\bos\.(?:remove|unlink|rmdir)\(\s*["'][^"']+["']/
 
 // ============================================================
 // 第七部分：禁止自动允许前缀
@@ -442,18 +449,11 @@ function dangerousRaw(command: string): string | undefined {
   // ---- 反弹 shell ----
   if (RE_D_REVERSE_SHELL.test(normalized)) return "reverse shell pattern"
 
-  // ---- 持久化后门 ----
-  // SSH authorized_keys 写入是最常见的持久化攻击向量
-  if (RE_D_AUTHORIZED_KEYS_WRITE.test(normalized)) return "SSH authorized_keys modification enables persistent backdoor"
   // sudoers 修改授予特权升级
   if (RE_D_SUDOERS_WRITE.test(normalized)) return "sudoers modification grants privilege escalation"
 
   // ---- 特权升级 ----
   if (RE_D_CHMOD_SETUID.test(normalized)) return "setuid/setgid bit creates privilege escalation surface"
-
-  // ---- 防火墙/网络保护移除 ----
-  if (RE_D_IPTABLES_FLUSH.test(normalized)) return "firewall rule flush removes network protection"
-  if (RE_D_UFW_DISABLE.test(normalized)) return "disabling firewall removes network protection"
 
   // ---- 全进程终止 ----
   if (RE_D_KILL_ALL.test(normalized)) return "mass process kill"
@@ -485,6 +485,15 @@ function cautiousRaw(command: string): string | undefined {
   // 导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；这里仅把
   // 本地敏感读取提升到 cautious。使用不含 .pem/.key 的窄版模式减少误报。
   if (RE_C_SENSITIVE_READ.test(normalized)) return "sensitive file read requires explicit approval"
+  // authorized_keys 和防火墙保护移除风险很高，但常见于用户明确的运维任务；
+  // 保持 cautious 让 reviewer 判断授权与上下文，根目录删除等不可逆破坏仍在
+  // dangerousRaw 中 fail-closed。
+  if (RE_D_AUTHORIZED_KEYS_WRITE.test(normalized)) return "SSH authorized_keys modification requires explicit approval"
+  if (RE_D_IPTABLES_FLUSH.test(normalized) || RE_D_UFW_DISABLE.test(normalized))
+    return "firewall protection removal requires explicit approval"
+  const rawTokens = rawFindOrPythonTokens(command)
+  if (rawTokens.some(findDeletesFile)) return "find file deletion requires explicit approval"
+  if (rawTokens.some(pythonRemovesFile)) return "Python file deletion requires explicit approval"
 }
 
 // ============================================================
@@ -501,6 +510,41 @@ function rawExecutableMatch(command: string, pattern: string) {
     if (isShellActive(quotes[index], command, index)) return true
   }
   return false
+}
+
+function rawFindOrPythonTokens(command: string) {
+  // raw 正则只定位可执行命令起点，实际删除语义交给 tokenizer 判断；这样同一
+  // 命令段内的 quoted data 不会被 lookahead 误当作 find/Python 删除参数。
+  const quotes = quoteOffsets(command)
+  return Array.from(command.matchAll(new RegExp(RAW_FIND_OR_PYTHON_COMMAND_PATTERN, "gi"))).flatMap((match) => {
+    const matchIndex = match.index ?? 0
+    if (!isShellActive(quotes[matchIndex], command, matchIndex)) return []
+    const executable = match[1]
+    const executableIndex = matchIndex + match[0].lastIndexOf(executable)
+    const tokens = tokenize(command.slice(executableIndex, rawExecutableSegmentEnd(command, executableIndex, matchIndex, quotes)).trim())
+    return tokens ? [tokens] : []
+  })
+}
+
+function rawExecutableSegmentEnd(command: string, start: number, matchIndex: number, quotes: string[]) {
+  // 对 $()/反引号中的命令，右边界是替换结束符；普通命令则到未引用的 shell
+  // 分隔符为止。反斜杠转义的 `\;` 是 find -exec 的普通参数，不能截断。
+  const substitutionEnd = command.startsWith("$(", matchIndex) ? ")" : command[matchIndex] === "`" ? "`" : ""
+  let escaped = false
+  for (let i = start; i < command.length; i++) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (command[i] === "\\" && quotes[i] !== "'") {
+      escaped = true
+      continue
+    }
+    if (quotes[i]) continue
+    if (substitutionEnd && command[i] === substitutionEnd) return i
+    if (command[i] === ";" || command[i] === "&" || command[i] === "|" || command[i] === "\n" || command[i] === "\r") return i
+  }
+  return command.length
 }
 
 function isShellActive(quote: string, command: string, index: number) {
@@ -839,6 +883,8 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   }
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
+  if (findDeletesFile(tokens))
+    return { level: "cautious", reason: "find file deletion requires explicit approval" }
 
   // ---- 文件移动/重命名 ----
   if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
@@ -881,16 +927,16 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   // ---- 防火墙与网络安全 ----
   if (cmd === "iptables" || cmd === "ip6tables") {
     if (tokens.some((item) => ["-F", "-X", "--flush", "--delete-chain"].includes(item)))
-      return { level: "dangerous", reason: "firewall rule flush removes network protection" }
+      return { level: "cautious", reason: "firewall protection removal requires explicit approval" }
     return { level: "cautious", reason: "firewall rule modification requires explicit approval" }
   }
   if (cmd === "ufw") {
     if (tokens[1] === "disable")
-      return { level: "dangerous", reason: "disabling firewall removes network protection" }
+      return { level: "cautious", reason: "firewall protection removal requires explicit approval" }
     return { level: "cautious", reason: "firewall configuration change requires explicit approval" }
   }
   if (cmd === "nft" && tokens.some((item) => item === "flush"))
-    return { level: "dangerous", reason: "nftables rule flush removes network protection" }
+    return { level: "cautious", reason: "firewall protection removal requires explicit approval" }
 
   // ---- 服务管理 ----
   if (cmd === "systemctl") {
@@ -981,6 +1027,24 @@ function classifyTokens(tokens: string[]): Decision | undefined {
     return { level: "cautious", reason: "remote file transfer requires explicit approval" }
 }
 
+function findDeletesFile(tokens: string[]) {
+  // find 的删除语义来自 argv，而不是源码字符串：`"-delete"` 和 `'-exec' 'rm'`
+  // 经 shell 去引号后仍是真实删除参数；quoted search 文本不会以 find 命令起头。
+  if (normalizeCommandName(tokens[0]) !== "find") return false
+  return tokens.some(
+    (item, index) =>
+      item === "-delete" ||
+      (["-exec", "-execdir"].includes(item) && normalizeCommandName(tokens[index + 1] ?? "") === "rm"),
+  )
+}
+
+function pythonRemovesFile(tokens: string[]) {
+  // 只处理显式 `python -c` 里的可见单文件删除；更宽的解释器行为仍保持
+  // general，由用户/后续 sandbox 处理。
+  if (!["python", "python3", "py"].includes(normalizeCommandName(tokens[0]))) return false
+  return RE_C_PYTHON_FILE_REMOVE_CALL.test(tokens[tokens.findIndex((item) => item === "-c") + 1] ?? "")
+}
+
 // ---- Git 子命令专项分类器 ----
 // Git 操作复杂且有多个风险层级，需要细化的启发式判断。
 function classifyGit(tokens: string[]): Decision | undefined {
@@ -999,7 +1063,7 @@ function classifyGit(tokens: string[]): Decision | undefined {
   // git add/commit/merge/rebase 等均视为 cautious，因为这些操作修改
   // 仓库状态且通常难以自动恢复。
   if (
-    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(sub)
+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv", "rm"].includes(sub)
   )
     return { level: "cautious", reason: "git state-changing command requires explicit approval" }
 
