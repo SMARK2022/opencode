@@ -9,6 +9,21 @@ const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
 const DEFAULT_STALE_MS = 60_000
 const RESOLVE_CACHE_MS = 5_000
 
+// Corrupt registry files are removed only after a grace window longer than one
+// heartbeat interval: the VS Code writer used to update the final JSON file in
+// place, so a reader could observe a transient empty/all-NUL file while VS Code
+// was still rewriting it. Keeping the 10s window larger than HEARTBEAT_MS
+// preserves live bridge recovery while still cleaning truly abandoned corrupt
+// manifests on the next discovery pass.
+const CORRUPT_REGISTRY_GRACE_MS = 10_000
+
+// The VS Code extension creates registry entries as `${randomUUID()}.json`.
+// Discovery deliberately ignores every other `*.json` name so a misconfigured
+// OPENCODE_IDE_REGISTRY_DIR cannot make this cleanup path own arbitrary JSON
+// files such as settings, notes, quoted names, or shell-looking filenames.
+const REGISTRY_MANIFEST_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
+const CORRUPT_REGISTRY_ENTRY = Symbol("corrupt-vscode-bridge-registry-entry")
+
 export type BridgeEntry = {
   schema: 1
   id: string
@@ -60,6 +75,7 @@ let cachedRegistryBridge:
   | {
       cwd: string
       filePath?: string
+      registryDir: string
       expiresAt: number
       bridge: BridgeRef
     }
@@ -83,13 +99,17 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
   const live: BridgeEntry[] = []
   await Promise.all(
     files
-      .filter((file) => file.endsWith(".json"))
+      .filter(isRegistryManifestFile)
       .map(async (file) => {
         const filepath = path.join(dir, file)
         const entry = await readEntry(filepath)
+        if (entry === CORRUPT_REGISTRY_ENTRY) {
+          await removeRegistryFile(dir, file, { olderThanMs: CORRUPT_REGISTRY_GRACE_MS, now }).catch(() => undefined)
+          return
+        }
         if (!entry) return
         if (pidDead(entry.pid)) {
-          await removeStale(filepath)
+          await removeRegistryFile(dir, file)
           return
         }
         const age = now - entry.updatedAt
@@ -101,7 +121,7 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
           live.push(entry)
           return
         }
-        if (age > staleMs) await removeStale(filepath)
+        if (age > staleMs) await removeRegistryFile(dir, file)
       }),
   )
   return live
@@ -109,11 +129,17 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
 
 export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
   const now = Date.now()
+  // Include the resolved registry directory in the cache identity because tests
+  // and custom deployments can move OPENCODE_IDE_REGISTRY_DIR without changing
+  // cwd/filePath; returning a bridge from the old directory would cross that
+  // explicit isolation boundary for up to RESOLVE_CACHE_MS (5 seconds).
+  const dir = registryDir()
   if (
     cachedRegistryBridge &&
     cachedRegistryBridge.expiresAt > now &&
     cachedRegistryBridge.cwd === input.cwd &&
-    cachedRegistryBridge.filePath === input.filePath
+    cachedRegistryBridge.filePath === input.filePath &&
+    cachedRegistryBridge.registryDir === dir
   ) {
     return cachedRegistryBridge.bridge
   }
@@ -149,6 +175,7 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
   cachedRegistryBridge = {
     cwd: input.cwd,
     filePath: input.filePath,
+    registryDir: dir,
     expiresAt: Date.now() + RESOLVE_CACHE_MS,
     bridge,
   }
@@ -255,7 +282,16 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
 }
 
 async function readEntry(filepath: string) {
-  const value = JSON.parse(await fs.readFile(filepath, "utf8")) as unknown
+  // Treat unreadable or concurrently-removed entries as absent: one bad direct
+  // child must not block discovery of another live bridge. Only JSON syntax
+  // failures return CORRUPT_REGISTRY_ENTRY, because parsed-but-foreign UUID JSON
+  // may belong to a misconfigured directory and must be ignored, not deleted.
+  const text = await fs.readFile(filepath, "utf8").catch(() => undefined)
+  if (text === undefined) return
+
+  const value = parseRegistryJson(text)
+  if (value === CORRUPT_REGISTRY_ENTRY) return value
+
   if (!isRecord(value)) return
   if (value.schema !== 1) return
   if (value.transport !== "http" || value.ideKind !== "vscode") return
@@ -378,7 +414,33 @@ function isMissing(error: unknown) {
   return isRecord(error) && error.code === "ENOENT"
 }
 
-function removeStale(filepath: string) {
+function isRegistryManifestFile(file: string) {
+  return REGISTRY_MANIFEST_FILE.test(file)
+}
+
+function parseRegistryJson(text: string) {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return CORRUPT_REGISTRY_ENTRY
+  }
+}
+
+async function removeRegistryFile(dir: string, file: string, options?: { olderThanMs?: number; now?: number }) {
+  // This is the only cleanup path for bridge registry entries. Keep all guards
+  // here so dead processes, stale manifests, and corrupt-manifest recovery share
+  // the same safety invariant: unlink only a direct child with the exact UUID
+  // manifest name that the VS Code extension owns, never a directory tree and
+  // never an arbitrary JSON file selected through glob expansion or shell syntax.
+  if (!isRegistryManifestFile(file)) return
+  const filepath = path.join(dir, file)
+  const stat = await fs.lstat(filepath).catch((error) => {
+    if (isMissing(error)) return
+    throw error
+  })
+  if (!stat) return
+  if (!stat.isFile()) return
+  if (options?.olderThanMs !== undefined && (options.now ?? Date.now()) - stat.mtimeMs < options.olderThanMs) return
   return fs.unlink(filepath).catch((error) => {
     if (isMissing(error)) return
     throw error

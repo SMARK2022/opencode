@@ -80,8 +80,21 @@ export function manifest(input: RegistryInput) {
 }
 
 async function writeRegistryFile(file: string, value: unknown) {
-  await fs.writeFile(file, JSON.stringify(value, null, 2), { mode: 0o600 })
-  await chmod(file, 0o600)
+  // Write into the registry directory first and publish with rename: readers only
+  // scan final `${uuid}.json` files, so a crash or VS Code shutdown can leave at
+  // worst a `.tmp` orphan instead of truncating the manifest currently used by
+  // OpenCode. The suffix parts are only for collision avoidance between the 5s
+  // heartbeat and extension reloads; they are not part of the public registry API.
+  const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  try {
+    await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 })
+    await chmod(temp, 0o600)
+    await fs.rename(temp, file)
+    await chmod(file, 0o600)
+  } catch (error) {
+    await fs.unlink(temp).catch(() => undefined)
+    throw error
+  }
 }
 
 async function chmod(file: string, mode: number) {
