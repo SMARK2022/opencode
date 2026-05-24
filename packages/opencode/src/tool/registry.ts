@@ -54,6 +54,7 @@ import { Reference } from "@/reference/reference"
 import { BackgroundJob } from "@/background/job"
 import { SessionStatus } from "@/session/status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { EffectBridge } from "@/effect/bridge"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -140,6 +141,10 @@ export const layer: Layer.Layer<
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
         const custom: Tool.Def[] = []
+        // 插件工具的 execute 是普通 async 函数，会跨出当前 Effect fiber。
+        // 这里捕获实例上下文，确保插件内部手动运行 context.ask 时仍使用
+        // 当前项目的 InstanceRef，而不是落到全局运行时后丢失权限状态。
+        const bridge = yield* EffectBridge.make()
 
         function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
           // Plugin tools still expose Zod args publicly; keep that compatibility
@@ -160,7 +165,10 @@ export const layer: Layer.Layer<
               Effect.gen(function* () {
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
-                  ask: (req) => toolCtx.ask(req),
+                  // 保持 @opencode-ai/plugin 的 ask 仍返回 Effect，同时把它绑定到
+                  // 当前 tool execution 的实例上下文；插件可以继续用
+                  // Effect.runPromise(context.ask(...))，但不会绕开项目级权限状态。
+                  ask: (req) => bridge.run(toolCtx.ask(req)),
                   directory: ctx.directory,
                   worktree: ctx.worktree,
                 }

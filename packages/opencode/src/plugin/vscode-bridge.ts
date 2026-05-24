@@ -170,6 +170,13 @@ export const VscodeBridgePlugin = async () => ({
       description: VscodeNotebookDescriptions.edit,
       args: editArgs,
       execute: async (args, context) => {
+        // notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
+        // mode 对 vscode_notebook_edit 的 deny 不会覆盖到这里，只会落到通用
+        // edit 规则，导致 notebook 写入权限和普通文件编辑权限混在一起。
+        await ask(context, "vscode_notebook_edit", args)
+        // 继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
+        // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
+        // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
         await ask(context, "edit", args)
         return {
           output: await call("/notebook/edit", args, context, 30_000),
@@ -180,10 +187,16 @@ export const VscodeBridgePlugin = async () => ({
     vscode_notebook_env: tool({
       description: VscodeNotebookDescriptions.env,
       args: envArgs,
-      execute: async (args, context) => ({
-        output: await call("/notebook/env", args, context, 120_000),
-        metadata: { endpoint: "/notebook/env" },
-      }),
+      execute: async (args, context) => {
+        // env 包含 configure/restart/save 等会改变 VS Code/Jupyter 状态的操作；
+        // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
+        // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
+        await ask(context, "vscode_notebook_env", args)
+        return {
+          output: await call("/notebook/env", args, context, 120_000),
+          metadata: { endpoint: "/notebook/env" },
+        }
+      },
     }),
   },
 })

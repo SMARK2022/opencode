@@ -389,6 +389,65 @@ describe("tool.registry", () => {
     }),
   )
 
+  it.instance("preserves instance context when plugin tools run permission asks inside async execute", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const customTools = path.join(test.directory, ".opencode", "tools")
+      const pluginTool = pathToFileURL(path.resolve(import.meta.dir, "../../../plugin/src/tool.ts")).href
+      const globalWithEffect = globalThis as typeof globalThis & { __opencodeTestEffect?: typeof Effect }
+      globalWithEffect.__opencodeTestEffect = Effect
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          delete globalWithEffect.__opencodeTestEffect
+        }),
+      )
+      yield* Effect.promise(() => fs.mkdir(customTools, { recursive: true }))
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(customTools, "ask.ts"),
+          [
+            `import { tool } from ${JSON.stringify(pluginTool)}`,
+            "const Effect = globalThis.__opencodeTestEffect",
+            "if (!Effect) throw new Error('missing test Effect')",
+            "export default tool({",
+            "  description: 'ask tool',",
+            "  args: {},",
+            "  execute: async (_args, context) => {",
+            "    await Effect.runPromise(context.ask({ permission: 'plugin_ask', patterns: ['*'], always: ['*'], metadata: { reason: 'inside-plugin-promise' } }))",
+            "    return 'asked'",
+            "  },",
+            "})",
+            "",
+          ].join("\n"),
+        ),
+      )
+
+      const registry = yield* ToolRegistry.Service
+      const loaded = (yield* registry.all()).find((tool) => tool.id === "ask")
+      if (!loaded) throw new Error("custom ask tool was not loaded")
+      const agents = yield* Agent.Service
+      let asked: string | undefined
+      const result = yield* loaded.execute({}, {
+        sessionID: SessionID.make("ses_test"),
+        messageID: MessageID.make("msg_test"),
+        agent: (yield* agents.defaultInfo()).name,
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => Effect.void,
+        ask: (req) =>
+          InstanceState.directory.pipe(
+            Effect.map((dir) => {
+              expect(dir).toBe(test.directory)
+              asked = req.permission
+            }),
+          ),
+      } satisfies Tool.Context)
+
+      expect(result.output).toBe("asked")
+      expect(asked).toBe("plugin_ask")
+    }),
+  )
+
   it.instance("loads legacy JSON-schema-shaped custom tools with wire schema", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
