@@ -40,6 +40,15 @@ const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME
 // #202：敏感路径参数匹配——raw 扫描发生在 shell quote 移除之前，允许敏感路径外侧有一层引号，
 // #202：避免 `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断
 const SENSITIVE_PATH_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_PATTERN}["']?`
+// #217：raw 层文件删除/移动模式——在 dangerousRaw 之后、token 化之前运行，
+// #217：捕获不透明 shell（重定向、命令替换、SSH/WSL 载荷、不支持分隔符）中的可见文件变更
+const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
+const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
+const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
+const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
+// #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
+const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
+const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
 
 // #197：禁止 always-allow 的宽泛前缀——授权后可隐藏未来任意载荷文本，用户点击 Always 时 precheck 从未见过这些未来载荷
 const BANNED_AUTO_ALLOW_PREFIXES = [
@@ -163,6 +172,13 @@ function evaluateShell(command: string, depth: number): Decision {
   // #202：dangerousRaw 已先处理外传，此处仅把本地敏感读取提升为 cautious，避免 safe 绕过
   const caution = cautiousRaw(command)
   if (caution) return { level: "cautious", reason: caution }
+
+  // #217：包装器载荷递归——重定向或不支持分隔符会让整条命令不透明，
+  // #217：扫描未引用段以发现可见的包装器载荷，破坏性脚本体保留 cautious/dangerous 层级
+  for (const wrapped of rawWrapperScripts(command)) {
+    const decision = evaluateShell(wrapped, depth + 1)
+    if (decision.level === "dangerous" || decision.level === "cautious") return decision
+  }
 
   const commands = splitCommands(command)
   // #197：分词失败意味着命令包含预检器无法理解的 shell 特性——不透明命令归为 general
@@ -361,7 +377,8 @@ function unwrap(tokens: string[]): UnwrapResult {
     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
     if (index >= 0 && tokens[index + 1]) {
       // #197：重组 /c 后的载荷用于递归原始扫描——cmd 语法与 POSIX shell 不同但仍可隐藏危险命令
-      return { action: "script", script: joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
+      // #217：cmd /c 载荷可能含空格的引号段——保留原始 token 避免 joinShellTokens 重组后改变语义
+      return { action: "script", script: tokens[index + 1].includes(" ") ? tokens[index + 1] : joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
     }
     // #197：无载荷的 cmd 可能进入交互式命令解释器——无法预检后续输入
     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
@@ -386,6 +403,63 @@ function unwrap(tokens: string[]): UnwrapResult {
   }
   // #197：非 wrapper 分支返回 none——none 不等于 allow，调用方继续 token 级判定，避免此处单点放行
   return { action: "none" }
+}
+
+// #217：rawWrapperScripts——顶层重定向或不支持分隔符可在逐命令解包前让整条命令不透明。
+// #217：扫描未引用命令段以发现可见的包装器载荷，使得破坏性脚本体仍保留 cautious/dangerous 层级
+function rawWrapperScripts(command: string) {
+  return rawCommandSegments(command).flatMap((segment) => {
+    const script = rawWrapperScript(segment)
+    return script ? [script] : []
+  })
+}
+
+// #217：rawWrapperScript——对单个命令段调用 unwrap/remoteWrapper 提取脚本载荷
+function rawWrapperScript(command: string) {
+  // #217：先尝试本地 wrapper 解包，再尝试远程 wrapper——两种路径都可能暴露可检查的脚本载荷
+  const tokens = tokenize(command)
+  if (!tokens) return
+  const unwrapped = unwrap(tokens)
+  if (unwrapped.action === "script") return unwrapped.script
+  const remote = remoteWrapper(tokens)
+  return remote.action === "remote" ? remote.script : undefined
+}
+
+// #217：rawCommandSegments——按 shell 分隔符切分命令为独立段，跳过引号内的分隔符。
+// #217：POSIX 单引号内反斜材为字面量，不开启转义状态，避免错误地在格式错误的单引号数据后隐藏可见删除
+function rawCommandSegments(command: string) {
+  const out: string[] = []
+  let start = 0
+  let quote = ""
+  let escaped = false
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true
+      continue
+    }
+    if (quote) {
+      if (char === quote) quote = ""
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      continue
+    }
+    if (char !== ";" && char !== "&" && char !== "|" && char !== "\n" && char !== "\r") continue
+    // #217：切分出当前段——分颞粒度足以让 rawWrapperScript 对每个段独立解包
+    const segment = command.slice(start, i).trim()
+    if (segment) out.push(segment)
+    // #217：&& 和 || 是双字符分隔符——跳过第二个字符避免误切
+    if ((char === "&" || char === "|") && command[i + 1] === char) i++
+    start = i + 1
+  }
+  const tail = command.slice(start).trim()
+  return tail ? [...out, tail] : out
 }
 
 function remoteWrapper(tokens: string[]): RemoteResult {
@@ -440,7 +514,7 @@ function dangerousRaw(command: string) {
   if (
     new RegExp(
       // #197：rm 同时带 -r/-R/--recursive 和 -f/--force 且目标为根/home/etc——递归强制删除保护目录不可恢复
-      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"]|$)|~\/?(?=[\s)'"]|$)|\$HOME\/?(?=[\s)'"]|$)|\/etc(?:\/|(?=[\s)'"]|$)))`,
+      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/etc(?:\/|(?=[\s)'"\x60]|$)))`,
     ).test(normalized)
   ) {
     // #197：递归强制删除根文件系统或 home 目录——系统不可恢复，直接 dangerous 防止重试绕过
@@ -459,7 +533,7 @@ function dangerousRaw(command: string) {
   // #202：在 raw 层先拦截，避免 token 解析差异把整盘/用户目录删除降级成 general 或 cautious
   if (/\bformat\b\s+[A-Za-z]:/i.test(normalized)) return "Windows drive format"
   if (
-    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"]|$))/i.test(
+    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i.test(
       normalized,
     )
   ) {
@@ -491,7 +565,7 @@ function dangerousRaw(command: string) {
     return "credential file sent with remote transfer"
   }
   // #197：解释器 API 和反向 shell 惯用法作为原始文本扫描——危险目标可能在字符串内而非 token 中
-  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(normalized)) {
+  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i.test(normalized)) {
     return "critical PowerShell recursive delete"
   }
   if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
@@ -521,6 +595,9 @@ function dangerousRaw(command: string) {
 // #202：读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审
 function cautiousRaw(command: string) {
   const normalized = command.replace(/\s+/g, " ").trim()
+  // #217：raw 层文件删除/移动扫描——引号感知匹配确保只在 shell 可执行上下文中命中
+  if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
+  if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
   if (
     new RegExp(
       // #209：去掉 (?:^|[;&|]\s*) 锚点——if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符，锚点导致漏审
@@ -532,6 +609,45 @@ function cautiousRaw(command: string) {
   ) {
     return "sensitive file read requires explicit approval"
   }
+}
+
+// #217：rawExecutableMatch——引号感知的文件删除/移动匹配。shell 语法上下文中分隔符在引号内是数据，
+// #217：$() 和反引号在未引用或双引号文本中执行，但在 POSIX 单引号中保持字面量
+function rawExecutableMatch(command: string, pattern: string) {
+  const quotes = quoteOffsets(command)
+  // #217：matchAll 遍历所有匹配——仅当匹配位置处于 shell 可执行上下文时才返回 true
+  for (const match of command.matchAll(new RegExp(pattern, "gi"))) {
+    const index = match.index ?? 0
+    // #217：未引用或双引号内的 $()、反引号启动命令替换——单引号内为字面量，不计为可执行
+    if (!quotes[index] || (quotes[index] === '"' && (command.startsWith("$(", index) || command[index] === "`"))) return true
+  }
+  return false
+}
+
+// #217：quoteOffsets——为命令中每个字符位置记录其所在的引号状态。
+// #217：POSIX 单引号内反斜材为字面量文本，不应开启转义状态，避免错误地在格式错误单引号数据后隐藏可见删除
+function quoteOffsets(command: string) {
+  const quotes = Array.from({ length: command.length }, () => "")
+  let quote = ""
+  let escaped = false
+  for (let i = 0; i < command.length; i++) {
+    quotes[i] = quote
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (command[i] === "\\") {
+      if (quote === "'") continue
+      escaped = true
+      continue
+    }
+    if (quote) {
+      if (command[i] === quote) quote = ""
+      continue
+    }
+    if (command[i] === "'" || command[i] === '"') quote = command[i]
+  }
+  return quotes
 }
 
 function riskyTokens(tokens: string[]): Decision | undefined {
@@ -588,6 +704,12 @@ function riskyTokens(tokens: string[]): Decision | undefined {
     // #202：PowerShell 递归删除非保护目录——cautious，危险但可能有意
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
+  // #217：token 级文件删除——已知删除命令名但未达 dangerous 阈值，需 reviewer 确认是否为预期清理
+  if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
+    return { level: "cautious", reason: "file deletion requires explicit approval" }
+  // #217：token 级文件移动/重命名——可绕过删除审查，需 reviewer 确认目标路径
+  if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
+    return { level: "cautious", reason: "file move or rename requires explicit approval" }
   // #202：远程文件传输可移动凭证到外部主机——cautious，安全读取应用专用 read/glob/grep 工具
   if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
 }
@@ -597,7 +719,8 @@ function riskyTokens(tokens: string[]): Decision | undefined {
 function cautiousGitSubcommand(tokens: string[]) {
   const subcommand = tokens[1]
   if (!subcommand) return false
-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)) return true
+  // #217：git mv 改变跟踪状态并可绕过删除审查——加入 cautious 子命令列表
+  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(subcommand)) return true
   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
 }
 
@@ -644,6 +767,9 @@ function protectedDeleteTarget(input: string) {
     normalized === "$HOME/" ||
     normalized === "$env:USERPROFILE" ||
     normalized === "$env:USERPROFILE/" ||
+    // #217：$env:SystemDrive 是 Windows 系统盘根——递归删除等同于格式化系统盘
+    normalized === "$env:SystemDrive" ||
+    normalized === "$env:SystemDrive/" ||
     /^\w:\/?$/.test(normalized) ||
     normalized === "/etc" ||
     normalized.startsWith("/etc/")

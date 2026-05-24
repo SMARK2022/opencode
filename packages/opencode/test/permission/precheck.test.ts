@@ -14,6 +14,11 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git status --porcelain").level).toBe("safe")
     expect(bash("git branch --show-current").level).toBe("safe")
     expect(bash("rg \"path with spaces\" src").level).toBe("safe")
+    // #217：rg 搜索文本中的 rm/delete 片段是搜索内容而非命令——splitter 不被搜索文本欺骗
+    expect(bash("rg \"; rm stale.tmp\" src").level).toBe("safe")
+    expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
+    expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
+    expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
   })
 
   // #202：read-looking 但可执行外部程序的命令不能进入 safe——rg --pre/git --ext-diff 等
@@ -63,13 +68,32 @@ describe("permission precheck bash classifier", () => {
 
   // #202：未建模分隔符（单个 &、换行）整体降级为 general，防止切错成 safe
   test("marks unsupported shell separators general instead of safe", () => {
-    expect(bash("git status & rm -rf node_modules")).toMatchObject({ level: "general" })
-    expect(bash("git status\nrm -rf node_modules")).toMatchObject({ level: "general" })
+    // #217：非破坏性命令用未建模分隔符仍 general——但破坏性命令通过 rawWrapperScripts 传播为 cautious
+    expect(bash("git status & rg TODO src")).toMatchObject({ level: "general" })
+    expect(bash("git status\nrg TODO src")).toMatchObject({ level: "general" })
   })
 
   // #202：破坏性但有限操作 cautious——仅该层到达 reviewer/user
   test("marks destructive but bounded commands cautious for reviewer/user approval", () => {
     expect(bash("rm -rf node_modules")).toMatchObject({ level: "cautious" })
+    // #217：文件删除/移动操作 cautious——bounded 但不可逆，需 reviewer 确认目标路径
+    expect(bash("rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("/bin/rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("rm -f 'path with spaces/file.txt'")).toMatchObject({ level: "cautious" })
+    expect(bash("unlink stale.sock")).toMatchObject({ level: "cautious" })
+    expect(bash("/usr/bin/unlink stale.sock")).toMatchObject({ level: "cautious" })
+    expect(bash("rmdir empty-dir")).toMatchObject({ level: "cautious" })
+    expect(bash("del /q C:\\Temp\\old.log")).toMatchObject({ level: "cautious" })
+    expect(bash("erase \"path with spaces\\old.log\"")).toMatchObject({ level: "cautious" })
+    expect(bash("Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force -ErrorAction SilentlyContinue")).toMatchObject({ level: "cautious" })
+    expect(bash(String.raw`Remove-Item -Path "$env:TEMP\old.log" -Force`)).toMatchObject({ level: "cautious" })
+    expect(bash("Remove-Item \"path with spaces\\old.log\" > deleted.log")).toMatchObject({ level: "cautious" })
+    // #217：未建模分隔符后的破坏性命令通过 rawWrapperScripts 传播——不会被降级为 general
+    expect(bash("git status & rm -f stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git status & /bin/rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
+    // #217：POSIX 单引号内反斜杠为字面量——格式错误的单引号后的可见删除仍需 cautious
+    expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
     expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
     expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
     expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
@@ -79,6 +103,34 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git branch feature/review")).toMatchObject({ level: "cautious" })
     expect(bash("git branch -D feature/review")).toMatchObject({ level: "cautious" })
     expect(bash("git branch -m old-name new-name")).toMatchObject({ level: "cautious" })
+  })
+
+  // #217：文件移动/重命名 cautious——可绕过删除审查，移动到归档等价于删除原路径
+  test("marks move and rename file mutations cautious because they can bypass delete review", () => {
+    expect(bash("mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("/bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("git status & /bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("move C:\\Temp\\old.log C:\\Temp\\archive\\old.log")).toMatchObject({ level: "cautious" })
+    expect(bash("ren old.log older.log")).toMatchObject({ level: "cautious" })
+    expect(bash("Rename-Item \"path with spaces\\old.log\" \"older.log\"")).toMatchObject({ level: "cautious" })
+    expect(bash(String.raw`Move-Item -LiteralPath "H:\\DumpStack.log.tmp" -Destination "$env:TEMP\\DumpStack.to_delete" -Force -ErrorAction Stop`)).toMatchObject({ level: "cautious" })
+    // #217：git mv 改变跟踪状态——加入 cautious 子命令列表
+    expect(bash("git mv old.txt new.txt")).toMatchObject({ level: "cautious" })
+  })
+
+  // #217：包装器载荷递归传播——ssh/wsl/cmd/pwsh/命令替换/反引号内的 bounded delete 保持 cautious
+  test("propagates bounded delete risks through shell, remote, and alternate OS wrappers", () => {
+    expect(bash("ssh example.com 'rm stale.tmp'")).toMatchObject({ level: "cautious" })
+    expect(bash("ssh -p 22 example.com rm -f 'path with spaces/stale.tmp'")).toMatchObject({ level: "cautious" })
+    expect(bash("wsl.exe -- rm stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("cmd /c del /q stale.tmp")).toMatchObject({ level: "cautious" })
+    expect(bash("cmd /c \"del /f /q H:\\DumpStack.log.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("git status; cmd /c \"del /f /q H:\\DumpStack.log.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("echo ok & cmd /c \"del /q stale.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("pwsh -Command 'Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force'")).toMatchObject({ level: "cautious" })
+    expect(bash("pwsh -Command \"Remove-Item stale.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
+    expect(bash("echo $(rm stale.tmp)")).toMatchObject({ level: "cautious" })
+    expect(bash("echo `rm stale.tmp`")).toMatchObject({ level: "cautious" })
   })
 
   // #202：保护根/盘符/用户目录删除 dangerous——含 Windows format/rd/del
@@ -92,6 +144,12 @@ describe("permission precheck bash classifier", () => {
     expect(bash("format C:")).toMatchObject({ level: "dangerous" })
     expect(bash("rmdir /s /q C:\\Users\\Alice")).toMatchObject({ level: "dangerous" })
     expect(bash("del /s /q %USERPROFILE%")).toMatchObject({ level: "dangerous" })
+    // #217：$env:USERPROFILE/$env:SystemDrive 递归删除 dangerous——反引号闭合也命中
+    expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "dangerous" })
+    expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "dangerous" })
+    expect(bash("powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
+    expect(bash("git status; powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
+    expect(bash("echo `rm -rf /`")).toMatchObject({ level: "dangerous" })
   })
 
   test("marks dangerous command substitutions dangerous instead of treating wrappers as safe", () => {
