@@ -20,6 +20,23 @@ const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
 // 解析缓存 5 秒：避免频繁扫描锁文件目录
 const RESOLVE_CACHE_MS = 5_000
 
+// #219：损坏注册文件的清理宽限窗口——大于心跳间隔，保留活桥恢复能力同时清理真正废弃的损坏清单
+// Corrupt registry files are removed only after a grace window longer than one
+// heartbeat interval: the VS Code writer used to update the final JSON file in
+// place, so a reader could observe a transient empty/all-NUL file while VS Code
+// was still rewriting it. Keeping the 10s window larger than HEARTBEAT_MS
+// preserves live bridge recovery while still cleaning truly abandoned corrupt
+// manifests on the next discovery pass.
+const CORRUPT_REGISTRY_GRACE_MS = 10_000
+
+// #219：注册清单文件名匹配 UUID 格式——发现只处理 VS Code 扩展创建的 ${randomUUID()}.json
+// The VS Code extension creates registry entries as `${randomUUID()}.json`.
+// Discovery deliberately ignores every other `*.json` name so a misconfigured
+// OPENCODE_IDE_REGISTRY_DIR cannot make this cleanup path own arbitrary JSON
+// files such as settings, notes, quoted names, or shell-looking filenames.
+const REGISTRY_MANIFEST_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
+const CORRUPT_REGISTRY_ENTRY = Symbol("corrupt-vscode-bridge-registry-entry")
+
 // 桥接条目：包含端口、token、工作区路径和心跳时间
 export type BridgeEntry = {
   schema: 1
@@ -75,6 +92,7 @@ let cachedRegistryBridge:
   | {
       cwd: string
       filePath?: string
+      registryDir: string
       expiresAt: number
       bridge: BridgeRef
     }
@@ -113,20 +131,26 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
 // 并行检查所有注册文件：Promise.all 确保所有检查完成后才返回
   await Promise.all(
     files
-      // 过滤 JSON 文件：注册目录可能包含非 JSON 临时文件
-      .filter((file) => file.endsWith(".json"))
+      // #219：仅匹配 UUID 格式的注册清单——防止误删非 VS Code 扩展创建的 JSON 文件
+      .filter(isRegistryManifestFile)
       .map(async (file) => {
         // 注册文件完整路径：每个 VS Code 实例一个 JSON 文件
         const filepath = path.join(dir, file)
         // 读取注册条目：解析 JSON 并验证 schema 版本
         const entry = await readEntry(filepath)
+        // #219：损坏条目经宽限期后清理——读取失败或 JSON 语法错误返回 CORRUPT_REGISTRY_ENTRY
+        if (entry === CORRUPT_REGISTRY_ENTRY) {
+          // #219：清理失败不影响发现——坏条目删除是尽力而为，发现须继续返回活桥
+          await removeRegistryFile(dir, file, { olderThanMs: CORRUPT_REGISTRY_GRACE_MS, now }).catch(() => undefined)
+          return
+        }
         // 无效条目跳过：JSON 解析失败或 schema 不匹配时返回 null
       // 无效条目：JSON 解析失败或 schema 版本不匹配时 readEntry 返回 null
         if (!entry) return
         // 先检查进程存活：进程已死则直接移除注册条目，无需进一步检查
         if (pidDead(entry.pid)) {
 // 移除过期注册文件：PID 已死的 VS Code 实例留下的残留文件
-          await removeStale(filepath)
+          await removeRegistryFile(dir, file)
           return
         }
         // 注册条目年龄：用于判断是否在心跳信任窗口内
@@ -142,7 +166,7 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
           return
         }
         // 过期清理：仅在健康检查失败且超过 staleMs 时删除注册文件
-        if (age > staleMs) await removeStale(filepath)
+        if (age > staleMs) await removeRegistryFile(dir, file)
       }),
   )
 // 返回活跃桥接列表：已排除过期、PID 失效和健康检查失败的条目
@@ -154,11 +178,18 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
 // 发现仅走 registry/cache/健康探测：env 捷径已删除
 export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
   const now = Date.now()
+  // #219：缓存身份包含 registryDir——测试和自定义部署可更改 OPENCODE_IDE_REGISTRY_DIR 而不改变 cwd/filePath
+  // Include the resolved registry directory in the cache identity because tests
+  // and custom deployments can move OPENCODE_IDE_REGISTRY_DIR without changing
+  // cwd/filePath; returning a bridge from the old directory would cross that
+  // explicit isolation boundary for up to RESOLVE_CACHE_MS (5 seconds).
+  const dir = registryDir()
   if (
     cachedRegistryBridge &&
     cachedRegistryBridge.expiresAt > now &&
     cachedRegistryBridge.cwd === input.cwd &&
-    cachedRegistryBridge.filePath === input.filePath
+    cachedRegistryBridge.filePath === input.filePath &&
+    cachedRegistryBridge.registryDir === dir
   ) {
     return cachedRegistryBridge.bridge
   }
@@ -202,6 +233,7 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
   cachedRegistryBridge = {
     cwd: input.cwd,
     filePath: input.filePath,
+    registryDir: dir,
     expiresAt: Date.now() + RESOLVE_CACHE_MS,
     bridge,
   }
@@ -330,7 +362,17 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
 
 // 读取注册条目：解析 JSON，验证 schema 版本和必需字段
 async function readEntry(filepath: string) {
-  const value = JSON.parse(await fs.readFile(filepath, "utf8")) as unknown
+  // #219：不可读或并发删除的条目视为缺失——单个损坏文件不得阻止发现其他活桥
+  // Treat unreadable or concurrently-removed entries as absent: one bad direct
+  // child must not block discovery of another live bridge. Only JSON syntax
+  // failures return CORRUPT_REGISTRY_ENTRY, because parsed-but-foreign UUID JSON
+  // may belong to a misconfigured directory and must be ignored, not deleted.
+  const text = await fs.readFile(filepath, "utf8").catch(() => undefined)
+  if (text === undefined) return
+
+  const value = parseRegistryJson(text)
+  if (value === CORRUPT_REGISTRY_ENTRY) return value
+
   if (!isRecord(value)) return
   if (value.schema !== 1) return
   if (value.transport !== "http" || value.ideKind !== "vscode") return
@@ -469,7 +511,39 @@ function isMissing(error: unknown) {
 }
 
 // 移除过期注册文件：catch 忽略文件不存在错误（可能被其他进程删除）
-function removeStale(filepath: string) {
+// #219：注册清单文件名判定——仅 UUID 格式的 .json 文件由 VS Code 扩展拥有
+function isRegistryManifestFile(file: string) {
+  return REGISTRY_MANIFEST_FILE.test(file)
+}
+
+// #219：安全 JSON 解析——语法错误返回 CORRUPT_REGISTRY_ENTRY 而非抛出
+function parseRegistryJson(text: string) {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return CORRUPT_REGISTRY_ENTRY
+  }
+}
+
+// #219：唯一的注册条目清理路径——仅删除直接子文件且名为 UUID 清单，不删目录树或任意 JSON
+// This is the only cleanup path for bridge registry entries. Keep all guards
+// here so dead processes, stale manifests, and corrupt-manifest recovery share
+// the same safety invariant: unlink only a direct child with the exact UUID
+// manifest name that the VS Code extension owns, never a directory tree and
+// never an arbitrary JSON file selected through glob expansion or shell syntax.
+async function removeRegistryFile(dir: string, file: string, options?: { olderThanMs?: number; now?: number }) {
+  if (!isRegistryManifestFile(file)) return
+  const filepath = path.join(dir, file)
+  const stat = await fs.lstat(filepath).catch((error) => {
+    if (isMissing(error)) return
+    throw error
+  })
+  // #219：文件已不存在时跳过——可能被其他进程删除
+  if (!stat) return
+  // #219：不删除目录——UUID 命名的目录不是注册清单
+  if (!stat.isFile()) return
+  // #219：宽限期内不删——避免清理 VS Code 正在重写的瞬态损坏文件
+  if (options?.olderThanMs !== undefined && (options.now ?? Date.now()) - stat.mtimeMs < options.olderThanMs) return
   return fs.unlink(filepath).catch((error) => {
     if (isMissing(error)) return
     throw error
