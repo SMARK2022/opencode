@@ -8,7 +8,7 @@ type DisplayEvent<E = OpenCodeEvent> = E extends OpenCodeEvent ? Omit<E, "durabl
 type Missing = { sessionID: string; messages: SessionMessageInfo[]; touched: string[]; missing: string }
 const metadata = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.MutableJson))
 
-export function nativeSessionEvent(source: readonly SessionMessageInfo[], event: OpenCodeEvent | NativeSessionEvent, pending: Map<string, SessionPendingMessage>): DisplayEvent | Missing | undefined {
+export function nativeSessionEvent(source: readonly SessionMessageInfo[], event: OpenCodeEvent | NativeSessionEvent, pending: Map<string, SessionPendingMessage>): DisplayEvent | Omit<Missing, "missing"> | Missing | undefined {
   if (!native(event)) return event
   const base = { id: event.id, created: event.data.timestamp, metadata: event.metadata }
   const sessionID = event.data.sessionID
@@ -17,6 +17,16 @@ export function nativeSessionEvent(source: readonly SessionMessageInfo[], event:
   const assistantID = "assistantMessageID" in event.data ? event.data.assistantMessageID : undefined
   if (assistantID && event.type !== "session.next.step.started" && !source.some((item) => item.id === assistantID && item.type === "assistant")) return missing(assistantID)
   switch (event.type) {
+    case "session.next.messages.hidden": {
+      const ids = new Set<string>(event.data.messageIDs)
+      const absent = event.data.messageIDs.find((id) => !source.some((message) => message.id === id))
+      // 保留隐藏事实的源缓存，缺失消息仍通过既有hydration读取，不删除审计对象。
+      return { sessionID, touched: [...ids], ...(absent ? { missing: absent } : {}), messages: source.map((message) => ids.has(message.id)
+        ? { ...message, metadata: metadata({ ...("metadata" in message ? message.metadata : {}), hidden: event.data.hidden }) }
+        : message),
+      }
+    }
+
     case "session.next.prompted":
       // canonical promotion自带完整prompt，不能再依赖先收到旧版admission缓存。
       pending.set(`${sessionID}:${event.data.messageID}`, { type: "user", delivery: event.data.delivery, data: {

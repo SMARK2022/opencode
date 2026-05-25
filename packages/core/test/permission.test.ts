@@ -40,11 +40,18 @@ let reviewStarted: Deferred.Deferred<void> | undefined
 let malformed = false
 let reviewBeforeStream: Deferred.Deferred<void> | undefined
 let reviewArrivals: Deferred.Deferred<void> | undefined
+let reviewScript: Stream.Stream<LLMEvent>[] | undefined
 const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
   prepare: () => Effect.die("unused"),
   generate: () => Effect.die("reviewer must consume the actual provider stream"),
   stream: (request) => Stream.unwrap(Effect.gen(function* () {
     reviewRequests.push(request)
+    // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
+    if (reviewScript) {
+      const next = reviewScript.shift()
+      if (!next) return yield* Effect.die("Unexpected reviewer retry")
+      return next
+    }
     if (reviewBeforeStream) {
       if (reviewArrivals && reviewRequests.length === 2) yield* Deferred.succeed(reviewArrivals, undefined)
       yield* Deferred.await(reviewBeforeStream)
@@ -608,5 +615,99 @@ describe("PermissionV2", () => {
     reviewGate = undefined
     reviewStarted = undefined
     reviewSettings = new Config.Info({})
+  }))
+
+  it.effect("repairs native reviewer protocol once while preserving hidden audit and usage", () => Effect.gen(function* () {
+    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      reviewScript = undefined
+      reviewSettings = new Config.Info({})
+    }))
+    const service = yield* PermissionV2.Service
+    const sessions = yield* SessionStore.Service
+    const events = yield* EventV2.Service
+    const database = yield* Database.Service
+    const hiddenIDs: SessionMessage.ID[] = []
+    const unsubscribe = yield* events.listen((event) => Schema.is(SessionEvent.MessagesHidden)(event)
+      ? Effect.sync(() => { hiddenIDs.push(...event.data.messageIDs) }) : Effect.void)
+    yield* Effect.addFinalizer(() => unsubscribe)
+    const accepted = { outcome: "allow", rationale: "bounded protocol fixture", risk_level: "low", user_authorization: "high" }
+    const text = (value: string) => Stream.make(
+      LLMEvent.textStart({ id: "reply" }), LLMEvent.textDelta({ id: "reply", text: value }), LLMEvent.textEnd({ id: "reply" }),
+      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { nonCachedInputTokens: 2, outputTokens: 1 } }),
+      LLMEvent.finish({ reason: "stop" }),
+    )
+    const tool = (input: unknown) => Stream.make(
+      LLMEvent.toolCall({ id: "decision", name: "permission_review_decision", input }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" }),
+    )
+    let sequence = 0
+    const run = (script: Stream.Stream<LLMEvent>[]) => {
+      reviewScript = script
+      reviewRequests.length = 0
+      return service.ask(assertion({ action: "edit", resources: ["src/protocol.ts"], metadata: { diff: `protocol-${++sequence}` } }))
+    }
+    expect(yield* run([text(JSON.stringify(accepted))])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(1)
+    const children = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).all().pipe(Effect.orDie)
+    expect(children).toHaveLength(1)
+    const child = children[0]
+    if (!child) return yield* Effect.die("Expected reviewer child")
+    const childID = SessionV2.ID.make(child.id)
+    const jsonAudit = yield* sessions.context(childID)
+    expect(jsonAudit.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")).toMatchObject({
+      name: "permission_review_decision", state: { status: "completed", structured: { ...accepted, source: "json_fallback" } },
+    })
+    // 合法deny不属于协议失败，不能以重试把拒绝变为放行。
+    expect(yield* run([text(JSON.stringify({ ...accepted, outcome: "deny" }))])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(1)
+    expect(hiddenIDs).toHaveLength(0)
+    const malformedText = "I forgot to submit the decision tool."
+    expect(yield* run([text(malformedText), tool(accepted)])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(2)
+    const prompts = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"))
+    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.`)
+    expect(hiddenIDs).toHaveLength(2)
+    const hidden = yield* Effect.forEach(hiddenIDs, (id) => sessions.message(id))
+    expect(hidden.map((record) => record?.message)).toMatchObject([
+      { type: "synthetic", metadata: { permissionReviewerRequest: true, hidden: { reason: "permission-reviewer-protocol-retry" } } },
+      { type: "assistant", finish: "error", tokens: { input: 2, output: 1 }, metadata: { permissionReviewerRequestID: hiddenIDs[0], hidden: { reason: "permission-reviewer-protocol-retry" } } },
+    ])
+    // 隐藏只影响普通历史；原始读取保留原文与已确认用量，runner也不能重放失败轮次。
+    expect(JSON.stringify(hidden[1]?.message)).toContain(malformedText)
+    expect((yield* sessions.context(childID)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
+    expect((yield* sessions.runnerContext(childID, 0)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
+    expect((yield* sessions.context(childID)).flatMap((message) => message.type === "assistant" ? message.content : []).some((part) => part.type === "tool" && part.state.status === "completed" && part.state.structured?.source === "tool_call")).toBe(true)
+    expect(yield* run([tool({ outcome: "allow" }), tool(accepted)])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(2)
+    // 未完成参数的tool-error也须先闭合真实残片，再按同一协议修复一次。
+    expect(yield* run([Stream.make(
+      LLMEvent.toolInputStart({ id: "broken", name: "permission_review_decision" }),
+      LLMEvent.toolInputDelta({ id: "broken", name: "permission_review_decision", text: "{bad" }),
+      LLMEvent.toolError({ id: "broken", name: "permission_review_decision", message: "malformed input" }),
+    ), tool(accepted)])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(2)
+    // Markdown中的合法对象仍不是整段JSON；第二次畸形保持可见且不发起第三次。
+    const hiddenBeforeFailure = hiddenIDs.length
+    expect(yield* run([text(`\`\`\`json\n${JSON.stringify(accepted)}\n\`\`\``), text("second malformed reply")])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(2)
+    expect(hiddenIDs).toHaveLength(hiddenBeforeFailure + 2)
+    const visible = JSON.stringify(yield* sessions.context(childID))
+    expect(visible).not.toContain("```json")
+    expect(visible).toContain("second malformed reply")
+    const hiddenBeforeProviderFailure = hiddenIDs.length
+    expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable" }))])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(1)
+    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure)
+    // 取消第二次真实流仍由退出owner收尾，不产生第三次尝试或人工pending。
+    const retryStarted = yield* Deferred.make<void>()
+    const cancelled = yield* run([text("cancel before repair"), Stream.unwrap(Deferred.succeed(retryStarted, undefined).pipe(Effect.as(Stream.never)))]).pipe(Effect.forkScoped)
+    yield* Deferred.await(retryStarted)
+    yield* Fiber.interrupt(cancelled)
+    expect((yield* sessions.context(childID)).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
+    expect(reviewRequests).toHaveLength(2)
+    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
+    expect(yield* service.list()).toEqual([])
   }))
 })

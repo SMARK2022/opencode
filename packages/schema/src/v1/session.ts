@@ -86,7 +86,7 @@ export const Hidden = Schema.Struct({
   time: NonNegativeInt,
   // repair-empty-dangling-assistant：cancel 产生的空体 assistant 专用隐藏原因，
   // 与 undo 隐藏区分开，便于审计两类来源不同的隐藏消息
-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
+  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
 })
 export type Hidden = Schema.Schema.Type<typeof Hidden>
 

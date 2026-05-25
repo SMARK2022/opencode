@@ -18,7 +18,7 @@ import { message as cleanMessage } from "@/utils/diffs"
 import { sessionNotFoundError } from "@/utils/server-errors"
 import { rootSession } from "@/utils/session-route"
 import { normalizeSessionInfo } from "@/utils/session"
-import { compareMessages, messageKey, normalizeSessionMessages, reviewerRequestID, syntheticTurn } from "@/utils/session-message"
+import { compareMessages, messageKey, normalizeSessionMessages, preserveMessageHidden, reviewerRequestID, sessionMessageHidden, syntheticTurn } from "@/utils/session-message"
 import type { NativeSessionEvent } from "./native-session-event"
 import { dropSessionCaches, pickSessionCacheEvictions, SESSION_CACHE_LIMIT } from "./global-sync/session-cache"
 import { createV2SessionReducer, type V2SessionReduction } from "./server-session-v2-reducer"
@@ -34,12 +34,13 @@ const sessionInfoLimit = 2_048
 const emptyIDs: ReadonlySet<string> = new Set()
 
 function needsOlderTurnRoot(source: readonly SessionMessageInfo[]) {
+  const visible = source.filter((message) => !sessionMessageHidden(message))
   // 页内已有较新的请求也不代表包含并发助手实际引用的较旧请求。
-  if (source.some((message) => {
+  if (visible.some((message) => {
     const id = reviewerRequestID(message)
-    return id !== undefined && !source.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
+    return id !== undefined && !visible.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
   })) return true
-  const boundary = source.find(
+  const boundary = visible.find(
     (message) =>
       message.type === "user" ||
       message.type === "shell" ||
@@ -689,7 +690,7 @@ export function createServerSession(
           const current = existing.filter((message) => !incoming.has(message.id))
           const live = new Map(existing.map((message) => [message.id, message]))
           return (page.sourceMode === "older" ? [...page.source, ...current] : [...current, ...page.source]).map(
-            (message) => (load?.touchedSource.has(message.id) ? (live.get(message.id) ?? message) : message),
+            (message) => preserveMessageHidden(live.get(message.id), load?.touchedSource.has(message.id) ? (live.get(message.id) ?? message) : message),
           )
         })()
       : undefined
@@ -892,8 +893,13 @@ export function createServerSession(
     if (reduction.touched.length === 0) return
 
     const touched = new Set(reduction.touched)
+    const concealed = new Set<string>()
     let parentID: string | undefined
     for (const message of reduction.messages) {
+      if (sessionMessageHidden(message)) {
+        if (touched.has(message.id)) concealed.add(message.id)
+        continue
+      }
       if (message.type === "user" || syntheticTurn(message) !== undefined)
         parentID = message.id
       if (message.type === "shell") {
@@ -909,6 +915,11 @@ export function createServerSession(
 
     const normalized = normalizeSessionMessages(reduction.sessionID, reduction.messages)
     batch(() => {
+      if (concealed.size) setData(produce((draft) => {
+        draft.message[reduction.sessionID] = (draft.message[reduction.sessionID] ?? []).filter((message) => !concealed.has(message.id))
+        // 仅移除显示及片段；原始session_message和隐藏metadata继续保留。
+        for (const messageID of concealed) deleteMessageParts(draft, messageID)
+      }))
       for (const message of normalized.messages) {
         if (!touched.has(message.id)) continue
         apply({ type: "message.updated", properties: { sessionID: reduction.sessionID, info: message } })
@@ -936,7 +947,7 @@ export function createServerSession(
       .message({ sessionID, messageID })
       .then((message) => {
         const current = data.session_message[sessionID] ?? []
-        const messages = [...current.filter((item) => item.id !== message.id), message].sort(compareMessages)
+        const messages = [...current.filter((item) => item.id !== message.id), preserveMessageHidden(current.find((item) => item.id === message.id), message)].sort(compareMessages)
         projectV2({ sessionID, messages, touched: [message.id] })
       })
       .catch(() => {})

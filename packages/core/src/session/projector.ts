@@ -177,6 +177,13 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
     }
     const appendMessage = (message: SessionMessage.Message) => insertMessage(db, event, message)
     const adapter: SessionMessageUpdater.Adapter = {
+      getMessage(messageID) {
+        return db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.id, messageID), eq(SessionMessageTable.session_id, event.data.sessionID))).get().pipe(
+          Effect.orDie,
+          Effect.map((row) => row ? decodeRow(row) : undefined),
+        )
+      },
+      updateMessage,
       getCurrentAssistant() {
         return Effect.gen(function* () {
           // A newer turn supersedes stale incomplete rows; never resume an older assistant projection.
@@ -530,6 +537,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.PromptCompleted, (event) => run(db, event))
     yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
+    yield* events.project(SessionEvent.MessagesHidden, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))

@@ -2,7 +2,7 @@ export * as PermissionReviewer from "./reviewer"
 
 import path from "path"
 import { LLM, LLMClient, LLMEvent, Tool } from "@opencode-ai/llm"
-import { Cause, Context, DateTime, Effect, FileSystem, Layer, Schema, Semaphore, Stream } from "effect"
+import { Cause, Clock, Context, DateTime, Effect, FileSystem, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import { and, eq } from "drizzle-orm"
 import { Config } from "../config"
 import { ConfigAutoReview } from "../config/auto-review"
@@ -88,58 +88,93 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const prompt = items.map((item) => item.text).join("\n\n")
       const model = { id: ModelV2.ID.make(selected.model.id), providerID: ProviderV2.ID.make(selected.model.provider) }
       const reviewerSession = yield* getReviewerSession(session, model)
-      const reviewerRequestID = SessionMessage.ID.create()
-      // 协议文本可持久检查，但使用synthetic事件，不能在后续审查中充当人类授权。
-      yield* events.publish(SessionEvent.Synthetic, {
-        sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
-        text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${prompt}`,
-      }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
       yield* updateToolAutoReview(input, { status: "reviewing", sessionID: reviewerSession })
-      const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
-        permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
+      const protocolError = new Failed({ reason: "reviewer did not call permission_review_decision" })
+      const deadline = (yield* Clock.currentTimeMillis) + (options.timeout_ms ?? 90_000)
+      const decodeAssessment = Schema.decodeUnknownOption(PermissionReviewerSchema.Assessment)
+      const decodeJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
+      const runReviewerAttempt = (attemptPrompt: string, hideProtocolFailure: boolean) => Effect.gen(function* () {
+        const reviewerRequestID = SessionMessage.ID.create()
+        // 每次尝试保留真实请求；相同reviewID不代替请求/助手的独立身份。
+        yield* events.publish(SessionEvent.Synthetic, {
+          sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
+          text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${attemptPrompt}`,
+        }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
+        const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
+          permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
+        })
+        let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
+        let textOutput = ""
+        return yield* client.stream(LLM.request({
+          model: selected.model, system, prompt: attemptPrompt,
+          tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
+            description: "Submit the structured allow/deny decision for this permission review.",
+            parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
+          }) }),
+        })).pipe(
+          Stream.runForEach((event) => Effect.gen(function* () {
+            if (event.type === "tool-error") return yield* protocolError
+            yield* publisher.publish(event)
+            if (event.type === "provider-error") return yield* new Failed({ reason: event.message })
+            if (event.type === "text-delta") textOutput += event.text
+            if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
+            assessment = Option.getOrUndefined(decodeAssessment(event.input))
+            if (!assessment) return
+            yield* publisher.publish(LLMEvent.toolResult({
+              id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
+              output: { structured: { ...assessment, reviewID: input.reviewID, source: "tool_call" }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
+            }))
+          })),
+          Effect.flatMap(() => Effect.gen(function* () {
+            if (assessment) return assessment
+            // 仅接受整段Schema合法JSON，不从解释或Markdown中抽取片段。
+            const fallback = Option.getOrUndefined(Option.flatMap(decodeJson(textOutput.trim()), decodeAssessment))
+            if (!fallback) return yield* protocolError
+            const callID = `json_fallback_${input.reviewID}`
+            yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "permission_review_decision", input: fallback }))
+            yield* publisher.publish(LLMEvent.toolResult({
+              id: callID, name: "permission_review_decision", result: { type: "text", value: JSON.stringify(fallback) },
+              output: { structured: { ...fallback, reviewID: input.reviewID, source: "json_fallback" }, content: [{ type: "text", text: JSON.stringify(fallback) }] },
+            }))
+            return fallback
+          })),
+          // 两次尝试共享原有总期限；收尾在超时竞争之外，取消返回前必须完成投影。
+          Effect.timeoutOrElse({ duration: Math.max(0, deadline - (yield* Clock.currentTimeMillis)), orElse: () => Effect.fail(timedOut) }),
+          Effect.onExit((exit) => Effect.gen(function* () {
+            const finalizer = exit._tag === "Failure"
+            yield* publisher.flush(finalizer)
+            if (exit._tag === "Failure") {
+              const failure = Cause.squash(exit.cause)
+              const reason = failure instanceof Error ? failure.message : "Review cancelled"
+              yield* publisher.failUnsettledTools(reason, false, true)
+              yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
+            }
+            const settlement = publisher.stepSettlement()
+            if (exit._tag === "Success" || settlement) {
+              const usage = settlement?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+              // 每次真实消耗独立结算；隐藏失败轮次不退款，也不算入父请求。
+              yield* events.publish(SessionEvent.Step.Ended, {
+                sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.startAssistant(finalizer),
+                finish: settlement?.finish ?? "tool-calls", cost: SessionRunnerModel.cost(selected.pricing, usage), tokens: usage,
+              }, { finalizer })
+            }
+          })),
+          Effect.tapError((error) => {
+            if (error !== protocolError || !hideProtocolFailure) return Effect.void
+            return Effect.gen(function* () {
+              const timestamp = yield* DateTime.now
+              const assistantID = publisher.peekAssistantMessageID()
+              yield* events.publish(SessionEvent.MessagesHidden, {
+                sessionID: reviewerSession, timestamp,
+                messageIDs: assistantID ? [reviewerRequestID, assistantID] : [reviewerRequestID],
+                hidden: { time: DateTime.toEpochMillis(timestamp), reason: "permission-reviewer-protocol-retry" },
+              })
+            })
+          }),
+        )
       })
-      let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
-      // 只声明裁决协议：一次真实provider流，不接业务工具registry或会话执行循环。
-      const result = yield* client.stream(LLM.request({
-        model: selected.model, system, prompt,
-        tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
-          description: "Submit the structured allow/deny decision for this permission review.",
-          parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
-        }) }),
-      })).pipe(
-        Stream.runForEach((event) => Effect.gen(function* () {
-          yield* publisher.publish(event)
-          if (event.type === "provider-error" || event.type === "tool-error") return yield* new Failed({ reason: event.message })
-          if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
-          // 真实reasoning/text在裁决前已经落盘；同一Schema验证最终输入，绝不执行该工具。
-          assessment = yield* Schema.decodeUnknownEffect(PermissionReviewerSchema.Assessment)(event.input).pipe(Effect.mapError((error) => new Failed({ reason: error.message })))
-          yield* publisher.publish(LLMEvent.toolResult({
-            id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
-            output: { structured: { ...assessment, reviewID: input.reviewID }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
-          }))
-        })),
-        Effect.flatMap(() => assessment ? Effect.succeed(assessment) : Effect.fail(new Failed({ reason: "reviewer did not call permission_review_decision" }))),
-        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
-        Effect.onExit((exit) => Effect.gen(function* () {
-          const finalizer = exit._tag === "Failure"
-          yield* publisher.flush(finalizer)
-          if (exit._tag === "Failure") {
-            const failure = Cause.squash(exit.cause)
-            const reason = failure instanceof Error ? failure.message : "Review cancelled"
-            // 失败/取消闭合真实残片和工具，沿退出安全通知模式，不伪造成功助手。
-            yield* publisher.failUnsettledTools(reason, false, true)
-            yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
-          }
-          const settlement = publisher.stepSettlement()
-          if (exit._tag === "Success" || settlement) {
-            const usage = settlement?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
-            // 已确认消耗留在审查子会话；失败不能退款，也不能算进父请求的账本。
-            yield* events.publish(SessionEvent.Step.Ended, {
-              sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.startAssistant(finalizer),
-              finish: settlement?.finish ?? "tool-calls", cost: SessionRunnerModel.cost(selected.pricing, usage), tokens: usage,
-            }, { finalizer })
-          }
-        })),
+      const result = yield* runReviewerAttempt(prompt, true).pipe(
+        Effect.catchIf((error) => error === protocolError, () => runReviewerAttempt(`${prompt}\n\n${PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT}`, false)),
       )
       yield* updateToolAutoReview(input, { status: result.outcome === "allow" ? "allowed" : "denied", result })
       return {

@@ -490,6 +490,15 @@ export namespace RevertEvent {
   })
 }
 
+// 当前Session事件，供真实history/SSE重放同一失败轮次的可见性，不借用V1消息事件。
+export const MessagesHidden = Event.define({
+  type: "session.next.messages.hidden",
+  ...options,
+  schema: {
+    ...Base, messageIDs: Schema.Array(SessionMessage.ID), hidden: SessionMessage.Hidden,
+  },
+})
+
 export const DurableDefinitions = Event.inventory(
   AgentSwitched,
   ModelSwitched,
@@ -501,6 +510,7 @@ export const DurableDefinitions = Event.inventory(
   RequestEstimated,
   ContextUpdated,
   Synthetic,
+  MessagesHidden,
   Shell.Started,
   Shell.Ended,
   Step.Started,
@@ -536,6 +546,7 @@ export const Definitions = Event.inventory(
   RequestEstimated,
   ContextUpdated,
   Synthetic,
+  MessagesHidden,
   Shell.Started,
   Shell.Ended,
   Step.Started,

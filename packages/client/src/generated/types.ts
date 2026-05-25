@@ -143,7 +143,7 @@ export type AgentsListOutput = {
     readonly permissions: ReadonlyArray<{
       readonly action: string
       readonly resource: string
-      readonly effect: "allow" | "deny" | "ask"
+      readonly effect: "allow" | "deny" | "ask" | "auto"
     }>
   }>
 }
@@ -268,6 +268,15 @@ export type SessionsListOutput = {
             readonly attachments: number
             readonly total: number
           }
+          readonly media?: {
+            readonly rawChars: number
+            readonly textChars: number
+            readonly tokens: number
+            readonly count: number
+            readonly imageTokens: number
+            readonly pdfTokens: number
+            readonly otherTokens: number
+          }
         }
         readonly afterPartID?: string
         readonly contextLimit?: number
@@ -365,6 +374,15 @@ export type SessionsCreateOutput = {
             readonly attachments: number
             readonly total: number
           }
+          readonly media?: {
+            readonly rawChars: number
+            readonly textChars: number
+            readonly tokens: number
+            readonly count: number
+            readonly imageTokens: number
+            readonly pdfTokens: number
+            readonly otherTokens: number
+          }
         }
         readonly afterPartID?: string
         readonly contextLimit?: number
@@ -437,6 +455,15 @@ export type SessionsGetOutput = {
             readonly toolOutput: number
             readonly attachments: number
             readonly total: number
+          }
+          readonly media?: {
+            readonly rawChars: number
+            readonly textChars: number
+            readonly tokens: number
+            readonly count: number
+            readonly imageTokens: number
+            readonly pdfTokens: number
+            readonly otherTokens: number
           }
         }
         readonly afterPartID?: string
@@ -711,6 +738,15 @@ export type SessionsContextOutput = {
               readonly attachments: number
               readonly total: number
             }
+            readonly media?: {
+              readonly rawChars: number
+              readonly textChars: number
+              readonly tokens: number
+              readonly count: number
+              readonly imageTokens: number
+              readonly pdfTokens: number
+              readonly otherTokens: number
+            }
           }
           readonly afterPartID?: string
           readonly contextLimit?: number
@@ -963,6 +999,15 @@ export type SessionsHistoryOutput = {
                 readonly attachments: number
                 readonly total: number
               }
+              readonly media?: {
+                readonly rawChars: number
+                readonly textChars: number
+                readonly tokens: number
+                readonly count: number
+                readonly imageTokens: number
+                readonly pdfTokens: number
+                readonly otherTokens: number
+              }
             }
             readonly afterPartID?: string
             readonly contextLimit?: number
@@ -993,6 +1038,19 @@ export type SessionsHistoryOutput = {
           readonly sessionID: string
           readonly messageID: string
           readonly text: string
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "session.next.messages.hidden"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly timestamp: number
+          readonly sessionID: string
+          readonly messageIDs: ReadonlyArray<string>
+          readonly hidden: { readonly time: number; readonly reason: "permission-reviewer-protocol-retry" }
         }
       }
     | {
@@ -1052,6 +1110,15 @@ export type SessionsHistoryOutput = {
                 readonly toolOutput: number
                 readonly attachments: number
                 readonly total: number
+              }
+              readonly media?: {
+                readonly rawChars: number
+                readonly textChars: number
+                readonly tokens: number
+                readonly count: number
+                readonly imageTokens: number
+                readonly pdfTokens: number
+                readonly otherTokens: number
               }
             }
             readonly afterPartID?: string
@@ -1544,6 +1611,15 @@ export type SessionsEventsOutput =
               readonly attachments: number
               readonly total: number
             }
+            readonly media?: {
+              readonly rawChars: number
+              readonly textChars: number
+              readonly tokens: number
+              readonly count: number
+              readonly imageTokens: number
+              readonly pdfTokens: number
+              readonly otherTokens: number
+            }
           }
           readonly afterPartID?: string
           readonly contextLimit?: number
@@ -1574,6 +1650,19 @@ export type SessionsEventsOutput =
         readonly sessionID: string
         readonly messageID: string
         readonly text: string
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "session.next.messages.hidden"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly timestamp: number
+        readonly sessionID: string
+        readonly messageIDs: ReadonlyArray<string>
+        readonly hidden: { readonly time: number; readonly reason: "permission-reviewer-protocol-retry" }
       }
     }
   | {
@@ -1633,6 +1722,15 @@ export type SessionsEventsOutput =
               readonly toolOutput: number
               readonly attachments: number
               readonly total: number
+            }
+            readonly media?: {
+              readonly rawChars: number
+              readonly textChars: number
+              readonly tokens: number
+              readonly count: number
+              readonly imageTokens: number
+              readonly pdfTokens: number
+              readonly otherTokens: number
             }
           }
           readonly afterPartID?: string
@@ -2058,6 +2156,15 @@ export type SessionsMessageOutput = {
               readonly attachments: number
               readonly total: number
             }
+            readonly media?: {
+              readonly rawChars: number
+              readonly textChars: number
+              readonly tokens: number
+              readonly count: number
+              readonly imageTokens: number
+              readonly pdfTokens: number
+              readonly otherTokens: number
+            }
           }
           readonly afterPartID?: string
           readonly contextLimit?: number
@@ -2252,6 +2359,15 @@ export type MessagesListOutput = {
               readonly toolOutput: number
               readonly attachments: number
               readonly total: number
+            }
+            readonly media?: {
+              readonly rawChars: number
+              readonly textChars: number
+              readonly tokens: number
+              readonly count: number
+              readonly imageTokens: number
+              readonly pdfTokens: number
+              readonly otherTokens: number
             }
           }
           readonly afterPartID?: string
