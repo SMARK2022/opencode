@@ -40,6 +40,7 @@ import { FSUtil } from "./fs-util"
 import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
 import type { PermissionV2 } from "./permission"
 import { SessionListing } from "./session/listing"
+import { Global } from "./global"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -290,7 +291,8 @@ const layer = Layer.effect(
               .where(eq(ProjectTable.id, input.project)).get().pipe(Effect.orDie)
             if (!project) return []
             // 已公开的 subpath 进入真实查询；空根与普通 project 仍是不同的筛选意图。
-            conditions.push(SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath) }))
+            const condition = SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath), home: Global.Path.home })
+            if (condition) conditions.push(condition)
           }
         }
         // #121：V2 list 与 opencode 共用 searchCondition
