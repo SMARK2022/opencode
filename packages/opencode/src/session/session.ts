@@ -914,7 +914,8 @@ function listByProject(
   }
   if (input.path !== undefined) {
     // 已定义的空根也使用共享相关查询，不能被真值判断吞掉。
-    conditions.push(SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory }))
+    const condition = SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory, home: input.scope !== "project" ? Global.Path.home : undefined })
+    if (condition) conditions.push(condition)
   } else {
     conditions.push(eq(SessionTable.project_id, input.projectID))
     if (input.scope !== "project" && input.directory) conditions.push(eq(SessionTable.directory, input.directory))
@@ -937,7 +938,7 @@ function listByProject(
     // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
     .select(selection)
     .from(SessionTable)
-    .where(and(...conditions))
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(SessionTable.time_updated))
     .limit(limit)
     .all()

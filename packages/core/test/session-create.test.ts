@@ -76,6 +76,7 @@ describe("SessionV2.create", () => {
       { title: "cross-owner-parent", project_id: otherID, directory: path.join(repo, "packages"), path: null },
       { title: "global-alias", project_id: ProjectV2.ID.global, directory: foreign, path: SessionPath.relative("/", outer).replace(/^[A-Za-z]:\//, "") },
       { title: "unrelated", project_id: otherID, directory: foreign, path: "unrelated" },
+      { title: "unrelated-child", project_id: otherID, directory: path.join(foreign, "child"), path: "child" },
       { title: "other-workspace", project_id: projectID, directory: child, path: "packages/a" },
     ]
     // 同一创建时间强制验证 ID 破同分和双向 cursor；数据只进入隔离测试数据库。
@@ -99,6 +100,49 @@ describe("SessionV2.create", () => {
     const back = next[0]
     if (!back) return yield* Effect.die("Missing next related page")
     expect((yield* session.list({ ...query, limit: 2, anchor: { id: back.id, time: DateTime.toEpochMillis(back.time.created), direction: "previous" } })).map(item => item.id)).toEqual(first.map(item => item.id))
+
+    // 同一真实查询覆盖home全局视图，环境只在当前测试作用域内切换并恢复。
+    const previousHome = process.env.OPENCODE_TEST_HOME
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (previousHome === undefined) delete process.env.OPENCODE_TEST_HOME
+      if (previousHome !== undefined) process.env.OPENCODE_TEST_HOME = previousHome
+    }))
+    process.env.OPENCODE_TEST_HOME = child
+    const home = yield* session.list(query)
+    expect(home.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "sibling", "global-parent", "legacy", "cross-owner-parent", "global-alias", "unrelated", "unrelated-child"])
+    expect((yield* session.list({ ...query, search: "unrelated", limit: 1 })).map(item => item.title)).toEqual(["unrelated"])
+    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
+    // 配置HOME隔离时，会话仍按源用户目录识别，过滤继续由同一真实SQL执行。
+    const previousSessionHome = process.env.OPENCODE_SESSION_HOME
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (previousSessionHome === undefined) delete process.env.OPENCODE_SESSION_HOME
+      if (previousSessionHome !== undefined) process.env.OPENCODE_SESSION_HOME = previousSessionHome
+    }))
+    process.env.OPENCODE_SESSION_HOME = child
+    process.env.OPENCODE_TEST_HOME = foreign
+    expect((yield* session.list(query)).map(item => item.title)).toEqual(home.map(item => item.title))
+    expect((yield* session.list({ ...query, search: "unrelated", limit: 1 })).map(item => item.title)).toEqual(["unrelated"])
+    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
+    // 非home视图只并入源home本身，不连带展开它的子目录或整个其他项目。
+    process.env.OPENCODE_SESSION_HOME = foreign
+    const isolated = (yield* session.list(query)).map(item => item.title)
+    expect(isolated).toContain("unrelated")
+    expect(isolated).not.toContain("unrelated-child")
+    expect((yield* session.list({ project: projectID, workspaceID })).map(item => item.title)).not.toContain("unrelated")
+    if (previousSessionHome === undefined) delete process.env.OPENCODE_SESSION_HOME
+    if (previousSessionHome !== undefined) process.env.OPENCODE_SESSION_HOME = previousSessionHome
+    // 非home查询只并入home本身，不能把其子目录或其他兄弟目录一并展开。
+    process.env.OPENCODE_TEST_HOME = foreign
+    const outside = (yield* session.list(query)).map(item => item.title)
+    expect(outside).toContain("unrelated")
+    expect(outside).not.toContain("unrelated-child")
+    expect(outside).not.toContain("sibling")
+    expect((yield* session.list({ project: projectID, workspaceID })).map(item => item.title)).not.toContain("unrelated")
+    if (process.platform === "win32") {
+      // 历史Windows拼写与派生绝对cwd应命中同一home，不能再受盘符或尾斜杠分裂影响。
+      process.env.OPENCODE_TEST_HOME = child.replaceAll("\\", "/").toUpperCase() + "/"
+      expect((yield* session.list(query)).map(item => item.title)).toContain("unrelated")
+    }
   }))
 
   it.effect("creates a fresh projected session when the ID is omitted", () =>
