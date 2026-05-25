@@ -115,6 +115,7 @@ import {
   PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
   type PendingToolInputStats,
 } from "./pending-tool-input"
+import { useVscodeNotebookToolView } from "./notebook-tool"
 
 addDefaultParsers(parsers.parsers)
 
@@ -1934,6 +1935,10 @@ type ToolProps<T> = {
 }
 
 const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
+// 工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
+// generic/plugin tool 的标题参数展示；真实内容仍由完成态的 notebook diff/source
+// card 或 generic output card 展示，避免 pending 阶段刷屏但不丢失结果可见性。
+const TOOL_INPUT_VALUE_MAX_LENGTH = 120
 
 function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
   const lines = input.split("\n")
@@ -2008,28 +2013,69 @@ function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
   const ctx = use()
   const output = createMemo(() => props.output?.trim() ?? "")
+  const pendingStats = createPendingToolInputStats(() => props.part)
+  const notebook = useVscodeNotebookToolView({
+    tool: () => props.tool,
+    input: () => props.input as Record<string, unknown>,
+    metadata: () => props.metadata as Record<string, unknown>,
+    output,
+    status: () => props.part.state.status,
+    pendingStats,
+    width: () => ctx.width,
+    diffWrapMode: ctx.diffWrapMode,
+  })
+  const notebookInline = createMemo(() => {
+    const view = notebook()
+    return view?.mode === "inline" ? view : undefined
+  })
+  const notebookBlock = createMemo(() => {
+    const view = notebook()
+    return view?.mode === "block" ? view : undefined
+  })
 
   return (
-    <Show
-      when={props.output && ctx.showGenericToolOutput()}
-      fallback={
+    <Switch>
+      <Match when={notebookInline()}>
+        {(view) => (
+          <InlineTool icon={view().icon} pending={view().pending} complete={view().complete} part={props.part}>
+            {view().children}
+          </InlineTool>
+        )}
+      </Match>
+      <Match when={notebookBlock()}>
+        {(view) => (
+          <BlockTool
+            title={view().title}
+            part={props.part}
+            maxLines={view().maxLines ?? 10}
+            threshold={view().threshold ?? 20}
+            totalLines={view().totalLines}
+            totalChars={view().totalChars}
+            preview={view().preview}
+          >
+            {view().body}
+          </BlockTool>
+        )}
+      </Match>
+      <Match when={props.output && ctx.showGenericToolOutput()}>
+        <BlockTool
+          title={`# ${props.tool} ${input(props.input)}`}
+          part={props.part}
+          maxLines={10}
+          threshold={20}
+          totalLines={output().split("\n").length}
+          totalChars={output().length}
+          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+        >
+          <text fg={theme.text}>{output()}</text>
+        </BlockTool>
+      </Match>
+      <Match when={true}>
         <InlineTool icon="⚙" pending="Writing command..." complete={true} part={props.part}>
           {props.tool} {input(props.input)}
         </InlineTool>
-      }
-    >
-      <BlockTool
-        title={`# ${props.tool} ${input(props.input)}`}
-        part={props.part}
-        maxLines={10}
-        threshold={20}
-        totalLines={output().split("\n").length}
-        totalChars={output().length}
-        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
-      >
-        <text fg={theme.text}>{output()}</text>
-      </BlockTool>
-    </Show>
+      </Match>
+    </Switch>
   )
 }
 
@@ -3005,7 +3051,15 @@ function input(input: Record<string, any>, omit?: string[]): string {
     return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
   })
   if (primitives.length === 0) return ""
-  return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
+  return `[${primitives.map(([key, value]) => `${key}=${inputValue(value)}`).join(", ")}]`
+}
+
+function inputValue(value: string | number | boolean) {
+  if (typeof value !== "string") return String(value)
+  const lines = value.split("\n")
+  if (lines.length > 1) return `<${lines.length} lines, ${value.length} chars>`
+  if (value.length <= TOOL_INPUT_VALUE_MAX_LENGTH) return value
+  return value.slice(0, TOOL_INPUT_VALUE_MAX_LENGTH).trimEnd() + "..."
 }
 
 function filetype(input?: string) {

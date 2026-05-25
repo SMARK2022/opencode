@@ -1,5 +1,7 @@
 export type PendingToolInputStats = {
   filePath?: string
+  cellId?: string
+  operation?: string
   fileCount: number
   added: number
   removed: number
@@ -11,9 +13,39 @@ export function createPendingToolInputParser(tool: string) {
   if (tool === "apply_patch") return createApplyPatchInputParser()
   if (tool === "edit") return createEditInputParser()
   if (tool === "write") return createWriteInputParser()
+  if (tool === "vscode_notebook_edit") return createNotebookEditInputParser()
   return {
     push(_input: string) {},
     stats: () => undefined,
+  }
+}
+
+function createNotebookEditInputParser() {
+  let filePath = ""
+  let cellId = ""
+  let operation = ""
+  const oldCode = createLineCounter()
+  const newCode = createLineCounter()
+  const scanner = createJsonStringFieldScanner(["filePath", "cellId", "editType", "oldCode", "newCode"], (field, value) => {
+    if (field === "filePath") filePath += value
+    if (field === "cellId") cellId += value
+    if (field === "editType") operation += value
+    if (field === "oldCode") oldCode.push(value)
+    if (field === "newCode") newCode.push(value)
+  })
+  return {
+    push: scanner.push,
+    stats: () => {
+      // notebook edit 的 pending 统计只能来自模型正在流式生成的参数，不能在渲染线程
+      // 读取 VS Code 或 notebook 文件；full-cell replace/delete 的真实删除行数要等完成后的 diff。
+      const stats = pendingStats(filePath, filePath ? 1 : 0, newCode.count(), oldCode.count())
+      if (!stats && !cellId && !operation) return undefined
+      return {
+        ...(stats ?? { fileCount: filePath ? 1 : 0, added: 0, removed: 0, filePath: filePath || undefined }),
+        cellId: cellId || undefined,
+        operation: operation || undefined,
+      }
+    },
   }
 }
 
@@ -90,6 +122,8 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
   let pendingKey = ""
   let expectingValueFor = ""
   let activeField = ""
+  let arrayField = ""
+  let arrayFieldHasValue = false
   let key = ""
   let inString = false
   let escaping = false
@@ -152,7 +186,12 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
 
         if (char === '"') {
           inString = true
-          activeField = wanted.has(expectingValueFor) ? expectingValueFor : ""
+          activeField = wanted.has(expectingValueFor) ? expectingValueFor : arrayField
+          // notebook oldCode/newCode 支持 string[]；bridge 的 sourceProp 会用 "\n"
+          // 拼接数组项，所以 streaming 统计也必须补上这个隐式换行，否则
+          // pending 阶段的 +N/-N 会低估数组形式源码的行数。
+          if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
+          if (activeField && arrayField) arrayFieldHasValue = true
           expectingValueFor = ""
           key = ""
           continue
@@ -162,8 +201,19 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
           pendingKey = ""
           continue
         }
+        if (expectingValueFor && char === "[" && wanted.has(expectingValueFor)) {
+          arrayField = expectingValueFor
+          arrayFieldHasValue = false
+          expectingValueFor = ""
+          continue
+        }
+        if (arrayField && char === "]") {
+          arrayField = ""
+          arrayFieldHasValue = false
+          continue
+        }
         if (expectingValueFor && !/\s/.test(char)) expectingValueFor = ""
-        if (char === "," || char === "{" || char === "}") pendingKey = ""
+        if (!arrayField && (char === "," || char === "{" || char === "}")) pendingKey = ""
       }
     },
   }

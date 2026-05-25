@@ -85,7 +85,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
     applied, editType: "delete", opIndex: `~~${deletedIndex + 1}~~`, beforeCount, afterCount: notebook.cellCount,
     anchorCell: targetCell, deletedCellIndex: deletedIndex,
     deletedKind, deletedLang, deletedId, deletedLineCount, deletedFirst,
-    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview,
+    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview, beforeSource: deletedPreview, afterSource: "",
   })
 }
 
@@ -121,7 +121,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
   const applied = await applyNotebookEditAndWait(notebook, edit)
   const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
+  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
 }
 
 // ---------------------------------------------------------------------------
@@ -171,11 +171,12 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
   if (sourceRaw === undefined) throw new Error("newCode is required for edit")
   const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
+  const beforeSource = targetCell.document.getText()
 
   const edit = new vscode.WorkspaceEdit()
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
   const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +198,7 @@ async function handleTypeChange(
   let contextSummary: string | undefined
 
   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+  const beforeSource = targetCell.document.getText()
 
   if (oldCode) {
     // string-match on old source, then create new cell with changed type
@@ -217,7 +219,7 @@ async function handleTypeChange(
   const targetIndex = targetCell.index
   const applied = await applyNotebookEditAndWait(notebook, edit)
   const updatedCell = notebook.cellAt(targetIndex)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
 }
 
 // ---------------------------------------------------------------------------
@@ -225,13 +227,14 @@ async function handleTypeChange(
 // ---------------------------------------------------------------------------
 
 async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number) {
+  const beforeSource = targetCell.document.getText()
   const result = matchAndReplace(targetCell, oldCode, newCode)
   const contextSummary = buildContext(notebook, targetCell, result, newCode)
 
   const edit = new vscode.WorkspaceEdit()
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
   const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +497,8 @@ function compactEditResult(
     shiftedOldIdx?: number
     sourcePreview?: string
     contextSummary?: string
+    beforeSource?: string
+    afterSource?: string
   },
 ) {
   const lines: Array<string | undefined> = [
@@ -540,10 +545,16 @@ function compactEditResult(
       cellCountBefore: info.beforeCount,
       cellCountAfter: info.afterCount,
       anchorCellIndex: info.anchorCell?.index,
+      deletedCellIndex: info.deletedCellIndex,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,
       kind: info.kind,
       language: info.language,
+      // opencode TUI 只从 data 派生展示 metadata，不改变 bridge 给模型的 summary。
+      // before/after 保持 cell 级源文本，确保 notebook edit 完成态能渲染真实 diff，
+      // pending 态仍只能显示参数行数估算，不能在 UI 线程重新读 VS Code 文档。
+      beforeSource: info.beforeSource,
+      afterSource: info.afterSource,
     },
   }
 }

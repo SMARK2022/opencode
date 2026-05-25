@@ -387,6 +387,266 @@ test("pending tool line counts update from streamed raw deltas", async () => {
   )
 })
 
+test("pending notebook edit shows throttled line counts without rendering raw source", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_live_delta", 1)],
+    {
+      msg_notebook_live_delta: [pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", "")],
+    },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
+
+      emit(
+        partDeltaEvent(
+          "evt_notebook_live_delta",
+          "msg_notebook_live_delta",
+          "part_notebook_live_delta",
+          JSON.stringify({
+            filePath: "notebooks/analysis notebook.ipynb",
+            cellId: "#VSC-12345678",
+            editType: "edit",
+            oldCode: "old one\nold two",
+            newCode: ["new one", "new two", "new three"],
+          }),
+        ),
+      )
+
+      await Bun.sleep(50)
+      await app.renderOnce()
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2"))).toBe(false)
+
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2")),
+      )
+      expect(frame.some((line) => line.includes("new two"))).toBe(false)
+    },
+  )
+})
+
+test("completed notebook edit renders a diff card instead of raw generic input", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_edit", 1)],
+    {
+      msg_notebook_edit: [
+        completedToolPart(
+          "part_notebook_edit",
+          "msg_notebook_edit",
+          "vscode_notebook_edit",
+          {
+            filePath: "notebooks/analysis.ipynb",
+            cellId: "#VSC-12345678",
+            editType: "edit",
+            newCode: "RAW_ONLY_SHOULD_NOT_RENDER",
+          },
+          {
+            vscodeNotebook: {
+              view: "edit",
+              path: "notebooks/analysis.ipynb",
+              cellLabel: "c3",
+              editType: "edit",
+              language: "python",
+              dirty: true,
+              cellCountBefore: 4,
+              cellCountAfter: 4,
+              diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1,2 @@", "-old value", "+new value", "+rendered diff line"].join("\n"),
+              added: 2,
+              removed: 1,
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")))
+      expect(frame.some((line) => line.includes("rendered diff line"))).toBe(true)
+      expect(frame.some((line) => line.includes("RAW_ONLY_SHOULD_NOT_RENDER"))).toBe(false)
+    },
+  )
+})
+
+test("notebook tool switches from pending inline summary to completed rich card", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_transition", 1)],
+    {
+      msg_notebook_transition: [pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", "")],
+    },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
+
+      emit(
+        partUpdatedEvent(
+          "evt_notebook_transition_done",
+          completedToolPart(
+            "part_notebook_transition",
+            "msg_notebook_transition",
+            "vscode_notebook_edit",
+            { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-12345678", editType: "edit" },
+            {
+              vscodeNotebook: {
+                view: "edit",
+                path: "notebooks/analysis.ipynb",
+                cellLabel: "c3",
+                editType: "edit",
+                diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1 @@", "-before transition", "+after transition"].join("\n"),
+                added: 1,
+                removed: 1,
+              },
+            },
+          ),
+        ),
+      )
+
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("after transition")))
+      expect(frame.some((line) => line.includes("Preparing notebook edit"))).toBe(false)
+    },
+  )
+})
+
+test("notebook summary renders cells from notebook metadata without enabling generic output", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_summary", 1)],
+    {
+      msg_notebook_summary: [
+        completedToolPart(
+          "part_notebook_summary",
+          "msg_notebook_summary",
+          "vscode_notebook_summary",
+          { filePath: "notebooks/analysis.ipynb" },
+          {
+            vscodeNotebook: {
+              view: "summary",
+              path: "notebooks/analysis.ipynb",
+              dirty: false,
+              runtime: "Python 3.11",
+              cells: [
+                { i: 1, id: "#VSC-11111111", kind: "markdown", lang: "markdown", lines: 3, exec: "not-run", existing_outs: [], first: "# Analysis" },
+                { i: 2, id: "#VSC-22222222", kind: "code", lang: "python", lines: 5, exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z", existing_outs: ["error"], first: "raise Error" },
+              ],
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) && lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
+      )
+      expect(frame.some((line) => line.includes("Notebook:"))).toBe(false)
+    },
+  )
+})
+
+test("notebook env renders operation status from notebook metadata", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_env", 1)],
+    {
+      msg_notebook_env: [
+        completedToolPart(
+          "part_notebook_env",
+          "msg_notebook_env",
+          "vscode_notebook_env",
+          { filePath: "notebooks/analysis.ipynb", operation: "configure", reason: "path with spaces | no shell" },
+          {
+            vscodeNotebook: {
+              view: "env",
+              path: "notebooks/analysis.ipynb",
+              operation: "configure",
+              status: "needs-selection",
+              guidance: "Select a kernel manually from the notebook toolbar, then call configure to verify.",
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")))
+      expect(frame.some((line) => line.includes("Select a kernel manually"))).toBe(true)
+      expect(frame.some((line) => line.includes("path with spaces | no shell"))).toBe(false)
+    },
+  )
+})
+
+test("notebook source, run, and output tools render rich notebook cards", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_readbacks", 1)],
+    {
+      msg_notebook_readbacks: [
+        completedToolPart(
+          "part_notebook_source",
+          "msg_notebook_readbacks",
+          "vscode_notebook_source",
+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-source" },
+          {
+            vscodeNotebook: {
+              view: "source",
+              path: "notebooks/analysis.ipynb",
+              target: "cell 3",
+              cellId: "#VSC-source",
+              returned: 2,
+              totalLines: 12,
+              truncated: false,
+            },
+          },
+        ),
+        completedToolPart(
+          "part_notebook_run",
+          "msg_notebook_readbacks",
+          "vscode_notebook_run",
+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-run" },
+          {
+            vscodeNotebook: {
+              view: "run",
+              path: "notebooks/analysis.ipynb",
+              target: "cell 4",
+              completed: true,
+              cells: [
+                {
+                  i: 4,
+                  id: "#VSC-run",
+                  kind: "code",
+                  lang: "python",
+                  lines: 3,
+                  exec: "current-run #4 succeeded 12ms ended=2026-05-25T00:00:00.000Z",
+                  existing_outs: ["text"],
+                  artifacts: [{ mime: "text/plain", bytes: 32, preview: "ok", artifactPath: ".opencode/cache/notebook-outputs/run.txt" }],
+                },
+              ],
+            },
+          },
+        ),
+        completedToolPart(
+          "part_notebook_output",
+          "msg_notebook_readbacks",
+          "vscode_notebook_output",
+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-output" },
+          {
+            vscodeNotebook: {
+              view: "output",
+              path: "notebooks/analysis.ipynb",
+              cell: { i: 5, id: "#VSC-output", kind: "code", lang: "python", lines: 2, existing_outs: ["png"] },
+              artifacts: [{ mime: "image/png", bytes: 4096, preview: "<image/png 4096 bytes>", artifactPath: ".opencode/cache/notebook-outputs/plot.png" }],
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Notebook source")) &&
+          lines.some((line) => line.includes("Notebook run") && line.includes("completed")) &&
+          lines.some((line) => line.includes(".opencode/cache/notebook-outputs/run.txt")) &&
+          lines.some((line) => line.includes("Notebook output") && line.includes("1 artifacts")) &&
+          lines.some((line) => line.includes(".opencode/cache/notebook-outputs/plot.png")),
+      )
+      expect(frame.some((line) => line.includes("vscode_notebook_source ["))).toBe(false)
+    },
+    {},
+    { height: 24 },
+  )
+})
+
 test("shell tool renders auto review as a second status line", async () => {
   await withRenderedSession(
     [assistantMessage("msg_auto_review", 1)],
@@ -1417,6 +1677,18 @@ function partDeltaEvent(id: string, messageID: string, partID: string, delta: st
       id,
       type: "message.part.delta",
       properties: { sessionID, messageID, partID, field, delta },
+    },
+  }
+}
+
+function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id,
+      type: "message.part.updated",
+      properties: { sessionID, part, time: 2 },
     },
   }
 }
