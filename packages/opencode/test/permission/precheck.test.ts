@@ -257,13 +257,13 @@ describe("permission precheck bash classifier", () => {
           files: [{ type: "delete", relativePath: "docs/old name.md", deletions: 4 }],
         },
       }),
-    ).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+    ).toMatchObject({ level: "cautious" })
   })
 
   test("keeps structured workspace updates on the existing non-shell general path", () => {
-    // Update-only diffs still need reviewer/user judgment when routed through auto,
-    // but they are not deletion-specific risk. Keeping them general preserves the
-    // existing non-shell behavior while allowing delete to cross the cautious seam.
+    // Update-only diffs are not deletion-specific risk. Keeping them general
+    // preserves deterministic allow for ordinary edits while delete crosses the
+    // cautious seam.
     expect(
       PermissionPrecheck.evaluate({
         permission: "edit",
@@ -291,11 +291,10 @@ describe("permission precheck bash classifier", () => {
     ).toMatchObject({ level: "general" })
   })
 
-  test("marks apply_patch external delete evidence cautious", () => {
+  test("keeps apply_patch external delete evidence on the external directory cautious path", () => {
     // External-directory preflight happens before the final edit diff exists. The
-    // apply_patch operation payload is the only delete evidence available there,
-    // so the precheck must treat that operation as the same cautious filesystem
-    // effect without relying on the target path alone.
+    // external path boundary is cautious on its own, so tool delete metadata must
+    // not be required for reviewer routing.
     expect(
       PermissionPrecheck.evaluate({
         permission: "external_directory",
@@ -307,7 +306,56 @@ describe("permission precheck bash classifier", () => {
           patchText: "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
         },
       }),
-    ).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+    ).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks external directory access cautious", () => {
+    // external_directory is the review boundary for every external path, including
+    // path-only read tools with spaces in the target path. This keeps
+    // glob/grep/lsp/repo_overview from falling back to a clickable ask just
+    // because they do not have write-style operation payloads.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "external_directory",
+        patterns: ["/Users/alice/Logs With Spaces/*"],
+        metadata: { agent: "auto", filepath: "/Users/alice/Logs With Spaces/app.log" },
+      }),
+    ).toMatchObject({ level: "cautious" })
+  })
+
+  test("keeps dangerous shell external directory effects denied", () => {
+    // External-directory review is intentionally below deterministic dangerous
+    // shell denial: an obviously destructive payload must not be made reviewable
+    // merely because it also references an external path.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "external_directory",
+        patterns: ["/Users/alice/*"],
+        metadata: { action_kind: "shell", agent: "auto", command: "rm -rf /", cwd: "/repo", shell: "bash" },
+      }),
+    ).toMatchObject({ level: "dangerous" })
+  })
+
+  test("keeps dangerous shell external directory effects denied with conflicting tool metadata", () => {
+    // The shell dangerous invariant wins over malformed/conflicting tool evidence:
+    // external_directory must never become reviewer-approvable when the same
+    // permission payload also contains a critical shell command.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "external_directory",
+        patterns: ["/Users/alice/*"],
+        metadata: {
+          action_kind: "shell",
+          agent: "auto",
+          command: "rm -rf /",
+          cwd: "/repo",
+          shell: "bash",
+          tool: "apply_patch",
+          operation: "delete",
+          patchText: "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
+        },
+      }),
+    ).toMatchObject({ level: "dangerous" })
   })
 
   test("filters broad always-allow prefixes", () => {

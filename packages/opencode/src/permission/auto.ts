@@ -62,32 +62,18 @@ export function evaluate(
   return Effect.gen(function* () {
     const precheck = PermissionPrecheck.evaluate(input)
     const isShell = input.permission === "bash"
-    const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
-    const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
     // [local-smark] auto 四级预审路由开始
-    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
-    // shell general 也直接允许，避免 auto shell 回到人工确认；非 shell general
-    // 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是用户
-    // 显式配置的例外，用来保留原本“低风险也审”的能力。
+    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 和 general 默认
+    // 直接允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。
+    // strict 是用户显式配置的例外，用来保留原本“低风险也审”的能力。
     if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
-    if (isShellExternalDirectory) {
-      // shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性
-      // 预审，不能再单独调用 reviewer；否则一次 bash 操作会在 external_directory
-      // 和 bash 两个权限点重复消耗 LLM。非 dangerous 情况放行给后续 bash auto。
-      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
-    }
-    if (input.permission === "external_directory" && !isToolExternalDirectory) {
-      // 无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
-      // auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
-      // metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断。
-      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
-    }
     if (precheck.level === "safe" && !input.strict) {
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    if (precheck.level === "general" && isShell && !input.strict) {
-      // 当前开发测试期要求 auto shell 不弹人工确认：无法精确判定但未命中
-      // dangerous/cautious 的命令先放行；非 shell general 继续走 reviewer。
+    if (precheck.level === "general" && !input.strict) {
+      // general 是“未知但未命中 cautious/dangerous”的确定性 allow 边界；reviewer
+      // 只承接 cautious。这样普通 edit/add/update 和未知 shell 不会消耗 LLM 或
+      // 回到可点击 ask，真正敏感的 delete/external-directory 会先被 precheck 提升。
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
     // [local-smark] auto 四级预审路由结束
@@ -161,28 +147,6 @@ function errorTag(error: unknown) {
   // TaggedErrorClass instances expose `_tag`, but tests may use plain objects to
   // assert router behavior without depending on reviewer service construction.
   return error && typeof error === "object" && "_tag" in error && typeof error._tag === "string" ? error._tag : undefined
-}
-
-function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
-  // action_kind alone is caller-controlled metadata; require a known tool and
-  // its operation payload so path-only requests still fall back to user approval.
-  if (metadata.action_kind !== "tool") return false
-  if (metadata.tool === "read") return metadata.operation === "read"
-  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
-  if (metadata.tool === "edit") {
-    return (
-      (metadata.operation === "edit" || metadata.operation === "create") &&
-      typeof metadata.oldString === "string" &&
-      typeof metadata.newString === "string"
-    )
-  }
-  if (metadata.tool === "apply_patch") {
-    return (
-      (metadata.operation === "add" || metadata.operation === "update" || metadata.operation === "delete" || metadata.operation === "move") &&
-      typeof metadata.patchText === "string"
-    )
-  }
-  return false
 }
 
 function errorMessage(error: unknown) {

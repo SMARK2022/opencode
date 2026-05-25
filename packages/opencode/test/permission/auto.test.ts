@@ -14,7 +14,11 @@ const bash = (command: string, reviewer?: PermissionAuto.Reviewer) =>
     ),
   )
 
-const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Reviewer) =>
+const shellExternalDirectory = (
+  command: string,
+  reviewer?: PermissionAuto.Reviewer,
+  metadata?: Readonly<Record<string, unknown>>,
+) =>
   Effect.runPromise(
     PermissionAuto.evaluate(
       {
@@ -25,6 +29,7 @@ const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Revie
           command,
           cwd: process.cwd(),
           shell: process.platform === "win32" ? "powershell" : "bash",
+          ...metadata,
         },
       },
       reviewer,
@@ -195,31 +200,68 @@ describe("permission auto routing", () => {
     expect(called).toBe(true)
   })
 
-  test("uses shell evidence for external directory auto routing", async () => {
-    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({
-      action: "allow",
-      source: "precheck",
-    })
+  test("routes native auto external directory requests to cautious reviewer", async () => {
+    let safeCalled = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/Alice/Logs/*" : "/Users/alice/Logs With Spaces/*"],
+            metadata: {
+              agent: "auto",
+              filepath: process.platform === "win32" ? "C:/Users/Alice/Logs/app.log" : "/Users/alice/Logs With Spaces/app.log",
+            },
+          },
+          {
+            review: (input) =>
+              Effect.sync(() => {
+                safeCalled = true
+                // Native auto treats every external-directory boundary as the
+                // cautious review seam. Path-only read tools such as glob/grep do
+                // not need per-tool metadata just to avoid a clickable user ask.
+                expect(input.precheck.level).toBe("cautious")
+                return {
+                  action: "allow" as const,
+                  reason: "reviewer approved bounded external directory access",
+                  reviewID: "review_external_auto_path",
+                  risk_level: "medium" as const,
+                  user_authorization: "medium" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
+    expect(safeCalled).toBe(true)
 
     let called = false
     await expect(
-      shellExternalDirectory("cat ~/.aws/credentials", {
-        review: () =>
+      shellExternalDirectory(
+        "git status --porcelain",
+        {
+        review: (input) =>
           Effect.sync(() => {
             called = true
+            expect(input.precheck.level).toBe("cautious")
             return {
-              action: "deny" as const,
-              reason: "reviewer rejected sensitive external read",
-              reviewID: "review_external_shell",
-              risk_level: "high" as const,
-              user_authorization: "unknown" as const,
+              action: "allow" as const,
+              reason: `reviewer approved ${input.precheck.level} shell external directory access`,
+              reviewID: "review_external_shell_safe",
+              risk_level: "medium" as const,
+              user_authorization: "medium" as const,
             }
           }),
-      }),
-    ).resolves.toMatchObject({ action: "allow", source: "precheck" })
-    expect(called).toBe(false)
+        },
+        { agent: "auto" },
+      ),
+    ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
+    expect(called).toBe(true)
 
-    await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
+    await expect(shellExternalDirectory("rm -rf /", undefined, { agent: "auto" })).resolves.toMatchObject({
+      action: "deny",
+      source: "precheck",
+    })
   })
 
   test("routes tool-origin external directory auto decisions to reviewer", async () => {
@@ -256,7 +298,7 @@ describe("permission auto routing", () => {
     expect(called).toBe(true)
   })
 
-  test("keeps external directory requests without tool evidence on the user approval path", async () => {
+  test("routes external directory requests without tool evidence to reviewer", async () => {
     let called = false
     await expect(
       Effect.runPromise(
@@ -274,7 +316,7 @@ describe("permission auto routing", () => {
                 called = true
                 return {
                   action: "deny" as const,
-                  reason: "reviewer should not decide external directory access without tool evidence",
+                  reason: "reviewer rejected external directory access without tool evidence",
                   reviewID: "review_external_directory_without_evidence",
                   risk_level: "high" as const,
                   user_authorization: "unknown" as const,
@@ -283,11 +325,45 @@ describe("permission auto routing", () => {
           },
         ),
       ),
-    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
-    expect(called).toBe(false)
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
   })
 
-  test("keeps malformed tool-origin external directory requests on the user approval path", async () => {
+  test("routes native auto malformed external directory evidence to reviewer", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "external_directory",
+            patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+            metadata: {
+              agent: "auto",
+              action_kind: "tool",
+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
+            },
+          },
+          {
+            review: (input) =>
+              Effect.sync(() => {
+                called = true
+                expect(input.precheck.level).toBe("cautious")
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer rejected malformed external directory evidence",
+                  reviewID: "review_native_auto_malformed_external_directory",
+                  risk_level: "high" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
+  test("routes malformed tool-origin external directory requests to reviewer", async () => {
     let called = false
     await expect(
       Effect.runPromise(
@@ -306,7 +382,7 @@ describe("permission auto routing", () => {
                 called = true
                 return {
                   action: "deny" as const,
-                  reason: "reviewer should not decide malformed tool external directory evidence",
+                  reason: "reviewer rejected malformed tool external directory evidence",
                   reviewID: "review_malformed_tool_external_directory",
                   risk_level: "high" as const,
                   user_authorization: "unknown" as const,
@@ -315,11 +391,11 @@ describe("permission auto routing", () => {
           },
         ),
       ),
-    ).resolves.toMatchObject({ action: "ask", source: "precheck" })
-    expect(called).toBe(false)
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    expect(called).toBe(true)
   })
 
-  test("allows shell general decisions during development without reviewer load", async () => {
+  test("allows general decisions without reviewer load", async () => {
     let called = false
     await expect(
       bash("unknown-tool --maybe-read", {
@@ -335,6 +411,32 @@ describe("permission auto routing", () => {
             }
           }),
       }),
+    ).resolves.toMatchObject({ action: "allow", source: "precheck" })
+    expect(called).toBe(false)
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "edit",
+            patterns: ["src/a.ts"],
+            metadata: { agent: "auto", filepath: "src/a.ts", diff: "-old\n+new" },
+          },
+          {
+            review: () =>
+              Effect.sync(() => {
+                called = true
+                return {
+                  action: "deny" as const,
+                  reason: "reviewer should not see general edit requests",
+                  reviewID: "review_general_edit",
+                  risk_level: "medium" as const,
+                  user_authorization: "unknown" as const,
+                }
+              }),
+          },
+        ),
+      ),
     ).resolves.toMatchObject({ action: "allow", source: "precheck" })
     expect(called).toBe(false)
   })
@@ -360,7 +462,6 @@ describe("permission auto routing", () => {
                 // see cautious, not generic non-shell uncertainty, so policy can
                 // distinguish irreversible filesystem effects from ordinary edits.
                 expect(input.precheck.level).toBe("cautious")
-                expect(input.precheck.reason).toBe("file deletion requires explicit approval")
                 return {
                   action: "allow" as const,
                   reason: "reviewer approved explicit file deletion",
@@ -421,7 +522,6 @@ describe("permission auto routing", () => {
               Effect.sync(() => {
                 called = true
                 expect(input.precheck.level).toBe("safe")
-                expect(input.precheck.reason).toContain("strict auto review required")
                 return {
                   action: "allow" as const,
                   reason: "strict reviewer approved read-only git status",

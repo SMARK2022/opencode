@@ -348,8 +348,8 @@ const ask = Effect.fn("ShellTool.ask")(function* (
       patterns: globs,
       always: globs,
       // Auto 模式下，项目外路径访问不能先退回普通 ask；把同一次 shell
-      // 命令证据传给 permission 层，让 external_directory 能做 deterministic
-      // 预审，真正的 reviewer/user 决策仍由后续 bash 权限单点处理。
+      // 命令证据传给 permission 层，让 dangerous payload 在 external_directory
+      // 门禁 deterministic deny，其他外部路径则进入同一条 cautious review 边界。
       metadata: {
         action_kind: "shell",
         command: metadata.command,

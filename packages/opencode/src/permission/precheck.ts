@@ -305,27 +305,45 @@ export function evaluate(input: {
   patterns: readonly string[]
   metadata: Readonly<Record<string, unknown>>
 }): Decision {
+  const externalDirectory = externalDirectoryEffect(input)
+  if (externalDirectory) return externalDirectory
   const fileEffect = structuredFileEffect(input)
   if (fileEffect) return fileEffect
 
-  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具默认回退到
-  // reviewer/user 审批。上面的 structuredFileEffect 是例外：edit/apply_patch
-  // 已经把最终文件效果作为权限 metadata 暴露出来，删除这种不可逆效果必须在
-  // auto reviewer 边界前被提升为 cautious，而不是留作普通 non-shell general。
-  if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
-    // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
-    // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
-    // ask，从而绕开 Auto agent 的 bash auto 路由。
-    return evaluateShell(
-      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-      0,
-    )
-  }
+  // bash and external_directory carry enough context for deterministic precheck.
+  // Other permissions default to general allow unless a structured boundary above
+  // promoted them to cautious first, such as workspace delete metadata.
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return evaluateShell(
     typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
     0,
   )
+}
+
+function externalDirectoryEffect(input: {
+  permission: string
+  patterns: readonly string[]
+  metadata: Readonly<Record<string, unknown>>
+}): Decision | undefined {
+  if (input.permission !== "external_directory") return
+
+  if (input.metadata.action_kind === "shell") {
+    const shell = evaluateShell(
+      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
+      0,
+    )
+    // external_directory access is normally reviewable, but an already-critical
+    // shell payload must remain deterministic deny. Otherwise a command like
+    // `rm -rf /` would become reviewer/user approved merely because it also
+    // crosses the external-directory gate.
+    if (shell.level === "dangerous") return shell
+  }
+
+  // This exact reason names the cautious seam for external path boundaries. It is
+  // intentionally independent of per-tool evidence so read-only tools such as
+  // glob/grep/lsp/repo_overview do not fall back to a clickable ask just because
+  // they lack write-style operation payloads.
+  return { level: "cautious", reason: "external directory access requires auto review" }
 }
 
 function structuredFileEffect(input: {
@@ -341,19 +359,8 @@ function structuredFileEffect(input: {
     Array.isArray(input.metadata.files) &&
     input.metadata.files.some((item) => fileEffectType(item) === "delete")
   ) {
-    return { level: "cautious", reason: "file deletion requires explicit approval" }
-  }
-
-  // apply_patch 访问项目外路径时，external_directory preflight 发生在最终
-  // edit diff 构造之前，此时只有 operation/patchText 能证明这是一次删除。
-  // 要求 patchText 存在，避免任意 path-only external_directory 请求仅凭 tool
-  // 名称就被提升到 reviewer 作为可审批的文件删除事实。
-  if (
-    input.permission === "external_directory" &&
-    input.metadata.tool === "apply_patch" &&
-    input.metadata.operation === "delete" &&
-    typeof input.metadata.patchText === "string"
-  ) {
+    // This exact reason labels the delete-specific cautious seam for reviewer
+    // audit; ordinary updates must not share it.
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   }
 }

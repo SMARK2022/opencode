@@ -943,7 +943,7 @@ reviewed.instance(
 )
 
 reviewed.instance(
-  "ask - auto routes non-shell general tools to reviewer without pending user approval",
+  "ask - auto allows non-shell general tools without pending user approval",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
@@ -956,12 +956,13 @@ reviewed.instance(
         metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
       })
 
-      // [local-smark] general 非 shell auto 路由回归开始
-      // 开发期要求 edit/apply_patch 这类非 shell auto 请求不要回到普通 ask；
-      // 它们没有 bash 级语义证据，预审层级是 general，因此交给 reviewer 单点判断。
-      expect(reviewedCalls).toBe(1)
+      // [local-smark] general auto 路由回归开始
+      // general 是 deterministic allow 边界；只有 cautious 才进入 reviewer。
+      // edit/apply_patch 的普通 add/update 不应因为缺少 bash 语义证据而消耗
+      // reviewer 或退回可点击 ask，delete 会在 precheck 中被提升为 cautious。
+      expect(reviewedCalls).toBe(0)
       expect(yield* list()).toHaveLength(0)
-      // [local-smark] general 非 shell auto 路由回归结束
+      // [local-smark] general auto 路由回归结束
     }),
   { git: true },
 )
