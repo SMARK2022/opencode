@@ -147,8 +147,8 @@ describe("AgentV2", () => {
         expect(item.system).toBe((yield* agent.resolve("build"))?.system)
         expect(item.system).toBeUndefined()
         expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
-        // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
-        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe("allow")
+        // 只有auto接入写入审查；interactive继续保留普通编辑权限。
+        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(id === "auto" ? "auto" : "allow")
         expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
         expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。

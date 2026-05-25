@@ -125,6 +125,8 @@ const layer = Layer.effectDiscard(
                 }
                 yield* permission.assert({
                   action: "edit",
+                  // 审批前仅传解析计划；不读取目标来填充diff或伪造删除行数。
+                  metadata: { files: targets.map(item => ({ type: item.hunk.type, relativePath: item.target.resource })), patchText: input.patchText },
                   resources: [...new Set(targets.map(({ target }) => target.resource))],
                   save: ["*"],
                   sessionID: context.sessionID,

@@ -206,16 +206,61 @@ export function evaluate(input: {
   patterns: readonly string[]
   metadata: Readonly<Record<string, unknown>>
 }): Decision {
-  // #197：目前仅 bash 有足够语法证据支持确定性预检——其他工具直接回退到用户审批而非猜测无关参数模式
-  // #202：非 bash 工具缺乏 shell 级语义证据，归为 general 而非 prompt，保持既有用户审批路径
-  // #203：shell 发起的 external_directory 不是独立工具动作，复用同一条命令的预审结果，
-  // #203：避免项目外路径先触发普通 ask 从而绕开 Auto agent 的 bash auto 路由
+  const fileEffect = structuredFileEffect(input)
+    // #230：结构化文件效果优先于通用规则——delete 是不可逆效果，必须谨慎处理
+  if (fileEffect) return fileEffect
+
+  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具默认回退到
+  // reviewer/user 审批。上面的 structuredFileEffect 是例外：edit/apply_patch
+  // 已经把最终文件效果作为权限 metadata 暴露出来，删除这种不可逆效果必须在
+  // auto reviewer 边界前被提升为 cautious，而不是留作普通 non-shell general。
   if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
+    // #230：apply_patch 项目外删除——external_directory preflight 后仍须谨慎
     return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
   }
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 }
+
+function structuredFileEffect(input: {
+    // #230：仅 edit/external_directory 两类携带结构化效果 metadata——其他权限无此证据
+  permission: string
+  metadata: Readonly<Record<string, unknown>>
+}): Decision | undefined {
+  // apply_patch 的项目内执行最终通过 edit 权限，并在 metadata.files 中携带
+  // add/update/delete/move 的结构化效果。这里仅提升 delete：普通 update 继续
+  // 走既有 non-shell general 路径。必须限定 permission=edit，避免其他工具恰好
+  // 使用 files metadata 时被误归类为 workspace edit 删除。
+  if (
+    input.permission === "edit" &&
+    // #230：edit 权限的 files 数组含 delete 项即提升 cautious——update/add 不提升
+    Array.isArray(input.metadata.files) &&
+    input.metadata.files.some((item) => fileEffectType(item) === "delete")
+  ) {
+    return { level: "cautious", reason: "file deletion requires explicit approval" }
+  }
+
+  // apply_patch 访问项目外路径时，external_directory preflight 发生在最终
+  // edit diff 构造之前，此时只有 operation/patchText 能证明这是一次删除。
+  // 要求 patchText 存在，避免任意 path-only external_directory 请求仅凭 tool
+  // 名称就被提升到 reviewer 作为可审批的文件删除事实。
+  if (
+    input.permission === "external_directory" &&
+    input.metadata.tool === "apply_patch" &&
+    input.metadata.operation === "delete" &&
+    typeof input.metadata.patchText === "string"
+    // #230：要求 patchText 存在——仅凭 operation 名不足以下删除结论
+  ) {
+    return { level: "cautious", reason: "file deletion requires explicit approval" }
+  }
+}
+
+function fileEffectType(input: unknown) {
+    // #230：files 元素可能来自外部 metadata——用 type 字段而非 instanceof 判定
+  if (!input || typeof input !== "object" || !("type" in input)) return
+  return input.type
+}
+
 
 export function canAlwaysAllowPrefix(tokens: string[]) {
   // #197：前缀来自 shell 解析器的 arity 计算——需与评估时同样规范化命令名，防止 wsl.exe、/bin/bash 等变体逃逸禁用列表
@@ -1069,3 +1114,4 @@ function normalizeCommandName(input: string) {
 }
 
 export * as PermissionPrecheck from "./precheck"
+

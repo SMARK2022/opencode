@@ -499,6 +499,13 @@ const layer = Layer.effect(
             permission
               .ask({
                 ...req,
+                 // Internally materialized task execution bypasses the main tool
+                 // adapter above, so it must attach the same agent evidence here.
+                 // Keep this aligned with the primary ctx.ask wrapper: reviewer
+                 // enablement must depend on the executing agent, not on each tool
+                 // remembering to pass metadata.agent itself.
+                 metadata: { ...req.metadata, agent: task.agent },
+        // #230：prompt 适配层统一写入 agent 标识——工具实现无需各自复制 ctx.agent
                 sessionID,
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
               })

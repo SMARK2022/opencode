@@ -186,9 +186,10 @@ const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // #203：auto 复用 build 权限形状，但只把 shell 命令接入 auto。edit
-          // #203：等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
-          // #203：扩大到新的工具审批面
+          // `apply_patch`、`write` 和 `edit` 在实际执行前都会请求 edit 权限；
+          // 因此 auto agent 必须把 edit 接入 auto admission，不能只给某个工具名
+          // 单独加规则。其他 build-like 权限暂不扩大到 auto，避免把本次文件删除
+          // 审查修复扩散到 read/task/notebook 等无关工具面。
           // #225：原生 auto agent 的 key/name 均用小写，避免大小写敏感比较错配
           auto: {
             name: "auto",
@@ -200,6 +201,8 @@ const layer = Layer.effect(
                 question: "allow",
                 plan_enter: "allow",
                 bash: "auto",
+                edit: "auto",
+        // #230：edit 权限接入 auto admission——apply_patch/write/edit 实际执行前都请求 edit 权限
                 // #203：external_directory:auto 让 shell 项目外路径门禁进入 auto 路由，
                 // #203：复用同一条命令的预审证据；白名单目录保持 allow 不被放宽
                 external_directory: {
