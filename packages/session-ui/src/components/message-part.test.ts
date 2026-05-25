@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readPartText } from "./message-part-text"
 import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
+import { notebookLine, notebookMetadata, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
 
 describe("readPartText", () => {
   test("returns empty string when accum is undefined and part text is undefined", () => {
@@ -47,4 +48,25 @@ test("projects actual review states and navigation identity without rendering an
   const pending = autoReviewMetadata({ reviewID: "pending" })
   expect(pending?.status).toBe("reviewing")
   expect(pending?.sessionID).toBeUndefined()
+})
+
+test("reads all Notebook display envelopes without recreating execution results", () => {
+  expect(Object.keys(notebookTools)).toEqual(["vscode_notebook_summary", "vscode_notebook_source", "vscode_notebook_run", "vscode_notebook_output", "vscode_notebook_edit", "vscode_notebook_env"])
+  for (const view of ["summary", "source", "run", "output", "edit", "env"]) {
+    expect(notebookMetadata({ view, path: "analysis.ipynb" })?.view).toBe(view)
+  }
+  expect(notebookMetadata(undefined)).toBeUndefined()
+  expect(notebookMetadata({ view: "unknown" })).toBeUndefined()
+  expect(notebookValue(false)).toBe("false")
+  expect(notebookValue(0)).toBe("0")
+  // 原执行状态与artifact路径完整可见，但不把完整artifact正文复制到行预览。
+  const cells = notebookRows([{ i: 2, id: "#VSC-a", kind: "code", lang: "python", lines: 3, exec: "current-run #4 succeeded 12ms", existing_outs: ["text"], first: "df.head()" }])
+  const line = notebookLine(cells[0] ?? {})
+  expect(line).toContain("c2  #VSC-a")
+  expect(line).toContain("current-run #4 succeeded 12ms")
+  expect(line).toContain("df.head()")
+  const artifacts = notebookRows([{ mime: "text/plain", bytes: 12, artifactPath: "output.txt", preview: "bounded", text: "FULL ARTIFACT" }])
+  expect(notebookLine(artifacts[0] ?? {})).toContain("text/plain  12  output.txt  bounded")
+  expect(notebookLine(artifacts[0] ?? {})).not.toContain("FULL ARTIFACT")
+  expect(notebookRows(undefined)).toEqual([])
 })

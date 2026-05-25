@@ -67,6 +67,8 @@ import { attached, inline, kind, typeLabel } from "./message-file"
 import { readPartText } from "./message-part-text"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
 import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
+import { notebookTools } from "./notebook-tool"
+import { NotebookTool } from "./notebook-tool-view"
 
 async function writeClipboard(text: string): Promise<boolean> {
   const body = typeof document === "undefined" ? undefined : document.body
@@ -2118,6 +2120,11 @@ function AutoReviewLine(props: { review: NonNullable<ReturnType<typeof autoRevie
   )
 }
 
+// 六工具进入实际共享展示入口，不再落入仅预览调用参数的GenericTool。
+Object.entries(notebookTools).forEach(([name, title]) => ToolRegistry.register({
+  name,
+  render: (props) => <NotebookTool {...props} title={title} />,
+}))
 ToolRegistry.register({
   name: "permission_review_decision",
   render(props) {

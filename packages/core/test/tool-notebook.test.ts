@@ -2,7 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import { pathToFileURL } from "url"
 import { expect } from "bun:test"
-import { Effect, Fiber, Layer } from "effect"
+import { Effect, Fiber, Layer, Schema } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Location } from "@opencode-ai/core/location"
@@ -43,6 +43,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
   const received: Array<{ path: string; method: string; auth: string | null; body: unknown }> = []
   const permissions: PermissionV2.AssertInput[] = []
   let deniedAction: string | undefined
+  const notebookMetadata = Schema.decodeUnknownSync(Schema.Struct({ vscodeNotebook: Schema.Record(Schema.String, Schema.Unknown) }))
   const started = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
   const queued = Promise.withResolvers<void>()
@@ -54,7 +55,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     // completed、原生状态和artifact各自保留，不能从summary推断执行成功。
     "/notebook/run": { ran: true, summary: "run", data: { completed: true, cells: [{ id: "#VSC-a", execution: { status: "succeeded", provenance: "current" }, artifacts: [{ mime: "image/png", bytes: 12, artifactURI: "vscode-remote://fixture/plot.png" }] }] } },
     "/notebook/output": { ran: false, summary: "output", data: { artifacts: [{ mime: "application/json", bytes: 7, text: '{"x":1}', artifactPath: path.join(tmp.path, "output.json") }] } },
-    "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0 } },
+    "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0, language: "python", beforeSource: "old value\n", afterSource: "new value\n" } },
     "/notebook/env": envResult,
   }
   // 四操作响应各有原生状态与诊断，测试保真而不把ran当成功证明。
@@ -116,7 +117,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     ] as const) {
       const result = yield* invoke(name, input)
       expect(result.result.type).toBe("text")
-      expect(result.output?.structured).toEqual(responses[endpoint])
+      expect(result.output?.structured).toEqual({ ...responses[endpoint], vscodeNotebook: expect.objectContaining({ view: endpoint.slice("/notebook/".length), path: filePath }) })
       expect(result.output?.content).toEqual([{ type: "text", text: responses[endpoint]?.summary }])
     }
     let completed = false
@@ -133,7 +134,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     release.resolve()
     const run = yield* Fiber.join(running)
     expect(completed).toBe(true)
-    expect(run.output?.structured).toEqual(responses["/notebook/run"])
+    expect(run.output?.structured).toEqual({ ...responses["/notebook/run"], vscodeNotebook: expect.objectContaining({ view: "run", path: filePath, completed: true, cells: [expect.objectContaining({ id: "#VSC-a" })] }) })
     expect(run.output?.content).toEqual([{ type: "text", text: "run" }])
     // 四操作推进同一队列，重启不再拥有第二个工具或HTTP入口。
     for (const [name, input, endpoint] of [
@@ -147,13 +148,21 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       const result = yield* invoke(name, input)
       const expected = "operation" in input ? environments[input.operation] : responses[endpoint]
       expect(result.result.type).toBe("text")
-      expect(result.output?.structured).toEqual(expected)
+      expect(result.output?.structured).toEqual({ ...expected, vscodeNotebook: expect.objectContaining({ view: endpoint.slice("/notebook/".length), path: filePath }) })
+      // 检查实际settlement的六类投影，原生响应仍完整比较，不能只声明一个展示字段。
+      if (endpoint === "/notebook/edit") {
+        expect(notebookMetadata(result.output?.structured).vscodeNotebook).toMatchObject({ cellLabel: "c1", added: 1, removed: 1, diff: expect.stringContaining("-old value") })
+      }
+      if (endpoint === "/notebook/output") {
+        expect(notebookMetadata(result.output?.structured).vscodeNotebook).toMatchObject({ artifacts: [{ mime: "application/json", bytes: 7, artifactPath: path.join(tmp.path, "output.json") }] })
+        expect(notebookMetadata(result.output?.structured).vscodeNotebook).not.toHaveProperty("artifacts.0.text")
+      }
       expect(result.output?.content).toEqual([{ type: "text", text: expected?.summary }])
     }
     // 最大期限也经实际canonical执行和序列化验证，默认300000的原请求断言继续保留。
     const maximum = yield* invoke("vscode_notebook_run", { filePath, cellId: "#VSC-a", timeoutMs: 3_000_000 })
     expect(maximum.result.type).toBe("text")
-    expect(maximum.output?.structured).toEqual(responses["/notebook/run"])
+    expect(maximum.output?.structured).toEqual({ ...responses["/notebook/run"], vscodeNotebook: expect.objectContaining({ view: "run", path: filePath }) })
     expect(maximum.output?.content).toEqual([{ type: "text", text: "run" }])
     // 鉴权、方法和端点均检查实际请求，不能用mock客户端绕过发现与序列化。
     expect(received.map(item => ({ path: item.path, method: item.method, auth: item.auth }))).toEqual(
@@ -197,7 +206,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       environments.configure = response
       const result = yield* invoke("vscode_notebook_env", { filePath, operation: "configure", reason: status })
       expect(result.result.type).toBe("text")
-      expect(result.output?.structured).toEqual(response)
+      expect(result.output?.structured).toEqual({ ...response, vscodeNotebook: expect.objectContaining({ view: "env", path: filePath, status }) })
       expect(result.output?.content).toEqual([{ type: "text", text: response.summary }])
     }
     expect(received).toHaveLength(15)
@@ -216,6 +225,14 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       expect(permissions.slice(beforePermissions).map((item) => item.action)).toEqual(action === "edit" ? ["vscode_notebook_edit", "edit"] : [action])
     }
     deniedAction = undefined
+    // 大格源码仍在完整原生data；仅展示差分受原有16Ki字符预算约束。
+    responses["/notebook/edit"] = { ...responses["/notebook/edit"], data: { beforeSource: "old\n", afterSource: "new line\n".repeat(3000), affectedCellIndex: 0, editType: "edit" } }
+    const bounded = yield* invoke("vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: "ignored fixture input" })
+    expect(bounded.result.type).toBe("text")
+    expect(bounded.output?.structured).toMatchObject({ data: { afterSource: "new line\n".repeat(3000) }, vscodeNotebook: { view: "edit", path: filePath, diffOmitted: "too-large", added: 3000, removed: 1 } })
+    expect(notebookMetadata(bounded.output?.structured).vscodeNotebook).toHaveProperty("diff", undefined)
+    expect(JSON.stringify(notebookMetadata(bounded.output?.structured).vscodeNotebook)).not.toContain("new line")
+    expect(bounded.output?.content).toEqual([{ type: "text", text: "edit" }])
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
     [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(
