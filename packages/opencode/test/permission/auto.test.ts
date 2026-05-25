@@ -343,25 +343,25 @@ describe("permission auto routing", () => {
     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
   })
 
-  test("fails closed for native Auto when reviewer is not wired", async () => {
+  test("fails closed for native auto when reviewer is not wired", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
           permission: "bash",
           patterns: ["git add ."],
-          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
+          metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
         }),
       ),
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
-  test("honors explicit user reviewer configuration for native Auto", async () => {
+  test("honors explicit user reviewer configuration for native auto", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
           permission: "bash",
           patterns: ["git add ."],
-          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
+          metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
           reviewerDisabled: true,
         }),
       ),

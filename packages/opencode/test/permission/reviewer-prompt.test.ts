@@ -12,7 +12,7 @@ const userInfo = (id: string): MessageV2.User => ({
   sessionID,
   role: "user",
   time: { created: 0 },
-  agent: "Auto",
+  agent: "auto",
   model: { providerID: ProviderID.make("test"), modelID: ModelID.make("model") },
 })
 const assistantInfo = (id: string, parentID = "msg_user_0"): MessageV2.Assistant => ({
@@ -24,7 +24,7 @@ const assistantInfo = (id: string, parentID = "msg_user_0"): MessageV2.Assistant
   modelID: ModelID.make("model"),
   providerID: ProviderID.make("test"),
   mode: "build",
-  agent: "Auto",
+  agent: "auto",
   path: { cwd: "/repo", root: "/repo" },
   cost: 0,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },

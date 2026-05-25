@@ -617,11 +617,11 @@ function isReviewerError(error: unknown): error is Error {
 
 function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
   // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
-  // 没有全局配置时，原生 Auto agent 仍应隐式启用 reviewer；否则选择 Auto
+  // 没有全局配置时，原生 auto agent 仍应隐式启用 reviewer；否则选择 auto
   // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
   if (permission?.approvals_reviewer === "user") return false
   if (permission?.approvals_reviewer === "auto_review") return true
-  return metadata.agent === "Auto"
+  return metadata.agent === "auto"
 }
 
 function errorMessage(error: unknown) {

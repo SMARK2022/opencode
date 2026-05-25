@@ -66,7 +66,7 @@ export function evaluate(
     const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
     // [local-smark] auto 四级预审路由开始
     // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
-    // shell general 也直接允许，避免 Auto shell 回到人工确认；非 shell general
+    // shell general 也直接允许，避免 auto shell 回到人工确认；非 shell general
     // 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是用户
     // 显式配置的例外，用来保留原本“低风险也审”的能力。
     if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
@@ -86,7 +86,7 @@ export function evaluate(
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
     if (precheck.level === "general" && isShell && !input.strict) {
-      // 当前开发测试期要求 Auto shell 不弹人工确认：无法精确判定但未命中
+      // 当前开发测试期要求 auto shell 不弹人工确认：无法精确判定但未命中
       // dangerous/cautious 的命令先放行；非 shell general 继续走 reviewer。
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
@@ -94,16 +94,16 @@ export function evaluate(
 
     // Cautious is the default auto review boundary: deterministic precheck found
     // a visible risk that is neither harmless nor immediately forbidden, so a
-    // reviewer must explicitly return allow/deny. Native Auto must not degrade
+    // reviewer must explicitly return allow/deny. Native auto must not degrade
     // back to a clickable user ask if reviewer wiring is missing; fail closed so
     // sensitive shell output cannot be exposed by pressing Allow.
     if (!reviewer) {
-      // Explicit user-review configuration is stronger than the native Auto
+      // Explicit user-review configuration is stronger than the native auto
       // fail-closed default. This preserves small/custom runtimes that construct
       // Permission.layer without a reviewer service but intentionally keep user
       // approval as the review boundary.
       if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
-      if (input.metadata.agent === "Auto") {
+      if (input.metadata.agent === "auto") {
         return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
       }
       return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision

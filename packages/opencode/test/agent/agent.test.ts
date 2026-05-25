@@ -52,11 +52,11 @@ it.instance("returns default native agents when no config", () =>
     const agents = yield* load((svc) => svc.list())
     const names = agents.map((a) => a.name)
     expect(names).toContain("build")
-    // [local-smark] Auto Agent 列表断言开始
-    // Auto 必须像其他原生主 Agent 一样可见，用户才能通过 default_agent 显式
+    // [local-smark] auto Agent 列表断言开始
+    // auto 必须像其他原生主 Agent 一样可见，用户才能通过 default_agent 显式
     // 进入 auto shell 路由；默认 build/interactive 行为不能因此改变。
-    expect(names).toContain("Auto")
-    // [local-smark] Auto Agent 列表断言结束
+    expect(names).toContain("auto")
+    // [local-smark] auto Agent 列表断言结束
     expect(names).toContain("plan")
     expect(names).toContain("general")
     expect(names).toContain("explore")
@@ -81,7 +81,7 @@ it.instance("build agent has correct default properties", () =>
 )
 
 // [local-smark] interactive 审批回归测试开始
-// 新增 Auto Agent 不能改变 interactive 的既有用户审批门禁。这里覆盖 shell
+// 新增 auto Agent 不能改变 interactive 的既有用户审批门禁。这里覆盖 shell
 // 与 notebook 执行权限，防止新增 agent 时误把 ask 分支改成 auto 或 allow。
 it.instance("interactive agent keeps existing ask gates for command execution", () =>
   Effect.gen(function* () {
@@ -94,17 +94,17 @@ it.instance("interactive agent keeps existing ask gates for command execution", 
 )
 // [local-smark] interactive 审批回归测试结束
 
-// [local-smark] Auto Agent 行为测试开始
-// 这个行为级测试只固定 Auto 的公开权限结果，不检查内部规则顺序或 helper 名。
+// [local-smark] auto Agent 行为测试开始
+// 这个行为级测试只固定 auto 的公开权限结果，不检查内部规则顺序或 helper 名。
 // 后续可以重构 auto 分支实现，但必须维持“build-like + shell:auto”的用户契约。
-it.instance("Auto agent routes shell through auto while preserving build-like permissions", () =>
+it.instance("auto agent routes shell through auto while preserving build-like permissions", () =>
   Effect.gen(function* () {
-    const auto = yield* load((svc) => svc.get("Auto"))
+    const auto = yield* load((svc) => svc.get("auto"))
     expect(auto).toBeDefined()
     expect(auto?.mode).toBe("primary")
     expect(auto?.native).toBe(true)
 
-    // Auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
+    // auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
     // 或 notebook 执行也引入 auto 分支从而扩大本次切入面。
     expect(evalPerm(auto, "bash")).toBe("auto")
     expect(evalPerm(auto, "external_directory")).toBe("auto")
@@ -114,7 +114,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
     expect(evalPerm(auto, "vscode_notebook_env")).toBe("allow")
     expect(evalPerm(auto, "vscode_notebook_edit")).toBe("allow")
 
-    // 这些边界继承自 build 的默认安全策略，不因 Auto 的 shell auto 路由而放宽。
+    // 这些边界继承自 build 的默认安全策略，不因 auto 的 shell auto 路由而放宽。
     expect(evalPerm(auto, "question")).toBe("allow")
     expect(evalPerm(auto, "plan_enter")).toBe("allow")
     expect(evalPerm(auto, "repo_clone")).toBe("deny")
@@ -123,7 +123,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
     expect(Permission.evaluate("external_directory", Truncate.GLOB, auto!.permission).action).toBe("allow")
   }),
 )
-// [local-smark] Auto Agent 行为测试结束
+// [local-smark] auto Agent 行为测试结束
 
 it.instance("plan agent denies edits except .opencode/plans/*", () =>
   Effect.gen(function* () {
@@ -702,23 +702,23 @@ it.instance(
   },
 )
 
-// [local-smark] Auto default_agent 选择测试开始
-// Auto 是显式可选的主 Agent；这里验证用户可以通过 default_agent 选择它，而
+// [local-smark] auto default_agent 选择测试开始
+// auto 是显式可选的主 Agent；这里验证用户可以通过 default_agent 选择它，而
 // 上面的无配置默认值仍保持 build。
 it.instance(
-  "defaultAgent can select the Auto shell-auto agent",
+  "defaultAgent can select the auto shell-auto agent",
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      expect(agent).toBe("Auto")
+      expect(agent).toBe("auto")
     }),
   {
     config: {
-      default_agent: "Auto",
+      default_agent: "auto",
     },
   },
 )
-// [local-smark] Auto default_agent 选择测试结束
+// [local-smark] auto default_agent 选择测试结束
 
 it.instance(
   "defaultAgent respects default_agent config set to custom agent with mode all",
@@ -787,7 +787,7 @@ it.instance(
 )
 
 it.instance(
-  "defaultAgent throws when only explicit Auto primary agent remains",
+  "defaultAgent throws when only explicit auto primary agent remains",
   () => expectDefaultAgentError("no primary visible agent found"),
   {
     config: {
@@ -796,10 +796,10 @@ it.instance(
         plan: { disable: true },
         interactive: { disable: true },
         decide: { disable: true },
-        // [local-smark] Auto 隐式默认回归测试开始
-        // Auto 在这里故意保持启用。它可见且可通过 default_agent 选择，但不能
+        // [local-smark] auto 隐式默认回归测试开始
+        // auto 在这里故意保持启用。它可见且可通过 default_agent 选择，但不能
         // 仅因为标准主 Agent 被禁用就成为无配置 fallback。
-        // [local-smark] Auto 隐式默认回归测试结束
+        // [local-smark] auto 隐式默认回归测试结束
       },
     },
   },

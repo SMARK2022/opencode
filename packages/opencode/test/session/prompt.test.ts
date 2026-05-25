@@ -780,7 +780,7 @@ it.instance(
           sessionID: chat.id,
           permission: "bash",
           patterns: [command],
-          metadata: { command, agent: "Auto" },
+          metadata: { command, agent: "auto" },
           always: ["*"],
           ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
         })
@@ -864,7 +864,7 @@ it.instance(
         sessionID: chat.id,
         permission: "bash",
         patterns: [command],
-        metadata: { command, agent: "Auto" },
+        metadata: { command, agent: "auto" },
         always: ["*"],
         ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
       })

@@ -80,11 +80,11 @@ type State = Omit<Interface, "generate">
 
 const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
 // [local-smark] 显式选择的主 Agent 列表开始
-// `Auto` 是可见且可通过 default_agent 选择的原生主 Agent，但它会把 shell
+// `auto` 是可见且可通过 default_agent 选择的原生主 Agent，但它会把 shell
 // 权限切到 auto 分支。为保持“只有显式选择才启用 auto”的不变量，未配置
 // default_agent 时的隐式回退逻辑会跳过这里列出的名称，避免用户只禁用其他
 // 主 Agent 后意外进入 auto 路由。
-const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["Auto"])
+const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["auto"])
 // [local-smark] 显式选择的主 Agent 列表结束
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
@@ -170,12 +170,12 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // [local-smark] Auto 原生 Agent 开始
-          // `Auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
+          // [local-smark] auto 原生 Agent 开始
+          // `auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
           // 等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
           // 扩大到新的工具审批面。
-          Auto: {
-            name: "Auto",
+          auto: {
+            name: "auto",
             description: "Build-like agent that routes shell commands through auto permission review.",
             options: {},
             permission: Permission.merge(
@@ -194,7 +194,7 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // [local-smark] Auto 原生 Agent 结束
+          // [local-smark] auto 原生 Agent 结束
           decide: {
             name: "decide",
             description: "Decide mode. Produces a decisive plan with bounded recent context and no tools.",
@@ -417,7 +417,7 @@ export const layer = Layer.effect(
         const list = Effect.fnUntraced(function* () {
           const cfg = yield* config.get()
           // [local-smark] Agent 列表 localeCompare 排序开始
-          // Auto 是用户要求的大写可见 Agent。这里显式使用既有测试声明的
+          // auto 的展示大小写由前端控件决定。这里显式使用既有测试声明的
           // localeCompare 语义，而不是大小写折叠或码点排序，避免影响 mixed-case
           // 自定义 Agent 的展示顺序；默认 Agent 仍保持列表第一。
           const defaultName = cfg.default_agent ?? "build"
@@ -438,15 +438,15 @@ export const layer = Layer.effect(
             if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
             return agent
           }
-          // [local-smark] Auto 隐式默认排除开始
+          // [local-smark] auto 隐式默认排除开始
           // 这里保持历史默认 Agent 的回退语义：没有显式配置 default_agent 时，
-          // 不因为新增了可见的 Auto 主 Agent 就自动启用 auto shell 路由。Auto
+          // 不因为新增了可见的 auto 主 Agent 就自动启用 auto shell 路由。auto
           // 仍然可以通过 default_agent 精确选择，只是不参与无配置 fallback。
           const visible = Object.entries(agents).find(
             ([name, agent]) =>
               agent.mode !== "subagent" && agent.hidden !== true && !EXPLICIT_ONLY_PRIMARY_AGENT_NAMES.has(name),
           )?.[1]
-          // [local-smark] Auto 隐式默认排除结束
+          // [local-smark] auto 隐式默认排除结束
           if (!visible) throw new Error("no primary visible agent found")
           return visible
         })

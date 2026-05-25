@@ -674,7 +674,7 @@ describe("tool.shell permissions", () => {
     }
 
     for (const item of ps) {
-      reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
+      reviewed.live(`routes auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
         withShell(
           item,
           Effect.gen(function* () {
@@ -705,12 +705,12 @@ describe("tool.shell permissions", () => {
                       },
                       {
                         ...ctx,
-                        agent: "Auto",
+                        agent: "auto",
                         ask: (req) =>
                           permission.ask({
                             ...req,
                             sessionID: ctx.sessionID,
-                            metadata: { ...req.metadata, agent: "Auto" },
+                            metadata: { ...req.metadata, agent: "auto" },
                             ruleset,
                           }).pipe(Effect.orDie),
                       },
