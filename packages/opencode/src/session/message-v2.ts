@@ -505,6 +505,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
+  // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
   const items = (yield* hydrate(db, slice)).map((item) =>
     input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
   )

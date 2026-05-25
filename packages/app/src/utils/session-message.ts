@@ -7,10 +7,22 @@ import type {
 } from "@opencode-ai/client/promise"
 import type { AssistantMessage, FilePart, Message, Part, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Option, Schema } from "effect"
+import { SessionMessage } from "@opencode-ai/schema/session-message"
 
 const emptyTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 const emptyModel: { id: string; providerID: string; variant?: string } = { id: "", providerID: "" }
 const decodeToolInput = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
+const hidden = Schema.is(SessionMessage.Hidden)
+
+export function sessionMessageHidden(message: SessionMessageInfo) {
+  return "metadata" in message && message.metadata?.hidden !== undefined && hidden(message.metadata.hidden)
+}
+
+export function preserveMessageHidden(current: SessionMessageInfo | undefined, incoming: SessionMessageInfo) {
+  const marker = current && "metadata" in current ? current.metadata?.hidden : undefined
+  if (!hidden(marker)) return incoming
+  return { ...incoming, metadata: { ...("metadata" in incoming ? incoming.metadata : {}), hidden: marker } }
+}
 
 export function compareMessages(a: Pick<Message, "id" | "time">, b: Pick<Message, "id" | "time">) {
   const left = messageKey(a)
@@ -46,14 +58,14 @@ function normalizeToolMetadata(name: string, metadata: Record<string, unknown>) 
 }
 
 export function reviewerRequestID(message: SessionMessageInfo) {
-  if (message.type !== "assistant" || message.agent !== "permission-reviewer") return
+  if (message.type !== "assistant" || message.agent !== "permission-reviewer" || sessionMessageHidden(message)) return
   const id = message.metadata?.permissionReviewerRequestID
   // 并发审查共享child，助手归属以请求ID为准而非最近一条synthetic。
   return typeof id === "string" ? id : undefined
 }
 
 export function syntheticTurn(message: SessionMessageInfo) {
-  if (message.type !== "synthetic") return
+  if (message.type !== "synthetic" || sessionMessageHidden(message)) return
   const reviewer = "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
   const text = reviewer && "text" in message && typeof message.text === "string" ? message.text : message.description
   if (!text?.trim()) return
@@ -69,6 +81,8 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
   let parentID: string | undefined
 
   source.forEach((message) => {
+    // 两条失败消息仍在源缓存/原始API，只有普通显示投影排除它们。
+    if (sessionMessageHidden(message)) return
     if (message.type === "agent-switched") {
       agent = message.agent
       return

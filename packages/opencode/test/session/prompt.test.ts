@@ -18,6 +18,7 @@ import { Config } from "@/config/config"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { PermissionReviewer } from "@/permission/reviewer/service"
 import { PermissionSessionCache } from "@/permission/cache/session-cache"
 import { PermissionCircuitBreaker } from "@/permission/reviewer/circuit-breaker"
@@ -349,6 +350,7 @@ const writeConfig = Effect.fn("test.writeConfig")(function* (dir: string, config
   yield* writeText(
     path.join(dir, "opencode.json"),
     JSON.stringify({ $schema: "https://opencode.ai/config.json", ...config }),
+// #227：文本 JSON 与工具输入 schema 同构——回退解析依赖严格结构而非自由文本
   )
 })
 
@@ -540,6 +542,7 @@ noLLMServer.instance(
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Pinned" })
+// #227：JSON 回退测试会话——auto 规则使 bash 请求进入 reviewer 而非用户审批
       yield* seed(chat.id, { finish: "stop" })
 
       const result = yield* prompt.loop({ sessionID: chat.id })
@@ -592,6 +595,7 @@ noLLMServer.instance(
 it.instance("loop exits without an LLM request for interrupted orphan tool calls", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
+// #227：测试一——模型只回纯文本 JSON 而不调用工具，验证 json_fallback 合成路径
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
     const chat = yield* sessions.create({ title: "Pinned" })
@@ -1416,6 +1420,7 @@ it.instance("loop continues when finish is tool-calls", () =>
 
     const result = yield* prompt.loop({ sessionID: session.id })
     expect(yield* llm.calls).toBe(2)
+// #227：第二次调用是修复格式的协议 nudge 重试——证据与请求上下文不变
     expect(result.info.role).toBe("assistant")
     if (result.info.role === "assistant") {
       expect(result.parts.some((part) => part.type === "text" && part.text === "second")).toBe(true)
@@ -1766,11 +1771,239 @@ it.instance(
   { git: true },
 )
 
+it.instance(
+  "auto permission reviewer accepts structured JSON text decisions",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer JSON fallback" })
+      const command = String.raw`rsync -av "/Volumes/My Passport/Calibration/" Sensetimex4:~/project/Calibration/`
+// #227：远程传输命令需要高权限评估——仅作 reviewer 输入，测试环境不会真正执行
+      yield* llm.push(
+        reply()
+          .text(
+            JSON.stringify({
+              outcome: "allow",
+              risk_level: "high",
+              user_authorization: "high",
+              rationale: "user explicitly authorized the bounded remote transfer",
+            }),
+          )
+          .stop()
+          .item(),
+      )
+
+      yield* permissions.ask({
+// #227：触发一次权限评估——断言 llm.calls=1 证明纯文本回退不消耗第二次 provider 调用
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      expect(yield* llm.calls).toBe(1)
+// #227：无协议错误时单次调用——JSON 回退是解析层兜底，不是重试
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
+// #227：从 reviewer 子会话读取 parts——断言合成 part 带 json_fallback 来源标记
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.source === "json_fallback" &&
+// #227：审计形状与工具调用路径一致——消费者靠 source 区分回退与真实工具调用
+            part.state.metadata?.rationale === "user explicitly authorized the bounded remote transfer",
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer hides malformed protocol attempts before retrying",
+// #227：测试二——首次回复是散文而非工具调用，验证协议错误触发隐藏+重试
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer protocol retry" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      const malformed = "I can allow this request, but I forgot to submit the decision tool."
+// #227：畸形输出不含工具调用——isReviewerDecisionProtocolError 识别后进入重试
+      yield* llm.push(
+        reply().text(malformed).stop().item(),
+// #227：第一次 provider 回复畸形——重试前该尝试必须被隐藏
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly authorized the bounded deletion",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+// #227：过滤隐藏消息后断言——畸形尝试不可见，只留最终合法决策
+      expect(
+        visible.flatMap((msg) => msg.parts).filter((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
+      ).toHaveLength(1)
+      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes(malformed)))).toBe(false)
+// #227：畸形文本必须被隐藏——用户不应把散文答案误读为已批准
+      expect(
+        visible.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.source === "tool_call" &&
+              part.state.metadata?.rationale === "user explicitly authorized the bounded deletion",
+          ),
+        ),
+      ).toBe(true)
+
+      const allMessages = (yield* MessageV2.page({ sessionID: reviewer.id, limit: 20, includeHidden: true })).items
+      expect(
+        allMessages.filter(
+          (msg) => msg.info.hidden && msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
+        ),
+      ).toHaveLength(1)
+      expect(
+        allMessages.filter(
+          (msg) => msg.info.hidden && msg.parts.some((part) => part.type === "text" && part.text.includes(malformed)),
+        ),
+      ).toHaveLength(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer fails closed after one malformed protocol retry",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      // #227：两次畸形响应使协议重试耗尽——第二次失败后必须确定性拒绝而非放宽为允许
+      yield* llm.push(
+        reply().text("first malformed reviewer response").stop().item(),
+        reply().text("second malformed reviewer response").stop().item(),
+      )
+
+      const exit = yield* permissions
+        .ask({
+          sessionID: chat.id,
+          permission: "bash",
+          patterns: [command],
+          metadata: { command, agent: "auto" },
+          always: ["*"],
+          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+        })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (!Exit.isFailure(exit)) return
+      // #227：协议重试耗尽后必须确定性失败——AutoDeniedError 使调用方只能拒绝，不存在静默放行分支
+      expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionV1.AutoDeniedError)
+      // #227：协议输出仅修复一次格式——重试一次后仍畸形即按拒绝退出，不追加更多模型调用
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed")))).toBe(false)
+      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed")))).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer retries malformed decision tool input",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer malformed tool retry" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      // #227：两次畸形响应使协议重试耗尽——第二次失败后必须确定性拒绝而非放宽为允许
+      yield* llm.push(
+        reply().tool("permission_review_decision", { outcome: "allow" }).item(),
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly authorized the bounded deletion after malformed tool input",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      expect(
+        visible.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.source === "tool_call" &&
+              part.state.metadata?.rationale === "user explicitly authorized the bounded deletion after malformed tool input",
+          ),
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+)
+
 // #214：reviewer 子代理流重试瞬时 provider 故障后记录决策
 it.instance(
   "auto permission reviewer retries transient provider failures before recording the decision",
   () =>
     Effect.gen(function* () {
+
       const { llm } = yield* useServerConfig(providerCfg)
       const permissions = yield* Permission.Service
       const sessions = yield* Session.Service

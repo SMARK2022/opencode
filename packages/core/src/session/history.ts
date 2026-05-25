@@ -9,6 +9,7 @@ import { SessionContextEpochTable, SessionMessageTable } from "./sql"
 type DatabaseService = Database.Interface["db"]
 
 const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
+const hidden = Schema.is(SessionMessage.Hidden)
 
 export const latestCompaction = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
   return yield* db
@@ -76,7 +77,8 @@ export const load = Effect.fn("SessionHistory.load")(function* (db: DatabaseServ
     ],
     { concurrency: "unbounded" },
   )
-  return yield* Effect.forEach(yield* messageRows(db, sessionID, compaction, epoch?.baselineSeq), decodeMessageRow)
+  // 普通模型历史排除失败协议轮次；原始message/messages读取仍可检查它们。
+  return (yield* Effect.forEach(yield* messageRows(db, sessionID, compaction, epoch?.baselineSeq), decodeMessageRow)).filter((message) => !hidden(message.metadata?.hidden))
 })
 
 export const loadForRunner = Effect.fn("SessionHistory.loadForRunner")(function* (
@@ -93,9 +95,9 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   baselineSeq: number,
 ) {
   const rows = yield* messageRows(db, sessionID, yield* latestCompaction(db, sessionID), baselineSeq)
-  return yield* Effect.forEach(rows, (row) =>
+  return (yield* Effect.forEach(rows, (row) =>
     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
-  )
+  )).filter((entry) => !hidden(entry.message.metadata?.hidden))
 })
 
 export * as SessionHistory from "./history"

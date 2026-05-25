@@ -236,6 +236,15 @@ describe("server session", () => {
     expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_request")).toMatchObject({ agent: "permission-reviewer", model: { modelID: "review" } })
     applyNative("session.next.step.failed", { assistantMessageID: "msg_native_answer", aborted: true, error: { type: "unknown", message: "cancel A" } })
     expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
+    // 隐藏只清显示投影；同一child的并行B和A的原始关联/正文仍保留。
+    applyNative("session.next.messages.hidden", { messageIDs: ["msg_native_request", "msg_native_answer"], hidden: { time: 20, reason: "permission-reviewer-protocol-retry" } })
+    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request_b", "msg_native_answer_b"])
+    expect(ctx.store.data.part.msg_native_answer).toBeUndefined()
+    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ metadata: { permissionReviewerRequestID: "msg_native_request", hidden: { reason: "permission-reviewer-protocol-retry" } }, content: [{ text: "Actual live explanation" }] })
+    applyNative("session.next.step.ended", { assistantMessageID: "msg_native_answer", finish: "stop", cost: 2, tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } } })
+    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request_b", "msg_native_answer_b"])
+    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ cost: 2, tokens: { input: 3, output: 4 }, metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
+    expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
   })
 
   test("resolves lineage by session ID without directory", async () => {
@@ -785,6 +794,40 @@ describe("server session", () => {
     expect(store.data.part[removed.id]).toBeUndefined()
     expect(store.data.part_text_accum_delta[part.id]).toBeUndefined()
     expect(store.data.part_text_accum_delta[removedPart.id]).toBeUndefined()
+
+    // Native在缺失片段时发出的旧hydration和旧历史页，也不能覆盖已落地隐藏标记。
+    const request = { id: "msg_hidden_request", type: "synthetic" as const, text: "review", time: { created: 1 }, metadata: { permissionReviewerRequest: true } }
+    const answer = { id: "msg_hidden_answer", type: "assistant" as const, agent: "permission-reviewer", model: { id: "review", providerID: "test" }, content: [{ type: "text" as const, id: "reply", text: "malformed reply" }], time: { created: 2 }, metadata: { permissionReviewerRequestID: request.id } }
+    const stalePage = { data: [answer, request], cursor: { previous: null, next: null } }
+    const pendingPage = Promise.withResolvers<typeof stalePage>()
+    const pendingHydration = Promise.withResolvers<typeof answer>()
+    let nativeCalls = 0
+    const nativeApi = {
+      list: async () => ++nativeCalls === 1 ? { data: [request], cursor: { previous: null, next: "older" } } : pendingPage.promise,
+    } as unknown as MessageApi
+    const native = createServerSession({} as OpencodeClient, { message: () => pendingHydration.promise } as unknown as SessionApi, nativeApi)
+    native.remember(session("ses_native"))
+    await native.sync("ses_native")
+    const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
+    let sequence = 0
+    const applyNative = (type: string, data: Record<string, unknown>) => native.applyV2(decode({ id: `evt_hidden_${++sequence}`, type, data: { sessionID: "ses_native", timestamp: sequence, ...data } }))
+    applyNative("session.next.text.delta", { assistantMessageID: answer.id, textID: "reply", delta: "late fragment" })
+    applyNative("session.next.step.started", { assistantMessageID: answer.id, agent: "permission-reviewer", model: answer.model })
+    applyNative("session.next.text.started", { assistantMessageID: answer.id, textID: "reply" })
+    applyNative("session.next.text.delta", { assistantMessageID: answer.id, textID: "reply", delta: "malformed reply" })
+    expect(native.data.message.ses_native).toHaveLength(2)
+    applyNative("session.next.messages.hidden", { messageIDs: [request.id, answer.id], hidden: { time: 20, reason: "permission-reviewer-protocol-retry" } })
+    expect(native.data.message.ses_native).toEqual([])
+    const loading = native.history.loadMore("ses_native")
+    pendingPage.resolve(stalePage)
+    await loading
+    expect(native.data.message.ses_native).toEqual([])
+    pendingHydration.resolve(answer)
+    await Bun.sleep(0)
+    expect(native.data.message.ses_native).toEqual([])
+    expect(native.data.session_message.ses_native.map((message) => "metadata" in message ? message.metadata?.hidden : undefined)).toEqual([{ time: 20, reason: "permission-reviewer-protocol-retry" }, { time: 20, reason: "permission-reviewer-protocol-retry" }])
+    expect(native.data.part[answer.id]).toBeUndefined()
+    expect(nativeCalls).toBe(2)
   })
 
   test("keeps removal tracking isolated across load generations", async () => {

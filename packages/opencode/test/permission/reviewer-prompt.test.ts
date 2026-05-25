@@ -79,7 +79,9 @@ describe("permission reviewer prompt", () => {
     expect(prompt).toContain("# User Authorization Scoring")
     expect(prompt).toContain("# Base Risk Taxonomy")
     expect(prompt).toContain("Deny pushes unless the user explicitly asks for push.")
-    expect(prompt).toContain("Use this JSON schema for every decision")
+    // 227把首选协议改为真实裁决工具；纯JSON只在运行时兼容，不再向模型宣传。
+    expect(prompt).toContain("Use this tool input schema for every decision")
+    expect(prompt).toContain("Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.")
     expect(prompt).toContain('"risk_level": "low" | "medium" | "high" | "critical"')
     expect(prompt).toContain('"outcome": "allow" | "deny"')
   })

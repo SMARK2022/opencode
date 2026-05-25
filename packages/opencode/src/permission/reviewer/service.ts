@@ -67,6 +67,33 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
 const REVIEWER_MESSAGE_FETCH_LIMIT = 120
 
 // #209：合并 provider options 与 model.options——reviewer stream 需与正常 SessionPrompt 一致的 provider 适配
+// JSON fallback is a runtime compatibility boundary, not a prompt contract: the
+// reviewer prompt still asks providers to submit `permission_review_decision`,
+// but some tool-capable providers occasionally return the same Assessment as a
+// plain JSON final answer. Accept only a complete schema-valid JSON object and
+// mark the persisted audit part with this source so later UI/export code can
+// distinguish fallback acceptance from an actual function/tool call.
+const JSON_FALLBACK_SOURCE = "json_fallback"
+// #227：JSON 回退来源标记——模型以纯文本回复决策而非调用工具时，合成 part 用此标记区分审计来源
+// This exact reason is the retry discriminator. Provider errors and policy
+// denials must not be retried through this path; only a completed reviewer turn
+// that produced neither a decision tool call nor valid JSON fallback is hidden
+// and retried with a protocol nudge.
+const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_review_decision"
+  // #227：协议错误哨兵——JSON 回退失败与工具缺失共用同一错误码触发重试
+// Keep this string aligned with MessageV2.Hidden. It names the audit workflow
+// that owns these hidden child-session turns and prevents future hidden-message
+// consumers from confusing protocol retry cleanup with undo or session repair.
+const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
+// #227：协议失败重试的隐藏原因——首次尝试的畸形输出在重试前隐藏，避免用户把 JSON/散文答案误读为已批准
+const PROTOCOL_RETRY_USER_ITEM = {
+// #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
+  type: "text" as const,
+  // The retry prompt deliberately asks only for the tool/function-call protocol.
+  // JSON text fallback is a runtime compatibility layer, not behavior we should
+  // advertise to the model after it already missed the preferred contract.
+  text: PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT,
+}
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
 
@@ -133,40 +160,69 @@ export const layer = Layer.effect(
                 Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
               )
             : { entries: [], truncated: false, entryTruncated: false }
-          const messages = buildMessages({
-            system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
-            userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
-          })
           // #209：在子会话中记录 reviewer 请求——metadata 标记防止被误认为人类授权，但保留可检查性
-          const reviewerUser = reviewerSession
-            ? yield* recordReviewerRequest({
+          const system = PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy, "tool")
+          const userItems = PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason)
+    // #227：buildMessages 统一拼装 system+userItems——重试时仅追加协议 nudge 其余不变
+          const messages = buildMessages({ system, userItems })
+          function runReviewerAttempt(messages: readonly ModelMessage[], hideProtocolFailure: boolean) {
+// #227：hideProtocolFailure=true 时协议错误触发隐藏+重试；第二次尝试传 false 不再隐藏
+            return Effect.gen(function* () {
+              const reviewerUser = reviewerSession
+// #227：先落盘 synthetic reviewer 请求，重试时才能按 requestID 隐藏首次失败尝试
+                ? yield* recordReviewerRequest({
+                    session: reviewerSession,
+                    model,
+                    reviewID: input.reviewID,
+                    text: renderReviewerPrompt(messages),
+                  })
+                : undefined
+              return yield* runReviewerAgent({
                 session: reviewerSession,
                 model,
                 // #214：reviewID 从父工具 autoReview metadata 传入——稳定 join key
                 reviewID: input.reviewID,
-                text: renderReviewerPrompt(messages),
-              })
-            : undefined
           // #209：streamText + permission_review_decision tool——流式持久化 reasoning/text/tool part，替代一次性 generateObject 黑盒
-          const assessment = yield* runReviewerAgent({
-            session: reviewerSession,
-            model,
+// #227：reviewer 用流式事件持久化 part——推理/文本/工具分片随 stream 实时落盘，替代一次性拼接
             // #214：reviewID 透传到 reviewer agent——最终决策 part 需 mirror 此 ID
-            reviewID: input.reviewID,
-            parentID: reviewerUser?.id,
-            messages,
-          }).pipe(
+                parentID: reviewerUser?.id,
+                messages,
+              }).pipe(
+                Effect.tapError((error) => {
+// #227：协议失败才隐藏——provider/schema 等其他错误保持可见，避免掩盖真实失败
+    // #227：隐藏前置条件齐全才隐藏——缺 reviewer 会话或非协议错误时静默跳过
+                  if (!hideProtocolFailure || !reviewerSession || !reviewerUser || !isReviewerDecisionProtocolError(error)) {
+                    return Effect.void
+                  }
+                  return hideReviewerProtocolAttempt(session, reviewerSession.id, reviewerUser.id)
+// #227：隐藏失败尝试后重试；隐藏本身失败不阻断流程（Effect.ignore）
+                }),
+              )
+            }) as Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error, never>
+          }
+          const assessment = yield* runReviewerAttempt(messages, true).pipe(
+            Effect.catchIf(isReviewerDecisionProtocolError, () =>
+// #227：仅协议格式错误触发重试，其他错误直接走超时/mapError 路径
+              // Keep the evidence and requested action unchanged; only append a
+              // protocol nudge so the second attempt repairs submission format
+              // instead of broadening the authorization or policy context.
+              runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
+            ),
             // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
             Effect.timeoutOrElse({
+// #227：超时是重试之外的第二道保险——provider 挂起不阻塞 auto 权限评估
               duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
               orElse: () => Effect.fail(new ReviewerTimedOut()),
             }),
             // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
             Effect.mapError((error) =>
+// #227：非 reviewer 错误统一包装为 RunError——fail-closed 信号可被上层捕获
+    // #227：isReviewerError 保持原始错误类型——只有未知错误才包装为 RunError
               isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
             ),
           )
           // #209：标记工具审查结果——allowed/denied 状态和 reviewer 评估详情写入工具 metadata 供 UI 渲染
+// #227：markToolReviewed 把 outcome 写回工具 metadata——UI 无需重查 reviewer 子会话
           yield* markToolReviewed(input, assessment)
 
           return {
@@ -370,8 +426,11 @@ export const layer = Layer.effect(
             })
             // #209：assessment 可变——由 tool-call 事件设置，流结束时检查是否为空决定 fail-closed
             let assessment: Schema.Schema.Type<typeof Assessment> | undefined
+// #227：assessment 由 tool-call 事件或文本回退填充——流结束时为空即 fail-closed
             // #209：textPart/reasoningPart 可变——跨 start/delta/end 事件保持引用以增量更新同一 part
             let textPart: TextPart | undefined
+            let textOutput = ""
+// #227：textOutput 累积所有 text-delta——JSON 回退解析需要完整文本而非首个分片
             let reasoningPart: ReasoningPart | undefined
             // #209：toolParts/toolInput 按 callID 索引——一个 tool-call 的 input-start/delta/end/call 共享同一 callID
             const toolParts = new Map<string, ToolPart>()
@@ -392,12 +451,18 @@ export const layer = Layer.effect(
               Effect.fnUntraced(function* (event) {
                 // #209：无 persist 时仅提取 assessment——不持久化中间 part，用于无子会话的纯判定路径
                 if (!persist) {
+                  if (event.type === "text-delta") {
+                    textOutput += event.text
+// #227：text-delta 增量累积，textPart 同时持久化——两者各自独立完成
+                  }
                   if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
-                    assessment = Schema.decodeUnknownSync(Assessment)(event.input)
+// #227：tool-call 事件携带最终 input——此处提取 assessment 为唯一权威来源
+                    assessment = assessmentFromUnknown(event.input)
                   }
                   return
                 }
                 if (event.type === "reasoning-start") {
+// #227：reasoning 空壳先建后增量更新——UI 能实时显示推理进度
                   // #209：reasoning part 先建空壳——delta 事件增量更新 text，end 事件收尾时间
                   reasoningPart = yield* session.updatePart({
                     id: PartID.ascending(),
@@ -425,7 +490,6 @@ export const layer = Layer.effect(
                   return
                 }
                 if (event.type === "text-start") {
-                  // #209：text part 与 reasoning 同样的 start/delta/end 三段式——保持与正常 assistant 消息一致的持久化形状
                   textPart = yield* session.updatePart({
                     id: PartID.ascending(),
                     sessionID: persist.sessionID,
@@ -438,6 +502,7 @@ export const layer = Layer.effect(
                   return
                 }
                 if (event.type === "text-delta" && textPart) {
+                  textOutput += event.text
                   textPart.text += event.text
                   if (event.providerMetadata) textPart.metadata = event.providerMetadata
                   yield* session.updatePart(textPart)
@@ -470,6 +535,7 @@ export const layer = Layer.effect(
                   return
                 }
                 if (event.type === "tool-input-end") {
+// #227：input 聚合完成时回填 state.input——running 状态先持久化保证 UI 及时
                   const part = toolParts.get(event.id)
                   // #209：part 不存在或已非 pending 时跳过——tool-call 可能先于 tool-input-end 到达导致状态已 completed
                   if (!part || part.state.status !== "pending") return
@@ -482,9 +548,11 @@ export const layer = Layer.effect(
                 }
                 if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
                   // #209：tool-call 携带最终 input——Schema.decode 验证并提取 assessment，同时把 tool part 标记 completed
-                  assessment = Schema.decodeUnknownSync(Assessment)(event.input)
+                  assessment = assessmentFromUnknown(event.input)
+                  if (!assessment) return
                   // #209：toolCallId 可能与 tool-input-start 的 event.id 不同——无 existing 时新建 part 壳
                   const existing = toolParts.get(event.toolCallId)
+// #227：toolCallId 与 input-start 的 event.id 可能不同——无 existing 时新建 part
                   const part = yield* session.updatePart({
                     ...(existing ?? {
                       id: PartID.ascending(),
@@ -500,17 +568,22 @@ export const layer = Layer.effect(
                       title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
                       // #214：reviewID mirror 到最终决策 part——子会话可按逻辑审查搜索/导出
                       // #214：一个隐藏 reviewer 子会话可累积多次审查轮次，每次需带父 autoReview.reviewID
-                      metadata: persist ? { ...assessment, reviewID: persist.reviewID } : assessment,
+                      metadata: { ...assessment, reviewID: persist.reviewID, source: "tool_call" },
                       output: JSON.stringify(assessment),
                       time: { start: Date.now(), end: Date.now() },
                     },
-                  } satisfies ToolPart)
+                  })
                   toolParts.set(event.toolCallId, part)
                   return
                 }
                 if (event.type === "tool-error") {
-                  // #209：工具执行错误转为 RunError——fail closed，不应让 provider 工具错误静默为 allow
-                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
+                  // The reviewer has exactly one no-side-effect protocol tool.
+                  // A tool-error here means the provider/model attempted a tool
+                  // submission that did not become a valid Assessment, so route it
+                  // through the same hidden retry as missing or malformed input
+                  // instead of treating it as an unrelated provider failure.
+                  return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
+// #227：文本回退也失败时抛协议错误——触发外层 catchIf 的第二次尝试
                 }
                 if (event.type === "error") {
                   // #214：provider stream 错误必须保留原始形状直到 SessionRetry 分类
@@ -532,12 +605,24 @@ export const layer = Layer.effect(
                 time: { start: reasoningPart.time.start, end: Date.now() },
               })
             // #209：模型未调用 permission_review_decision——fail closed，未给出明确 allow 即拒绝
-            if (!assessment)
-              return yield* new ReviewerRunError({ reason: "reviewer did not call permission_review_decision" })
+            if (!assessment) {
+              const fallback = assessmentFromJsonText(textOutput)
+// #227：纯文本回退只在无工具调用时启用——解析失败仍 fail-closed 而非静默放行
+              if (fallback) {
+                // The text part remains as provider output, while this synthetic
+                // no-side-effect tool part preserves the same audit shape as the
+                // function-call path. Consumers should read `source` before
+                // treating the part as a provider-emitted tool call.
+                if (persist) yield* recordJsonFallbackDecision(session, persist, fallback)
+                return fallback
+              }
+              return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
+            }
             return assessment
           }),
-        // #209：release 时中止 AbortController——确保 Effect 取消时 streamText 立即停止，不再消耗 provider 配额
         (abort) => Effect.sync(() => abort.abort()),
+// #227：release 中止 AbortController——Effect 取消/超时立即停止 streamText 不再消耗配额
+        // #209：release 时中止 AbortController——确保 Effect 取消时 streamText 立即停止，不再消耗 provider 配额
       ).pipe(
         // #214：SessionRetry.retry 封装——hidden reviewer 子代理流复用同一 provider 安全重试策略
         // #214：reviewer 子代理流是审计 transcript，非活跃 SessionProcessor run——重试时不更新父工具 autoReview 状态
@@ -554,6 +639,7 @@ export const layer = Layer.effect(
 
     // #209：标记工具状态为 reviewing——附带 reviewer 子会话 ID 供 UI 导航
     function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
+// #227：reviewing 状态附带 reviewer 子会话 ID——UI 可跳转查看审查过程
       return updateToolAutoReview(input, {
         status: "reviewing",
         ...(reviewerSessionID ? { sessionID: reviewerSessionID } : {}),
@@ -562,6 +648,7 @@ export const layer = Layer.effect(
 
     // #209：标记工具审查完成——allowed/denied 状态和 reviewer 评估详情
     function markToolReviewed(input: PermissionAuto.ReviewInput, assessment: Schema.Schema.Type<typeof Assessment>) {
+// #227：allowed/denied 终结状态——result 附带完整评估供审计与 UI 展示
       return updateToolAutoReview(input, {
         status: assessment.outcome === "allow" ? "allowed" : "denied",
         result: {
@@ -571,7 +658,6 @@ export const layer = Layer.effect(
         },
       })
     }
-
     // #209：标记工具审查失败——timed_out/failed/fallback_user 状态和错误原因
     function markToolReviewFailed(
       input: PermissionAuto.ReviewInput,
@@ -670,6 +756,13 @@ function isReviewerError(error: unknown): error is Error {
   return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
 }
 
+function isReviewerDecisionProtocolError(error: unknown) {
+  // Only this protocol miss gets one hidden retry. Other ReviewerRunError values
+  // include provider tool errors, schema failures, and policy-path loading errors;
+  // retrying those would blur operational failures with model formatting repair.
+  return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
+}
+
 // #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
 // #203：无全局配置时原生 auto agent 隐式启用 reviewer；否则选 auto 只会把 cautious 降级成普通 ask
 function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
@@ -715,6 +808,84 @@ export const defaultLayer = layer.pipe(
 // #203：Layer.suspend 保留历史循环边界：Session 导入 Permission 类型，故 Session.defaultLayer
 // #203：不能在本模块初始化期间被解引用
 export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))))
+
+function assessmentFromJsonText(text: string) {
+  const trimmed = text.trim()
+  if (!trimmed) return
+  try {
+    // Deliberately parse only the whole final text. Extracting JSON from prose,
+    // markdown fences, or mixed reasoning would let untrusted explanation text
+    // influence the permission boundary and belongs in the protocol retry path.
+    return Schema.decodeUnknownSync(Assessment)(JSON.parse(trimmed))
+  } catch {
+    return
+  }
+}
+
+function assessmentFromUnknown(input: unknown) {
+// #227：畸形工具参数与缺失协议输出同等待遇——不绕过修复格式的第二次尝试
+  try {
+    // Treat malformed tool/function arguments the same as missing protocol
+    // output: they are not a valid permission decision, but they also should not
+    // bypass the one retry that repairs reviewer submission format.
+    return Schema.decodeUnknownSync(Assessment)(input)
+  } catch {
+    return
+  }
+}
+
+function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: SessionID, requestID: MessageID): Effect.Effect<void, ReviewerRunError, never> {
+// #227：隐藏请求与畸形 assistant 回复——重试后只保留最终可见尝试
+  return Effect.gen(function* () {
+    const hidden = { time: Date.now(), reason: PROTOCOL_RETRY_HIDDEN_REASON as typeof PROTOCOL_RETRY_HIDDEN_REASON }
+// #227：hidden 元数据独立于消息内容——重试后消息仍可作结构压缩锚点
+    // #208: use sessions.messages instead of MessageV2.get to avoid Database.Service leak
+    const messages = yield* sessions.messages({ sessionID, limit: 100 })
+    const request = messages.find((m) => m.info.id === requestID)
+// #227：按 requestID 定位 synthetic 请求——消息缓存行可能因分页错位
+    // Hide the synthetic reviewer request together with its malformed assistant
+    // reply. The prompt is regenerated for the retry, and keeping only the final
+    // visible attempt prevents users from reading a malformed JSON/prose answer
+    // as an approved decision before the protocol repair completes.
+    if (request) {
+      yield* sessions.updateMessage({ ...request.info, hidden })
+    }
+    const assistant = messages.find((m) => m.info.role === "assistant" && m.info.parentID === requestID)
+    if (assistant?.info.role === "assistant") {
+      yield* sessions.updateMessage({ ...assistant.info, hidden })
+    }
+  }).pipe(Effect.ignore)
+}
+
+function recordJsonFallbackDecision(
+// #227：合成 tool part 模拟函数调用路径的审计形状——source 字段标识回退来源
+  sessions: Session.Interface,
+  persist: { sessionID: SessionID; messageID: MessageID; reviewID: string },
+  assessment: Schema.Schema.Type<typeof Assessment>,
+) {
+  return Effect.gen(function* () {
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      sessionID: persist.sessionID,
+      messageID: persist.messageID,
+      type: "tool",
+      // This synthetic call id cannot collide with provider tool-call ids because
+      // it is namespaced by the stable review id and is only created after the
+      // stream ended without any `permission_review_decision` function call.
+      callID: `json_fallback_${persist.reviewID}`,
+// #227：callID 用 reviewID 命名空间——不可能与 provider 真实 tool-call id 冲突
+      tool: "permission_review_decision",
+      state: {
+        status: "completed",
+        input: assessment,
+        title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+        metadata: { ...assessment, reviewID: persist.reviewID, source: JSON_FALLBACK_SOURCE },
+        output: JSON.stringify(assessment),
+        time: { start: Date.now(), end: Date.now() },
+      },
+    } satisfies ToolPart)
+  })
+}
 
 // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
 // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型

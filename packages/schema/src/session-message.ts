@@ -21,6 +21,13 @@ export const UnknownError = Schema.Struct({
   message: Schema.String,
 }).annotate({ identifier: "Session.Error.Unknown" })
 
+// 协议修复只改变可见性，原文、错误及用量继续保存在原消息上。
+export interface Hidden extends Schema.Schema.Type<typeof Hidden> {}
+export const Hidden = Schema.Struct({
+  time: NonNegativeInt,
+  reason: Schema.Literal("permission-reviewer-protocol-retry"),
+}).annotate({ identifier: "Session.Message.Hidden" })
+
 const Base = {
   id: ID,
   metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),

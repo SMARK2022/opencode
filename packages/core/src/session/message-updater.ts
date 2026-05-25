@@ -14,6 +14,8 @@ export interface Adapter {
   readonly updateAssistant: (assistant: SessionMessage.Assistant) => Effect.Effect<void>
   readonly updateShell: (shell: SessionMessage.Shell) => Effect.Effect<void>
   readonly appendMessage: (message: SessionMessage.Message) => Effect.Effect<void>
+  readonly getMessage: (messageID: SessionMessage.ID) => Effect.Effect<SessionMessage.Message | undefined>
+  readonly updateMessage: (message: SessionMessage.Message) => Effect.Effect<void>
 }
 
 export function memory(state: MemoryState): Adapter {
@@ -25,6 +27,15 @@ export function memory(state: MemoryState): Adapter {
     state.messages.findLastIndex((message) => message.type === "shell" && message.callID === callID)
 
   return {
+    getMessage(messageID) {
+      return Effect.sync(() => state.messages.find((message) => message.id === messageID))
+    },
+    updateMessage(message) {
+      return Effect.sync(() => {
+        const index = assistantIndex(message.id)
+        if (index >= 0) state.messages[index] = message
+      })
+    },
     getCurrentAssistant() {
       return Effect.sync(() => {
         const index = latestAssistantIndex()
@@ -164,6 +175,13 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }),
         )
       },
+      "session.next.messages.hidden": (event) =>
+        Effect.forEach(event.data.messageIDs, (messageID) => Effect.gen(function* () {
+          const message = yield* adapter.getMessage(messageID)
+          if (!message) return
+          // 合并标记而非替换metadata，保留审查关联、真实正文与已有终态。
+          yield* adapter.updateMessage({ ...message, metadata: { ...message.metadata, hidden: event.data.hidden } })
+        }), { discard: true }),
       "session.next.shell.started": (event) => {
         return adapter.appendMessage(
           SessionMessage.Shell.make({
