@@ -67,7 +67,7 @@ export function evaluate(
     const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
     // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据——仅凭路径不构成授权上下文
     const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
-    // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 Auto shell
+    // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 auto shell
     // #203：回到人工确认；非 shell general 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝
     // #203：strict 是用户显式配置的例外，保留原本"低风险也审"的能力
     if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
@@ -87,18 +87,19 @@ export function evaluate(
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
     if (precheck.level === "general" && isShell && !input.strict) {
-      // #203：开发测试期要求 Auto shell 不弹人工确认：未命中 dangerous/cautious 的命令先放行；
+      // #203：开发测试期要求 auto shell 不弹人工确认：未命中 dangerous/cautious 的命令先放行；
       // #203：非 shell general 继续走 reviewer
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
 
     // #203：cautious 是 review 边界——确定性 precheck 发现可见风险但非立即禁止，reviewer 必须显式返回 allow/deny
-    // #203：原生 Auto 不能在 reviewer 缺失时降级回可点击的用户 ask；fail closed 防止敏感 shell 输出因点 Allow 暴露
+    // #203：原生 auto 不能在 reviewer 缺失时降级回可点击的用户 ask；fail closed 防止敏感 shell 输出因点 Allow 暴露
     if (!reviewer) {
-      // #203：显式 user reviewer 配置强于原生 Auto fail-closed 默认——保留小型/自定义运行时
+      // #203：显式 user reviewer 配置强于原生 auto fail-closed 默认——保留小型/自定义运行时
       // #203：无 reviewer service 但有意保留用户审批作为 review 边界的场景
       if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
-      if (input.metadata.agent === "Auto") {
+      // #225：metadata.agent 与 agent key 同为小写 auto——大小写敏感比较在此对齐
+      if (input.metadata.agent === "auto") {
         return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
       }
       return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision

@@ -74,8 +74,8 @@ const layer = Layer.effect(
       if (build) return build
       for (const agent of data.agents.values()) {
         const fallback = selectable(agent)
-        // Auto 只接受显式选择，禁用其他主代理不应悄悄启用自动权限。
-        if (fallback && agent.id !== "Auto") return fallback
+        // auto只接受显式选择，与注册键小写化保持一致。
+        if (fallback && agent.id !== "auto") return fallback
       }
     }
 

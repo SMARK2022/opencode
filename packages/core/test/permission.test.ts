@@ -399,8 +399,8 @@ describe("PermissionV2", () => {
     const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
     // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
     const agents = yield* AgentV2.Service
-    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("Auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
-    const automatic = assertion({ agent: AgentV2.ID.make("Auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
+    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
+    const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])

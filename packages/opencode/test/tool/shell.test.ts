@@ -675,7 +675,8 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
   }
 
   for (const item of ps) {
-    reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
+    // #225：agent 标识统一小写 auto——与 agent key/name、metadata.agent 的生产比较保持同构
+    reviewed.live(`routes auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
       withShell(
         item,
         Effect.gen(function* () {
@@ -714,7 +715,7 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
                     patterns: [String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`],
                     metadata: {
                       action_kind: "shell",
-                      agent: "Auto",
+            agent: "auto",
                       command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
                       cwd: projectRoot,
                       shell: item.shell,
