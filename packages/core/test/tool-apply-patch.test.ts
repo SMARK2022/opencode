@@ -9,6 +9,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Location } from "@opencode-ai/core/location"
 import { LocationMutation } from "@opencode-ai/core/location-mutation"
 import { PermissionV2 } from "@opencode-ai/core/permission"
+import { PermissionPrecheck } from "@opencode-ai/core/permission/precheck"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
@@ -156,6 +157,11 @@ describe("ApplyPatchTool", () => {
           expect(yield* exists(remove)).toBe(false)
           expect(readsBeforeEditApproval).toBe(0)
           expect(assertions).toMatchObject([{ action: "edit", resources: ["update.txt", "remove.txt"] }])
+          // 分类器必须消费真实工具请求，不能只用手造metadata证明删除已送审。
+          const request = assertions[0]
+          if (!request?.metadata) return yield* Effect.die("Missing edit precheck metadata")
+          expect(request.metadata.files).toEqual([{ type: "update", relativePath: "update.txt" }, { type: "delete", relativePath: "remove.txt" }])
+          expect(PermissionPrecheck.evaluate({ permission: request.action, patterns: request.resources, metadata: request.metadata })).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
         }
       }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

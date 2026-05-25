@@ -1,4 +1,41 @@
 import { describe, expect, test } from "bun:test"
+  test("routes structured workspace deletes to reviewer as cautious", async () => {
+    let called = false
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "edit",
+            patterns: ["docs/old name.md"],
+            metadata: {
+              agent: "auto",
+              files: [{ type: "delete", relativePath: "docs/old name.md", deletions: 4 }],
+            },
+          },
+          {
+            review: (input) =>
+              Effect.sync(() => {
+                called = true
+                // Delete is the security boundary under test. The reviewer should
+                // see cautious, not generic non-shell uncertainty, so policy can
+                // distinguish irreversible filesystem effects from ordinary edits.
+                expect(input.precheck.level).toBe("cautious")
+                expect(input.precheck.reason).toBe("file deletion requires explicit approval")
+                return {
+                  action: "allow" as const,
+                  reason: "reviewer approved explicit file deletion",
+                  reviewID: "review_workspace_delete",
+                  risk_level: "medium" as const,
+                  user_authorization: "medium" as const,
+                }
+              }),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
+    expect(called).toBe(true)
+  })
+
 import { Effect } from "effect"
 import { PermissionAuto } from "../../src/permission/auto"
 

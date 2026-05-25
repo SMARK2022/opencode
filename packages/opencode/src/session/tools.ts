@@ -99,6 +99,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       permission
         .ask({
           ...req,
+          // #230：permission reviewer 以 metadata.agent 为稳定信号——集中在此写入使 apply_patch/write/edit/插件共享同一安全路径
+          metadata: { ...req.metadata, agent: input.agent.name },
           sessionID: input.session.id,
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
           ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),

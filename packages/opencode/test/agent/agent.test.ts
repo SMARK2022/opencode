@@ -92,7 +92,7 @@ it.instance("interactive agent keeps existing ask gates for command execution", 
 
 // #201：auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
 // #203：后续可重构 auto 分支实现，但必须维持 "build-like + shell:auto" 的用户契约
-it.instance("auto agent routes shell through auto while preserving build-like permissions", () =>
+it.instance("auto agent routes shell and workspace edits through auto while preserving build-like permissions", () =>
   Effect.gen(function* () {
     // #225：get 用小写 agent key
     const auto = yield* load((svc) => svc.get("auto"))
@@ -100,11 +100,12 @@ it.instance("auto agent routes shell through auto while preserving build-like pe
     expect(auto?.mode).toBe("primary")
     expect(auto?.native).toBe(true)
 
-    // #203：auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
-    // #203：或 notebook 执行也引入 auto 分支从而扩大本次切入面
+    // apply_patch/write/edit 在 runtime 都通过 edit permission 约束；这里固定
+    // auto agent 对工作区写入的真实公开行为，防止未来只给 apply_patch 增加
+    // 孤立规则却漏掉实际执行链路上的 edit gate。
     expect(evalPerm(auto, "bash")).toBe("auto")
     expect(evalPerm(auto, "external_directory")).toBe("auto")
-    expect(evalPerm(auto, "edit")).toBe("allow")
+    expect(evalPerm(auto, "edit")).toBe("auto")
     expect(evalPerm(auto, "task")).toBe("allow")
     expect(evalPerm(auto, "vscode_notebook_run")).toBe("allow")
     expect(evalPerm(auto, "vscode_notebook_env")).toBe("allow")

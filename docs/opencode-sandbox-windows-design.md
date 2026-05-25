@@ -86,7 +86,8 @@ opencode 的权限先从 agent/session 层组合出来。
 - 默认权限由 `packages/opencode/src/agent/agent.ts` 构造。
 - `build` agent 近似全工具可用。
 - `interactive` agent 对 shell/notebook run/env 默认 ask。
-- `auto` agent 当前把 `bash` 与 shell-originated `external_directory` 接入 `auto`。
+- `auto` agent 当前把 `bash`、workspace edit gate 与 shell/tool-originated
+  `external_directory` 接入 `auto`。
 - 用户配置 `config.permission` 会通过 `Permission.fromConfig` 转成 ruleset。
 - session permission 会和 agent permission 在工具上下文处 merge。
 
@@ -96,10 +97,12 @@ opencode 的权限先从 agent/session 层组合出来。
 auto agent
   bash: auto
   external_directory: auto except whitelisted dirs
-  edit/write/apply_patch: still follows build-like allow shape
+  edit/write/apply_patch: auto through the shared edit permission gate
 ```
 
-这说明当前 auto 的重点是 shell risk gate，而不是所有写工具都改成 reviewer 审批。
+这说明当前 auto 的重点是 shell risk gate 与 workspace edit gate；`apply_patch`、`write`、`edit`
+在运行时共享 `edit` permission，因此文件写入和删除必须在同一个 auto admission seam 上审查，而不是按工具名分散处理。
+read/task/notebook 等其他 build-like 权限暂不因此扩大到 auto。
 
 ### 中层：Tool Context ask 边界
 

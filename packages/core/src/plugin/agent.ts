@@ -148,8 +148,10 @@ export const Plugin = define({
             ...PermissionV2.merge(defaults, [
               { action: "question", resource: "*", effect: "allow" },
               { action: "plan_enter", resource: "*", effect: "allow" },
-              // auto只改变shell路由；其余基础权限及后续配置覆盖保持原样。
+              // auto同时审查命令与工作区写入，其他代理权限和后续配置覆盖保持原样。
               { action: "bash", resource: "*", effect: id === "auto" ? "auto" : "ask" },
+              // edit统一承接write、edit和apply_patch，不新增按工具名分裂的规则。
+              ...(id === "auto" ? [{ action: "edit", resource: "*", effect: "auto" as const }] : []),
               // auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
               ...(id === "auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
