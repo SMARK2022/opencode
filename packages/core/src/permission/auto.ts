@@ -63,32 +63,19 @@ export function evaluate(
   return Effect.gen(function* () {
     // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
     const precheck = PermissionPrecheck.evaluate(input)
-    const isShell = input.permission === "bash"
-    const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
-    // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据——仅凭路径不构成授权上下文
-    const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
-    // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 auto shell
-    // #203：回到人工确认；非 shell general 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝
-    // #203：strict 是用户显式配置的例外，保留原本"低风险也审"的能力
+    // #232：shell-origin 与 tool-origin external_directory 不再单独分支——统一由
+    // #232：precheck 的 externalDirectoryEffect 提升为 cautious 或保持 dangerous deny。
+    // #232：safe/general/cautious/dangerous 是 LLM 负载边界——safe 和 general 默认直接
+    // #232：允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是
+    // #232：用户显式配置的例外，用来保留原本"低风险也审"的能力。
     if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
-    if (isShellExternalDirectory) {
-      // #203：shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性预审，
-      // #203：不能再单独调用 reviewer；否则一次 bash 会在 external_directory 和 bash 两个权限点
-      // #203：重复消耗 LLM。非 dangerous 情况放行给后续 bash auto
-      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
-    }
-    if (input.permission === "external_directory" && !isToolExternalDirectory) {
-      // #210：无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
-      // #210：auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
-      // #210：metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断
-      return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
-    }
     if (precheck.level === "safe" && !input.strict) {
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
-    if (precheck.level === "general" && isShell && !input.strict) {
-      // #203：开发测试期要求 auto shell 不弹人工确认：未命中 dangerous/cautious 的命令先放行；
-      // #203：非 shell general 继续走 reviewer
+    if (precheck.level === "general" && !input.strict) {
+      // #232：general 是"未知但未命中 cautious/dangerous"的确定性 allow 边界；reviewer
+      // #232：只承接 cautious。这样普通 edit/add/update 和未知 shell 不会消耗 LLM 或
+      // #232：回到可点击 ask，真正敏感的 delete/external-directory 会先被 precheck 提升。
       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
     }
 
@@ -156,31 +143,9 @@ function errorTag(error: unknown) {
   return error && typeof error === "object" && "_tag" in error && typeof error._tag === "string" ? error._tag : undefined
 }
 
-// #210：tool-origin 证据校验——action_kind 是 caller 可控 metadata，需同时携带已知 tool 及其 operation/payload，
-// #210：仅凭路径的请求仍回退人工审批，防止 reviewer 替路径授权后续读写内容
-function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
-  if (metadata.action_kind !== "tool") return false
-  if (metadata.tool === "read") return metadata.operation === "read"
-  // 空字符串也是有效写入负载；缺少content的纯路径请求才继续人工审批。
-  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
-  if (metadata.tool === "edit") {
-    return (
-      (metadata.operation === "edit" || metadata.operation === "create") &&
-      typeof metadata.oldString === "string" &&
-      typeof metadata.newString === "string"
-    )
-  }
-  if (metadata.tool === "apply_patch") {
-    // #210：apply_patch 需匹配 hunk.type（add/update/delete/move）并携带 patchText 证据
-    return (
-      (metadata.operation === "add" || metadata.operation === "update" || metadata.operation === "delete" || metadata.operation === "move") &&
-      typeof metadata.patchText === "string"
-    )
-  }
-  return false
-}
-
 // #198：提取错误消息——provider/model 错误在 deny reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
+// #232：tool-origin 证据校验整体移除——external_directory 边界统一 cautious，
+// #232：不再需要逐工具 operation/payload 证据判定是否进入 reviewer。
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message
   if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message

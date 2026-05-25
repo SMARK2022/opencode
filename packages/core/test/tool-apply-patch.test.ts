@@ -226,6 +226,12 @@ describe("ApplyPatchTool", () => {
                 expect(assertions).toMatchObject([
                   { sessionID, action: "edit", resources: ["nested/new.txt", "update.txt", "remove.txt"], save: ["*"] },
                 ])
+                // 真实leaf交付每个操作类型，不能把混合patch中的删除当作general更新。
+                expect(assertions[0]?.metadata?.files).toEqual([
+                  { type: "add", relativePath: "nested/new.txt" },
+                  { type: "update", relativePath: "update.txt" },
+                  { type: "delete", relativePath: "remove.txt" },
+                ])
                 expect(readsBeforeEditApproval).toBe(0)
                 expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/new.txt"), "utf8"))).toBe(
                   "created\n",

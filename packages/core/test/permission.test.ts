@@ -430,9 +430,9 @@ describe("PermissionV2", () => {
     expect(reviewText).toContain("shortened")
     expect(reviewText).not.toContain("PRIVATE REASONING")
     expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
-    // 外部目录复用同一shell预检，不再为相同命令调用第二次模型。
+    // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
     expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(1)
+    expect(reviewRequests).toHaveLength(2)
     reviewSettings = new Config.Info({ approvals_reviewer: "user" })
     const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
     expect(user.effect).toBe("ask")
@@ -496,9 +496,10 @@ describe("PermissionV2", () => {
     expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(reviews + 2)
     expect(reviewRequests.at(-1)?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")).toContain('"operation": "write"')
+    // 仅含路径的外部访问也进入同一reviewer，结果来自审查而非general直接放行。
     const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
-    expect(pathOnly.effect).toBe("ask")
-    yield* service.reply({ requestID: pathOnly.id, reply: "reject" })
+    expect(pathOnly.effect).toBe("allow")
+    expect(reviewRequests).toHaveLength(reviews + 3)
     // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
     reviewGate = yield* Deferred.make<void>()
     reviewStarted = yield* Deferred.make<void>()

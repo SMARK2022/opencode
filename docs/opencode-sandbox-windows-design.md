@@ -139,7 +139,7 @@ read/task/notebook 等其他 build-like 权限暂不因此扩大到 auto。
 +--------------------------------------------------------------------------------+
 ```
 
-shell 的 `external_directory` 不是独立工具动作。它只是 shell 命令执行前的项目外路径门禁。opencode 当前已经把同一条 shell command、cwd、shell、agent 写入 `external_directory` metadata，避免 auto 模式下项目外路径先退回普通人工 ask，从而绕开后续 bash auto 路由。
+shell 的 `external_directory` 不是独立工具动作。它只是 shell 命令执行前的项目外路径门禁。opencode 当前已经把同一条 shell command、cwd、shell、agent 写入 `external_directory` metadata，避免 auto 模式下项目外路径先退回普通人工 ask，并确保危险 shell payload 在该门禁 deterministic deny；非危险外部路径进入 cautious review 边界。
 
 关键 metadata：
 
@@ -192,13 +192,13 @@ for each requested pattern:
               |                          |                           |
               v                          v                           v
 +-----------------------------+ +--------------------------+ +--------------------+
-| dangerous                   | | safe                     | | general shell      |
+| dangerous                   | | safe                     | | general            |
 | deny by precheck            | | allow unless strict      | | allow unless strict|
 +-----------------------------+ +--------------------------+ +--------------------+
                                          |
                                          v
 +--------------------------------------------------------------------------------+
-|  cautious / strict / non-shell general                                          |
+|  cautious / strict                                                              |
 |  -> reviewer if available                                                       |
 |  -> ask only when reviewer disabled by config or fallback=user                  |
 |  -> deny when reviewer unavailable for native auto agent                        |
@@ -209,12 +209,12 @@ for each requested pattern:
 
 ```text
 safe       known read-only shell command
-general    unknown or opaque command requiring broader judgment
+general    unknown or opaque command that is allowed unless strict review is enabled
 cautious   visible sensitive or risky operation requiring reviewer/user boundary
 dangerous  critical operation that fails closed before execution
 ```
 
-`PermissionPrecheck` 目前真正覆盖 `bash` 和 shell-originated `external_directory`。非 shell 权限直接回到 `general`。
+`PermissionPrecheck` 目前真正覆盖 `bash` 和所有 `external_directory` 边界。其他非 shell 权限直接回到 `general`，除非结构化 metadata 先把它提升到 `cautious`，例如 workspace delete。
 
 ### Reviewer boundary
 
