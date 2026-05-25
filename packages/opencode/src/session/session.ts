@@ -163,14 +163,43 @@ function relatedPathConditions(input: { path: string; directory?: string; global
 }
 
 function relatedDirectoryConditions(directory: string) {
-  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
-  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
-  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
-  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
+  const comparable = comparableDirectoryColumn()
+  const value = comparableDirectoryValue(directory)
   return [
     ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
     like(comparable, value ? `${value}/%` : "%"),
   ]
+}
+
+// Session switching is path-scoped, not raw-directory scoped: the TUI asks with
+// both `directory` (absolute cwd) and `path` (cwd relative to the project
+// worktree). `Global.Path.home` is the canonical absolute path for `~`; on
+// Windows historical rows and requests can differ by slash direction, trailing
+// slash, or drive-letter casing, so home comparisons must normalize those
+// spellings without changing the broader directory/path API contract.
+function comparableDirectoryColumn() {
+  const column = sql<string>`rtrim(replace(${SessionTable.directory}, ${"\\"}, "/"), "/")`
+  if (process.platform === "win32") return sql<string>`lower(${column})`
+  return column
+}
+
+function comparableDirectoryValue(directory: string) {
+  const resolved = process.platform === "win32" ? directory : path.resolve(directory)
+  const normalized = resolved.replaceAll("\\", "/").replace(/\/+$/, "")
+  if (process.platform === "win32") return normalized.toLowerCase()
+  return normalized
+}
+
+function homeDirectoryCondition() {
+  // Match exactly the home directory after applying the same compatibility
+  // normalization to stored rows and `Global.Path.home`; this deliberately does
+  // not match `~/child` sessions when another directory asks to include `~`.
+  return eq(comparableDirectoryColumn(), comparableDirectoryValue(Global.Path.home))
+}
+
+function isHomeDirectory(directory: string | undefined) {
+  if (!directory) return false
+  return comparableDirectoryValue(directory) === comparableDirectoryValue(Global.Path.home)
 }
 
 function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
@@ -926,40 +955,54 @@ function* listByProject(
     conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
   }
   if (input.path !== undefined) {
-    const projectPath = or(
-      ...relatedPathConditions({
-        path: input.path,
+    const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
+    // The TUI session switcher uses `directory + path` queries to show the
+    // existing current/parent/child path range. Treat `~` as the user's global
+    // switching hub: when the request itself is home, do not add any project or
+    // path predicate so search/start/limit apply across all sessions; otherwise
+    // union in only the exact home-directory sessions. Directory-only calls stay
+    // below in the legacy branch, preserving reset/delete/archive-style exact
+    // directory behavior.
+    if (includeHomeSwitchScope && isHomeDirectory(input.directory)) {
+      // The surrounding workspace/start/search/roots/limit predicates remain in
+      // force. Only the path/project boundary is widened for `~` switching.
+    } else {
+      const projectPath = or(
+        ...relatedPathConditions({
+          path: input.path,
+          directory: input.directory,
+          global: input.projectID === ProjectID.global,
+          root: true,
+        }),
+      )!
+      const useDirectoryFallback = directoryMatchesPath({
         directory: input.directory,
-        global: input.projectID === ProjectID.global,
-        root: true,
-      }),
-    )!
-    const useDirectoryFallback = directoryMatchesPath({
-      directory: input.directory,
-      path: input.path,
-      projectID: input.projectID,
-    })
-    const globalPath = useDirectoryFallback && input.directory
-      ? or(
-          ...relatedPathConditions({
-            path: SessionPath.relative("/", input.directory),
-            directory: input.directory,
-            global: true,
-          }),
-        )
-      : undefined
-    const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
+        path: input.path,
+        projectID: input.projectID,
+      })
+      const globalPath = useDirectoryFallback && input.directory
+        ? or(
+            ...relatedPathConditions({
+              path: SessionPath.relative("/", input.directory),
+              directory: input.directory,
+              global: true,
+            }),
+          )
+        : undefined
+      const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
 
-    // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
-    conditions.push(
-      or(
-        and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
-        ...(globalPath && input.projectID !== ProjectID.global
-          ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
-          : []),
-        ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
-      )!,
-    )
+      // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
+      conditions.push(
+        or(
+          and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
+          ...(globalPath && input.projectID !== ProjectID.global
+            ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
+            : []),
+          ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
+          ...(includeHomeSwitchScope ? [homeDirectoryCondition()] : []),
+        )!,
+      )
+    }
   } else if (input.scope !== "project" && !input.experimentalWorkspaces) {
     conditions.push(eq(SessionTable.project_id, input.projectID))
     if (input.directory) {
@@ -985,7 +1028,10 @@ function* listByProject(
     db
       .select()
       .from(SessionTable)
-      .where(and(...conditions))
+      // A home path-scoped switch query intentionally has no project/path
+      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
+      // only filters instead of inventing a dummy true condition.
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(SessionTable.time_updated))
       .limit(limit)
       .all(),
