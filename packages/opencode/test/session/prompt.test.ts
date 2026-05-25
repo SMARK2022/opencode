@@ -323,6 +323,20 @@ const waitForBusy = (sessionID: SessionID, duration: Duration.Input = "2 seconds
     duration,
   )
 
+// Permission prompts are asynchronous tool side effects. Poll the public
+// Permission.Service list so tests observe the same pending request that a UI
+// would render, without depending on private prompt-loop scheduling details.
+const waitForPermission = Effect.fn("test.waitForPermission")(function* (count: number) {
+  const permission = yield* Permission.Service
+  return yield* pollWithTimeout(
+    Effect.gen(function* () {
+      const pending = yield* permission.list()
+      return pending.length === count ? pending : undefined
+    }),
+    `permission request count never reached ${count}`,
+  )
+})
+
 const hasBash = Effect.sync(() => Bun.which("bash") !== null)
 
 const deferredAsPromise = <A>(deferred: Deferred.Deferred<A>): PromiseLike<A> => ({
@@ -1187,6 +1201,48 @@ it.instance(
     }),
   { git: true },
   15_000,
+)
+
+it.instance(
+  "auto agent tool permission requests carry auto agent evidence before approval",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const permission = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Auto metadata permission gate",
+        permission: [{ permission: "todowrite", pattern: "*", action: "ask" }],
+      })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "auto",
+        noReply: true,
+        parts: [{ type: "text", text: "track the work" }],
+      })
+      yield* llm.push(
+        reply()
+          .tool("todowrite", {
+            todos: [{ content: "check permission metadata", status: "pending", priority: "high" }],
+          })
+          .item(),
+      )
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+      const [request] = yield* waitForPermission(1)
+
+      expect(request.permission).toBe("todowrite")
+      // Tool implementations should not each remember to copy ctx.agent into
+      // metadata. The prompt adapter owns that permission fact so native auto can
+      // enable reviewer consistently for every non-shell tool request.
+      expect(request.metadata.agent).toBe("auto")
+
+      yield* permission.reply({ requestID: request.id, reply: "reject" })
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+  10_000,
 )
 
 it.instance(

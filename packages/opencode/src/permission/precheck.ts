@@ -305,8 +305,13 @@ export function evaluate(input: {
   patterns: readonly string[]
   metadata: Readonly<Record<string, unknown>>
 }): Decision {
-  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具有意回退到
-  // 用户审批而不是猜测不相关的参数模式。
+  const fileEffect = structuredFileEffect(input)
+  if (fileEffect) return fileEffect
+
+  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具默认回退到
+  // reviewer/user 审批。上面的 structuredFileEffect 是例外：edit/apply_patch
+  // 已经把最终文件效果作为权限 metadata 暴露出来，删除这种不可逆效果必须在
+  // auto reviewer 边界前被提升为 cautious，而不是留作普通 non-shell general。
   if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
     // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
     // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
@@ -321,6 +326,41 @@ export function evaluate(input: {
     typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
     0,
   )
+}
+
+function structuredFileEffect(input: {
+  permission: string
+  metadata: Readonly<Record<string, unknown>>
+}): Decision | undefined {
+  // apply_patch 的项目内执行最终通过 edit 权限，并在 metadata.files 中携带
+  // add/update/delete/move 的结构化效果。这里仅提升 delete：普通 update 继续
+  // 走既有 non-shell general 路径。必须限定 permission=edit，避免其他工具恰好
+  // 使用 files metadata 时被误归类为 workspace edit 删除。
+  if (
+    input.permission === "edit" &&
+    Array.isArray(input.metadata.files) &&
+    input.metadata.files.some((item) => fileEffectType(item) === "delete")
+  ) {
+    return { level: "cautious", reason: "file deletion requires explicit approval" }
+  }
+
+  // apply_patch 访问项目外路径时，external_directory preflight 发生在最终
+  // edit diff 构造之前，此时只有 operation/patchText 能证明这是一次删除。
+  // 要求 patchText 存在，避免任意 path-only external_directory 请求仅凭 tool
+  // 名称就被提升到 reviewer 作为可审批的文件删除事实。
+  if (
+    input.permission === "external_directory" &&
+    input.metadata.tool === "apply_patch" &&
+    input.metadata.operation === "delete" &&
+    typeof input.metadata.patchText === "string"
+  ) {
+    return { level: "cautious", reason: "file deletion requires explicit approval" }
+  }
+}
+
+function fileEffectType(input: unknown) {
+  if (!input || typeof input !== "object" || !("type" in input)) return
+  return input.type
 }
 
 export function canAlwaysAllowPrefix(tokens: string[]) {

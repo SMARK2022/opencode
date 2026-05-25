@@ -171,9 +171,10 @@ export const layer = Layer.effect(
             native: true,
           },
           // [local-smark] auto 原生 Agent 开始
-          // `auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
-          // 等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
-          // 扩大到新的工具审批面。
+          // `apply_patch`、`write` 和 `edit` 在实际执行前都会请求 edit 权限；
+          // 因此 auto agent 必须把 edit 接入 auto admission，不能只给某个工具名
+          // 单独加规则。其他 build-like 权限暂不扩大到 auto，避免把本次文件删除
+          // 审查修复扩散到 read/task/notebook 等无关工具面。
           auto: {
             name: "auto",
             description: "Build-like agent that routes shell commands through auto permission review.",
@@ -184,6 +185,7 @@ export const layer = Layer.effect(
                 question: "allow",
                 plan_enter: "allow",
                 bash: "auto",
+                edit: "auto",
                 external_directory: {
                   "*": "auto",
                   ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),

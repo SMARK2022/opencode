@@ -245,6 +245,71 @@ describe("permission precheck bash classifier", () => {
     ).toMatchObject({ level: "general" })
   })
 
+  test("marks structured workspace file deletion cautious before non-shell fallback", () => {
+    // apply_patch reports its final workspace effect through edit metadata.files.
+    // This is the observable permission payload, so delete risk must be classified
+    // here instead of by adding a tool-specific branch in apply_patch execution.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "edit",
+        patterns: ["docs/old name.md"],
+        metadata: {
+          files: [{ type: "delete", relativePath: "docs/old name.md", deletions: 4 }],
+        },
+      }),
+    ).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+  })
+
+  test("keeps structured workspace updates on the existing non-shell general path", () => {
+    // Update-only diffs still need reviewer/user judgment when routed through auto,
+    // but they are not deletion-specific risk. Keeping them general preserves the
+    // existing non-shell behavior while allowing delete to cross the cautious seam.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "edit",
+        patterns: ["src/index.ts"],
+        metadata: {
+          files: [{ type: "update", relativePath: "src/index.ts", additions: 1, deletions: 1 }],
+        },
+      }),
+    ).toMatchObject({ level: "general" })
+  })
+
+  test("does not treat unrelated files metadata as workspace edit deletion", () => {
+    // files is not a globally reserved metadata field. Only the edit permission
+    // owns apply_patch/write/edit workspace effects, so unrelated permissions must
+    // retain the existing non-shell general behavior even if they include a file
+    // summary with a delete-shaped value.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "task",
+        patterns: ["general"],
+        metadata: {
+          files: [{ type: "delete", relativePath: "notes.txt" }],
+        },
+      }),
+    ).toMatchObject({ level: "general" })
+  })
+
+  test("marks apply_patch external delete evidence cautious", () => {
+    // External-directory preflight happens before the final edit diff exists. The
+    // apply_patch operation payload is the only delete evidence available there,
+    // so the precheck must treat that operation as the same cautious filesystem
+    // effect without relying on the target path alone.
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "external_directory",
+        patterns: ["/tmp/project/*"],
+        metadata: {
+          action_kind: "tool",
+          tool: "apply_patch",
+          operation: "delete",
+          patchText: "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
+        },
+      }),
+    ).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+  })
+
   test("filters broad always-allow prefixes", () => {
     expect(PermissionPrecheck.canAlwaysAllowPrefix(["git"])).toBe(false)
     expect(PermissionPrecheck.canAlwaysAllowPrefix(["git", "status"])).toBe(true)
