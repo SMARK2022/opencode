@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Override version, for example 1.15.3-smark. Empty means packages/opencode/package.json version."
+        description: "Override version, for example 1.15.4-smark. Empty means packages/opencode/package.json version."
         required: false
         type: string
   push:
