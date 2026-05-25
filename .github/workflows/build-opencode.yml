@@ -10,7 +10,9 @@ on:
       version:
         # #156：显式版本允许 v 前缀，脚本内统一去 v 后再拼接 tag
         # #161：示例版本随 tip 升号；默认仍读 package.json
-        description: "Override version, for example 1.19.11-smark. Empty means packages/opencode/package.json version."
+        # #231：source bump 1.15.3→1.15.4 按 0161 协同升号规则映射到目标版本线 1.19.11→1.19.12-smark
+        # #231：README 的 SMARK 展示段在目标为纯上游未移植——版本展示语义由本文件与 package.json 承载
+        description: "Override version, for example 1.19.12-smark. Empty means packages/opencode/package.json version."
         required: false
         type: string
   push:
