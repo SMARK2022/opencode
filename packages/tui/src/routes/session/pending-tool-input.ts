@@ -2,6 +2,10 @@
 export type PendingToolInputStats = {
   // #187：filePath 可空（多文件 patch 时用 fileCount）
   filePath?: string
+  // #224：notebook edit 的稳定 cell 定位键，pending 阶段从 cellId 参数流式提取
+  cellId?: string
+  // #224：notebook edit 操作类型（insert/edit/delete）或 env 操作（configure/restart/save）
+  operation?: string
   // #187：apply_patch 多文件计数
   fileCount: number
   // #187：新增行（write/content 或 newString 或 +diff）
@@ -37,10 +41,45 @@ export function createPendingToolInputParser(tool: string) {
   if (tool === "apply_patch") return createApplyPatchInputParser()
   if (tool === "edit") return createEditInputParser()
   if (tool === "write") return createWriteInputParser()
+  // #224：notebook edit 的 pending 统计需要 filePath/cellId/editType + oldCode/newCode 行数
+  if (tool === "vscode_notebook_edit") return createNotebookEditInputParser()
   // #187：bash 等无 raw 进度 UI 的工具返回空 parser
   return {
     push(_input: string) {},
     stats: () => undefined,
+  }
+}
+
+  // #224：notebook edit 的 pending 统计从流式参数提取 filePath/cellId/editType +
+// oldCode/newCode 行数。bridge 的 sourceProp 会用 "\n" 拼接 string[] 数组项，
+// streaming 统计也必须补上这个隐式换行，否则 pending 阶段的 +N/-N 会低估。
+// #224：与 createEditInputParser 不同——notebook edit 还需要 cellId 和 editType
+function createNotebookEditInputParser() {
+  let filePath = ""
+  let cellId = ""
+  let operation = ""
+  const oldCode = createLineCounter()
+  const newCode = createLineCounter()
+  const scanner = createJsonStringFieldScanner(["filePath", "cellId", "editType", "oldCode", "newCode"], (field, value) => {
+    if (field === "filePath") filePath += value
+    if (field === "cellId") cellId += value
+    if (field === "editType") operation += value
+    if (field === "oldCode") oldCode.push(value)
+    if (field === "newCode") newCode.push(value)
+  })
+  return {
+    push: scanner.push,
+    stats: () => {
+      // #224：notebook edit 的 pending 统计只能来自模型正在流式生成的参数，不能在渲染线程
+      // 读取 VS Code 或 notebook 文件；full-cell replace/delete 的真实删除行数要等完成后的 diff。
+      const stats = pendingStats(filePath, filePath ? 1 : 0, newCode.count(), oldCode.count())
+      if (!stats && !cellId && !operation) return undefined
+      return {
+        ...(stats ?? { fileCount: filePath ? 1 : 0, added: 0, removed: 0, filePath: filePath || undefined }),
+        cellId: cellId || undefined,
+        operation: operation || undefined,
+      }
+    },
   }
 }
 
@@ -136,6 +175,10 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
   let expectingValueFor = ""
   // #187：当前正在读的 value 字段名；空表示在 key 相位
   let activeField = ""
+  // #224：数组字段状态——oldCode/newCode 可以是 string[]，需要跟踪数组边界
+  // #224：arrayField 记录当前正在遍历的数组字段名，空表示不在数组内
+  let arrayField = ""
+  let arrayFieldHasValue = false
   let key = ""
   // #187：是否位于 JSON 字符串 token 内部
   let inString = false
@@ -203,18 +246,42 @@ function decodeEscaped(char: string) {
 
         if (char === '"') {
           inString = true
-          activeField = wanted.has(expectingValueFor) ? expectingValueFor : ""
+          // #224：数组内 string 项也激活 wanted 字段；数组外仍用 expectingValueFor
+          // #224：这样 oldCode/newCode 的 string[] 元素也能被 lineCounter 正确计数
+          activeField = wanted.has(expectingValueFor) ? expectingValueFor : arrayField
+          // #224：分隔换行必须先于第二项内容，才能对齐 sourceProp 的 join("\n")。
+          // 空末项也有分隔符，不能把它延迟到结束引号之后补入。
+          // 逐字符输入时，第二项尚未闭合也必须立即显示独立的一行。
+          if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
+          if (activeField && arrayField) arrayFieldHasValue = true
           expectingValueFor = ""
           key = ""
           continue
         }
+        // #224：保留普通字段的冒号转换，数组扩展不能切断所有工具的字段识别。
         if (char === ":" && pendingKey) {
           expectingValueFor = pendingKey
           pendingKey = ""
           continue
         }
+        // #224：进入数组字段——oldCode/newCode 可以是 string[]
+        // #224：遇到 [ 后切换到数组模式，后续逗号不再重置 pendingKey
+        if (expectingValueFor && char === "[" && wanted.has(expectingValueFor)) {
+          arrayField = expectingValueFor
+          arrayFieldHasValue = false
+          expectingValueFor = ""
+          continue
+        }
+        // #224：退出数组字段——遇到 ] 恢复到普通字段模式
+        if (arrayField && char === "]") {
+          arrayField = ""
+          arrayFieldHasValue = false
+          continue
+        }
         if (expectingValueFor && !/\s/.test(char)) expectingValueFor = ""
-        if (char === "," || char === "{" || char === "}") pendingKey = ""
+        // #224：数组内不重置 pendingKey——逗号是数组项分隔符不是字段分隔符
+        // #224：这确保 string[] 的后续元素仍能被正确识别为同一字段的值
+        if (!arrayField && (char === "," || char === "{" || char === "}")) pendingKey = ""
       }
     },
   }

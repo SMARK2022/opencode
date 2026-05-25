@@ -100,6 +100,10 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
     shiftedCell,
     shiftedOldIdx,
     sourcePreview: deletedPreview,
+    // #224：delete 的 before/after——deletedPreview 是删除前源码，after 为空
+    // #224：notebookResult 用 before=deletedPreview, after="" 生成全删除 diff
+    beforeSource: deletedPreview,
+    afterSource: "",
   })
 }
 
@@ -141,7 +145,8 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   // 未应用时不能读取 index+1，特别是尾部附近的失败插入可能使它越界。
   const shiftedCell = applied && shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
   if (input.save === true) await saveNotebook(notebook)
-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
+  // 新格差分以空源码为起点；实际位置、身份与失败状态沿用结构编辑结果。
+  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
 }
 
 async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
@@ -189,6 +194,8 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   // 未请求类型变更时缺少 newCode 是错误，不能将它解释为保留原文的成功编辑。
   if (sourceRaw === undefined) throw new Error("newCode is required for edit")
   const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
+  // 应用前捕获完整源码，不能从修改后的文档反推差分左侧。
+  const beforeSource = targetCell.document.getText()
 
   const edit = new vscode.WorkspaceEdit()
   // TextEdit 作用于格文档 URI，NotebookEdit 作用于 notebook URI，不能交换二者。
@@ -196,7 +203,7 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   // 内容不变的 TextEdit 不产生新版本，有效空操作不能等到同步超时。
   const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
   if (input.save === true) await saveNotebook(notebook)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
 }
 
 async function handleTypeChange(
@@ -214,6 +221,8 @@ async function handleTypeChange(
   let contextSummary: string | undefined
 
   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+  // 类型替换产生新格身份，差分左侧必须在原格还可读取时捕获。
+  const beforeSource = targetCell.document.getText()
 
   if (oldCode) {
     // 先在旧源码完成匹配再更换语言，匹配失败不能留下半次类型修改。
@@ -241,10 +250,12 @@ async function handleTypeChange(
   // applyEdit=false 时原格仍是有效锚点，不能假造已经创建的新格。
   const anchorCell = applied ? notebook.cellAt(anchorCellIndex) : targetCell
   if (input.save === true) await saveNotebook(notebook)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(anchorCellIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(anchorCellIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
 }
 
 async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number, input: Record<string, unknown>) {
+  // 片段替换的差分仍比较完整源码，Preview不代替合成结果。
+  const beforeSource = targetCell.document.getText()
   const result = matchAndReplace(targetCell, oldCode, newCode)
   // Context 在 applyEdit 前捕获，不能从修改后的文档反推旧邻接行。
   const contextSummary = buildContext(notebook, targetCell, result, newCode)
@@ -256,7 +267,7 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
   const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
   if (input.save === true) await saveNotebook(notebook)
   // Preview 只展示替换片段，完整合成源码由 TextEdit 写入而不塞进差分摘要。
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
 }
 
 function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCode: string) {
@@ -513,6 +524,9 @@ function compactEditResult(
     shiftedOldIdx?: number
     sourcePreview?: string
     contextSummary?: string
+    // #224：before/after 源码供 opencode TUI 生成 diff card
+    beforeSource?: string
+    afterSource?: string
   },
 ) {
   const target =
@@ -572,10 +586,14 @@ function compactEditResult(
       cellCountBefore: info.beforeCount,
       cellCountAfter: info.afterCount,
       anchorCellIndex: info.anchorCellIndex,
+      deletedCellIndex: info.deletedCellIndex,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,
       kind: info.kind,
       language: info.language,
+      // 桥接返回格级差分输入，插件仅持久化有界diff；模型summary保持原样。
+      beforeSource: info.beforeSource,
+      afterSource: info.afterSource,
     },
   }
 }

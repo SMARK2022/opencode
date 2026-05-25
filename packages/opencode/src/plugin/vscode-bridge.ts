@@ -2,9 +2,13 @@
 // Plugin 入口：注册 notebook bridge 工具并转发到 ide/vscode-bridge 客户端
 import { Effect } from "effect"
 import { tool, type ToolContext, type PluginInput, type Hooks } from "@opencode-ai/plugin"
+import { NotebookView } from "@opencode-ai/core/tool/notebook-view"
 import { z } from "zod"
 import * as VscodeBridge from "@/ide/vscode-bridge"
 import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
+
+// Notebook展示契约仍为内部metadata，两代共用纯投影而不复制执行器或渲染器。
+const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
 
 const requiredFilePath = {
   filePath: z
@@ -91,13 +95,14 @@ const editArgs = {
     .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
 }
 
-async function call(
+async function callRaw(
   endpoint: string,
   args: Record<string, unknown>,
   context: Pick<ToolContext, "directory" | "abort">,
   timeoutMs?: number,
 ) {
-  const value = await VscodeBridge.callBridge({
+  // #224：返回原始 bridge value，notebookResult 从中派生 summary + compact metadata
+  return await VscodeBridge.callBridge({
     cwd: context.directory,
     path: endpoint,
     body: args,
@@ -105,7 +110,19 @@ async function call(
     signal: context.abort,
     timeoutMs,
   })
-  return VscodeBridge.summaryOnly(value)
+}
+
+// #224：从 bridge 原始返回值派生 output summary + vscodeNotebook metadata；
+// metadata 只包含 TUI 展示需要的 compact 字段，不复制完整源码/artifact 文本
+function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown) {
+  const view = NotebookView.build(endpoint, args, value)
+  return {
+    output: VscodeBridge.summaryOnly(value),
+    metadata: {
+      endpoint,
+      ...(view && { [NOTEBOOK_METADATA_KEY]: view }),
+    },
+  }
 }
 
 // ask 适配：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise
@@ -129,18 +146,12 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
     vscode_notebook_summary: tool({
       description: VscodeNotebookDescriptions.summary,
       args: requiredFilePath,
-      execute: async (args, context) => ({
-        output: await call("/notebook/summary", args, context, 10_000),
-        metadata: { endpoint: "/notebook/summary" },
-      }),
+      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
     }),
     vscode_notebook_source: tool({
       description: VscodeNotebookDescriptions.source,
       args: sourceArgs,
-      execute: async (args, context) => ({
-        output: await call("/notebook/source", args, context, 10_000),
-        metadata: { endpoint: "/notebook/source" },
-      }),
+      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
     }),
     vscode_notebook_run: tool({
       description: VscodeNotebookDescriptions.run,
@@ -148,20 +159,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
       execute: async (args, context) => {
         await ask(context, "vscode_notebook_run", args)
         const timeoutMs = args.timeoutMs ?? 300_000
-        return {
-          // run 工具描述：endCellId 为 range 信号，type 仅提示
-          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
-          metadata: { endpoint: "/notebook/run" },
-        }
+        const body = { ...args, timeoutMs }
+        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
       },
     }),
     vscode_notebook_output: tool({
       description: VscodeNotebookDescriptions.output,
       args: outputArgs,
-      execute: async (args, context) => ({
-        output: await call("/notebook/output", args, context, 30_000),
-        metadata: { endpoint: "/notebook/output" },
-      }),
+      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
     }),
     vscode_notebook_edit: tool({
       description: VscodeNotebookDescriptions.edit,
@@ -175,10 +180,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
         await ask(context, "edit", args)
-        return {
-          output: await call("/notebook/edit", args, context, 30_000),
-          metadata: { endpoint: "/notebook/edit" },
-        }
+        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
       },
     }),
     vscode_notebook_env: tool({
@@ -191,10 +193,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
       execute: async (args, context) => {
         // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
         await ask(context, "vscode_notebook_env", args)
-        return {
-          output: await call("/notebook/env", args, context, 120_000),
-          metadata: { endpoint: "/notebook/env", operation: args.operation },
-        }
+        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
       },
     }),
   },

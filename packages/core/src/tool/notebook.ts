@@ -11,6 +11,7 @@ import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 import { VscodeNotebookDescriptions } from "./notebook-descriptions"
+import { NotebookView } from "./notebook-view"
 
 const filePath = Schema.String.annotate({
   description: "Absolute notebook path or file URI. Required; the bridge never infers a notebook from VS Code focus or open documents.",
@@ -80,26 +81,31 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
     source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
   }).pipe(Effect.mapError(error => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Permission denied: ${action}`, error })))
   // 模型继续接收原生summary正文，完整响应同时经统一settlement保存在structured。
-  const common = { output: Output, toModelOutput: ({ output }: { output: typeof Output.Encoded }) => [{ type: "text" as const, text: output.summary }] }
+  const common = (endpoint: string) => ({
+    output: Output, structured: Schema.Record(Schema.String, Schema.Unknown),
+    // 展示投影追加到structured，完整原生响应及模型summary不被压平或替换。
+    toStructuredOutput: ({ input, output }: { input: Record<string, unknown>; output: typeof Output.Encoded }) => ({ ...output, vscodeNotebook: NotebookView.build(endpoint, input, output) }),
+    toModelOutput: ({ output }: { output: typeof Output.Encoded }) => [{ type: "text" as const, text: output.summary }],
+  })
   yield* tools.register({
-    vscode_notebook_summary: Tool.make({ ...common, description: VscodeNotebookDescriptions.summary, input: SummaryInput,
+    vscode_notebook_summary: Tool.make({ ...common("/notebook/summary"), description: VscodeNotebookDescriptions.summary, input: SummaryInput,
       execute: (args, context) => call("/notebook/summary", args, context, 10_000) }),
-    vscode_notebook_source: Tool.make({ ...common, description: VscodeNotebookDescriptions.source, input: SourceInput,
+    vscode_notebook_source: Tool.make({ ...common("/notebook/source"), description: VscodeNotebookDescriptions.source, input: SourceInput,
       execute: (args, context) => call("/notebook/source", args, context, 10_000) }),
-    vscode_notebook_run: Tool.make({ ...common, description: VscodeNotebookDescriptions.run, input: RunInput,
+    vscode_notebook_run: Tool.make({ ...common("/notebook/run"), description: VscodeNotebookDescriptions.run, input: RunInput,
       execute: (args, context) => ask("vscode_notebook_run", args, context).pipe(
         // 只补source规定的run默认，HTTP窗口保留每格期限外的五秒传输余量。
         Effect.andThen(call("/notebook/run", { ...args, timeoutMs: args.timeoutMs ?? 300_000 }, context, (args.timeoutMs ?? 300_000) + 5_000)),
       ) }),
-    vscode_notebook_output: Tool.make({ ...common, description: VscodeNotebookDescriptions.output, input: OutputInput,
+    vscode_notebook_output: Tool.make({ ...common("/notebook/output"), description: VscodeNotebookDescriptions.output, input: OutputInput,
       execute: (args, context) => call("/notebook/output", args, context, 30_000) }),
-    vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common, description: VscodeNotebookDescriptions.edit, input: EditInput,
+    vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common("/notebook/edit"), description: VscodeNotebookDescriptions.edit, input: EditInput,
       // 专属权限先表达Notebook策略，再保留通用edit；两层拒绝均在发现/传输之前。
       execute: (args, context) => ask("vscode_notebook_edit", args, context).pipe(
         Effect.andThen(ask("edit", args, context)),
         Effect.andThen(call("/notebook/edit", args, context, 30_000)),
       ) }), "edit"),
-    vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
+    vscode_notebook_env: Tool.make({ ...common("/notebook/env"), description: VscodeNotebookDescriptions.env, input: EnvInput,
       // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
       execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
   }).pipe(Effect.orDie)

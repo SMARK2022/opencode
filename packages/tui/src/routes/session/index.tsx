@@ -63,6 +63,8 @@ import {
   PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
   type PendingToolInputStats,
 } from "./pending-tool-input"
+// #224：notebook 工具的 inline/block 视图 seam——把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的描述
+import { useVscodeNotebookToolView } from "./notebook-tool"
 // #154：pending/streaming 判定抽到 util，便于单测与去重
 import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
 import type {
@@ -2027,6 +2029,11 @@ function previewText(input: string, maxLines: number, maxChars: number) {
   return collapseToolOutput(input, maxLines, maxChars).output
 }
 
+// #224：工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
+// generic/plugin tool 的标题参数展示；真实内容仍由完成态的 notebook diff/source
+// card 或 generic output card 展示，避免 pending 阶段刷屏但不丢失结果可见性。
+const TOOL_INPUT_VALUE_MAX_LENGTH = 120
+
 function GenericTool(props: ToolProps) {
   const { theme } = useTheme()
   const ctx = use()
@@ -2040,33 +2047,83 @@ function GenericTool(props: ToolProps) {
     if (expanded() || !collapsed().overflow) return output()
     return collapseToolOutput(output(), maxLines, maxChars()).output
   })
+  // Notebook完成态消费紧凑元数据，流式参数只用于pending摘要，不访问VS Code。
+  const pendingStats = createPendingToolInputStats(() => props.part)
+  const notebook = useVscodeNotebookToolView({
+    tool: () => props.tool,
+    input: () => props.input as Record<string, unknown>,
+    metadata: () => props.metadata as Record<string, unknown>,
+    output,
+    status: () => props.part.state.status,
+    pendingStats,
+    width: () => ctx.width,
+    diffWrapMode: ctx.diffWrapMode,
+  })
+  // #224：notebookInline 只在 view.mode === "inline" 时有值——控制 Switch 的第一个 Match
+  const notebookInline = createMemo(() => {
+    const view = notebook()
+    return view?.mode === "inline" ? view : undefined
+  })
+  // #224：notebookBlock 只在 view.mode === "block" 时有值——控制 Switch 的第二个 Match
+  const notebookBlock = createMemo(() => {
+    const view = notebook()
+    return view?.mode === "block" ? view : undefined
+  })
+  // 外层沿用同一展开状态；小卡片直接显示正文，超预算时才使用Notebook预览。
+  const notebookOverflow = createMemo(() => {
+    const view = notebookBlock()
+    return Boolean(view?.preview) && ((view?.totalLines ?? 0) > (view?.threshold ?? 20) || (view?.totalChars ?? 0) > maxChars() * 2)
+  })
 
   return (
-    <Show
-      when={props.output && ctx.showGenericToolOutput()}
-      fallback={
+    <Switch>
+      {/* #224：notebook inline 视图——pending 态和完成态的轻量单行摘要 */}
+      <Match when={notebookInline()}>
+        {(view) => (
+          <InlineTool icon={view().icon} pending={view().pending} complete={view().complete} part={props.part}>
+            {view().children}
+          </InlineTool>
+        )}
+      </Match>
+      {/* #224：notebook block 视图——完成态的 diff/source/summary/run/output/env card */}
+      <Match when={notebookBlock()}>
+        {(view) => (
+          <BlockTool
+            title={view().title}
+            part={props.part}
+            onClick={notebookOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+            preview={notebookOverflow() && !expanded() ? view().preview : undefined}
+          >
+            {view().body}
+          </BlockTool>
+        )}
+      </Match>
+      {/* #94/#144：通用工具输出——保留折叠/展开逻辑，仅当有 output 且 showGenericToolOutput 时进入 */}
+      <Match when={props.output && ctx.showGenericToolOutput()}>
+        <BlockTool
+          title={`# ${props.tool} ${input(props.input)}`}
+          part={props.part}
+          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+          // #144：通用工具折叠预览
+          preview={
+            collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
+          }
+        >
+          <box gap={1}>
+            <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
+            <Show when={collapsed().overflow}>
+              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+            </Show>
+          </box>
+        </BlockTool>
+      </Match>
+      {/* #224：无 output 或关闭 generic 输出时回退到 inline 单行摘要 */}
+      <Match when={true}>
         <InlineTool icon="⚙" pending="Writing command…" complete={true} part={props.part}>
           {props.tool} {input(props.input)}
         </InlineTool>
-      }
-    >
-      <BlockTool
-        title={`# ${props.tool} ${input(props.input)}`}
-        part={props.part}
-        onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
-        // #144：通用工具折叠预览
-        preview={
-          collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
-        }
-      >
-        <box gap={1}>
-          <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
-          <Show when={collapsed().overflow}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-        </box>
-      </BlockTool>
-    </Show>
+      </Match>
+    </Switch>
   )
 }
 
@@ -3307,7 +3364,20 @@ function input(input: Record<string, unknown>, omit?: string[]): string {
     return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
   })
   if (primitives.length === 0) return ""
-  return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
+    // #224：多行 string 参数在标题中只显示行数/字符数摘要，不刷屏
+  // #224：inputValue 对多行/超长值做截断，单行短值原样返回
+  return `[${primitives.map(([key, value]) => `${key}=${inputValue(value as string | number | boolean)}`).join(", ")}]`
+}
+
+// #224：标题参数值截断——多行 string 显示 <N lines, M chars>，
+// #224：单行超长 string 截断到 TOOL_INPUT_VALUE_MAX_LENGTH 并追加省略号
+// #224：这只影响 generic/plugin tool 的标题，不影响 notebook block card 的完整展示
+function inputValue(value: string | number | boolean) {
+  if (typeof value !== "string") return String(value)
+  const lines = value.split("\n")
+  if (lines.length > 1) return `<${lines.length} lines, ${value.length} chars>`
+  if (value.length <= TOOL_INPUT_VALUE_MAX_LENGTH) return value
+  return value.slice(0, TOOL_INPUT_VALUE_MAX_LENGTH).trimEnd() + "..."
 }
 
 function stringValue(value: unknown) {
