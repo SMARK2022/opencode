@@ -1000,9 +1000,9 @@ reviewed.instance(
   { git: true },
 )
 
-// #203：edit/apply_patch 等非 shell auto 请求预审层级为 general，开发期交给 reviewer 单点判断
+// #232：general 是确定性 allow 边界——edit/apply_patch 的普通 add/update 不消耗 reviewer
 reviewed.instance(
-  "ask - auto routes non-shell general tools to reviewer without pending user approval",
+  "ask - auto allows non-shell general tools without pending user approval",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
@@ -1015,9 +1015,11 @@ reviewed.instance(
         metadata: { filepath: "/repo/src/a.ts", diff: "-old\n+new" },
       })
 
-      // #203：开发期要求 edit 这类非 shell auto 请求不回到普通 ask；预审层级 general，
-      // #203：交给 reviewer 单点判断，不产生 pending 用户审批
-      expect(reviewedCalls).toBe(1)
+      // #232：断言从 1 翻转为 0——general 不再消耗 reviewer 配额，pending 审批为零。
+      // #232：general 是 deterministic allow 边界；只有 cautious 才进入 reviewer。
+      // #232：edit/apply_patch 的普通 add/update 不应因为缺少 bash 语义证据而消耗
+      // #232：reviewer 或退回可点击 ask，delete 会在 precheck 中被提升为 cautious。
+      expect(reviewedCalls).toBe(0)
       expect(yield* list()).toHaveLength(0)
     }),
   { git: true },

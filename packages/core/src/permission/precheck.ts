@@ -206,20 +206,42 @@ export function evaluate(input: {
   patterns: readonly string[]
   metadata: Readonly<Record<string, unknown>>
 }): Decision {
+  const externalDirectory = externalDirectoryEffect(input)
+  if (externalDirectory) return externalDirectory
   const fileEffect = structuredFileEffect(input)
     // #230：结构化文件效果优先于通用规则——delete 是不可逆效果，必须谨慎处理
   if (fileEffect) return fileEffect
 
-  // 目前只有 bash 权限有足够的语法证据进行预审查。其他工具默认回退到
-  // reviewer/user 审批。上面的 structuredFileEffect 是例外：edit/apply_patch
-  // 已经把最终文件效果作为权限 metadata 暴露出来，删除这种不可逆效果必须在
-  // auto reviewer 边界前被提升为 cautious，而不是留作普通 non-shell general。
-  if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
-    // #230：apply_patch 项目外删除——external_directory preflight 后仍须谨慎
-    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
-  }
+  // #232：bash 与所有 external_directory 边界携带足够上下文做确定性预审；其他权限
+  // #232：默认回到 general allow，除非上方的结构化边界（如 workspace delete metadata）
+  // #232：先把它们提升到 cautious。
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+}
+
+// #232：external_directory 边界统一为 cautious review seam——shell 发起的访问复用同一条
+// #232：命令的确定性预审，dangerous payload 仍 deterministic deny；其他外部路径（含
+// #232：glob/grep/lsp/repo_overview 等只读工具）不再需要逐工具证据即可进入 reviewer。
+function externalDirectoryEffect(input: {
+  permission: string
+  patterns: readonly string[]
+  metadata: Readonly<Record<string, unknown>>
+}): Decision | undefined {
+  if (input.permission !== "external_directory") return
+
+  if (input.metadata.action_kind === "shell") {
+    const shell = evaluateShell(
+      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
+      0,
+    )
+    // #232：已经确定性的危险 shell 载荷必须在 external_directory 门禁保持 deny——
+    // #232：否则 rm -rf / 仅因同时跨越外部路径边界就会变成 reviewer 可审批。
+    if (shell.level === "dangerous") return shell
+  }
+
+  // #232：该 reason 命名外部路径边界的 cautious seam；刻意不依赖逐工具证据，
+  // #232：使 glob/grep/lsp/repo_overview 等只读工具不因缺少写类载荷退回可点击 ask。
+  return { level: "cautious", reason: "external directory access requires auto review" }
 }
 
 function structuredFileEffect(input: {
@@ -237,20 +259,8 @@ function structuredFileEffect(input: {
     Array.isArray(input.metadata.files) &&
     input.metadata.files.some((item) => fileEffectType(item) === "delete")
   ) {
-    return { level: "cautious", reason: "file deletion requires explicit approval" }
-  }
-
-  // apply_patch 访问项目外路径时，external_directory preflight 发生在最终
-  // edit diff 构造之前，此时只有 operation/patchText 能证明这是一次删除。
-  // 要求 patchText 存在，避免任意 path-only external_directory 请求仅凭 tool
-  // 名称就被提升到 reviewer 作为可审批的文件删除事实。
-  if (
-    input.permission === "external_directory" &&
-    input.metadata.tool === "apply_patch" &&
-    input.metadata.operation === "delete" &&
-    typeof input.metadata.patchText === "string"
-    // #230：要求 patchText 存在——仅凭 operation 名不足以下删除结论
-  ) {
+    // #232：该 reason 命名 delete 专属的 cautious seam 供 reviewer 审计——普通 update
+    // #232：不得共享它；apply_patch 项目外删除统一由 externalDirectoryEffect 覆盖。
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   }
 }
