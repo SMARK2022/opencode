@@ -66,10 +66,14 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
 
-// [local-smark] Hidden message support for undo/repair
+// Hidden messages remain persisted for audit/recovery, but are removed from
+// normal prompt replay and visible history. Each reason names the workflow that
+// owns the invisibility boundary: undo hides reverted turns, repair hides empty
+// dangling assistants, and permission-reviewer protocol retry hides malformed
+// reviewer attempts before the same permission request is retried once.
 const Hidden = Schema.Struct({
   time: NonNegativeInt,
-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
+  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
 })
 
 // OutputLengthError is re-exported from ./message-error above

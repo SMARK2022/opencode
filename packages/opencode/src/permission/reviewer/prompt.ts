@@ -24,13 +24,14 @@ export interface UserPromptItem {
 
 export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
 
-// The text contract intentionally describes the exact JSON literals even though
-// generateObject also receives a schema. Some providers degrade to prompt-only
-// validation, so the prompt and schema both carry the same allow/deny contract.
+// The text contract names the decision tool and repeats its JSON-shaped input
+// because provider tool forcing is intentionally not required for every backend.
+// Runtime may accept strict JSON as a compatibility fallback, but the prompt must
+// keep steering models toward the auditable permission_review_decision protocol.
 const OUTPUT_CONTRACT_PROMPT = `\
-Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Your final message must be strict JSON.
+Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.
 
-Use this JSON schema for every decision, including low-risk allows:
+Use this tool input schema for every decision, including low-risk allows:
 {
   "risk_level": "low" | "medium" | "high" | "critical",
   "user_authorization": "unknown" | "low" | "medium" | "high",

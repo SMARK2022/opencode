@@ -840,6 +840,219 @@ it.instance(
 )
 
 it.instance(
+  "auto permission reviewer accepts structured JSON text decisions",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer JSON fallback" })
+      const command = String.raw`rsync -av "/Volumes/My Passport/Calibration/" Sensetimex4:~/project/Calibration/`
+      yield* llm.push(
+        reply()
+          .text(
+            JSON.stringify({
+              outcome: "allow",
+              risk_level: "high",
+              user_authorization: "high",
+              rationale: "user explicitly authorized the bounded remote transfer",
+            }),
+          )
+          .stop()
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      expect(yield* llm.calls).toBe(1)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.source === "json_fallback" &&
+            part.state.metadata?.rationale === "user explicitly authorized the bounded remote transfer",
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer hides malformed protocol attempts before retrying",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer protocol retry" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      const malformed = "I can allow this request, but I forgot to submit the decision tool."
+      yield* llm.push(
+        reply().text(malformed).stop().item(),
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly authorized the bounded deletion",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      expect(
+        visible.flatMap((msg) => msg.parts).filter((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
+      ).toHaveLength(1)
+      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes(malformed)))).toBe(false)
+      expect(
+        visible.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.source === "tool_call" &&
+              part.state.metadata?.rationale === "user explicitly authorized the bounded deletion",
+          ),
+        ),
+      ).toBe(true)
+
+      const allMessages = (yield* MessageV2.page({ sessionID: reviewer.id, limit: 20, includeHidden: true })).items
+      expect(
+        allMessages.filter(
+          (msg) => msg.info.hidden && msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
+        ),
+      ).toHaveLength(1)
+      expect(
+        allMessages.filter(
+          (msg) => msg.info.hidden && msg.parts.some((part) => part.type === "text" && part.text.includes(malformed)),
+        ),
+      ).toHaveLength(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer fails closed after one malformed protocol retry",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      yield* llm.push(
+        reply().text("first malformed reviewer response").stop().item(),
+        reply().text("second malformed reviewer response").stop().item(),
+      )
+
+      const exit = yield* permissions
+        .ask({
+          sessionID: chat.id,
+          permission: "bash",
+          patterns: [command],
+          metadata: { command, agent: "auto" },
+          always: ["*"],
+          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+        })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (!Exit.isFailure(exit)) return
+      expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.AutoDeniedError)
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed")))).toBe(false)
+      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed")))).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "auto permission reviewer retries malformed decision tool input",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer malformed tool retry" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      yield* llm.push(
+        reply().tool("permission_review_decision", { outcome: "allow" }).item(),
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "user explicitly authorized the bounded deletion after malformed tool input",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+
+      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      expect(
+        visible.some((msg) =>
+          msg.parts.some(
+            (part) =>
+              part.type === "tool" &&
+              part.tool === "permission_review_decision" &&
+              part.state.status === "completed" &&
+              part.state.metadata?.source === "tool_call" &&
+              part.state.metadata?.rationale === "user explicitly authorized the bounded deletion after malformed tool input",
+          ),
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
   "auto permission reviewer retries transient provider failures before recording the decision",
   () =>
     Effect.gen(function* () {
