@@ -85,10 +85,11 @@ type State = Omit<Interface, "generate">
 
 // #200：保留代理名集合——permission-reviewer 的安全不变量不可被用户配置放宽
 const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
-// #201：显式选择的主 Agent 集合——Auto 可见且可经 default_agent 选择，但它会把
+// #201：显式选择的主 Agent 集合——auto 可见且可经 default_agent 选择，但它会把
 // #201：shell 权限切到 auto 分支。为保持"只有显式选择才启用 auto"的不变量，未配置
 // #201：default_agent 时的隐式回退跳过此处列出的名称，避免禁用其他主 Agent 后意外进入 auto 路由
-const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["Auto"])
+// #225：agent key 统一小写 auto——与 metadata.agent 比较及 default_agent 配置保持大小写一致
+const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["auto"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -185,11 +186,12 @@ const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // #203：Auto 复用 build 权限形状，但只把 shell 命令接入 auto。edit
+          // #203：auto 复用 build 权限形状，但只把 shell 命令接入 auto。edit
           // #203：等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
           // #203：扩大到新的工具审批面
-          Auto: {
-            name: "Auto",
+          // #225：原生 auto agent 的 key/name 均用小写，避免大小写敏感比较错配
+          auto: {
+            name: "auto",
             description: "Build-like agent that routes shell commands through auto permission review.",
             options: {},
             permission: Permission.merge(
@@ -413,7 +415,7 @@ const layer = Layer.effect(
 
         const list = Effect.fnUntraced(function* () {
           const cfg = yield* config.get()
-          // #201：Agent 列表 localeCompare 排序——Auto 是大写可见 Agent，显式使用 localeCompare
+          // #201：Agent 列表 localeCompare 排序——auto 是可见 Agent，显式使用 localeCompare
           // #201：语义而非码点排序，避免影响 mixed-case 自定义 Agent 展示顺序；默认 Agent 仍居首
           const defaultName = cfg.default_agent ?? "build"
           return Object.values(agents).toSorted((a, b) => {
@@ -432,8 +434,9 @@ const layer = Layer.effect(
             if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
             return agent
           }
-          // #201：Auto 隐式默认排除——保持历史回退语义：无显式 default_agent 时不因新增可见
-          // #201：Auto 主 Agent 就自动启用 auto shell 路由；Auto 仍可经 default_agent 精确选择
+          // #225：隐式默认排除集合用小写 auto key，与 agents 对象的键保持一致
+          // #201：auto 隐式默认排除——保持历史回退语义：无显式 default_agent 时不因新增可见
+          // #201：auto 主 Agent 就自动启用 auto shell 路由；auto 仍可经 default_agent 精确选择
           const visible = Object.entries(agents).find(
             ([name, agent]) =>
               agent.mode !== "subagent" && agent.hidden !== true && !EXPLICIT_ONLY_PRIMARY_AGENT_NAMES.has(name),

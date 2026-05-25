@@ -331,7 +331,7 @@ describe("permission auto routing", () => {
     expect(called).toBe(false)
   })
 
-  // #203：开发期 shell general 直接 allow——Auto shell 不弹人工确认；未命中 dangerous/cautious 的命令先放行
+  // #203：开发期 shell general 直接 allow——auto shell 不弹人工确认；未命中 dangerous/cautious 的命令先放行
   test("allows shell general decisions during development without reviewer load", async () => {
     let called = false
     await expect(
@@ -357,27 +357,28 @@ describe("permission auto routing", () => {
     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
   })
 
-  // #203：原生 Auto reviewer 缺失时 fail closed——cautious 不降级为可点击 ask，防止点 Allow 暴露敏感 shell 输出
-  test("fails closed for native Auto when reviewer is not wired", async () => {
+  // #225：测试 metadata.agent 用小写 auto，与 agent key 对齐
+  // #203：原生 auto reviewer 缺失时 fail closed——cautious 不降级为可点击 ask，防止点 Allow 暴露敏感 shell 输出
+  test("fails closed for native auto when reviewer is not wired", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
           permission: "bash",
           patterns: ["git add ."],
-          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
+          metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
         }),
       ),
     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
-  // #203：显式 user reviewer 配置强于原生 Auto fail-closed——保留用户审批作为 review 边界
-  test("honors explicit user reviewer configuration for native Auto", async () => {
+  // #203：显式 user reviewer 配置强于原生 auto fail-closed——保留用户审批作为 review 边界
+  test("honors explicit user reviewer configuration for native auto", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
           permission: "bash",
           patterns: ["git add ."],
-          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
+          metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
           reviewerDisabled: true,
         }),
       ),

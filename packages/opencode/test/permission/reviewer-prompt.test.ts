@@ -15,7 +15,8 @@ const userInfo = (id: string): User => ({
   sessionID,
   role: "user",
   time: { created: 0 },
-  agent: "Auto",
+  // #225：测试消息 agent 字段用小写 auto
+  agent: "auto",
   model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("model") },
 })
 // #206：构造助手消息——包含 parentID/path/cost/tokens 等 Assistant 必填字段
@@ -28,7 +29,7 @@ const assistantInfo = (id: string, parentID = "msg_user_0"): Assistant => ({
   modelID: ModelV2.ID.make("model"),
   providerID: ProviderV2.ID.make("test"),
   mode: "build",
-  agent: "Auto",
+  agent: "auto",
   path: { cwd: "/repo", root: "/repo" },
   cost: 0,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },

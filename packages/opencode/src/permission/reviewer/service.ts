@@ -87,7 +87,7 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         const cfg = yield* config.get()
         const permission = cfg.permission
-        // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 Auto 隐式启用
+        // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 auto 隐式启用
         if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
         const autoReview = permission?.auto_review
 
@@ -671,11 +671,12 @@ function isReviewerError(error: unknown): error is Error {
 }
 
 // #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
-// #203：无全局配置时原生 Auto agent 隐式启用 reviewer；否则选 Auto 只会把 cautious 降级成普通 ask
+// #203：无全局配置时原生 auto agent 隐式启用 reviewer；否则选 auto 只会把 cautious 降级成普通 ask
 function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
   if (permission?.approvals_reviewer === "user") return false
   if (permission?.approvals_reviewer === "auto_review") return true
-  return metadata.agent === "Auto"
+  // #225：reviewer 隐式启用判定与小写 agent key 对齐
+  return metadata.agent === "auto"
 }
 
 // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议

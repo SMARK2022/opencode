@@ -49,8 +49,9 @@ it.instance("returns default native agents when no config", () =>
     const agents = yield* load((svc) => svc.list())
     const names = agents.map((a) => a.name)
     expect(names).toContain("build")
-    // #201：Auto 必须像其他原生主 Agent 一样可见，用户才能经 default_agent 显式进入 auto shell 路由
-    expect(names).toContain("Auto")
+    // #201：auto 必须像其他原生主 Agent 一样可见，用户才能经 default_agent 显式进入 auto shell 路由
+    // #225：断言改为小写 auto，与 agent key 一致
+    expect(names).toContain("auto")
     // interactive 仍保留：旧 review 迁移目标
     expect(names).toContain("interactive")
     expect(names).toContain("plan")
@@ -77,7 +78,7 @@ it.instance("build agent has correct default properties", () =>
   }),
 )
 
-// #201：interactive 审批回归——新增 Auto Agent 不能改变 interactive 既有用户审批门禁
+// #201：interactive 审批回归——新增 auto Agent 不能改变 interactive 既有用户审批门禁
 // #201：覆盖 shell 与 notebook 执行权限，防止新增 agent 时误把 ask 改成 auto/allow
 it.instance("interactive agent keeps existing ask gates for command execution", () =>
   Effect.gen(function* () {
@@ -89,16 +90,17 @@ it.instance("interactive agent keeps existing ask gates for command execution", 
   }),
 )
 
-// #201：Auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
+// #201：auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
 // #203：后续可重构 auto 分支实现，但必须维持 "build-like + shell:auto" 的用户契约
-it.instance("Auto agent routes shell through auto while preserving build-like permissions", () =>
+it.instance("auto agent routes shell through auto while preserving build-like permissions", () =>
   Effect.gen(function* () {
-    const auto = yield* load((svc) => svc.get("Auto"))
+    // #225：get 用小写 agent key
+    const auto = yield* load((svc) => svc.get("auto"))
     expect(auto).toBeDefined()
     expect(auto?.mode).toBe("primary")
     expect(auto?.native).toBe(true)
 
-    // #203：Auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
+    // #203：auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
     // #203：或 notebook 执行也引入 auto 分支从而扩大本次切入面
     expect(evalPerm(auto, "bash")).toBe("auto")
     expect(evalPerm(auto, "external_directory")).toBe("auto")
@@ -108,7 +110,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
     expect(evalPerm(auto, "vscode_notebook_env")).toBe("allow")
     expect(evalPerm(auto, "vscode_notebook_edit")).toBe("allow")
 
-    // #201：这些边界继承自 build 的默认安全策略，不因 Auto 的 shell auto 路由而放宽
+    // #201：这些边界继承自 build 的默认安全策略，不因 auto 的 shell auto 路由而放宽
     expect(evalPerm(auto, "question")).toBe("allow")
     expect(evalPerm(auto, "plan_enter")).toBe("allow")
     expect(evalPerm(auto, "repo_clone")).toBe("allow")
@@ -731,18 +733,19 @@ it.instance(
   },
 )
 
-// #201：Auto default_agent 选择测试——Auto 是显式可选主 Agent，验证用户可经 default_agent 选择它
+// #201：auto default_agent 选择测试——auto 是显式可选主 Agent，验证用户可经 default_agent 选择它
 // #201：而无配置默认值仍保持 build（上面的 EXPLICIT_ONLY 排除保证）
+// #225：default_agent 配置与断言统一小写 auto
 it.instance(
-  "defaultAgent can select the Auto shell-auto agent",
+  "defaultAgent can select the auto shell-auto agent",
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      expect(agent).toBe("Auto")
+      expect(agent).toBe("auto")
     }),
   {
     config: {
-      default_agent: "Auto",
+      default_agent: "auto",
     },
   },
 )
@@ -828,7 +831,7 @@ it.instance("decide agent denies tool permissions", () =>
 )
 
 it.instance(
-  "defaultAgent throws when only explicit Auto primary agent remains",
+  "defaultAgent throws when only explicit auto primary agent remains",
   () => expectDefaultAgentError("no primary visible agent found"),
   {
     config: {
@@ -839,7 +842,7 @@ it.instance(
         // #159：disable decide 而非已移除的 review
         decide: { disable: true },
         plan: { disable: true },
-        // #201：Auto 在这里故意保持启用。它可见且可经 default_agent 选择，但不能
+        // #201：auto 在这里故意保持启用。它可见且可经 default_agent 选择，但不能
         // #201：仅因为标准主 Agent 被禁用就成为无配置 fallback（EXPLICIT_ONLY 排除）
       },
     },

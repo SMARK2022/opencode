@@ -119,7 +119,7 @@ describe("AgentV2", () => {
 
       const agents = yield* agent.all()
       expect(agents.map((item) => String(item.id)).sort()).toEqual([
-        "Auto",
+        "auto",
         "build",
         "compaction",
         "decide",
@@ -136,35 +136,35 @@ describe("AgentV2", () => {
         expect(PermissionV2.evaluate(action, "*", decide?.permissions ?? []).effect).toBe("deny")
       // 新增审批代理是唯一例外，既有内置代理仍沿用原来的 bash 策略。
       for (const item of agents) {
-        if (item.id === "interactive" || item.id === "Auto") continue
+        if (item.id === "interactive" || item.id === "auto") continue
         expect(item.permissions.some((rule) => rule.action === "bash" && rule.effect !== "deny")).toBe(false)
       }
       // 从实际注册表 resolve 后求值，缺失注册或错误动作会直接使断言失败。
-      for (const id of ["interactive", "Auto"]) {
+      for (const id of ["interactive", "auto"]) {
         const item = yield* agent.resolve(id)
         if (!item) throw new Error(`expected registered ${id} agent`)
         expect(item).toMatchObject({ id, mode: "primary", hidden: false })
         expect(item.system).toBe((yield* agent.resolve("build"))?.system)
         expect(item.system).toBeUndefined()
-        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
+        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
         // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
         expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe("allow")
         expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
         expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
         expect(PermissionV2.evaluate("read", ".env", item.permissions).effect).toBe("ask")
-        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
+        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
       }
-      // 显式默认可以选择Auto；仅剩Auto时仍不能成为隐式fallback。
-      const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("Auto")))
-      expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("Auto"))
-      expect((yield* agent.all())[0]?.id).toBe(AgentV2.ID.make("Auto"))
+      // 显式默认可以选择auto；仅剩auto时仍不能成为隐式fallback。
+      const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("auto")))
+      expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("auto"))
+      expect((yield* agent.all())[0]?.id).toBe(AgentV2.ID.make("auto"))
       yield* explicit.dispose
       const only = yield* agent.transform((draft) => {
-        for (const item of draft.list()) if (item.id !== "Auto") draft.remove(item.id)
+        for (const item of draft.list()) if (item.id !== "auto") draft.remove(item.id)
       })
       expect(yield* agent.default()).toBeUndefined()
-      expect((yield* agent.resolve("Auto"))?.id).toBe(AgentV2.ID.make("Auto"))
+      expect((yield* agent.resolve("auto"))?.id).toBe(AgentV2.ID.make("auto"))
       yield* only.dispose
       expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("build"))
       const listed = yield* agent.all()
