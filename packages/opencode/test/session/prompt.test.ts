@@ -733,8 +733,28 @@ it.instance(
       expect(tool.state.output).toContain(file)
       expect(tool.state.output).not.toContain("No context found for instance")
       expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+
+      // 行为断言读取真实 daemon log：必须能串起 processor/tool timing，
+      // 同时确认诊断日志没有泄漏工具输入 pattern 或工具输出路径。
+      const timing = yield* pollWithTimeout(
+        Effect.promise(() => Bun.file(Log.file()).text().catch(() => "")).pipe(
+          Effect.map((content) => {
+            const lines = content.split("\n").filter((line) => line.includes(`sessionID=${session.id}`) && line.includes(" timing"))
+            return lines.some((line) => line.includes("phase=processor.end")) &&
+            lines.some((line) => line.includes("phase=tool.end") && line.includes("status=completed"))
+              ? lines.join("\n")
+              : undefined
+          }),
+        ),
+        "timing logs never reached the daemon log",
+      )
+      expect(timing).toContain("phase=ai.first_event")
+      expect(timing).toContain("phase=part.first_delta")
+      expect(timing).not.toContain("**/*.txt")
+      expect(timing).not.toContain(file)
     }),
   { git: true },
+  10_000,
 )
 
 it.instance(

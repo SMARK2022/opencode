@@ -97,6 +97,41 @@ const DECIDE_CONTINUE_BELOW = 0.5
 const DECIDE_TARGET = 0.7
 const DECIDE_MAX = 1
 
+type ToolTimingInput = {
+  source: "local" | "mcp"
+  tool: string
+  sessionID: SessionID
+  messageID: MessageID
+  callID: string | undefined
+}
+
+function toolTiming(
+  input: ToolTimingInput,
+  extra: { phase: "tool.start" } | { phase: "tool.end"; status: "completed" | "error"; durationMs: number },
+) {
+  // 工具 timing 只记录 daemon log 中的短 milestone，禁止携带 args、output、
+  // metadata。tool.start/tool.end 是低基数字段，用来把“工具静默等待”
+  // 和 provider 首 token 慢、TUI 接收/应用慢区分开。
+  log.info("tool timing", { ...extra, ...input })
+}
+
+function timedToolExecution<A, E, R>(input: ToolTimingInput, effect: Effect.Effect<A, E, R>) {
+  // 只在前置 plugin hook 通过后写 tool.start，避免 hook 自身失败被误判
+  // 为工具静默。MCP 传入的 effect 沿用既有 Tool.execute span 边界，包含
+  // permission gate；执行失败仍通过 Exit 原样恢复，保持既有错误传播语义。
+  const startedAt = Date.now()
+  toolTiming(input, { phase: "tool.start" })
+  return Effect.gen(function* () {
+    const exit = yield* effect.pipe(Effect.exit)
+    toolTiming(input, {
+      phase: "tool.end",
+      status: Exit.isSuccess(exit) ? "completed" : "error",
+      durationMs: Date.now() - startedAt,
+    })
+    return yield* exit
+  })
+}
+
 function isDecideAgent(agent: Agent.Info) {
   return agent.name === "decide"
 }
@@ -758,12 +793,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             return run.promise(
               Effect.gen(function* () {
                 const ctx = context(args, options)
+                const timing = {
+                  source: "local" as const,
+                  tool: item.id,
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.messageID,
+                  callID: ctx.callID,
+                }
                 yield* plugin.trigger(
                   "tool.execute.before",
                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
                   { args },
                 )
-                const result = yield* item.execute(args, ctx)
+                const result = yield* timedToolExecution(timing, item.execute(args, ctx))
                 const output = {
                   ...result,
                   attachments: result.attachments?.map((attachment) => ({
@@ -800,23 +842,33 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           run.promise(
             Effect.gen(function* () {
               const ctx = context(args, opts)
+              const timing = {
+                source: "mcp" as const,
+                tool: key,
+                sessionID: ctx.sessionID,
+                messageID: ctx.messageID,
+                callID: opts.toolCallId,
+              }
               yield* plugin.trigger(
                 "tool.execute.before",
                 { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
                 { args },
               )
-              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
-                yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-                return yield* Effect.promise(() => execute(args, opts))
-              }).pipe(
-                Effect.withSpan("Tool.execute", {
-                  attributes: {
-                    "tool.name": key,
-                    "tool.call_id": opts.toolCallId,
-                    "session.id": ctx.sessionID,
-                    "message.id": input.processor.message.id,
-                  },
-                }),
+              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* timedToolExecution(
+                timing,
+                Effect.gen(function* () {
+                  yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
+                  return yield* Effect.promise(() => execute(args, opts))
+                }).pipe(
+                  Effect.withSpan("Tool.execute", {
+                    attributes: {
+                      "tool.name": key,
+                      "tool.call_id": opts.toolCallId,
+                      "session.id": ctx.sessionID,
+                      "message.id": input.processor.message.id,
+                    },
+                  }),
+                ),
               )
               yield* plugin.trigger(
                 "tool.execute.after",

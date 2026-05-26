@@ -140,6 +140,34 @@ export const layer = Layer.effect(
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
+      let timing:
+        | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
+        | undefined
+
+      // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
+      // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
+      // processor.start/ai.first_event 区分 provider 首事件延迟，part.start /
+      // part.first_delta 区分 processor 内部处理延迟，processor.end 标记回合收束。
+      const streamTiming = (phase: string, extra?: Record<string, unknown>) => {
+        if (!timing) return
+        slog.info("stream timing", {
+          phase,
+          sessionID: ctx.sessionID,
+          messageID: ctx.assistantMessage.id,
+          elapsedMs: Date.now() - timing.startedAt,
+          ...extra,
+        })
+      }
+      const logPartStart = (partType: string, extra: Record<string, unknown>) => {
+        streamTiming("part.start", { partType, ...extra })
+      }
+      const logFirstDelta = (partType: string, partID: string, field: string, deltaChars: number) => {
+        if (!timing) return
+        const key = `${partID}\0${field}`
+        if (timing.firstDelta.has(key)) return
+        timing.firstDelta.add(key)
+        streamTiming("part.first_delta", { partType, partID, field, deltaChars })
+      }
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -282,12 +310,14 @@ export const layer = Layer.effect(
               metadata: value.providerMetadata,
             }
             yield* session.updatePart(ctx.reasoningMap[value.id])
+            logPartStart("reasoning", { partID: ctx.reasoningMap[value.id].id })
             return
 
           case "reasoning-delta":
             if (!(value.id in ctx.reasoningMap)) return
             ctx.reasoningMap[value.id].text += value.text
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
+            logFirstDelta("reasoning", ctx.reasoningMap[value.id].id, "text", value.text.length)
             yield* session.updatePartDelta({
               sessionID: ctx.reasoningMap[value.id].sessionID,
               messageID: ctx.reasoningMap[value.id].messageID,
@@ -345,6 +375,7 @@ export const layer = Layer.effect(
               messageID: part.messageID,
               sessionID: part.sessionID,
             }
+            logPartStart("tool", { partID: part.id, callID: value.id })
             return
 
           case "tool-input-delta":
@@ -352,7 +383,8 @@ export const layer = Layer.effect(
             ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.delta
             // Publish a bus-only delta so the UI stays real-time.
             const tcall = ctx.toolcalls[value.id]
-            if (tcall)
+            if (tcall) {
+              logFirstDelta("tool", tcall.partID, "raw", value.delta.length)
               yield* session.updatePartDelta({
                 sessionID: tcall.sessionID,
                 messageID: tcall.messageID,
@@ -360,6 +392,7 @@ export const layer = Layer.effect(
                 field: "raw",
                 delta: value.delta,
               })
+            }
             return
 
           case "tool-input-end": {
@@ -657,12 +690,14 @@ export const layer = Layer.effect(
               metadata: value.providerMetadata,
             }
             yield* session.updatePart(ctx.currentText)
+            logPartStart("text", { partID: ctx.currentText.id })
             return
 
           case "text-delta":
             if (!ctx.currentText) return
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
+            logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
             yield* session.updatePartDelta({
               sessionID: ctx.currentText.sessionID,
               messageID: ctx.currentText.messageID,
@@ -830,17 +865,30 @@ export const layer = Layer.effect(
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
-        slog.info("process")
+        timing = { startedAt: Date.now(), firstStreamEvent: false, firstDelta: new Set() }
+        streamTiming("processor.start", {
+          providerID: ctx.model.providerID,
+          modelID: ctx.model.id,
+          agent: streamInput.agent.name,
+        })
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
-        return yield* Effect.gen(function* () {
+        const result = yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             const stream = llm.stream(streamInput)
 
             yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
+              Stream.tap((event) =>
+                Effect.gen(function* () {
+                  if (timing && !timing.firstStreamEvent) {
+                    timing.firstStreamEvent = true
+                    streamTiming("ai.first_event", { event: event.type })
+                  }
+                  yield* handleEvent(event)
+                }),
+              ),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
@@ -894,6 +942,12 @@ export const layer = Layer.effect(
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"
         })
+        streamTiming("processor.end", {
+          result,
+          durationMs: timing ? Date.now() - timing.startedAt : 0,
+        })
+        timing = undefined
+        return result
       })
 
       return {

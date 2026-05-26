@@ -5,6 +5,7 @@ import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { batch, onCleanup, onMount } from "solid-js"
 import { ConnectionError } from "../util/connection-error"
+import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 
 export type SDKTestTransport = {
   fetch?: typeof fetch
@@ -54,6 +55,20 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     // cleanup work can delay them even when the HTTP stream is still healthy,
     // so keep the disconnect threshold above short-lived event-loop stalls.
     const heartbeatTimeout = props.heartbeatTimeout ?? 90_000
+    const loggedPartDeltaReceives = new Set<string>()
+
+    function logPartDeltaReceive(event: GlobalEvent) {
+      if (event.payload.type === "server.connected") loggedPartDeltaReceives.clear()
+      if (event.payload.type !== "message.part.delta") return
+      const key = partDeltaTimingKey(event.payload.properties)
+      if (loggedPartDeltaReceives.has(key)) return
+      // receive 阶段表示 “SDK SSE 已收到 delta，尚未进入 SyncProvider”。
+      // 只记录每个 message/part/field 的首条 delta，避免 token 级日志膨胀；
+      // 达到上限后清空只会降低诊断精度，不会影响事件投递。
+      if (loggedPartDeltaReceives.size >= PART_DELTA_TIMING_LIMIT) loggedPartDeltaReceives.clear()
+      loggedPartDeltaReceives.add(key)
+      logPartDeltaTiming({ client: sdk, phase: "delta.receive", ...event.payload.properties })
+    }
 
     const flush = () => {
       if (queue.length === 0) return
@@ -70,6 +85,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     }
 
     const handleEvent = (event: GlobalEvent) => {
+      logPartDeltaReceive(event)
       queue.push(event)
       const elapsed = Date.now() - last
 
@@ -182,6 +198,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       abort.abort()
       sse?.abort()
       if (timer) clearTimeout(timer)
+      loggedPartDeltaReceives.clear()
     })
 
     return {

@@ -27,6 +27,7 @@ import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 
 const log = Log.create({ service: "llm" })
+const toolLog = Log.create({ service: "session.prompt" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 type Result = Awaited<ReturnType<typeof streamText>>
 
@@ -231,7 +232,25 @@ const live: Layer.Layer<
         workflowModel.systemPrompt = system.join("\n")
         workflowModel.toolExecutor = async (toolName, argsJson, _requestID) => {
           const t = sortedTools[toolName]
+          const startedAt = Date.now()
+          const timing = {
+            source: "workflow",
+            tool: toolName,
+            sessionID: input.sessionID,
+            callID: _requestID,
+          }
+          // GitLab workflow 模型会绕过 session.prompt 的 local/MCP tool adapter，
+          // 所以这里补同一组 daemon-log milestone。只记录 phase/source、
+          // sessionID、工具名、callID、status 和耗时；不记录 argsJson、结果、
+          // metadata，避免 workflow 参数或输出进入日志。
+          toolLog.info("tool timing", { phase: "tool.start", ...timing })
           if (!t || !t.execute) {
+            toolLog.info("tool timing", {
+              phase: "tool.end",
+              ...timing,
+              status: "error",
+              durationMs: Date.now() - startedAt,
+            })
             return { result: "", error: `Unknown tool: ${toolName}` }
           }
           try {
@@ -241,12 +260,24 @@ const live: Layer.Layer<
               abortSignal: input.abort,
             })
             const output = typeof result === "string" ? result : (result?.output ?? JSON.stringify(result))
+            toolLog.info("tool timing", {
+              phase: "tool.end",
+              ...timing,
+              status: "completed",
+              durationMs: Date.now() - startedAt,
+            })
             return {
               result: output,
               metadata: typeof result === "object" ? result?.metadata : undefined,
               title: typeof result === "object" ? result?.title : undefined,
             }
           } catch (e: any) {
+            toolLog.info("tool timing", {
+              phase: "tool.end",
+              ...timing,
+              status: "error",
+              durationMs: Date.now() - startedAt,
+            })
             return { result: "", error: e.message ?? String(e) }
           }
         }

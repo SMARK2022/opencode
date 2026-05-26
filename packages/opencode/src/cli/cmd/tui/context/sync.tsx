@@ -35,6 +35,7 @@ import { useKV } from "./kv"
 // [local-smark] SessionPath for daemon multi-instance path management
 import { SessionPath } from "@/session/path"
 import { aggregateFailures } from "./aggregate-failures"
+import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
@@ -130,6 +131,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
     let pendingPartDeltas: EventMessagePartDelta[] = []
     let pendingPartDeltaTimer: Timer | undefined
+    const loggedPartDeltaApplications = new Set<string>()
 
     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
       // Only adjacent deltas for the same Solid store cell are safe to merge.
@@ -167,11 +169,29 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       return result
     }
 
+    function logPartDeltaApplication(event: EventMessagePartDelta, phase: "delta.apply" | "delta.drop", reason?: string) {
+      const key = `${phase}\0${partDeltaTimingKey(event.properties)}`
+      if (loggedPartDeltaApplications.has(key)) return
+      // apply/drop 阶段表示 “SyncProvider reducer 已处理 delta”。drop 只说明
+      // 当时本地 store 缺 message/part，不代表 daemon 没发；这些 reason 字符串
+      // 必须保持短且稳定，方便和 receive 阶段在 daemon log 中对齐。
+      // key 前缀包含 phase，保证同一 part 先 drop 后恢复 apply 时两段都会出现。
+      if (loggedPartDeltaApplications.size >= PART_DELTA_TIMING_LIMIT) loggedPartDeltaApplications.clear()
+      loggedPartDeltaApplications.add(key)
+      logPartDeltaTiming({ client: sdk.client, phase, reason, ...event.properties })
+    }
+
     function applyPartDelta(event: EventMessagePartDelta) {
       const parts = store.part[event.properties.messageID]
-      if (!parts) return
+      if (!parts) {
+        logPartDeltaApplication(event, "delta.drop", "missing-message")
+        return
+      }
       const result = Binary.search(parts, event.properties.partID, (p) => p.id)
-      if (!result.found) return
+      if (!result.found) {
+        logPartDeltaApplication(event, "delta.drop", "missing-part")
+        return
+      }
       setStore(
         "part",
         event.properties.messageID,
@@ -186,6 +206,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           ;(part[field] as string) = (existing ?? "") + event.properties.delta
         }),
       )
+      logPartDeltaApplication(event, "delta.apply")
     }
 
     function flushPartDeltas() {
@@ -369,6 +390,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       if (event.type !== "message.part.delta") flushPartDeltas()
       switch (event.type) {
         case "server.connected":
+          loggedPartDeltaApplications.clear()
           if (!connectedOnce) {
             connectedOnce = true
             break
@@ -642,6 +664,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     onCleanup(() => {
       if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
       pendingPartDeltas = []
+      loggedPartDeltaApplications.clear()
     })
 
     const exit = useExit()
