@@ -85,6 +85,9 @@ export function tokenAccounting(
   // #122：会话累计与当前 request 边界（按 user 消息切分）
 // ── 1. lastUser / requestAssistantIDs ──
   const lastUser = messages.findLast((m) => m.role === "user")
+  const latestRequestAssistant = lastUser
+    ? messages.findLast((m) => m.role === "assistant" && m.parentID === lastUser.id)
+    : undefined
   const requestAssistantIDs = new Set<string>()
   if (lastUser) {
     for (const m of messages) {
@@ -175,7 +178,13 @@ export function tokenAccounting(
       session.cacheWrite += msg.tokens.cache.write
       session.cost += msg.cost ?? 0
       if (isRequest) {
-        confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
+        // 当前 user 请求的最新 assistant 消息在 message.tokens 上携带预流式
+        // 上传估算，让 prompt/侧栏在回车后立即显示 input。该值属于当前步骤
+        // 而非已完成历史步骤，因此 request 总计不得在此处计入后又作为
+        // stepInput 重复统计。output 与 cost 保持在 fallback 路径：上传估算
+        // 回归只影响 input，且无 step-finish parts 的历史消息仍需保留总计。
+        if (msg.id !== latestRequestAssistant?.id)
+          confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
         confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
         confirmedRequest.cost += msg.cost ?? 0
       }
@@ -281,7 +290,16 @@ export function tokenAccounting(
 
   // ── 6. request totals（confirmed + in-flight）─────────
   // #124：input 与 output 必须分开，stepOutput 不能混进 totalInput
-  const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
+  // 当 provider usage 已到达但 message.completed 尚未落库时，confirmedRequest
+  // 已包含最新 step-finish input。assistant 消息可能仍携带较早的预流式估算，
+  // 因此不能用「估算 − 实际用量」推导 pending input。此时只有 finish 之后
+  // 写入的工具结果才是已知的未来 input。
+  const inFlightInput = stepConfirmed
+    ? 0
+    : stepSF && latestAssistant?.id === latestRequestAssistant?.id
+      ? pendingToolResultTokens + pendingAttachTokens
+      : stepInput
+  const totalInput = confirmedRequest.input + inFlightInput
   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
 
   // ── 7. breakdown 优先级（#127）──────────────────────────────

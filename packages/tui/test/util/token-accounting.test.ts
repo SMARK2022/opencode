@@ -347,4 +347,110 @@ describe("tokenAccounting", () => {
     expect(calibrated.ratio.output).toBe(8)
     expect(calibrated.request.totalOutput).toBe(320)
   })
+
+  // #238：in-flight 上传估算在整个正常生命周期内只计一次
+  test("request total counts the in-flight upload estimate once across the normal lifecycle", () => {
+    // 正常发送路径会先把 daemon 的 upload estimate 写到 assistant message，
+    // 然后依次出现 step-start、step-finish，最后 message.completed 落库。
+    // request.totalInput 必须表示“已确认步骤 + 当前 in-flight step”，同一轮上传
+    // 在完成前不能同时作为历史累计和当前步骤各算一次。
+    const sf = (input: number, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, inputChars?: number) =>
+      // 包装目标版 stepFinish(id, tokens, inputChars) 签名，保持用例的位置参数形态与 source 一致
+      stepFinish("sf", { input, output, reasoning, cache: { read: cacheRead, write: cacheWrite } }, inputChars)
+    const tokens = { input: 100_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+    const cases = [
+      {
+        // 场景一：估算已写但任何 parts 都未到达——此时 totalInput 只来自估算本身
+        name: "pending assistant message",
+        msg: assistantMsg("2", "1", tokens),
+        parts: [] as any[],
+        confirmed: false,
+      },
+      {
+        // 场景二：step-start 到达——估算转为 step 上下文，仍不得重复进入 request 总计
+        name: "streaming after step-start",
+        msg: assistantMsg("2", "1", tokens),
+        parts: [{ id: "ss", type: "step-start", inputTokens: 100_000, inputChars: 400_000 }] as any[],
+        confirmed: false,
+      },
+      {
+        // 场景三：provider 确认值已到但 message 未 completed——确认值替换估算成为 step.input
+        name: "provider usage received before message completion",
+        msg: assistantMsg("2", "1", tokens),
+        parts: [
+          { id: "ss", type: "step-start", inputTokens: 100_000, inputChars: 400_000 },
+          sf(100_000, 0, 0, 0, 0, 400_000),
+        ] as any[],
+        confirmed: false,
+      },
+      {
+        // 场景四：completed 落库——步骤转入 confirmed 历史，不改变 request 总计
+        name: "completed assistant message",
+        msg: assistantMsg("2", "1", tokens, 10),
+        parts: [
+          { id: "ss", type: "step-start", inputTokens: 100_000, inputChars: 400_000 },
+          sf(100_000, 0, 0, 0, 0, 400_000),
+        ] as any[],
+        confirmed: true,
+      },
+    ]
+
+    for (const item of cases) {
+      const acc = tokenAccounting([userMsg("1"), item.msg] as any, () => item.parts)
+      expect(acc.step.input, item.name).toBe(100_000)
+      expect(acc.step.confirmed, item.name).toBe(item.confirmed)
+      expect(acc.request.totalInput, item.name).toBe(100_000)
+    }
+
+    // 多个 assistant 可以归属于同一个 user request；修复 in-flight 双算时，
+    // 仍需保留已确认历史步骤，否则括号累计值会从“双算”退化为“漏算”。
+    const acc = tokenAccounting(
+      [
+        userMsg("1"),
+        assistantMsg("2", "1", { input: 50_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, 5),
+        assistantMsg("3", "1", tokens),
+      ] as any,
+      (id) => (id === "2" ? [sf(50_000, 0, 0, 0, 0, 200_000)] : []),
+    )
+    expect(acc.step.input, "confirmed history plus in-flight assistant").toBe(100_000)
+    expect(acc.request.totalInput, "confirmed history plus in-flight assistant").toBe(150_000)
+  })
+
+  // #238：无 step-finish 的旧消息保留 output/cost 可见性，input 只计一次
+  // 目标版 helper 无 cost 字段，用展开覆盖模拟带 cost 的历史消息
+  test("latest message-token fallback keeps output and cost while input is counted once", () => {
+    // 部分 completed 或历史 assistant 消息可能只有 message.tokens 而没有
+    // step-finish parts。input fallback 仍须避免活跃步骤双算；output 与 cost
+    // 在该形态下没有等价的 step-finish 重复来源，必须继续进入 request 总计。
+    const msg = {
+      ...assistantMsg("2", "1", { input: 10, output: 20, reasoning: 5, cache: { read: 2, write: 3 } }, 10),
+      cost: 0.5,
+    }
+    const acc = tokenAccounting([userMsg("1"), msg] as any, () => [])
+
+    expect(acc.step.input).toBe(15)
+    expect(acc.request.totalInput).toBe(15)
+    expect(acc.request.totalOutput).toBe(25)
+    expect(acc.request.cost).toBe(0.5)
+  })
+
+  // #238：step-finish 先于 message tokens 更新时，request 总计以 provider 值为准
+  test("request total uses provider input when step-finish arrives before message token update", () => {
+    // updatePart(step-finish) 与 updateMessage(tokens) 是两个独立同步事件；
+    // UI 可能短暂看到「已确认 provider usage + assistant 仍带旧上传估算」。
+    // 该窗口内已确认 step-finish 值是权威值，估算与实际值的差不是 pending context。
+    const msg = assistantMsg("2", "1", { input: 120, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })
+    const acc = tokenAccounting([userMsg("1"), msg] as any, () => [
+      { id: "ss", type: "step-start", inputTokens: 120, inputChars: 480 },
+      sf2(100, 0, 0, 0, 0, 400),
+    ])
+
+    expect(acc.step.input).toBe(120)
+    expect(acc.request.totalInput).toBe(100)
+  })
+
+  function sf2(input: number, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, inputChars?: number) {
+    return stepFinish("sf", { input, output, reasoning, cache: { read: cacheRead, write: cacheWrite } }, inputChars)
+  }
+
 })
