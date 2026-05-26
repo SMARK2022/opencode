@@ -127,9 +127,12 @@ export const LANGUAGE_EXTENSIONS: Record<string, string> = {
   ".typc": "typst",
 }
 
-export function filetype(input?: string) {
-  if (!input) return "none"
-  const language = LANGUAGE_EXTENSIONS[path.extname(input)]
-  if (["typescriptreact", "javascriptreact", "javascript"].includes(language)) return "typescript"
-  return language
+export function filetype(input?: string, language?: string) {
+  // #233：language 参数（bridge metadata）优先于扩展名推导——notebook diff 路径
+  // #233：可能携带 .python 这类语言 ID，直接作为扩展名查表会失败。
+  // #233：缺失输入返回 "none"——既有共享工具契约，permission.tsx 与测试依赖
+  const resolved = language ?? (input ? LANGUAGE_EXTENSIONS[path.extname(input)] : "none")
+  // #233：tsx/jsx/js 归一为 typescript——与上游语法高亮对 TS 家族的约定一致
+  if (resolved && ["typescriptreact", "javascriptreact", "javascript"].includes(resolved)) return "typescript"
+  return resolved
 }

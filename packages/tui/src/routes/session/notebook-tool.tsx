@@ -92,11 +92,25 @@ export function useVscodeNotebookToolView(props: {
   // #224：notebook edit block 视图——从 metadata.diff 渲染 diff card，无 diff 时显示 summary
   function editView(metadata: Record<string, unknown>): VscodeNotebookToolView {
     const diff = stringValue(metadata.diff) ?? ""
+    const editType = stringValue(metadata.editType)
+    // #233：insert 编辑优先从 diff 还原源码，其次用 bridge 的 insertedSourcePreview
+    // #233：还原失败（diff 过大被省略）时 preview 为 undefined，body 退回 summary
+    const insertSourceFromDiff = editType === "insert" ? notebookInsertSourceFromDiff(diff) : undefined
+    const insertSource = insertSourceFromDiff ?? (editType === "insert" ? stringValue(metadata.insertedSourcePreview) : undefined)
     // #224：stats 从 metadata.added/removed 派生——如果 diff 被省略，stats 仍保留行数
     const stats = { added: numberValue(metadata.added) ?? 0, removed: numberValue(metadata.removed) ?? 0 }
+    const visibleText = insertSource ?? diff
+    // #233：可见文本优先 insert 源码——totalChars 与折叠行数都基于它，避免尺寸不一致
+    const visibleLines = visibleText.split("\n").length
+    // #233：notebook diff 路径携带 .python 这类语言 ID 而非 .py 扩展名——语法
+    // #233：高亮必须以 bridge metadata 的 language 为准。
+    const language = stringValue(metadata.language)
+    // #233：diff 被省略时折叠尺寸仍按真实变更规模计算——否则 3000 行插入预览
+    // #233：会以展开形态挂载，击穿 BlockTool 的 10 行首屏预算。
+    const totalLines = stringValue(metadata.diffOmitted) ? Math.max(visibleLines, stats.added + stats.removed + 3) : visibleLines
     const title = [
       "←",
-      notebookEditLabel(stringValue(metadata.editType)),
+      notebookEditLabel(editType),
       notebookTarget(stringValue(metadata.path)),
       stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
         stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
@@ -108,16 +122,25 @@ export function useVscodeNotebookToolView(props: {
       title,
       maxLines: 10,
       threshold: 20,
-      totalLines: diff.split("\n").length,
-      totalChars: diff.length,
-      preview: diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} maxLines={10} /> : undefined,
-      // #224：body 在 diff 和 summary 之间用 Show 切换；diffOmitted 时显示提示
+      totalLines,
+      totalChars: visibleText.length,
+      preview: insertSource !== undefined
+        ? <NotebookSourceCode source={insertSource} filePath={filePath} language={language} maxLines={10} />
+        : diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} language={language} maxLines={10} /> : undefined,
+      // #233：body 在插入源码、diff 和 summary 之间用嵌套 Show 切换
       body: (
         <box gap={1} flexDirection="column">
-          <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
-            <NotebookDiff diff={diff} filePath={filePath} />
+          <Show when={insertSource !== undefined} fallback={
+            <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
+              <NotebookDiff diff={diff} filePath={filePath} language={language} />
+            </Show>
+          }>
+            <NotebookSourceCode source={insertSource ?? ""} filePath={filePath} language={language} />
+            <Show when={booleanValue(metadata.insertedSourcePreviewTruncated) && insertSourceFromDiff === undefined}>
+              <text fg={theme.textMuted}>Inserted source preview is truncated; use vscode_notebook_source for the full cell.</text>
+            </Show>
           </Show>
-          <Show when={stringValue(metadata.diffOmitted)}>
+          <Show when={stringValue(metadata.diffOmitted) && insertSource === undefined}>
             <text fg={theme.textMuted}>Diff omitted from metadata because it exceeds the notebook inline display budget.</text>
           </Show>
           <text fg={theme.textMuted}>{summaryLine(metadata)}</text>
@@ -138,7 +161,13 @@ export function useVscodeNotebookToolView(props: {
       threshold: 20,
       totalLines: lines,
       totalChars: JSON.stringify(metadata).length,
-      preview: <NotebookCells cells={cells.slice(0, 8)} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
+      preview: (
+        <box flexDirection="column">
+          <text fg={theme.textMuted}>runtime={stringValue(metadata.runtime) ?? "unknown"} dirty={String(booleanValue(metadata.dirty) ?? "unknown")}</text>
+          {/* #233：折叠预览优先展示最近失败的 cell——late failure 不被前 6 个成功 cell 掩盖 */}
+          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
+        </box>
+      ),
       body: <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
     }
   }
@@ -162,14 +191,23 @@ export function useVscodeNotebookToolView(props: {
   function runView(metadata: Record<string, unknown>): VscodeNotebookToolView {
     const cells = arrayRecords(metadata.cells)
     const completed = booleanValue(metadata.completed)
+    const artifacts = artifactRows(cells)
     return {
       mode: "block",
       title: `▶ Notebook run ${notebookTarget(stringValue(metadata.path))} ${stringValue(metadata.target) ?? ""} · ${completed === false ? "failed" : "completed"}`,
       maxLines: 10,
       threshold: 20,
-      totalLines: cells.length + artifactRows(cells).length + 2,
+      totalLines: cells.length + artifacts.length + 2,
       totalChars: JSON.stringify(metadata).length,
-      preview: <NotebookRun cells={cells.slice(0, 6)} />,
+      preview: (
+        <box flexDirection="column">
+          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
+          <Show when={artifacts.length}>
+            {/* #233：折叠态只报数量——artifact 明细在展开后的 body 中呈现 */}
+            <text fg={theme.textMuted}>Artifacts: {artifacts.length} available after expand</text>
+          </Show>
+        </box>
+      ),
       body: <NotebookRun cells={cells} />,
     }
   }
@@ -219,13 +257,14 @@ export function useVscodeNotebookToolView(props: {
   }
 
   // #224：NotebookDiff 组件——用 opentui diff 渲染 unified/split diff，根据宽度自动选 view
-  function NotebookDiff(diffProps: { diff: string; filePath?: string; maxLines?: number }) {
+  // #233：NotebookDiff 接收 bridge language——diff 路径扩展名不足时仍正确高亮
+  function NotebookDiff(diffProps: { diff: string; filePath?: string; language?: string; maxLines?: number }) {
     return (
       <box paddingLeft={1} maxHeight={diffProps.maxLines} overflow={diffProps.maxLines ? "hidden" : undefined}>
         <diff
           diff={diffProps.diff}
           view={props.width() > 120 ? "split" : "unified"}
-          filetype={filetype(diffProps.filePath)}
+          filetype={filetype(diffProps.filePath, diffProps.language)}
           syntaxStyle={syntax()}
           showLineNumbers={true}
           width="100%"
@@ -242,6 +281,21 @@ export function useVscodeNotebookToolView(props: {
           removedLineNumberBg={theme.diffRemovedLineNumberBg}
         />
       </box>
+    )
+  }
+
+  // #233：插入源码渲染——line_number 前缀 + code 块，与 NotebookDiff 的折叠预算一致
+  function NotebookSourceCode(codeProps: { source: string; filePath?: string; language?: string; maxLines?: number }) {
+    return (
+      <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+        <code
+          conceal={false}
+          fg={theme.text}
+          filetype={filetype(codeProps.filePath, codeProps.language)}
+          syntaxStyle={syntax()}
+          content={codeProps.maxLines ? previewText(codeProps.source, codeProps.maxLines) : codeProps.source}
+        />
+      </line_number>
     )
   }
 
@@ -336,6 +390,24 @@ function notebookDiffPath(metadata: Record<string, unknown>) {
 }
 
 // #224：edit 完成态摘要行——cell 数变化 + dirty 状态 + editType
+// #233：从 insert diff 还原插入源码——进入首个 hunk 后每个 + 前缀行都是真实
+// #233：源码；patch 头只出现在首个 hunk 之前，因此 ++ 开头的源码行必须保留。
+function notebookInsertSourceFromDiff(diff: string) {
+  // #233：空 diff 或全 header 的 diff 无插入源码——返回 undefined 走 preview 回退
+  if (!diff) return undefined
+  const lines = diff.split("\n")
+  const source: string[] = []
+  let hunk = false
+  for (const line of lines) {
+    if (line.startsWith("@@ ")) {
+      hunk = true
+      continue
+    }
+    if (hunk && line.startsWith("+")) source.push(line.slice(1))
+  }
+  return source.length ? source.join("\n") : undefined
+}
+
 function summaryLine(metadata: Record<string, unknown>) {
   const before = numberValue(metadata.cellCountBefore)
   const after = numberValue(metadata.cellCountAfter)
@@ -357,6 +429,29 @@ function cellLine(cell: Record<string, unknown>) {
 }
 
 // #224：cell 标签——有 index 显示 cN，否则用 id 或默认 'cell'
+// #233：折叠预览行——精简 exec 状态词（failed/error/skipped 等），保留 first 摘要
+function previewCellLine(cell: Record<string, unknown>) {
+  // #233：exec 状态词取首个匹配单词——完整时间戳在折叠行中无展示价值
+  const exec = stringValue(cell.exec)
+  return [
+    cellLabel(cell),
+    [stringValue(cell.kind), stringValue(cell.lang)].filter(Boolean).join("/"),
+    exec?.match(/\b(failed|error|skipped|succeeded|not-run)\b/)?.[1] ?? exec,
+    stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
+  ].filter(Boolean).join("  ")
+}
+
+// #233：预览优先展示最近失败的 cells（最多 6 个）——late failure 在折叠态可见
+function previewCells(cells: Record<string, unknown>[]) {
+  const failed = cells.filter(failedCell).slice(-6)
+  return failed.length ? failed : cells.slice(0, 6)
+}
+
+function failedCell(cell: Record<string, unknown>) {
+  const exec = stringValue(cell.exec)
+  return Boolean(exec?.includes("failed") || exec?.includes("error"))
+}
+
 function cellLabel(cell: Record<string, unknown>) {
   const index = numberValue(cell.i)
   return index === undefined ? stringValue(cell.id) ?? "cell" : `c${index}`

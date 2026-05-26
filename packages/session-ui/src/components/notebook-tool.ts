@@ -56,3 +56,32 @@ export function notebookLine(value: Record<string, unknown>) {
   const outputs = Array.isArray(value.existing_outs) ? value.existing_outs.filter((item): item is string => typeof item === "string") : []
   return [id, ...values, ...outputs].filter((item): item is string => item !== undefined).join("  ")
 }
+
+export function notebookInsertSource(view: Record<string, unknown> | undefined) {
+  if (view?.editType !== "insert") return
+  const source: string[] = []
+  let hunk = false
+  for (const line of typeof view.diff === "string" ? view.diff.split("\n") : []) {
+    if (line.startsWith("@@ ")) {
+      hunk = true
+      continue
+    }
+    // 文件头只在首个hunk之前；正文的+++必须还原为真正的++源码。
+    if (hunk && line.startsWith("+")) source.push(line.slice(1))
+  }
+  if (source.length) return { text: source.join("\n"), truncated: false }
+  return typeof view.insertedSourcePreview === "string"
+    ? { text: view.insertedSourcePreview, truncated: view.insertedSourcePreviewTruncated === true } : undefined
+}
+
+export function notebookPreviewCells(cells: Record<string, unknown>[]) {
+  // 最近失败优先，只影响折叠预览；展开正文仍保留原单元格次序。
+  const failed = cells.filter((cell) => typeof cell.exec === "string" && /failed|error/.test(cell.exec)).slice(-6)
+  return failed.length ? failed : cells.slice(0, 6)
+}
+
+export function notebookLanguage(value: unknown) {
+  if (typeof value !== "string") return
+  // 虚拟.ipynb路径不足以识别语言，沿原Notebook契约归一TS家族。
+  return ["typescriptreact", "javascriptreact", "javascript"].includes(value) ? "typescript" : value
+}

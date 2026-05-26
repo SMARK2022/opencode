@@ -4,6 +4,9 @@ import { createTwoFilesPatch } from "diff"
 
 // 展示差分有界，完整原生data及模型summary仍由各自执行链保留。
 const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
+// 插入预览供两代代码组件共享；完整源码仍由source工具读取，不能复制进展示metadata。
+const NOTEBOOK_INSERT_PREVIEW_LINES = 10
+const NOTEBOOK_INSERT_PREVIEW_MAX_CHARS = 4 * 1024
 
 export function build(endpoint: string, args: Record<string, unknown>, value: unknown) {
   const data = recordValue(recordValue(value).data)
@@ -71,12 +74,17 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
   // #224：diff 超过 16KB 只保留统计，diff 设为 undefined，diffOmitted 标记 "too-large"
   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
+  const editType = stringValue(data.editType) ?? stringValue(args.editType)
+  // #233：insert 有 afterSource 时生成有界预览——TUI 用代码渲染器展示插入内容
+  const insertedSourcePreview = editType === "insert" && after !== undefined
+    ? previewNotebookInsertSource(after)
+    : undefined
   return {
     view: "edit",
     path,
     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
     cellId: stringValue(args.cellId),
-    editType: stringValue(data.editType) ?? stringValue(args.editType),
+    editType,
     cellCountBefore: numberValue(data.cellCountBefore),
     cellCountAfter: numberValue(data.cellCountAfter),
     dirty: booleanValue(data.dirty),
@@ -84,8 +92,29 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
     language: stringValue(data.language),
     diff,
     diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
+    ...(insertedSourcePreview && {
+      insertedSourcePreview: insertedSourcePreview.text,
+      insertedSourcePreviewTruncated: insertedSourcePreview.truncated,
+    }),
     added: stats.added,
     removed: stats.removed,
+  }
+}
+
+// #233：insert 源码预览——去掉单个尾部空行（diff 构造会补换行），取前 10 行并
+// #233：按 4KB 截断；truncated 标记真实行数或字符被裁剪。
+function previewNotebookInsertSource(source: string) {
+  // #233：rawLines 兼容 CRLF/LF——notebook cell 源码可能来自 Windows 编辑器
+  const rawLines = source.split(/\r?\n/)
+  const lines = rawLines.at(-1) === "" ? rawLines.slice(0, -1) : rawLines
+  const linePreview = lines.slice(0, NOTEBOOK_INSERT_PREVIEW_LINES).join("\n")
+  const text = linePreview.length > NOTEBOOK_INSERT_PREVIEW_MAX_CHARS
+    ? linePreview.slice(0, NOTEBOOK_INSERT_PREVIEW_MAX_CHARS)
+    : linePreview
+  return {
+    text,
+    // #233：截断判定——行数超 10 或字符被 4KB 上限裁剪，二者任一即为 truncated
+    truncated: lines.length > NOTEBOOK_INSERT_PREVIEW_LINES || text.length < linePreview.length,
   }
 }
 
@@ -169,11 +198,22 @@ function compactArtifacts(value: unknown) {
 
 // #224：从 diff 文本统计 added/removed 行数
 function diffStats(diff: string) {
-  const lines = diff.split("\n")
-  return {
-    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
-    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+  // #233：只统计 hunk 体内行——patch 文件头在首个 hunk 之前；进入 hunk 后
+  // #233：`+++`/`---` 可能是合法 notebook 源码行，不再按文件头排除。
+  // #233：added/removed 只在 hunk 体内累计——header 行不计入变更统计
+  let added = 0
+  let removed = 0
+  let hunk = false
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("@@ ")) {
+      hunk = true
+      continue
+    }
+    if (!hunk) continue
+    if (line.startsWith("+")) added++
+    if (line.startsWith("-")) removed++
   }
+  return { added, removed }
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

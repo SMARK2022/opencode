@@ -13,14 +13,16 @@ export function previewDiff(input: string, maxLines: number) {
   // Flush each preview hunk as a fresh, parser-valid hunk. The preview may drop
   // trailing body lines, so the original @@ counts must be rewritten to the
   // actual old/new line counts that remain visible to DiffRenderable.
+  // #233：计数改为惰性函数——省略号 context 行 push 后行数变化，重复计数必须实时反映
+  const oldVisible = () => body.filter((line) => line[0] === " " || line[0] === "-").length
+  const newVisible = () => body.filter((line) => line[0] === " " || line[0] === "+").length
   const flush = () => {
     if (!oldStart) return
 
     // 计数重写是本函数的核心契约：截断后 @@ 头若沿用原值，parsePatch 会按虚高行数越界读行
-    const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
-    const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
-    const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
-    const incomplete = oldVisible < expectedOld || newVisible < expectedNew
+    // #233：计数改为惰性函数——省略号 context 行 push 后行数变化，重复计数必须实时反映
+    const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
+    const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
     // Match previewText's "N visible rows plus one ellipsis row" contract, but
     // keep the ellipsis as a legal context line so parsePatch accepts it. The
     // incomplete branch covers metadata that was already clipped mid-hunk.
@@ -28,7 +30,7 @@ export function previewDiff(input: string, maxLines: number) {
     if (cut || incomplete) body.push(" …")
     changed ||= cut || countMismatch
     out.push(
-      `@@ -${oldStart},${body.filter((line) => line[0] === " " || line[0] === "-").length} +${newStart},${body.filter((line) => line[0] === " " || line[0] === "+").length} @@${suffix}`,
+      `@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`,
       ...body,
     )
     oldStart = newStart = suffix = ""
@@ -42,6 +44,7 @@ export function previewDiff(input: string, maxLines: number) {
 
     const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/)
     if (hunk) {
+      // #233：进入新 hunk 先 flush 前一 hunk——输出保持解析器可接受的独立 hunk 形态
       flush()
       // hunk 头必须精确锚定：宽松匹配会把正文里类 @@ 的行误判为新 hunk 起点
       oldStart = hunk[1]
@@ -58,6 +61,13 @@ export function previewDiff(input: string, maxLines: number) {
       continue
     }
 
+    // #233：完整 hunk 后可出现新的文件头或 patch 元数据——先 flush 再处理，
+    // #233：使类头源行只在预期 hunk 体消费期间才合法。
+    // #233：此处基于可见行数判断完整性——被预算截断的 hunk 不满足计数，继续消费。
+    if (oldVisible() >= expectedOld && newVisible() >= expectedNew) {
+      flush()
+    }
+
     if (line[0] === " ") {
       if (left >= limit || right >= limit) {
         cut = true
@@ -69,19 +79,40 @@ export function previewDiff(input: string, maxLines: number) {
       continue
     }
 
-    if ((line[0] === "-" && !line.startsWith("---")) || (line[0] === "+" && !line.startsWith("+++"))) {
+    // #233：hunk 内 +/- 消费——`+++`/`---` 此时可能是合法源码行，仅按预期
+    // #233：行数耗尽停止；已满足侧的行触发 flush 而非死循环。
+    if (line[0] === "-" || line[0] === "+") {
       const del: string[] = []
       const add: string[] = []
       let j = i
-      while (src[j] && /^[+-]/.test(src[j]) && !/^(---|\+\+\+)/.test(src[j])) {
-        ;(src[j][0] === "-" ? del : add).push(src[j])
+      // #233：seen 计数从当前 body 起算——已消费行不重复计入本 hunk 的预期配额
+      let seenOld = oldVisible()
+      let seenNew = newVisible()
+      while (src[j] && /^[+-]/.test(src[j])) {
+        if (seenOld >= expectedOld && seenNew >= expectedNew) break
+        if (src[j][0] === "-") {
+          if (seenOld >= expectedOld) break
+          del.push(src[j])
+          seenOld++
+          j++
+          continue
+        }
+        if (seenNew >= expectedNew) break
+        add.push(src[j])
+        seenNew++
         j++
       }
-      // 成对增删按对齐截取：单侧截断会让 split 视图左右错位
-      const paired = del.length > 0 && add.length > 0
-      const take = paired ? Math.min(del.length, add.length, limit - left, limit - right) : 0
-      const dl = paired ? take : Math.min(del.length, limit - left)
-      const al = paired ? take : Math.min(add.length, limit - right)
+      if (j === i) {
+        // #233：畸形或已裁剪 hunk 对已满足侧再抛一行——flush 加省略号后透传，
+        // #233：防止外层循环对同一行无限重处理。
+        // #233：flush 会把当前 body 写入 out，随后该行按独立内容透传。
+        flush()
+        out.push(line)
+        continue
+      }
+      // #233：左右预算独立截取——del/add 各自不超过 split 视图的可见额度
+      const dl = Math.min(del.length, limit - left)
+      const al = Math.min(add.length, limit - right)
       body.push(...del.slice(0, dl), ...add.slice(0, al))
       left += dl
       right += al
