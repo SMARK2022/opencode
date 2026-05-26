@@ -536,26 +536,32 @@ const statusCounts = (status: string, requests: number) => ({
 const stepInputTokens = (part: MessageV2.StepFinishPart) => part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
 
 const componentsFromStep = (part: MessageV2.StepFinishPart) => {
-  if (!part.inputBreakdown || !part.inputChars) return emptyComponents()
-  const inputTokens = stepInputTokens(part)
+  const inputChars = finiteStat(part.inputChars)
+  if (!part.inputBreakdown || inputChars <= 0) return emptyComponents()
+  const inputTokens = finiteStat(stepInputTokens(part))
   const media = part.inputBreakdown.media
-  const attachmentTokens = media?.tokens
+  const attachmentTokens = Number.isFinite(media?.tokens) ? media?.tokens : undefined
   const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
-  const textChars = media ? Math.max(1, part.inputChars - media.rawChars + media.textChars) : part.inputChars
-  const alloc = (chars: number) => Math.round((chars / textChars) * textTokens)
+  const textChars = media ? Math.max(1, inputChars - finiteStat(media.rawChars) + finiteStat(media.textChars)) : inputChars
+  // Local 1.15.3 rows can have `inputBreakdown.messages` persisted as `{}`.
+  // Missing counters mean "unknown contribution", not invalid stats; keep every
+  // derived component finite so tool charts never receive NaN coordinates.
+  const alloc = (chars?: number) => Math.round((finiteStat(chars) / textChars) * textTokens)
   return {
     system: alloc(part.inputBreakdown.system),
     instructions: alloc(part.inputBreakdown.instructions),
     skills: alloc(part.inputBreakdown.skills),
     toolSchemas: alloc(part.inputBreakdown.tools),
-    userMessages: alloc(part.inputBreakdown.messages.userText),
-    assistantText: alloc(part.inputBreakdown.messages.assistantText),
-    reasoning: alloc(part.inputBreakdown.messages.reasoning),
-    toolCalls: alloc(part.inputBreakdown.messages.toolInput),
-    toolResults: alloc(part.inputBreakdown.messages.toolOutput),
-    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages.attachments),
+    userMessages: alloc(part.inputBreakdown.messages?.userText),
+    assistantText: alloc(part.inputBreakdown.messages?.assistantText),
+    reasoning: alloc(part.inputBreakdown.messages?.reasoning),
+    toolCalls: alloc(part.inputBreakdown.messages?.toolInput),
+    toolResults: alloc(part.inputBreakdown.messages?.toolOutput),
+    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages?.attachments),
   } satisfies InputComponentTotals
 }
+
+const finiteStat = (value: number | undefined) => typeof value === "number" && Number.isFinite(value) ? value : 0
 
 const componentsFromAssistant = (message: MessageV2.WithParts | undefined) => {
   const components = emptyComponents()
