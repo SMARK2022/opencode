@@ -71,6 +71,106 @@ describe("previewDiff", () => {
     expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
   })
 
+  // #233：hunk 体内形似文件头的 +/- 行是合法源码——不得被误当 patch 头截断
+  // #233：hunk 体内的 ---/+++ 行是源码而非文件头——正则排除会让解析器误断行
+  test("keeps hunk body lines that look like diff headers", () => {
+    const input = `Index: /tmp/notebook.py
+===================================================================
+--- /tmp/notebook.py
++++ /tmp/notebook.py
+@@ -1,2 +1,2 @@
+-old line
+--- legal removed source
++new line
++++ legal added source`
+    const hunk = parsePatch(previewDiff(input, 10))[0]?.hunks[0]
+
+    expect(hunk?.lines).toContain("--- legal removed source")
+    expect(hunk?.lines).toContain("+++ legal added source")
+    expect(hunk?.oldLines).toBe(2)
+    expect(hunk?.newLines).toBe(2)
+  })
+
+  // #233：预算允许时不平衡 hunk 的额外 +/- 行全部保留
+  test("keeps unbalanced hunk body lines when preview budget allows them", () => {
+    const input = `Index: /tmp/notebook.py
+===================================================================
+--- /tmp/notebook.py
++++ /tmp/notebook.py
+@@ -1,1 +1,2 @@
+-old line
++new line
++++ legal added source`
+    const hunk = parsePatch(previewDiff(input, 10))[0]?.hunks[0]
+
+    expect(hunk?.lines).toEqual(["-old line", "+new line", "+++ legal added source"])
+    expect(hunk?.oldLines).toBe(1)
+    expect(hunk?.newLines).toBe(2)
+  })
+
+  // #233：完整 hunk 之后的文件头不得被当作前一 hunk 的源码体
+  // #233：双文件输入解析出两个 patch——Index 头行数不进入任一 hunk 的计数
+  test("does not treat later file headers as previous hunk source", () => {
+    const input = `Index: /tmp/one.py
+===================================================================
+--- /tmp/one.py
++++ /tmp/one.py
+@@ -1,1 +1,1 @@
+--- legal removed source
++++ legal added source
+Index: /tmp/two.py
+===================================================================
+--- /tmp/two.py
++++ /tmp/two.py
+@@ -1,1 +1,1 @@
+-old two
++new two`
+    const patches = parsePatch(previewDiff(input, 10))
+
+    expect(patches).toHaveLength(2)
+    expect(patches[0]?.hunks[0]?.lines).toContain("--- legal removed source")
+    expect(patches[0]?.hunks[0]?.lines).toContain("+++ legal added source")
+    expect(patches[1]?.oldFileName).toBe("/tmp/two.py")
+    expect(patches[1]?.hunks[0]?.lines).toContain("+new two")
+  })
+
+  // #233：完整 hunk 后紧跟相邻文件头时各自独立解析
+  test("does not consume adjacent file headers after a complete hunk", () => {
+    const input = `--- /tmp/one.py
++++ /tmp/one.py
+@@ -1,1 +1,1 @@
+-old one
++new one
+--- /tmp/two.py
++++ /tmp/two.py
+@@ -1,1 +1,1 @@
+-old two
++new two`
+    const patches = parsePatch(previewDiff(input, 10))
+
+    expect(patches).toHaveLength(2)
+    expect(patches[0]?.oldFileName).toBe("/tmp/one.py")
+    expect(patches[0]?.hunks[0]?.lines).toEqual(["-old one", "+new one"])
+    expect(patches[1]?.oldFileName).toBe("/tmp/two.py")
+    expect(patches[1]?.hunks[0]?.lines).toEqual(["-old two", "+new two"])
+  })
+
+  // #233：不完整 hunk 后跟已满足侧的行——flush 省略号并透传，不进入死循环
+  test("does not loop when an incomplete hunk is followed by an already-satisfied side", () => {
+    const input = `Index: /tmp/incomplete.py
+===================================================================
+--- /tmp/incomplete.py
++++ /tmp/incomplete.py
+@@ -1,2 +1,1 @@
+-old
++new
++++ already satisfied side`
+    const preview = previewDiff(input, 10)
+
+    expect(preview).toContain(" …")
+    expect(preview).toContain("+++ already satisfied side")
+  })
+
   test("repairs an already-clipped hunk before diff rendering", () => {
     // 上游已裁剪的 hunk 头计数失真，按实际可见行修复
     const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]

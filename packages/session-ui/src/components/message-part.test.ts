@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readPartText } from "./message-part-text"
 import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
-import { notebookLine, notebookMetadata, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
+import { notebookInsertSource, notebookLanguage, notebookLine, notebookMetadata, notebookPreviewCells, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
 
 describe("readPartText", () => {
   test("returns empty string when accum is undefined and part text is undefined", () => {
@@ -69,4 +69,19 @@ test("reads all Notebook display envelopes without recreating execution results"
   expect(notebookLine(artifacts[0] ?? {})).toContain("text/plain  12  output.txt  bounded")
   expect(notebookLine(artifacts[0] ?? {})).not.toContain("FULL ARTIFACT")
   expect(notebookRows(undefined)).toEqual([])
+  // 同一实际消费者的纯决策边界，覆盖原渲染用例的源码/语言和晚失败意图。
+  const inserted = notebookInsertSource({ editType: "insert", diff: "--- NOT_SOURCE\n+++ notebook.ipynb\n@@ -0,0 +1,2 @@\n+print(1)\n+++ legal source", insertedSourcePreview: "incomplete", insertedSourcePreviewTruncated: true })
+  expect(inserted).toEqual({ text: "print(1)\n++ legal source", truncated: false })
+  expect(inserted?.text).not.toContain("NOT_SOURCE")
+  expect(notebookInsertSource({ editType: "insert", insertedSourcePreview: "bounded", insertedSourcePreviewTruncated: true })).toEqual({ text: "bounded", truncated: true })
+  expect(notebookInsertSource({ editType: "edit", insertedSourcePreview: "not inserted" })).toBeUndefined()
+  expect(notebookLanguage("python")).toBe("python")
+  expect(notebookLanguage("typescriptreact")).toBe("typescript")
+  expect(notebookLanguage("javascriptreact")).toBe("typescript")
+  expect(notebookLanguage(undefined)).toBeUndefined()
+  const run = Array.from({ length: 19 }, (_, i) => ({ i: i + 1, exec: i === 18 || i < 6 ? "current-run failed" : "not-run", artifacts: i === 18 ? [{ mime: "text/plain", artifactPath: "last.txt" }] : [] }))
+  expect(notebookPreviewCells(run).map((cell) => cell.i)).toEqual([2, 3, 4, 5, 6, 19])
+  expect(run[0]?.i).toBe(1)
+  expect(notebookRows(notebookPreviewCells(run).at(-1)?.artifacts)).toMatchObject([{ artifactPath: "last.txt" }])
+  expect(notebookPreviewCells(run.map((cell) => ({ ...cell, exec: "succeeded" }))).map((cell) => cell.i)).toEqual([1, 2, 3, 4, 5, 6])
 })

@@ -196,6 +196,8 @@ export const dict: Record<string, string> = {
   "ui.notebook.cells": "Cells",
   "ui.notebook.artifacts": "Artifacts (MIME, bytes, path, preview)",
   "ui.notebook.diffOmitted": "Diff omitted from metadata because it exceeds the notebook inline display budget.",
+  "ui.notebook.insertPreviewTruncated": "Inserted source preview is truncated; use vscode_notebook_source for the full cell.",
+  "ui.notebook.availableArtifacts": "Artifacts: {{count}} available after expand",
 
   "ui.basicTool.called": "Called `{{tool}}`",
   "ui.toolErrorCard.failed": "Failed",

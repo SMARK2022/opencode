@@ -233,6 +233,25 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     expect(notebookMetadata(bounded.output?.structured).vscodeNotebook).toHaveProperty("diff", undefined)
     expect(JSON.stringify(notebookMetadata(bounded.output?.structured).vscodeNotebook)).not.toContain("new line")
     expect(bounded.output?.content).toEqual([{ type: "text", text: "edit" }])
+    // 相同真实HTTP/registry链验证小插入、超大多行/单行及十行尾换行，非手造metadata。
+    for (const [source, added, truncated] of [
+      ["print(1)\n++ legal source prefix\n", 2, false],
+      ["import pandas\n" + "row payload\n".repeat(3000), 3001, true],
+      ["visible-prefix-" + "x".repeat(20_000) + "-hidden-suffix", 1, true],
+      [Array.from({ length: 10 }, (_, index) => `line_${index + 1}`).join("\n") + "\n", 10, false],
+    ] as const) {
+      responses["/notebook/edit"] = { ran: false, summary: "insert", data: { beforeSource: "", afterSource: source, affectedCellIndex: 0, editType: "insert", language: "python" } }
+      const result = yield* invoke("vscode_notebook_edit", { filePath, cellId: "BOTTOM", editType: "insert", newCode: "RAW_INPUT_NOT_RENDERED" })
+      const view = notebookMetadata(result.output?.structured).vscodeNotebook
+      expect(view).toMatchObject({ view: "edit", editType: "insert", language: "python", added, removed: 0, insertedSourcePreviewTruncated: truncated })
+      expect(typeof view.insertedSourcePreview).toBe("string")
+      expect(String(view.insertedSourcePreview).length).toBeLessThanOrEqual(4096)
+      expect(String(view.insertedSourcePreview).split("\n").length).toBeLessThanOrEqual(10)
+      expect(JSON.stringify(view)).not.toContain("RAW_INPUT_NOT_RENDERED")
+      if (added === 2) expect(view.insertedSourcePreview).toContain("++ legal source prefix")
+      if (source.includes("hidden-suffix")) expect(view.insertedSourcePreview).not.toContain("hidden-suffix")
+      if (added > 3000) expect(view).toHaveProperty("diffOmitted", "too-large")
+    }
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
     [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(
