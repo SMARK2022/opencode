@@ -50,6 +50,10 @@ const registryLayer = Layer.effect(
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
 
     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) {
+      const startedAt = Date.now()
+      // canonical结算统一计时，叶子仍拥有授权与执行；不记录输入、输出和metadata。
+      const timing = { source: "native", tool: input.call.name, sessionID: input.sessionID, messageID: input.assistantMessageID, callID: input.call.id }
+      yield* Effect.logInfo("tool timing", { phase: "tool.start", ...timing })
       // 把暂存原文的清理绑定整个 settlement，而不是仅绑定成功返回路径。
       return yield* Effect.gen(function* () {
       const registration =
@@ -94,6 +98,12 @@ const registryLayer = Layer.effect(
           yield* onInterrupted(bounded)
         })),
         Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })),
+        // 模型可见的error结果也记失败，真实失败/中断仍原样传播，不做catch-and-success。
+        Effect.onExit((exit) => Effect.logInfo("tool timing", {
+          phase: "tool.end", ...timing,
+          status: exit._tag === "Success" && exit.value.result.type !== "error" ? "completed" : "error",
+          durationMs: Date.now() - startedAt,
+        })),
       )
     })
 

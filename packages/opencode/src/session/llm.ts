@@ -129,7 +129,26 @@ const live: Layer.Layer<
         workflowModel.systemPrompt = prepared.system.join("\n")
         workflowModel.toolExecutor = async (toolName, argsJson, _requestID) => {
           const t = prepared.tools[toolName]
+          const startedAt = Date.now()
+          const timing = {
+            source: "workflow",
+            tool: toolName,
+            sessionID: input.sessionID,
+            callID: _requestID,
+          }
+          // GitLab workflow 模型会绕过 tools.ts 的 local/MCP tool adapter，
+          // 所以这里补同一组 daemon-log milestone。只记录 phase/source、
+          // sessionID、工具名、callID、status 和耗时；不记录 argsJson、结果、
+          // metadata，避免 workflow 参数或输出进入日志。
+          await bridge.promise(Effect.logInfo("tool timing", { phase: "tool.start", ...timing }))
           if (!t || !t.execute) {
+            await bridge.promise(Effect.logInfo("tool timing", {
+              phase: "tool.end",
+              ...timing,
+              status: "error",
+            // #237：durationMs 只度量本轮工具执行墙钟——不含排队与权限等待，保证 timing 口径一致
+              durationMs: Date.now() - startedAt,
+            }))
             return { result: "", error: `Unknown tool: ${toolName}` }
           }
           try {
@@ -139,12 +158,24 @@ const live: Layer.Layer<
               abortSignal: input.abort,
             })
             const output = typeof result === "string" ? result : (result?.output ?? JSON.stringify(result))
+            await bridge.promise(Effect.logInfo("tool timing", {
+              phase: "tool.end",
+              ...timing,
+              status: "completed",
+              durationMs: Date.now() - startedAt,
+            }))
             return {
               result: output,
               metadata: typeof result === "object" ? result?.metadata : undefined,
               title: typeof result === "object" ? result?.title : undefined,
             }
           } catch (e: any) {
+            await bridge.promise(Effect.logInfo("tool timing", {
+              phase: "tool.end",
+              ...timing,
+              status: "error",
+              durationMs: Date.now() - startedAt,
+            }))
             return { result: "", error: e.message ?? String(e) }
           }
         }

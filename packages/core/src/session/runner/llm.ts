@@ -316,6 +316,17 @@ const layer = Layer.effect(
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()
+      const startedAt = Date.now()
+      let firstStreamEvent = true
+      // 只记录本轮身份和里程碑，不把实际请求、工具参数或提供者元数据带进日志。
+      yield* Effect.logInfo("stream timing", {
+        phase: "processor.start", sessionID: session.id, providerID: model.provider, modelID: model.id, agent: agent.id,
+      })
+      // turn scope 在流、工具和用量结算后关闭，失败与中断也记录结束且保持原Cause。
+      yield* Effect.addFinalizer((exit) => Effect.logInfo("stream timing", {
+        phase: "processor.end", sessionID: session.id, result: exit._tag,
+        durationMs: Date.now() - startedAt,
+      }))
       // ContextEpoch 仍决定 baseline 和历史选择，估算不另建历史或改变请求。
       const samples = Token.inputHistory(context, model)
       let inputEstimate: SessionMessage.InputEstimate | undefined
@@ -358,6 +369,13 @@ const layer = Layer.effect(
       })).pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
+            // 首事件只取类型，保留唯一stream与既有顺序消费，不逐token写诊断。
+            if (firstStreamEvent) {
+              firstStreamEvent = false
+              yield* Effect.logInfo("stream timing", {
+                phase: "ai.first_event", sessionID: session.id, event: event.type, elapsedMs: Date.now() - startedAt,
+              })
+            }
             if (overflowFailure || publisher.hasProviderError()) return
             if (LLMEvent.is.providerError(event)) {
               if (isContextOverflowFailure(event) && !publisher.hasAssistantStarted()) {
