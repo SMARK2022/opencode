@@ -135,6 +135,80 @@ describe("daemon lifecycle", () => {
     DAEMON_START_TIMEOUT_MS + 5_000,
   )
 
+  // #235：startup idle——首个 SSE client 前无保护会遗留孤儿 daemon
+  test(
+    "daemon exits if no SSE client connects before startup idle timeout",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      // #235：startup idle 250ms 远小于常规 idle——验证启动期保护独立生效
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+        // #235：显式清零 launcher——宿主 opencode 会话注入的 LAUNCHER_PID 会让 startup idle 永久 skip
+        OPENCODE_DAEMON_LAUNCHER_PID: "0",
+      })
+
+      try {
+        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(exitCode).toBe(0)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  // #235：launcher watcher——launcher 先死且无 client 时按 1s 轮询快速清场
+  test(
+    "daemon exits when launcher dies before the first SSE client connects",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_LAUNCHER_PID: "987654321",
+      })
+
+      try {
+        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(exitCode).toBe(0)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  // #235：launcher 存活时 startup idle 必须重排而非退出——防启动慢的 TUI 误杀
+  test(
+    "daemon does not exit before first SSE while the launcher is alive",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+        OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
+      })
+
+      try {
+        await Bun.sleep(750)
+        expect(ServerLock.alive(proc.pid)).toBe(true)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeDefined()
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
   test(
     "compiled-binary path: spawning with OPENCODE_PROCESS_ROLE=worker env bypasses yargs and starts daemon",
     async () => {
@@ -186,7 +260,11 @@ describe("daemon lifecycle", () => {
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
       // #173：250ms idle，测试不必等 30s
-      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
+      // #235：startup idle 显式放宽——本测试验证运行期 idle，不能误触启动期保护
+      const { proc, lock } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "5000",
+      })
 
       try {
         const ctrl = new AbortController()

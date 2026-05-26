@@ -250,6 +250,8 @@ export async function discoverOrSpawnDaemon(
           env: {
             ...env,
             OPENCODE_PROCESS_ROLE: "worker",
+            // 首个订阅前由daemon判断启动方是否仍存活，不改变监听与锁路径运输。
+            OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
             ...(lockPath ? { OPENCODE_LOCK_PATH: lockPath } : {}),
             // 覆盖继承的外部监听变量，避免内部请求误启动旧的外部端口。
             OPENCODE_EXTERNAL_NETWORK: external ? JSON.stringify(network) : "",

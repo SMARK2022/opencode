@@ -84,6 +84,7 @@ import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
+import { ExitSignals } from "./context/exit"
 import { cliErrorMessage, errorFormat } from "./util/error"
 
 registerOpencodeSpinner()
@@ -235,10 +236,21 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       )
       yield* Effect.addFinalizer(() => Effect.sync(TuiAudio.dispose))
       const shutdown = yield* Deferred.make<unknown>()
-      const onSighup = () => destroyRenderer(renderer)
+      // #235：终端驱动信号全量注册——SIGHUP 之外补 SIGINT/SIGTERM，
+      // #235：acquireRelease 承担 onCleanup 语义，避免组件重挂载重复监听
+      const signalHandlers = ExitSignals.map((signal) => {
+        const handler = () => destroyRenderer(renderer)
+        // #235：注册延迟到 acquire 执行——release 注销同源，保证成对
+        return { register: () => process.on(signal, handler), remove: () => process.off(signal, handler) }
+      })
       yield* Effect.acquireRelease(
-        Effect.sync(() => process.on("SIGHUP", onSighup)),
-        () => Effect.sync(() => process.off("SIGHUP", onSighup)),
+        Effect.sync(() => {
+          for (const signalHandler of signalHandlers) signalHandler.register()
+        }),
+        () =>
+          Effect.sync(() => {
+            for (const signalHandler of signalHandlers) signalHandler.remove()
+          }),
       )
       renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
       const pluginRuntime = createPluginRuntime()

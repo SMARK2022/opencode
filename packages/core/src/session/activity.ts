@@ -2,18 +2,20 @@ import { EventEmitter } from "events"
 import { Effect } from "effect"
 
 const emitter = new EventEmitter()
-const active = new Set<string>()
+const active = new Set<symbol>()
 
 // #152：begin 返回 end；进程内跟踪 session/shell 活跃 runner
 export function begin(id: string) {
-  active.add(id)
+  // #235：不同 listener 可并行处理同一 ID，每次登记独占令牌，避免互相提前释放。
+  const token = Symbol(id)
+  active.add(token)
   emitter.emit("change", active.size)
 
   let done = false
   return () => {
     if (done) return
     done = true
-    active.delete(id)
+    active.delete(token)
     emitter.emit("change", active.size)
   }
 }
