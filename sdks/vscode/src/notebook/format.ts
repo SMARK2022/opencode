@@ -17,6 +17,7 @@ import {
   previewText,
   formatBytes,
   quoteForSummary,
+  toPosixPath,
 } from "../util"
 
 // ---------------------------------------------------------------------------
@@ -213,6 +214,35 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
   if (kernelName) return kernelName
   if (languageName && languageVersion) return `${languageName} ${languageVersion}`
   return languageName ?? null
+}
+
+/**
+ * Returns the path string shown to the model at the top of every notebook tool
+ * result. Keep this display-only path POSIX-normalized for token efficiency;
+ * data payloads can continue carrying the original VS Code fsPath/URI shape.
+ */
+export function notebookPath(notebook: vscode.NotebookDocument) {
+  return toPosixPath(notebook.uri.fsPath || notebook.uri.toString())
+}
+
+/**
+ * All notebook tools start with the same two model-facing lines:
+ * `Notebook:` identifies the document, and `<Tool>:` carries operation fields.
+ * This invariant lets agents parse summaries without relearning per-tool layout.
+ */
+export function notebookHeader(notebook: vscode.NotebookDocument, label: string, fields: Array<string | undefined>) {
+  return [
+    `Notebook: ${notebookPath(notebook)}`,
+    `${label}: ${fields.filter(Boolean).join(" ")}`,
+  ]
+}
+
+/**
+ * Compact cell references always pair the shifting display index with the stable
+ * #VSC identifier, because agents must never treat cN alone as a durable handle.
+ */
+export function cellRef(cell: vscode.NotebookCell) {
+  return `c${c1(cell)} id=${copilotLikeCellId(cell)} ${cellTypeLabel(cell.kind)}/${cell.document.languageId}`
 }
 
 // ---------------------------------------------------------------------------

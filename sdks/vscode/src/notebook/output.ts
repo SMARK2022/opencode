@@ -7,15 +7,16 @@
  */
 import * as vscode from "vscode"
 import * as path from "node:path"
+import { quoteForSummary } from "../util"
 import {
-  c1,
-  copilotLikeCellId,
   existingOuts,
   compactCell,
   runtimeLabel,
   isTextLikeMime,
   extensionForMime,
   formatArtifactSummary,
+  notebookHeader,
+  cellRef,
 } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
@@ -45,11 +46,16 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
     )
   ).flat()
 
-  const cellId = copilotLikeCellId(cell)
   const summaryLines = [
-    `Cell c${c1(cell)} id=${cellId} existing outputs: ${existingOuts(cell).join(", ") || "none"}.`,
-    `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
+    ...notebookHeader(notebook, "Output", [
+      `target=${quoteForSummary(cellRef(cell))}`,
+      `dirty=${notebook.isDirty}`,
+      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
+      `outs=${quoteForSummary(existingOuts(cell).join(",") || "none")}`,
+      `artifacts=${artifacts.length}`,
+    ]),
     "",
+    `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
     "Artifacts:",
     ...artifacts.map((a) => formatArtifactSummary(a)),
   ].join("\n")

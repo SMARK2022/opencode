@@ -13,8 +13,8 @@
  * (Copilot-style #VSC-xxxxxxxx).
  */
 import * as vscode from "vscode"
-import { stringProp, numberProp } from "../util"
-import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
+import { stringProp, numberProp, quoteForSummary } from "../util"
+import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, runtimeLabel, notebookHeader, cellRef } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 // ---------------------------------------------------------------------------
@@ -34,13 +34,10 @@ export async function notebookSource(input: Record<string, unknown>) {
 
   const ranges = computeVirtualRanges(notebook)
 
-  // Resolve target cell via cellId (stable identifier; no cellIndex in schema)
+  // A supplied cellId is a precise request, not a hint. If it is stale or bogus,
+  // fail like edit/run/output instead of silently returning unrelated source.
   const cellId = stringProp(input, "cellId")
-  let cell: vscode.NotebookCell | undefined
-  if (cellId) {
-    try { cell = resolveNotebookCell(notebook, undefined, cellId) }
-    catch { cell = undefined }
-  }
+  const cell = cellId ? resolveNotebookCell(notebook, undefined, cellId) : undefined
   const targetCellIndex = cell?.index
 
   // Determine line window
@@ -56,8 +53,7 @@ export async function notebookSource(input: Record<string, unknown>) {
         globalStart = offset
       } else {
         globalStart = range.start
-        warning =
-          "WARNING: Offset out of bounds for the specified cell! ALWAYS use GLOBAL document line numbers (1-based). Offset reset to default."
+        warning = "Offset is outside the target cell range; reset to the cell range start. Offsets are global virtual source line numbers."
       }
     } else {
       globalStart = range.start
@@ -131,7 +127,23 @@ export async function notebookSource(input: Record<string, unknown>) {
   if (!bytesCut && renderedLines < limit) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
   const more = lastRenderedLine < globalEnd
 
-  let output = warning ? `${warning}\n\n` : ""
+  const targetRange = targetCellIndex !== undefined ? ranges.get(targetCellIndex) : undefined
+  let output = [
+    ...notebookHeader(notebook, "Source", [
+      `target=${quoteForSummary(cell ? cellRef(cell) : "all")}`,
+      targetRange ? `range=[${targetRange.start},${targetRange.end}]` : undefined,
+      `offset=${globalStart}`,
+      `limit=${limit}`,
+      `returned=${renderedLines}`,
+      `total=${totalLines}`,
+      `truncated=${bytesCut || more}`,
+      `dirty=${notebook.isDirty}`,
+      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
+    ]),
+    warning ? `Warning: ${warning}` : undefined,
+    "",
+  ].filter((line): line is string => line !== undefined).join("\n")
+  output += "\n"
   output +=
     [`<path>${notebook.uri.fsPath || notebook.uri.toString()}</path>`, `<type>notebook</type>`, "<content>"].join(
       "\n",
@@ -150,7 +162,7 @@ export async function notebookSource(input: Record<string, unknown>) {
     summary: output,
     data: {
       path: notebook.uri.fsPath || notebook.uri.toString(),
-      target: targetCellIndex !== undefined ? `cell ${targetCellIndex}` : "all",
+      target: targetCellIndex !== undefined ? `cell ${targetCellIndex + 1}` : "all",
       cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
       globalStart,
       limit,

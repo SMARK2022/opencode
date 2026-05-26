@@ -3,8 +3,8 @@
  * execution state, and output MIME types as a compact LLM-friendly summary.
  */
 import * as vscode from "vscode"
-import { toPosixPath, quoteForSummary } from "../util"
-import { compactCell, runtimeLabel, computeVirtualRanges } from "./format"
+import { quoteForSummary } from "../util"
+import { compactCell, runtimeLabel, computeVirtualRanges, notebookHeader } from "./format"
 import { resolveNotebook } from "./resolve"
 
 // ---------------------------------------------------------------------------
@@ -53,10 +53,18 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
       : `${executed.length}/${code.length} code cells executed`
 
   return [
-    `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
-    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
+    ...notebookHeader(notebook, "Summary", [
+      `type=${notebook.notebookType}`,
+      `dirty=${notebook.isDirty}`,
+      `cells=${notebook.cellCount}`,
+      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
+      `status=${quoteForSummary(status)}`,
+    ]),
     "",
-    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable for existing cells within the current session (insert/delete preserves the URI). Cell replacement (type change) produces a new ID — the edit response shows the updated ID; line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
+    // Keep the contract reminder short: the detailed rules live in tool
+    // descriptions, while this line preserves the invariants needed for the next
+    // call without crowding out the first-screen cell list.
+    `Fields: cN is 1-based display position; id is the stable #VSC handle; range=[A,B] uses global virtual source lines.`,
     "",
     'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
     ...cells.map((cell) => {

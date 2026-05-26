@@ -40,8 +40,9 @@
  */
 import * as vscode from "vscode"
 import { TextDecoder } from "node:util"
-import { extensionState, extensionInfo, stringProp } from "../util"
+import { extensionState, extensionInfo, stringProp, quoteForSummary } from "../util"
 import { resolveNotebook } from "./resolve"
+import { notebookHeader, runtimeLabel } from "./format"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -142,6 +143,19 @@ export async function notebookEnv(input: Record<string, unknown>) {
   }
 }
 
+function envSummaryHeader(notebook: vscode.NotebookDocument, operation: Operation, status?: string, dirty = String(notebook.isDirty), runtime = runtimeLabel(notebook) ?? "unknown") {
+  // Env operations all target notebook-level state rather than a cell. Keeping
+  // target/dirty/runtime in the shared second line prevents failure branches
+  // from losing the context needed for the model's next tool decision.
+  return notebookHeader(notebook, "Env", [
+    `operation=${operation}`,
+    "target=notebook",
+    status ? `status=${status}` : undefined,
+    `dirty=${dirty}`,
+    `runtime=${quoteForSummary(runtime)}`,
+  ])
+}
+
 // ===========================================================================
 // info — kernel / interpreter / metadata snapshot
 // ===========================================================================
@@ -154,7 +168,7 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
   return {
     ran: false,
     summary: [
-      `Operation: info`,
+      ...envSummaryHeader(notebook, "info", undefined, String(notebook.isDirty), activeRuntime ? formatActiveRuntime(activeRuntime) : runtimeLabel(notebook) ?? "unknown"),
       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}`,
       `Python/Jupyter extensions: ${extensionState(PYTHON_ID)}/${extensionState(JUPYTER_ID)}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
@@ -203,6 +217,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
   if (!jupyter) {
     return configureResult({
+      notebook,
       path: primaryPath,
       reason,
       status: "failed",
@@ -273,6 +288,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
 
   if (preCheck.configured) {
     return configureResult({
+      notebook,
       path: primaryPath,
       reason,
       status: "configured",
@@ -379,6 +395,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
 
   // ---- node 10: construct response ----
   return configureResult({
+    notebook,
     path: primaryPath,
     reason,
     status,
@@ -464,6 +481,7 @@ function resolveConfigureStatus(
 }
 
 function configureResult(input: {
+  notebook: vscode.NotebookDocument
   path: string
   reason?: string
   status: ConfigureStatus
@@ -483,8 +501,7 @@ function configureResult(input: {
   return {
     ran: true,
     summary: [
-      "Operation: configure",
-      `Status: ${input.status}`,
+      ...envSummaryHeader(input.notebook, "configure", input.status),
       input.summary,
       guidance,
       input.reason ? `Reason: ${input.reason}` : "",
@@ -569,7 +586,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   if (!jupyter) {
     return {
       ran: true,
-      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "failed"),
+        "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
+      ].join("\n"),
       data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt },
     }
   }
@@ -580,7 +600,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   if (!allCommands.includes(RESTART_CMD)) {
     return {
       ran: true,
-      summary: "jupyter.restartkernel command is not registered. Check that the Jupyter extension is correctly installed.",
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "failed"),
+        "jupyter.restartkernel command is not registered. Check that the Jupyter extension is correctly installed.",
+      ].join("\n"),
       data: {
         path: primaryPath,
         operation: "restart",
@@ -614,7 +637,7 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     return {
       ran: true,
       summary: [
-        "Operation: restart",
+        ...envSummaryHeader(notebook, "restart", "requested"),
         "Kernel restart requested. All runtime state from previous cell executions should be cleared.",
         "Rerun setup or import cells before running dependent cells.",
         reason ? `Reason: ${reason}` : "",
@@ -633,7 +656,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     const message = error instanceof Error ? error.message : String(error)
     return {
       ran: true,
-      summary: `Kernel restart invocation failed: ${message}.`,
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "failed"),
+        `Kernel restart invocation failed: ${message}.`,
+      ].join("\n"),
       data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt },
     }
   } finally {
@@ -657,7 +683,7 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) 
     return {
       ran: true,
       summary: [
-        "Operation: save",
+        ...envSummaryHeader(notebook, "save", "skipped", `${notebook.isDirty}->${notebook.isDirty}`),
         "Saved: skipped — notebook is untitled and has no stable file path.",
         "Use a Save As / create-file workflow first, then save the named notebook.",
         reason ? `Reason: ${reason}` : "",
@@ -708,7 +734,7 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) 
   return {
     ran: true,
     summary: [
-      `Operation: save`,
+      ...envSummaryHeader(notebook, "save", saved ? "saved" : saveError ? "error" : "not-confirmed", `${beforeDirty}->${afterDirty}`),
       `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
       `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
       saveError ? `Save error: ${saveError}` : undefined,

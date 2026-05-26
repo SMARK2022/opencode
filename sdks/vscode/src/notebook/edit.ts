@@ -23,8 +23,9 @@ import {
   fullDocumentRange,
   documentEol,
   previewText,
+  quoteForSummary,
 } from "../util"
-import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
+import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, notebookHeader, cellRef } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 const EDIT_TYPES = new Set(["insert", "edit", "delete"])
@@ -120,8 +121,9 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
   const applied = await applyNotebookEditAndWait(notebook, edit)
+  const insertedCell = notebook.cellAt(insertIndex)
   const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
+  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, insertedCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +484,7 @@ function compactEditResult(
     beforeCount: number
     afterCount: number
     anchorCell?: vscode.NotebookCell
+    insertedCell?: vscode.NotebookCell
     deletedCellIndex?: number
     affectedCellIndex?: number
     kind?: string
@@ -501,32 +504,54 @@ function compactEditResult(
     afterSource?: string
   },
 ) {
+  const target = info.editType === "insert" && info.anchorCell
+    ? `after ${cellRef(info.anchorCell)}`
+    : info.editType === "insert" && info.insertedCell
+      ? `at ${cellRef(info.insertedCell)}`
+      : info.editType === "delete" && info.deletedId
+        ? `c${(info.deletedCellIndex ?? 0) + 1} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang}`
+        : info.anchorCell
+          ? cellRef(info.anchorCell)
+          : `index=${info.opIndex}`
   const lines: Array<string | undefined> = [
-    `Notebook edit: applied=${info.applied} op=${info.editType} at=${info.opIndex} num_cells=${info.beforeCount}->${info.afterCount} dirty=${notebook.isDirty}.`,
+    ...notebookHeader(notebook, "Edit", [
+      `op=${info.editType}`,
+      `applied=${info.applied}`,
+      `dirty=${notebook.isDirty}`,
+      `cells=${info.beforeCount}->${info.afterCount}`,
+      `target=${quoteForSummary(target)}`,
+    ]),
   ]
 
-  // --- Anchor ---
   if (info.editType === "delete" && info.deletedId) {
-    // Deleted cell: strikethrough with full metadata
     const dIdx = (info.deletedCellIndex ?? 0) + 1
-    lines.push(`Anchor: ~~c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}~~`)
+    // Deleted ids are intentionally shown as invalid handles so agents do not
+    // reuse them after a successful delete; the shifted row below is the next
+    // safe continuation point when one exists.
+    lines.push(`Deleted: c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}`)
   } else if (info.anchorCell) {
-    const displayIdx = info.deletedCellIndex !== undefined ? info.deletedCellIndex + 1 : c1(info.anchorCell)
     const anchorId = copilotLikeCellId(info.anchorCell)
     const typePart = info.oldKind
       ? `${info.oldKind}/${info.oldLang}->${info.kind}/${info.language}`
       : `${cellTypeLabel(info.anchorCell.kind)}/${info.anchorCell.document.languageId}`
-    lines.push(`Anchor: c${displayIdx} id=${anchorId} ${typePart}.`)
+    lines.push(`Anchor: c${c1(info.anchorCell)} id=${anchorId} ${typePart}.`)
     if (info.oldKind) {
       lines.push(`NOTE: Type change replaced the cell. Use id=${anchorId} for subsequent operations on this cell.`)
     }
+  }
+
+  if (info.editType === "insert" && info.insertedCell) {
+    lines.push(`Inserted: c${c1(info.insertedCell)} id=${copilotLikeCellId(info.insertedCell)} ${cellTypeLabel(info.insertedCell.kind)}/${info.insertedCell.document.languageId}.`)
   }
 
   // --- Affected ---
   if ((info.editType === "delete" || info.editType === "insert") && info.shiftedCell) {
     const oldIdx = (info.shiftedOldIdx ?? 0) + 1
     const newIdx = c1(info.shiftedCell)
-    lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
+    // `Shifted` names index movement separately from the inserted/deleted cell;
+    // this avoids the previous ambiguous `Affected` row being mistaken for the
+    // newly inserted cell id.
+    lines.push(`Shifted: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
   }
 
   if (info.contextSummary) {
@@ -545,6 +570,8 @@ function compactEditResult(
       cellCountBefore: info.beforeCount,
       cellCountAfter: info.afterCount,
       anchorCellIndex: info.anchorCell?.index,
+      insertedCellIndex: info.insertedCell?.index,
+      insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
       deletedCellIndex: info.deletedCellIndex,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,

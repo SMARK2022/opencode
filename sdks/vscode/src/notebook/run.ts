@@ -9,7 +9,7 @@
  * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
  */
 import * as vscode from "vscode"
-import { stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
+import { stringProp, numberProp, quoteForSummary } from "../util"
 import {
   c1,
   copilotLikeCellId,
@@ -17,6 +17,8 @@ import {
   executionText,
   runtimeLabel,
   formatArtifactSummary,
+  notebookHeader,
+  cellRef,
 } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 import { serializeNotebookOutputItem } from "./output"
@@ -138,9 +140,8 @@ function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, end
 }
 
 function describeRunTarget(cells: vscode.NotebookCell[]) {
-  if (cells.length === 1) return `cell ${c1(cells[0])}`
-  const indices = cells.map((c) => c1(c))
-  return `range ${indices[0]}-${indices[indices.length - 1]}`
+  if (cells.length === 1) return cellRef(cells[0])
+  return `${cellRef(cells[0])}..${cellRef(cells[cells.length - 1])}`
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +176,12 @@ function runSummaryText(
 ) {
   const artifactRoot = ".opencode/cache/notebook-outputs/"
   return [
-    `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
-    `Run: target=${target} completed=${completed} dirty=${notebook.isDirty} runtime=${runtimeLabel(notebook) ?? "unknown"}`,
-    `ArtifactsRoot: ${artifactRoot}`,
+    ...notebookHeader(notebook, "Run", [
+      `target=${quoteForSummary(target)}`,
+      `completed=${completed}`,
+      `dirty=${notebook.isDirty}`,
+      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
+    ]),
     "",
     "Cells:",
     ...cells.map(
@@ -185,6 +189,7 @@ function runSummaryText(
         `c${c.i} id=${c.id} exec=${quoteForSummary(c.exec)} outs=${quoteForSummary(c.existing_outs.join(",") || "none")}`,
     ),
     "",
+    `ArtifactsRoot: ${artifactRoot}`,
     "Artifacts:",
     ...cells.flatMap((c) => c.artifacts.map((a) => formatArtifactSummary(a, c.i))),
   ].join("\n")
