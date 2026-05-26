@@ -7,6 +7,8 @@ export function previewDiff(input: string, maxLines: number) {
   let expectedOld = 0,
     expectedNew = 0,
     changed = false
+  const oldVisible = () => body.filter((line) => line[0] === " " || line[0] === "-").length
+  const newVisible = () => body.filter((line) => line[0] === " " || line[0] === "+").length
 
   // Flush each preview hunk as a fresh, parser-valid hunk. The preview may drop
   // trailing body lines, so the original @@ counts must be rewritten to the
@@ -14,17 +16,15 @@ export function previewDiff(input: string, maxLines: number) {
   const flush = () => {
     if (!oldStart) return
 
-    const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
-    const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
-    const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
-    const incomplete = oldVisible < expectedOld || newVisible < expectedNew
+    const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
+    const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
     // Match previewText's "N visible rows plus one ellipsis row" contract, but
     // keep the ellipsis as a legal context line so parsePatch accepts it. The
     // incomplete branch covers metadata that was already clipped mid-hunk.
     if (cut || incomplete) body.push(" …")
     changed ||= cut || countMismatch
     out.push(
-      `@@ -${oldStart},${body.filter((line) => line[0] === " " || line[0] === "-").length} +${newStart},${body.filter((line) => line[0] === " " || line[0] === "+").length} @@${suffix}`,
+      `@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`,
       ...body,
     )
     oldStart = newStart = suffix = ""
@@ -52,6 +52,15 @@ export function previewDiff(input: string, maxLines: number) {
       continue
     }
 
+    if (oldVisible() >= expectedOld && newVisible() >= expectedNew) {
+      // A new file header or other patch metadata can follow a completed hunk.
+      // Flush before handling it so header-like source rows remain valid only
+      // while the expected hunk body is still being consumed.
+      flush()
+      out.push(line)
+      continue
+    }
+
     if (line[0] === " ") {
       if (left >= limit || right >= limit) {
         cut = true
@@ -63,18 +72,38 @@ export function previewDiff(input: string, maxLines: number) {
       continue
     }
 
-    if ((line[0] === "-" && !line.startsWith("---")) || (line[0] === "+" && !line.startsWith("+++"))) {
+    if (line[0] === "-" || line[0] === "+") {
       const del: string[] = []
       const add: string[] = []
       let j = i
-      while (src[j] && /^[+-]/.test(src[j]) && !/^(---|\+\+\+)/.test(src[j])) {
-        ;(src[j][0] === "-" ? del : add).push(src[j])
+      // We are already inside a hunk; `+++`/`---` here can be legitimate source
+      // rows, so stop only when this hunk's expected old/new rows are consumed.
+      let seenOld = oldVisible()
+      let seenNew = newVisible()
+      while (src[j] && /^[+-]/.test(src[j])) {
+        if (seenOld >= expectedOld && seenNew >= expectedNew) break
+        if (src[j][0] === "-") {
+          if (seenOld >= expectedOld) break
+          del.push(src[j])
+          seenOld++
+          j++
+          continue
+        }
+        if (seenNew >= expectedNew) break
+        add.push(src[j])
+        seenNew++
         j++
       }
-      const paired = del.length > 0 && add.length > 0
-      const take = paired ? Math.min(del.length, add.length, limit - left, limit - right) : 0
-      const dl = paired ? take : Math.min(del.length, limit - left)
-      const al = paired ? take : Math.min(add.length, limit - right)
+      if (j === i) {
+        // Malformed or already-clipped hunks can present a row for the side whose
+        // expected count is already satisfied. Flush with an ellipsis instead of
+        // reprocessing the same row forever in the outer loop.
+        flush()
+        out.push(line)
+        continue
+      }
+      const dl = Math.min(del.length, limit - left)
+      const al = Math.min(add.length, limit - right)
       body.push(...del.slice(0, dl), ...add.slice(0, al))
       left += dl
       right += al

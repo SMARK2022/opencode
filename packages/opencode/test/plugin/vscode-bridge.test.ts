@@ -235,7 +235,7 @@ describe("vscode bridge plugin", () => {
         dirty: true,
         language: "python",
         beforeSource: "",
-        afterSource: "print('new cell')\n",
+        afterSource: "print('new cell')\n++ legal source prefix\n",
       },
     })
 
@@ -249,13 +249,15 @@ describe("vscode bridge plugin", () => {
         vscodeNotebook: {
           view: "edit",
           cellLabel: "c4",
-          added: 1,
+          added: 2,
           removed: 0,
         },
       },
     })
     if (typeof result === "string") throw new Error("expected structured notebook insert result")
     expect((result.metadata?.vscodeNotebook as Record<string, string>).diff).toContain("#c4")
+    expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("print('new cell')")
+    expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("++ legal source prefix")
   })
 
   test("omits oversized notebook edit diffs from persisted metadata", async () => {
@@ -293,6 +295,105 @@ describe("vscode bridge plugin", () => {
     if (typeof result === "string") throw new Error("expected structured oversized notebook edit result")
     expect((result.metadata?.vscodeNotebook as Record<string, unknown>).diff).toBeUndefined()
     expect(JSON.stringify(result.metadata)).not.toContain("new line\nnew line\nnew line")
+  })
+
+  test("keeps oversized notebook insert previews visible without persisting the full cell source", async () => {
+    const plugin = await VscodeBridgePlugin()
+    const filePath = "F:\\project with spaces\\large notebook.ipynb"
+    const inserted = ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()", ...Array.from({ length: 3000 }, (_, i) => `row_${i}`)].join("\n")
+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: false,
+      summary: "Notebook edit: applied=true op=insert at=4 num_cells=3->4 dirty=true.",
+      data: {
+        path: filePath,
+        editType: "insert",
+        cellCountBefore: 3,
+        cellCountAfter: 4,
+        affectedCellIndex: 3,
+        dirty: true,
+        language: "python",
+        beforeSource: "",
+        afterSource: inserted,
+      },
+    })
+
+    const result = await plugin.tool.vscode_notebook_edit.execute(
+      { filePath, cellId: "#VSC-anchor", editType: "insert", newCode: "ignored in mock" },
+      allowContext(filePath),
+    )
+
+    if (typeof result === "string") throw new Error("expected structured oversized notebook insert result")
+    const metadata = result.metadata?.vscodeNotebook as Record<string, unknown>
+    expect(metadata).toMatchObject({ view: "edit", editType: "insert", cellLabel: "c4", diffOmitted: "too-large" })
+    expect(metadata.insertedSourcePreview).toContain("import pandas as pd")
+    expect(metadata.insertedSourcePreview).toContain("df.head()")
+    expect(metadata.insertedSourcePreview).not.toContain("row_2999")
+    expect(metadata.insertedSourcePreviewTruncated).toBe(true)
+    expect(JSON.stringify(result.metadata)).not.toContain("row_2999")
+  })
+
+  test("keeps oversized single-line notebook insert previews bounded and non-empty", async () => {
+    const plugin = await VscodeBridgePlugin()
+    const filePath = "F:\\project with spaces\\wide notebook.ipynb"
+    const inserted = `visible-prefix-${"x".repeat(20_000)}-hidden-suffix`
+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: false,
+      summary: "Notebook edit: applied=true op=insert at=1 num_cells=0->1 dirty=true.",
+      data: {
+        path: filePath,
+        editType: "insert",
+        cellCountBefore: 0,
+        cellCountAfter: 1,
+        affectedCellIndex: 0,
+        dirty: true,
+        language: "python",
+        beforeSource: "",
+        afterSource: inserted,
+      },
+    })
+
+    const result = await plugin.tool.vscode_notebook_edit.execute(
+      { filePath, cellId: "BOTTOM", editType: "insert", newCode: "ignored in mock" },
+      allowContext(filePath),
+    )
+
+    if (typeof result === "string") throw new Error("expected structured wide notebook insert result")
+    const preview = (result.metadata?.vscodeNotebook as Record<string, unknown>).insertedSourcePreview
+    expect(preview).toBeString()
+    expect(preview).toContain("visible-prefix")
+    expect(preview).not.toContain("hidden-suffix")
+    expect((result.metadata?.vscodeNotebook as Record<string, unknown>).insertedSourcePreviewTruncated).toBe(true)
+  })
+
+  test("does not mark exact ten-line notebook insert previews truncated because of the final newline", async () => {
+    const plugin = await VscodeBridgePlugin()
+    const filePath = "F:\\project with spaces\\ten-line notebook.ipynb"
+    const inserted = `${Array.from({ length: 10 }, (_, i) => `line_${i + 1}`).join("\n")}\n`
+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: false,
+      summary: "Notebook edit: applied=true op=insert at=1 num_cells=0->1 dirty=true.",
+      data: {
+        path: filePath,
+        editType: "insert",
+        cellCountBefore: 0,
+        cellCountAfter: 1,
+        affectedCellIndex: 0,
+        dirty: true,
+        language: "python",
+        beforeSource: "",
+        afterSource: inserted,
+      },
+    })
+
+    const result = await plugin.tool.vscode_notebook_edit.execute(
+      { filePath, cellId: "BOTTOM", editType: "insert", newCode: "ignored in mock" },
+      allowContext(filePath),
+    )
+
+    if (typeof result === "string") throw new Error("expected structured ten-line notebook insert result")
+    const metadata = result.metadata?.vscodeNotebook as Record<string, unknown>
+    expect(metadata.insertedSourcePreview).toContain("line_10")
+    expect(metadata.insertedSourcePreviewTruncated).toBe(false)
   })
 })
 

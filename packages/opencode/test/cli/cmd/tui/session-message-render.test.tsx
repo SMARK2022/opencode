@@ -464,6 +464,150 @@ test("completed notebook edit renders a diff card instead of raw generic input",
   )
 })
 
+test("completed notebook edit uses notebook language for supported diff syntax highlighting", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_edit_highlight", 1)],
+    {
+      msg_notebook_edit_highlight: [
+        completedToolPart(
+          "part_notebook_edit_highlight",
+          "msg_notebook_edit_highlight",
+          "vscode_notebook_edit",
+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-12345678", editType: "edit" },
+          {
+            vscodeNotebook: {
+              view: "edit",
+              path: "notebooks/analysis.ipynb",
+              cellLabel: "c3",
+              editType: "edit",
+              language: "typescript",
+              dirty: true,
+              cellCountBefore: 4,
+              cellCountAfter: 4,
+              diff: [
+                "--- notebooks/analysis.ipynb#c3.typescript",
+                "+++ notebooks/analysis.ipynb#c3.typescript",
+                "@@ -1 +1 @@",
+                "-const verified = false",
+                "+const verified = true",
+              ].join("\n"),
+              added: 1,
+              removed: 1,
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("const verified = true")))
+      const start = Date.now()
+      for (;;) {
+        await app.renderOnce()
+        const line = app.captureSpans().lines.find((item) => item.spans.map((span) => span.text).join("").includes("const verified = true"))
+        const identifierSpan = line?.spans.find((span) => span.text.includes("verified"))
+        const keywordSpan = line?.spans.find((span) => span.text.includes("const"))
+        if (identifierSpan && keywordSpan && JSON.stringify(keywordSpan.fg) !== JSON.stringify(identifierSpan.fg)) break
+        if (Date.now() - start > 2_000) {
+          expect(keywordSpan?.fg).not.toEqual(identifierSpan?.fg)
+          break
+        }
+        await Bun.sleep(10)
+      }
+    },
+  )
+})
+
+test("completed oversized notebook insert renders inserted source preview when the full diff is omitted", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_insert_preview", 1)],
+    {
+      msg_notebook_insert_preview: [
+        completedToolPart(
+          "part_notebook_insert_preview",
+          "msg_notebook_insert_preview",
+          "vscode_notebook_edit",
+          {
+            filePath: "notebooks/large analysis.ipynb",
+            cellId: "#VSC-anchor",
+            editType: "insert",
+            newCode: "RAW_INSERT_INPUT_SHOULD_NOT_RENDER",
+          },
+          {
+            vscodeNotebook: {
+              view: "edit",
+              path: "notebooks/large analysis.ipynb",
+              cellLabel: "c4",
+              editType: "insert",
+              language: "python",
+              dirty: true,
+              cellCountBefore: 3,
+              cellCountAfter: 4,
+              diffOmitted: "too-large",
+              added: 3003,
+              removed: 0,
+              insertedSourcePreview: ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()"].join("\n"),
+              insertedSourcePreviewTruncated: true,
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook insert") && line.includes("+3003 -0")) &&
+        lines.some((line) => line.includes("import pandas as pd")) &&
+        lines.some((line) => line.includes("df.head()")),
+      )
+      expect(frame.some((line) => line.includes("RAW_INSERT_INPUT_SHOULD_NOT_RENDER"))).toBe(false)
+      expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
+      expect(frame.some((line) => line.includes("Diff omitted"))).toBe(false)
+    },
+    {},
+    { height: 24 },
+  )
+})
+
+test("completed notebook insert renders inserted source as code instead of a diff", async () => {
+  const inserted = Array.from({ length: 12 }, (_, index) => `print('inserted line ${index + 1}')`)
+  inserted[5] = "++ legal source prefix"
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_insert_code", 1)],
+    {
+      msg_notebook_insert_code: [
+        completedToolPart(
+          "part_notebook_insert_code",
+          "msg_notebook_insert_code",
+          "vscode_notebook_edit",
+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-anchor", editType: "insert" },
+          {
+            vscodeNotebook: {
+              view: "edit",
+              path: "notebooks/analysis.ipynb",
+              cellLabel: "c4",
+              editType: "insert",
+              language: "python",
+              dirty: true,
+              cellCountBefore: 3,
+              cellCountAfter: 4,
+              diff: ["--- DIFF_HEADER_SHOULD_NOT_RENDER", "+++ notebooks/analysis.ipynb#c4.py", "@@ -0,0 +1,12 @@", ...inserted.map((line) => `+${line}`)].join("\n"),
+              added: 12,
+              removed: 0,
+              insertedSourcePreview: inserted.slice(0, 10).join("\n"),
+              insertedSourcePreviewTruncated: true,
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("print('inserted line 12')")))
+      expect(frame.some((line) => line.includes("++ legal source prefix"))).toBe(true)
+      expect(frame.some((line) => line.includes("DIFF_HEADER_SHOULD_NOT_RENDER"))).toBe(false)
+      expect(frame.some((line) => line.includes("Inserted source preview is truncated"))).toBe(false)
+    },
+  )
+})
+
 test("notebook tool switches from pending inline summary to completed rich card", async () => {
   await withRenderedSession(
     [assistantMessage("msg_notebook_transition", 1)],
@@ -533,6 +677,50 @@ test("notebook summary renders cells from notebook metadata without enabling gen
       )
       expect(frame.some((line) => line.includes("Notebook:"))).toBe(false)
     },
+  )
+})
+
+test("collapsed notebook summary preview surfaces late failed cells", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_summary_late_failure", 1)],
+    {
+      msg_notebook_summary_late_failure: [
+        completedToolPart(
+          "part_notebook_summary_late_failure",
+          "msg_notebook_summary_late_failure",
+          "vscode_notebook_summary",
+          { filePath: "notebooks/long.ipynb" },
+          {
+            vscodeNotebook: {
+              view: "summary",
+              path: "notebooks/long.ipynb",
+              dirty: false,
+              runtime: "Python 3.11",
+              cells: Array.from({ length: 19 }, (_, index) => ({
+                i: index + 1,
+                id: `#VSC-${String(index + 1).padStart(8, "0")}`,
+                kind: index === 18 || index % 3 !== 0 ? "code" : "markdown",
+                lang: index === 18 || index % 3 !== 0 ? "python" : "markdown",
+                lines: 3,
+                exec: index === 18 || index < 6 ? `current-run #${index + 1} failed 12ms ended=2026-05-25T00:00:00.000Z` : "not-run",
+                existing_outs: index === 18 || index < 6 ? ["error"] : [],
+                first: index === 18 ? "raise Error" : `cell ${index + 1}`,
+              })),
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook summary") && line.includes("19 cells")) &&
+        lines.some((line) => line.includes("c19")) &&
+        lines.some((line) => line.includes("failed")),
+      )
+      expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
+    },
+    {},
+    { height: 18 },
   )
 })
 
@@ -644,6 +832,61 @@ test("notebook source, run, and output tools render rich notebook cards", async 
     },
     {},
     { height: 24 },
+  )
+})
+
+test("collapsed notebook run preview surfaces late failed cells", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_run_late_failure", 1)],
+    {
+      msg_notebook_run_late_failure: [
+        completedToolPart(
+          "part_notebook_run_late_failure",
+          "msg_notebook_run_late_failure",
+          "vscode_notebook_run",
+          { filePath: "notebooks/long.ipynb", cellId: "#VSC-start", endCellId: "#VSC-end" },
+          {
+            vscodeNotebook: {
+              view: "run",
+              path: "notebooks/long.ipynb",
+              target: "range 1-19",
+              completed: false,
+              cells: Array.from({ length: 19 }, (_, index) => ({
+                i: index + 1,
+                id: `#VSC-${String(index + 1).padStart(8, "0")}`,
+                kind: "code",
+                lang: "python",
+                lines: 3,
+                exec: index === 18 ? "current-run #19 failed 12ms ended=2026-05-25T00:00:00.000Z" : "current-run #1 succeeded 4ms ended=2026-05-25T00:00:00.000Z",
+                existing_outs: index === 18 ? ["error"] : index < 6 ? ["text"] : [],
+                artifacts: index === 18
+                  ? Array.from({ length: 8 }, (_, artifact) => ({
+                      mime: "text/plain",
+                      bytes: 32,
+                      preview: `artifact ${artifact}`,
+                      artifactPath: `.opencode/cache/notebook-outputs/artifact-${artifact}.txt`,
+                    }))
+                  : index === 17
+                    ? [{ mime: "text/plain", bytes: 32, preview: "extra artifact", artifactPath: ".opencode/cache/notebook-outputs/artifact-extra.txt" }]
+                    : [],
+              })),
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook run") && line.includes("failed")) &&
+        lines.some((line) => line.includes("c19")) &&
+        lines.some((line) => line.includes("failed")),
+      )
+      expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
+      expect(frame.some((line) => line.includes("Artifacts: 9 available after expand"))).toBe(true)
+      expect(frame.some((line) => line.includes("artifact-7.txt"))).toBe(false)
+    },
+    {},
+    { height: 18 },
   )
 })
 

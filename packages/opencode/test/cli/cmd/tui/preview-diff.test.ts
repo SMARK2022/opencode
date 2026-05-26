@@ -69,6 +69,99 @@ describe("previewDiff", () => {
     expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
   })
 
+  test("keeps hunk body lines that look like diff headers", () => {
+    const input = `Index: /tmp/notebook.py
+===================================================================
+--- /tmp/notebook.py
++++ /tmp/notebook.py
+@@ -1,2 +1,2 @@
+-old line
+--- legal removed source
++new line
++++ legal added source`
+    const hunk = parsePatch(previewDiff(input, 10))[0]?.hunks[0]
+
+    expect(hunk?.lines).toContain("--- legal removed source")
+    expect(hunk?.lines).toContain("+++ legal added source")
+    expect(hunk?.oldLines).toBe(2)
+    expect(hunk?.newLines).toBe(2)
+  })
+
+  test("keeps unbalanced hunk body lines when preview budget allows them", () => {
+    const input = `Index: /tmp/notebook.py
+===================================================================
+--- /tmp/notebook.py
++++ /tmp/notebook.py
+@@ -1,1 +1,2 @@
+-old line
++new line
++++ legal added source`
+    const hunk = parsePatch(previewDiff(input, 10))[0]?.hunks[0]
+
+    expect(hunk?.lines).toEqual(["-old line", "+new line", "+++ legal added source"])
+    expect(hunk?.oldLines).toBe(1)
+    expect(hunk?.newLines).toBe(2)
+  })
+
+  test("does not treat later file headers as previous hunk source", () => {
+    const input = `Index: /tmp/one.py
+===================================================================
+--- /tmp/one.py
++++ /tmp/one.py
+@@ -1,1 +1,1 @@
+--- legal removed source
++++ legal added source
+Index: /tmp/two.py
+===================================================================
+--- /tmp/two.py
++++ /tmp/two.py
+@@ -1,1 +1,1 @@
+-old two
++new two`
+    const patches = parsePatch(previewDiff(input, 10))
+
+    expect(patches).toHaveLength(2)
+    expect(patches[0]?.hunks[0]?.lines).toContain("--- legal removed source")
+    expect(patches[0]?.hunks[0]?.lines).toContain("+++ legal added source")
+    expect(patches[1]?.oldFileName).toBe("/tmp/two.py")
+    expect(patches[1]?.hunks[0]?.lines).toContain("+new two")
+  })
+
+  test("does not consume adjacent file headers after a complete hunk", () => {
+    const input = `--- /tmp/one.py
++++ /tmp/one.py
+@@ -1,1 +1,1 @@
+-old one
++new one
+--- /tmp/two.py
++++ /tmp/two.py
+@@ -1,1 +1,1 @@
+-old two
++new two`
+    const patches = parsePatch(previewDiff(input, 10))
+
+    expect(patches).toHaveLength(2)
+    expect(patches[0]?.oldFileName).toBe("/tmp/one.py")
+    expect(patches[0]?.hunks[0]?.lines).toEqual(["-old one", "+new one"])
+    expect(patches[1]?.oldFileName).toBe("/tmp/two.py")
+    expect(patches[1]?.hunks[0]?.lines).toEqual(["-old two", "+new two"])
+  })
+
+  test("does not loop when an incomplete hunk is followed by an already-satisfied side", () => {
+    const input = `Index: /tmp/incomplete.py
+===================================================================
+--- /tmp/incomplete.py
++++ /tmp/incomplete.py
+@@ -1,2 +1,1 @@
+-old
++new
++++ already satisfied side`
+    const preview = previewDiff(input, 10)
+
+    expect(preview).toContain(" …")
+    expect(preview).toContain("+++ already satisfied side")
+  })
+
   test("repairs an already-clipped hunk before diff rendering", () => {
     const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]
 

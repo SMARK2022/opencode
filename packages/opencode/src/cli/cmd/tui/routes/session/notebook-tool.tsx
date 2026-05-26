@@ -85,10 +85,22 @@ export function useVscodeNotebookToolView(props: {
 
   function editView(metadata: Record<string, unknown>): VscodeNotebookToolView {
     const diff = stringValue(metadata.diff) ?? ""
+    const editType = stringValue(metadata.editType)
+    const insertSourceFromDiff = editType === "insert" ? notebookInsertSourceFromDiff(diff) : undefined
+    const insertSource = insertSourceFromDiff ?? (editType === "insert" ? stringValue(metadata.insertedSourcePreview) : undefined)
     const stats = { added: numberValue(metadata.added) ?? 0, removed: numberValue(metadata.removed) ?? 0 }
+    const visibleText = insertSource ?? diff
+    const visibleLines = visibleText.split("\n").length
+    // Notebook diff paths carry language IDs like `.python`, not real file
+    // extensions like `.py`, so use bridge metadata for syntax highlighting.
+    const language = stringValue(metadata.language)
+    // When the real diff is omitted, collapse sizing must still use the real
+    // change magnitude; otherwise a 3000-line insert preview mounts expanded and
+    // defeats BlockTool's 10-line first-screen budget.
+    const totalLines = stringValue(metadata.diffOmitted) ? Math.max(visibleLines, stats.added + stats.removed + 3) : visibleLines
     const title = [
       "←",
-      notebookEditLabel(stringValue(metadata.editType)),
+      notebookEditLabel(editType),
       notebookTarget(stringValue(metadata.path)),
       stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
       stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
@@ -99,15 +111,24 @@ export function useVscodeNotebookToolView(props: {
       title,
       maxLines: 10,
       threshold: 20,
-      totalLines: diff.split("\n").length,
-      totalChars: diff.length,
-      preview: diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} maxLines={10} /> : undefined,
+      totalLines,
+      totalChars: visibleText.length,
+      preview: insertSource !== undefined
+        ? <NotebookSourceCode source={insertSource} filePath={filePath} language={language} maxLines={10} />
+        : diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} language={language} maxLines={10} /> : undefined,
       body: (
         <box gap={1} flexDirection="column">
-          <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
-            <NotebookDiff diff={diff} filePath={filePath} />
+          <Show when={insertSource !== undefined} fallback={
+            <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
+              <NotebookDiff diff={diff} filePath={filePath} language={language} />
+            </Show>
+          }>
+            <NotebookSourceCode source={insertSource ?? ""} filePath={filePath} language={language} />
+            <Show when={booleanValue(metadata.insertedSourcePreviewTruncated) && insertSourceFromDiff === undefined}>
+              <text fg={theme.textMuted}>Inserted source preview is truncated; use vscode_notebook_source for the full cell.</text>
+            </Show>
           </Show>
-          <Show when={stringValue(metadata.diffOmitted)}>
+          <Show when={stringValue(metadata.diffOmitted) && insertSource === undefined}>
             <text fg={theme.textMuted}>Diff omitted from metadata because it exceeds the notebook inline display budget.</text>
           </Show>
           <text fg={theme.textMuted}>{summaryLine(metadata)}</text>
@@ -127,7 +148,12 @@ export function useVscodeNotebookToolView(props: {
       threshold: 20,
       totalLines: lines,
       totalChars: JSON.stringify(metadata).length,
-      preview: <NotebookCells cells={cells.slice(0, 8)} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
+      preview: (
+        <box flexDirection="column">
+          <text fg={theme.textMuted}>runtime={stringValue(metadata.runtime) ?? "unknown"} dirty={String(booleanValue(metadata.dirty) ?? "unknown")}</text>
+          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
+        </box>
+      ),
       body: <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
     }
   }
@@ -149,14 +175,22 @@ export function useVscodeNotebookToolView(props: {
   function runView(metadata: Record<string, unknown>): VscodeNotebookToolView {
     const cells = arrayRecords(metadata.cells)
     const completed = booleanValue(metadata.completed)
+    const artifacts = artifactRows(cells)
     return {
       mode: "block",
       title: `▶ Notebook run ${notebookTarget(stringValue(metadata.path))} ${stringValue(metadata.target) ?? ""} · ${completed === false ? "failed" : "completed"}`,
       maxLines: 10,
       threshold: 20,
-      totalLines: cells.length + artifactRows(cells).length + 2,
+      totalLines: cells.length + artifacts.length + 2,
       totalChars: JSON.stringify(metadata).length,
-      preview: <NotebookRun cells={cells.slice(0, 6)} />,
+      preview: (
+        <box flexDirection="column">
+          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
+          <Show when={artifacts.length}>
+            <text fg={theme.textMuted}>Artifacts: {artifacts.length} available after expand</text>
+          </Show>
+        </box>
+      ),
       body: <NotebookRun cells={cells} />,
     }
   }
@@ -203,13 +237,13 @@ export function useVscodeNotebookToolView(props: {
     }
   }
 
-  function NotebookDiff(diffProps: { diff: string; filePath?: string; maxLines?: number }) {
+  function NotebookDiff(diffProps: { diff: string; filePath?: string; language?: string; maxLines?: number }) {
     return (
       <box paddingLeft={1} maxHeight={diffProps.maxLines} overflow={diffProps.maxLines ? "hidden" : undefined}>
         <diff
           diff={diffProps.diff}
           view={props.width() > 120 ? "split" : "unified"}
-          filetype={filetype(diffProps.filePath)}
+          filetype={filetype(diffProps.filePath, diffProps.language)}
           syntaxStyle={syntax()}
           showLineNumbers={true}
           width="100%"
@@ -226,6 +260,20 @@ export function useVscodeNotebookToolView(props: {
           removedLineNumberBg={theme.diffRemovedLineNumberBg}
         />
       </box>
+    )
+  }
+
+  function NotebookSourceCode(codeProps: { source: string; filePath?: string; language?: string; maxLines?: number }) {
+    return (
+      <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+        <code
+          conceal={false}
+          fg={theme.text}
+          filetype={filetype(codeProps.filePath, codeProps.language)}
+          syntaxStyle={syntax()}
+          content={codeProps.maxLines ? previewText(codeProps.source, codeProps.maxLines) : codeProps.source}
+        />
+      </line_number>
     )
   }
 
@@ -307,6 +355,24 @@ function notebookDiffPath(metadata: Record<string, unknown>) {
     .join("")
 }
 
+function notebookInsertSourceFromDiff(diff: string) {
+  if (!diff) return undefined
+  const lines = diff.split("\n")
+  const source: string[] = []
+  let hunk = false
+  for (const line of lines) {
+    if (line.startsWith("@@ ")) {
+      hunk = true
+      continue
+    }
+    // Small insert diffs are still available in metadata. Once inside a hunk,
+    // every plus-prefixed row is real inserted source; patch headers only appear
+    // before the first hunk, so source lines beginning with "++" must survive.
+    if (hunk && line.startsWith("+")) source.push(line.slice(1))
+  }
+  return source.length ? source.join("\n") : undefined
+}
+
 function summaryLine(metadata: Record<string, unknown>) {
   const before = numberValue(metadata.cellCountBefore)
   const after = numberValue(metadata.cellCountAfter)
@@ -324,6 +390,26 @@ function cellLine(cell: Record<string, unknown>) {
     arrayStrings(cell.existing_outs).length ? `outs=${arrayStrings(cell.existing_outs).join(",")}` : undefined,
     stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
   ].filter(Boolean).join("  ")
+}
+
+function previewCellLine(cell: Record<string, unknown>) {
+  const exec = stringValue(cell.exec)
+  return [
+    cellLabel(cell),
+    [stringValue(cell.kind), stringValue(cell.lang)].filter(Boolean).join("/"),
+    exec?.match(/\b(failed|error|skipped|succeeded|not-run)\b/)?.[1] ?? exec,
+    stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
+  ].filter(Boolean).join("  ")
+}
+
+function previewCells(cells: Record<string, unknown>[]) {
+  const failed = cells.filter(failedCell).slice(-6)
+  return failed.length ? failed : cells.slice(0, 6)
+}
+
+function failedCell(cell: Record<string, unknown>) {
+  const exec = stringValue(cell.exec)
+  return Boolean(exec?.includes("failed") || exec?.includes("error"))
 }
 
 function cellLabel(cell: Record<string, unknown>) {
@@ -348,11 +434,11 @@ function previewText(input: string, maxLines: number) {
   return lines.length > maxLines ? [...lines.slice(0, maxLines), "…"].join("\n") : input
 }
 
-function filetype(input?: string) {
+function filetype(input?: string, language?: string) {
   const ext = input?.match(/\.[^.]+$/)?.[0]
-  const language = ext ? LANGUAGE_EXTENSIONS[ext] : undefined
-  if (language && ["typescriptreact", "javascriptreact", "javascript"].includes(language)) return "typescript"
-  return language
+  const resolved = language ?? (ext ? LANGUAGE_EXTENSIONS[ext] : undefined)
+  if (resolved && ["typescriptreact", "javascriptreact", "javascript"].includes(resolved)) return "typescript"
+  return resolved
 }
 
 function bytesText(value?: number) {

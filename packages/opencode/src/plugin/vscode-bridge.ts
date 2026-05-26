@@ -14,6 +14,12 @@ const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
 // 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
 // 把 notebook 源码整段复制进会话状态。
 const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
+// Inserted cells behave like write-new-file in the TUI, so they need bounded
+// source metadata for the code renderer instead of relying on an empty-file
+// diff. Keep this aligned with the 10-line collapsed card budget: the metadata
+// remains bounded, and large notebook sources still require vscode_notebook_source.
+const NOTEBOOK_INSERT_PREVIEW_LINES = 10
+const NOTEBOOK_INSERT_PREVIEW_MAX_CHARS = 4 * 1024
 
 const requiredFilePath = {
   filePath: z
@@ -193,12 +199,16 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
   const stats = diffStats(fullDiff ?? "")
   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
+  const editType = stringValue(data.editType) ?? stringValue(args.editType)
+  const insertedSourcePreview = editType === "insert" && after !== undefined
+    ? previewNotebookInsertSource(after)
+    : undefined
   return {
     view: "edit",
     path,
     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
     cellId: stringValue(args.cellId),
-    editType: stringValue(data.editType) ?? stringValue(args.editType),
+    editType,
     cellCountBefore: numberValue(data.cellCountBefore),
     cellCountAfter: numberValue(data.cellCountAfter),
     dirty: booleanValue(data.dirty),
@@ -206,8 +216,25 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
     language: stringValue(data.language),
     diff,
     diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
+    ...(insertedSourcePreview && {
+      insertedSourcePreview: insertedSourcePreview.text,
+      insertedSourcePreviewTruncated: insertedSourcePreview.truncated,
+    }),
     added: stats.added,
     removed: stats.removed,
+  }
+}
+
+function previewNotebookInsertSource(source: string) {
+  const rawLines = source.split(/\r?\n/)
+  const lines = rawLines.at(-1) === "" ? rawLines.slice(0, -1) : rawLines
+  const linePreview = lines.slice(0, NOTEBOOK_INSERT_PREVIEW_LINES).join("\n")
+  const text = linePreview.length > NOTEBOOK_INSERT_PREVIEW_MAX_CHARS
+    ? linePreview.slice(0, NOTEBOOK_INSERT_PREVIEW_MAX_CHARS)
+    : linePreview
+  return {
+    text,
+    truncated: lines.length > NOTEBOOK_INSERT_PREVIEW_LINES || text.length < linePreview.length,
   }
 }
 
@@ -284,10 +311,23 @@ function compactArtifacts(value: unknown) {
 }
 
 function diffStats(diff: string) {
-  const lines = diff.split("\n")
+  let added = 0
+  let removed = 0
+  let hunk = false
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("@@ ")) {
+      hunk = true
+      continue
+    }
+    // Count only hunk body rows. Patch file headers are before the first hunk;
+    // inside a hunk, `+++`/`---` can be legitimate notebook source lines.
+    if (!hunk) continue
+    if (line.startsWith("+")) added++
+    if (line.startsWith("-")) removed++
+  }
   return {
-    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
-    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+    added,
+    removed,
   }
 }
 
