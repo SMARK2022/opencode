@@ -65,7 +65,7 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
+import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, References, Schema, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -675,6 +675,50 @@ const verifyPartialFlushOnInterruption = (kind: FragmentKind) =>
   })
 
 describe("SessionRunnerLLM", () => {
+  it.effect("records Native stream and tool milestones without logging payloads", () =>
+    Effect.gen(function* () {
+      yield* setup
+      // 复用真实runner与内存投影；局部Logger不依赖协调器先前创建的fork context。
+      yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
+      const session = yield* SessionV2.Service
+      const runner = yield* SessionRunner.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Run timing check" }), resume: false })
+      const secret = "payload-not-for-timing"
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.reasoningStart({ id: "timing-reasoning" }),
+          LLMEvent.reasoningDelta({ id: "timing-reasoning", text: secret }),
+          LLMEvent.reasoningEnd({ id: "timing-reasoning" }),
+          LLMEvent.toolInputStart({ id: "timing-call", name: "echo" }),
+          LLMEvent.toolInputDelta({ id: "timing-call", name: "echo", text: JSON.stringify({ text: secret }) }),
+          LLMEvent.toolInputEnd({ id: "timing-call", name: "echo" }),
+          LLMEvent.toolCall({ id: "timing-call", name: "echo", input: { text: secret } }),
+          LLMEvent.textStart({ id: "timing-text" }),
+          LLMEvent.textDelta({ id: "timing-text", text: secret }),
+          LLMEvent.textDelta({ id: "timing-text", text: " tail" }),
+          LLMEvent.textEnd({ id: "timing-text" }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ],
+        [],
+      ]
+      const logs: string[] = []
+      // 局部真实Effect Logger验证实际埋点，不添加生产捕获数组或另写模拟执行器。
+      yield* runner.run({ sessionID, force: true }).pipe(
+        Effect.provide(Logger.layer([Logger.make((entry) => { logs.push(JSON.stringify(entry.message)) })])),
+        Effect.provideService(References.MinimumLogLevel, "Info"),
+      )
+      const timing = logs.filter((line) => line.includes(" timing")).join("\n")
+      for (const phase of ["processor.start", "ai.first_event", "part.start", "part.first_delta", "processor.end", "tool.start", "tool.end"]) {
+        expect(timing).toContain(`"phase":"${phase}"`)
+      }
+      expect(logs.filter((line) => line.includes('"phase":"part.first_delta"'))).toHaveLength(3)
+      expect(timing).not.toContain(secret)
+      expect(executions).toContain(secret)
+    }),
+  )
+
   it.effect("bounds active provider streams by total timeout and respects explicit timeout or false", () =>
     Effect.gen(function* () {
       // 后续原用例读取 requests[0]；本用例的模块级捕获须随现有测试 scope 清空。

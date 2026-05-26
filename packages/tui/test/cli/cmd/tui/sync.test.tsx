@@ -551,9 +551,21 @@ describe("tui sync part delta coalesce (#186)", () => {
     // #186：同 part raw 多段 delta 合并后仍得到完整文本
     await using tmp = await tmpdir()
     await Bun.write(`${tmp.path}/kv.json`, "{}")
-    const { app, emit, sync } = await mount(undefined, tmp.path)
+    const logs: Array<{ extra?: Record<string, unknown> }> = []
+    const { app, emit, sync } = await mount((url, request) => {
+      if (url.pathname !== "/log") return
+      // /log 失败模拟 daemon log 写入不可用；同步 reducer 仍必须应用 delta，
+      // 且日志 payload 不能携带 delta 正文或其他流式内容。
+      return request!.text().then((body) => {
+        logs.push(JSON.parse(body))
+        throw new Error("log endpoint unavailable")
+      }) as unknown as Response
+    }, tmp.path)
 
     try {
+      emit(deltaEvent("delta_missing", "secret"))
+      await wait(() => logs.some((entry) => entry.extra?.phase === "delta.drop"))
+
       emit(messageEvent(assistantMessage()))
       emit(partEvent(pendingToolPart()))
       await wait(() => sync.data.part.msg_1?.[0]?.id === "part_1")
@@ -570,6 +582,13 @@ describe("tui sync part delta coalesce (#186)", () => {
           sync.data.part.msg_1[0].state.raw === "hello world",
       )
       expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "hello world" } })
+      await wait(() => logs.some((entry) => entry.extra?.phase === "delta.apply"))
+      const phases = logs.map((entry) => entry.extra?.phase)
+      expect(phases.filter((phase) => phase === "delta.receive")).toHaveLength(1)
+      expect(phases).toContain("delta.drop")
+      expect(phases).toContain("delta.apply")
+      expect(JSON.stringify(logs)).not.toContain("hello world")
+      expect(JSON.stringify(logs)).not.toContain("secret")
     } finally {
       app.renderer.destroy()
     }

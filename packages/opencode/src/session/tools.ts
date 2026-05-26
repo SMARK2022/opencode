@@ -14,7 +14,7 @@ import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
-import { Effect } from "effect"
+import { Effect, Exit } from "effect"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
 import { SessionProcessor } from "./processor"
@@ -24,6 +24,36 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+
+type ToolTimingInput = {
+  source: "local" | "mcp"
+  tool: string
+  sessionID: string
+  callID: string | undefined
+}
+
+function toolTiming(input: ToolTimingInput, extra: { phase: "tool.start" } | { phase: "tool.end"; status: "completed" | "error"; durationMs: number }) {
+  // 工具 timing 只记录 daemon log 中的短 milestone，禁止携带 args、output、
+  // metadata。tool.start/tool.end 是低基数字段，用来把“工具静默等待”
+  // 和 provider 首 token 慢、TUI 接收/应用慢区分开。
+  return Effect.logInfo("tool timing", { ...extra, ...input })
+}
+
+function timedToolExecution<A, E, R>(input: ToolTimingInput, effect: Effect.Effect<A, E, R>) {
+  // 只在前置 plugin hook 通过后写 tool.start，避免 hook 自身失败被误判
+  // 为工具静默。执行失败仍通过 Exit 原样恢复，保持既有错误传播语义。
+  const startedAt = Date.now()
+  return Effect.gen(function* () {
+    yield* toolTiming(input, { phase: "tool.start" })
+    const exit = yield* effect.pipe(Effect.exit)
+    yield* toolTiming(input, {
+      phase: "tool.end",
+      status: Exit.isSuccess(exit) ? "completed" : "error",
+      durationMs: Date.now() - startedAt,
+    })
+    return yield* exit
+  })
+}
 
 const MCP_RESOURCE_TOOLS = {
   list: "list_mcp_resources",
@@ -124,12 +154,18 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const ctx = context(args, options)
+            const timing = {
+              source: "local" as const,
+              tool: item.id,
+              sessionID: ctx.sessionID,
+              callID: ctx.callID,
+            }
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
               { args },
             )
-            const result = yield* item.execute(args, ctx)
+            const result = yield* timedToolExecution(timing, item.execute(args, ctx))
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
@@ -421,23 +457,32 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       run.promise(
         Effect.gen(function* () {
           const ctx = context(args, opts)
+          const timing = {
+            source: "mcp" as const,
+            tool: key,
+            sessionID: ctx.sessionID,
+            callID: opts.toolCallId,
+          }
           yield* plugin.trigger(
             "tool.execute.before",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
             { args },
           )
-          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
-            yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
-          }).pipe(
-            Effect.withSpan("Tool.execute", {
-              attributes: {
-                "tool.name": key,
-                "tool.call_id": opts.toolCallId,
-                "session.id": ctx.sessionID,
-                "message.id": input.processor.message.id,
-              },
-            }),
+          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* timedToolExecution(
+            timing,
+            Effect.gen(function* () {
+              yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
+              return yield* Effect.promise(() => execute(args, opts))
+            }).pipe(
+              Effect.withSpan("Tool.execute", {
+                attributes: {
+                  "tool.name": key,
+                  "tool.call_id": opts.toolCallId,
+                  "session.id": ctx.sessionID,
+                  "message.id": input.processor.message.id,
+                },
+              }),
+            ),
           )
           yield* plugin.trigger(
             "tool.execute.after",

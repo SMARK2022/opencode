@@ -35,6 +35,7 @@ import { SessionPath } from "@opencode-ai/core/session/path"
 // #132：会话 path 规范化
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
+import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -167,6 +168,7 @@ export const {
     // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
     let pendingPartDeltas: EventMessagePartDelta[] = []
     let pendingPartDeltaTimer: Timer | undefined
+    const loggedPartDeltaApplications = new Set<string>()
 
     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
       // #186：仅同 session/message/part/field 的相邻 delta 可合并；公共事件流仍逐条投递
@@ -202,13 +204,31 @@ export const {
       return result
     }
 
+    function logPartDeltaApplication(event: EventMessagePartDelta, phase: "delta.apply" | "delta.drop", reason?: string) {
+      const key = `${phase}\0${partDeltaTimingKey(event.properties)}`
+      if (loggedPartDeltaApplications.has(key)) return
+      // apply/drop 阶段表示 “SyncProvider reducer 已处理 delta”。drop 只说明
+      // 当时本地 store 缺 message/part，不代表 daemon 没发；这些 reason 字符串
+      // 必须保持短且稳定，方便和 receive 阶段在 daemon log 中对齐。
+      // key 前缀包含 phase，保证同一 part 先 drop 后恢复 apply 时两段都会出现。
+      if (loggedPartDeltaApplications.size >= PART_DELTA_TIMING_LIMIT) loggedPartDeltaApplications.clear()
+      loggedPartDeltaApplications.add(key)
+      logPartDeltaTiming({ client: sdk.client, phase, reason, ...event.properties })
+    }
+
     function applyPartDelta(event: EventMessagePartDelta) {
       // #186：orphan delta（part 尚未入 store）直接丢弃，与 hydration 竞态测试一致
       const parts = store.part[event.properties.messageID]
-      if (!parts) return
+      if (!parts) {
+        logPartDeltaApplication(event, "delta.drop", "missing-message")
+        return
+      }
       const result = search(parts, event.properties.partID, (p) => p.id)
       // #186：找不到 part 时不创建空壳，避免伪造 tool/text
-      if (!result.found) return
+      if (!result.found) {
+        logPartDeltaApplication(event, "delta.drop", "missing-part")
+        return
+      }
       // 合并后的实际写入仍须标记 hydration 冲突，避免旧 HTTP 快照覆盖实时内容。
       // 此标记不创建 orphan，也不改变 pending raw 的嵌套状态契约。
       touchPart(event.properties.sessionID, event.properties.partID)
@@ -229,6 +249,7 @@ export const {
           ;(part[field] as string) = (existing ?? "") + event.properties.delta
         }),
       )
+      logPartDeltaApplication(event, "delta.apply")
     }
 
     function flushPartDeltas() {
@@ -380,6 +401,7 @@ export const {
           void bootstrap()
           break
         case "server.connected":
+          loggedPartDeltaApplications.clear()
           // #132：SSE 无回放；重连后刷新持久化状态
           if (!connectedOnce) {
             connectedOnce = true
@@ -698,6 +720,7 @@ export const {
       // #186：不在 cleanup 里 flush——组件已拆，UI 不再需要最后一帧
       if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
       pendingPartDeltas = []
+      loggedPartDeltaApplications.clear()
     })
 
     const exit = useExit()

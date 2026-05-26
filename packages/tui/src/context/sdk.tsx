@@ -4,6 +4,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { createSimpleContext } from "./helper"
 import { batch, onCleanup, onMount } from "solid-js"
 import { ConnectionError } from "../util/connection-error"
+import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 
 // #165：事件源类型仅服务 testTransport
 export type EventSource = {
@@ -64,6 +65,20 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     const maxRetryDelay = 30000
     // #139：默认 15s，与 source 服务端 10s 心跳匹配
     const heartbeatTimeout = props.heartbeatTimeout ?? 90_000 /* #152：容忍长 diff/事件循环卡顿 */
+    const loggedPartDeltaReceives = new Set<string>()
+
+    function logPartDeltaReceive(event: GlobalEvent) {
+      if (event.payload.type === "server.connected") loggedPartDeltaReceives.clear()
+      if (event.payload.type !== "message.part.delta") return
+      const key = partDeltaTimingKey(event.payload.properties)
+      if (loggedPartDeltaReceives.has(key)) return
+      // receive 阶段表示 “SDK SSE 已收到 delta，尚未进入 SyncProvider”。
+      // 只记录每个 message/part/field 的首条 delta，避免 token 级日志膨胀；
+      // 达到上限后清空只会降低诊断精度，不会影响事件投递。
+      if (loggedPartDeltaReceives.size >= PART_DELTA_TIMING_LIMIT) loggedPartDeltaReceives.clear()
+      loggedPartDeltaReceives.add(key)
+      logPartDeltaTiming({ client: sdk, phase: "delta.receive", ...event.payload.properties })
+    }
 
     const flush = () => {
       if (queue.length === 0) return
@@ -79,6 +94,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     }
 
     const handleEvent = (event: GlobalEvent) => {
+      logPartDeltaReceive(event)
       queue.push(event)
       const elapsed = Date.now() - last
 
@@ -179,6 +195,8 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       abort.abort()
       sse?.abort()
       if (timer) clearTimeout(timer)
+      loggedPartDeltaReceives.clear()
+      // #237：去重集合随 cleanup 清空——长会话重连时不残留旧 part 已记状态，防止内存增长
       handlers.clear()
     })
 

@@ -67,11 +67,18 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
     }
   >()
   const timestamp = DateTime.now
+  const startedAt = Date.now()
   let assistantMessageID: SessionMessage.ID | undefined
   let assistantActive = false
   let assistantFailed = false
   let providerFailed = false
   let stepSettlement: { readonly finish: string; readonly tokens: ReturnType<typeof tokens> } | undefined
+  // 复用真实publisher身份；日志仅传长度和阶段，绝不携带片段正文。
+  const streamTiming = (phase: string, extra: Record<string, unknown>) =>
+    Effect.logInfo("stream timing", {
+      phase, sessionID: input.sessionID, messageID: assistantMessageID,
+      elapsedMs: Date.now() - startedAt, ...extra,
+    })
 
   const startAssistant = Effect.fnUntraced(function* (finalizer = false) {
     if (assistantMessageID !== undefined) return assistantMessageID
@@ -106,8 +113,12 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
       Effect.suspend(() => {
         const current = chunks.get(id)
         if (!current) return Effect.die(`${name} delta before start: ${id}`)
+        // 既有片段数组即首delta证据，不另建去重缓存，也不改变缺start的错误语义。
+        const first = current.length === 0
         current.push(value)
-        return Effect.void
+        return first
+          ? streamTiming("part.first_delta", { partType: name === "tool input" ? "tool" : name, partID: id, field: name === "tool input" ? "raw" : "text", deltaChars: value.length })
+          : Effect.void
       })
     const end = Effect.fnUntraced(function* (id: string, providerMetadata?: ProviderMetadata, finalizer = false) {
       const current = chunks.get(id)
@@ -186,6 +197,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
       callID: event.id,
       name: event.name,
     })
+    yield* streamTiming("part.start", { partType: "tool", partID: event.id, callID: event.id })
   })
 
   const endToolInput = Effect.fnUntraced(function* (event: { readonly id: string; readonly name: string }) {
@@ -271,6 +283,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           timestamp: yield* timestamp,
           textID: event.id,
         })
+        yield* streamTiming("part.start", { partType: "text", partID: event.id })
         return
       case "text-delta":
         yield* text.append(event.id, event.text)
@@ -294,6 +307,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           reasoningID: event.id,
           providerMetadata: event.providerMetadata,
         })
+        yield* streamTiming("part.start", { partType: "reasoning", partID: event.id })
         return
       case "reasoning-delta":
         yield* reasoning.append(event.id, event.text)

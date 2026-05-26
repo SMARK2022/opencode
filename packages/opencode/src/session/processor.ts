@@ -180,6 +180,30 @@ const layer = Layer.effect(
       }
       let aborted = false
 
+      // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
+      // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
+      // processor.start/ai.first_event 区分 provider 首事件延迟，part.start /
+      // part.first_delta 区分 processor 内部处理延迟，processor.end 标记回合收束。
+      let timing:
+        | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
+        | undefined
+      const streamTiming = (phase: string, extra?: Record<string, unknown>) =>
+        Effect.logInfo("stream timing", {
+          phase,
+          sessionID: input.sessionID,
+          messageID: input.assistantMessage.id,
+          elapsedMs: timing ? Date.now() - timing.startedAt : 0,
+          ...extra,
+        })
+      const logPartStart = (partType: string, extra: Record<string, unknown>) => streamTiming("part.start", { partType, ...extra })
+      const logFirstDelta = (partType: string, partID: string, field: string, deltaChars: number) => {
+        if (!timing) return Effect.void
+        const key = `${partID}\0${field}`
+        if (timing.firstDelta.has(key)) return Effect.void
+        timing.firstDelta.add(key)
+        return streamTiming("part.first_delta", { partType, partID, field, deltaChars })
+      }
+
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
           providerID: input.model.providerID,
@@ -376,6 +400,7 @@ const layer = Layer.effect(
               metadata: value.providerMetadata,
             }
             yield* session.updatePart(ctx.reasoningMap[value.id])
+            yield* logPartStart("reasoning", { partID: ctx.reasoningMap[value.id].id })
             return
 
           case "reasoning-delta":
@@ -383,6 +408,7 @@ const layer = Layer.effect(
             if (!(value.id in ctx.reasoningMap)) return
             ctx.reasoningMap[value.id].text += value.text
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
+            yield* logFirstDelta("reasoning", ctx.reasoningMap[value.id].id, "text", value.text.length)
             yield* session.updatePartDelta({
               sessionID: ctx.reasoningMap[value.id].sessionID,
               messageID: ctx.reasoningMap[value.id].messageID,
@@ -404,6 +430,7 @@ const layer = Layer.effect(
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
             yield* ensureToolCall(value)
+            yield* logPartStart("tool", { callID: value.id, partID: ctx.toolcalls[value.id]?.partID })
             return
 
           case "tool-input-delta": {
@@ -412,6 +439,7 @@ const layer = Layer.effect(
             if (!pending || pending.part.state.status !== "pending") return
             // 上游 LLMEvent 使用 text；仅累积内存，不能恢复逐 token 的 durable PartUpdated 写入。
             ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.text
+            yield* logFirstDelta("tool", pending.call.partID, "raw", value.text.length)
             // raw 是既有 V1 wire 字段；consumer 在 pending state 内应用，不创造顶层 part.raw。
             yield* session.updatePartDelta({
               sessionID: pending.call.sessionID,
@@ -642,12 +670,14 @@ const layer = Layer.effect(
               metadata: value.providerMetadata,
             }
             yield* session.updatePart(ctx.currentText)
+            yield* logPartStart("text", { partID: ctx.currentText.id })
             return
 
           case "text-delta":
             if (!ctx.currentText) return
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
+            yield* logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
             yield* session.updatePartDelta({
               sessionID: ctx.currentText.sessionID,
               messageID: ctx.currentText.messageID,
@@ -796,16 +826,22 @@ const layer = Layer.effect(
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+        timing = { startedAt: Date.now(), firstStreamEvent: false, firstDelta: new Set() }
         yield* Effect.logInfo("process", {
           "session.id": input.sessionID,
           messageID: input.assistantMessage.id,
+        })
+        yield* streamTiming("processor.start", {
+          providerID: input.model.providerID,
+          modelID: input.model.id,
+          agent: streamInput.agent.name,
         })
         ctx.needsCompaction = false
         // 仅本次准备请求触发的内部转移，不能吞掉真实失败或用户中断。
         const preflightCompaction = Symbol("preflight-compaction")
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
-        return yield* Effect.gen(function* () {
+        const result = yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
@@ -852,7 +888,15 @@ const layer = Layer.effect(
             }) })
 
             yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
+              Stream.tap((event) =>
+                Effect.gen(function* () {
+                  if (timing && !timing.firstStreamEvent) {
+                    timing.firstStreamEvent = true
+                    yield* streamTiming("ai.first_event", { event: event.type })
+                  }
+                  yield* handleEvent(event)
+                }),
+              ),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
@@ -897,6 +941,13 @@ const layer = Layer.effect(
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"
         })
+        yield* streamTiming("processor.end", {
+          result,
+          durationMs: timing ? Date.now() - timing.startedAt : 0,
+        })
+        // #237：timing 复位在 end 之后——下一轮次重新起算，避免跨 request 累计 duration
+        timing = undefined
+        return result
       })
 
       return {

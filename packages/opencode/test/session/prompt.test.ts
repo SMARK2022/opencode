@@ -8,6 +8,9 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { NodeFileSystem } from "@effect/platform-node"
+import { Logging } from "@opencode-ai/core/observability/logging"
+import { Logger, References } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -1493,7 +1496,16 @@ it.instance("glob tool keeps instance context during prompt runs", () =>
     yield* llm.tool("glob", { pattern: "**/*.txt" })
     yield* llm.text("done")
 
-    const result = yield* prompt.loop({ sessionID: session.id })
+    // Install the real file logger locally; closing its scope flushes before the assertions.
+    const result = yield* prompt.loop({ sessionID: session.id }).pipe(
+      Effect.provide(
+        Logger.layer([Logging.fileLogger(path.join(dir, "timing.log"))]).pipe(
+          Layer.provide(NodeFileSystem.layer),
+          Layer.orDie,
+        ),
+      ),
+      Effect.provideService(References.MinimumLogLevel, "Info"),
+    )
     expect(result.info.role).toBe("assistant")
 
     const msgs = yield* MessageV2.filterCompactedEffect(session.id)
@@ -1508,6 +1520,25 @@ it.instance("glob tool keeps instance context during prompt runs", () =>
     expect(tool.state.output).toContain(file)
     expect(tool.state.output).not.toContain("No context found for instance")
     expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+
+    // 行为断言读取测试局部的真实 Effect file log：必须能串起 processor/tool timing，
+    // 同时确认诊断日志没有泄漏工具输入 pattern 或工具输出路径。
+    const timing = yield* pollWithTimeout(
+      Effect.promise(() => Bun.file(path.join(dir, "timing.log")).text().catch(() => "")).pipe(
+        Effect.map((content) => {
+          const lines = content.split("\n").filter((line) => line.includes(`${session.id}`) && line.includes(" timing"))
+          return lines.some((line) => line.includes("phase=processor.end")) &&
+          lines.some((line) => line.includes("phase=tool.end") && line.includes("status=completed"))
+            ? lines.join("\n")
+            : undefined
+        }),
+      ),
+      "timing logs never reached the daemon log",
+    )
+    expect(timing).toContain("phase=ai.first_event")
+    expect(timing).toContain("phase=part.first_delta")
+    expect(timing).not.toContain("**/*.txt")
+    expect(timing).not.toContain(file)
   }),
 )
 
