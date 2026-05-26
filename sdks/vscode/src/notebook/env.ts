@@ -11,8 +11,9 @@
  */
 import vscode from "vscode"
 import { TextDecoder } from "node:util"
-import { extensionState, extensionInfo, stringProp } from "../util"
+import { extensionState, extensionInfo, stringProp, quoteForSummary } from "../util"
 import { resolveNotebook } from "./resolve"
+import { notebookHeader } from "./format"
 
 type KernelOutputItem = { mime: string; data: Uint8Array }
 type KernelOutput = { items: KernelOutputItem[] }
@@ -86,6 +87,17 @@ export async function notebookEnv(input: Record<string, unknown>) {
   }
 }
 
+// 未探测运行时的操作只标unknown，文档元数据不替代活动内核证据。
+function envSummaryHeader(notebook: vscode.NotebookDocument, operation: "info" | "configure" | "restart" | "save", status?: string, dirty = String(notebook.isDirty), runtime = "unknown") {
+  return notebookHeader(notebook, "Env", [
+    `operation=${operation}`,
+    "target=notebook",
+    status ? `status=${status}` : undefined,
+    `dirty=${dirty}`,
+    `runtime=${quoteForSummary(runtime)}`,
+  ])
+}
+
 async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) {
   const activeRuntime = await getActiveRuntime(notebook.uri)
   const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
@@ -93,7 +105,8 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) 
   return {
     ran: false,
     summary: [
-      "Operation: info",
+      // 头部复用本次活动内核探测结果，无内核时不回退到kernelspec。
+      ...envSummaryHeader(notebook, "info", undefined, String(notebook.isDirty), activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"),
       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
@@ -134,6 +147,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
   if (!jupyter) {
     return configureResult({
+      notebook,
       path: primaryPath,
       reason,
       status: "failed",
@@ -175,6 +189,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   const preCheck = await probeConfigureRuntime(notebook.uri)
   if (preCheck.configured) {
     return configureResult({
+      notebook,
       path: primaryPath,
       reason,
       status: "configured",
@@ -221,6 +236,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
           ? "failed"
           : "selection-requested"
   return configureResult({
+    notebook,
     path: primaryPath,
     reason,
     status,
@@ -239,6 +255,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
 }
 
 function configureResult(input: {
+  notebook: vscode.NotebookDocument
   path: string
   reason?: string
   status: "configured" | "selected" | "needs-selection" | "selection-requested" | "failed"
@@ -254,7 +271,7 @@ function configureResult(input: {
   }[input.status]
   return {
     ran: true,
-    summary: ["Operation: configure", `Status: ${input.status}`, input.summary, guidance, input.reason ? `Reason: ${input.reason}` : undefined].filter(Boolean).join("\n"),
+    summary: [...envSummaryHeader(input.notebook, "configure", input.status), input.summary, guidance, input.reason ? `Reason: ${input.reason}` : undefined].filter(Boolean).join("\n"),
     data: { path: input.path, operation: "configure", reason: input.reason, status: input.status, ...input.data },
     note: "Public-API configure. Uses api.kernels.getKernel and the existing Python executeCode probe; no internal controllerRegistration/kernelProvider access.",
   }
@@ -294,12 +311,12 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   const startedAt = Date.now()
   const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
   if (!jupyter) {
-    return { ran: true, summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.", data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
+    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
   }
   if (!jupyter.isActive) await jupyter.activate()
   const allCommands = await vscode.commands.getCommands(true)
   if (!allCommands.includes(RESTART_CMD)) {
-    return { ran: true, summary: "jupyter.restartkernel command is not registered.", data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
+    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "jupyter.restartkernel command is not registered."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
   }
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
   const original = config.get<boolean>(CONFIG_KEY)
@@ -311,12 +328,12 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     await vscode.commands.executeCommand(RESTART_CMD, { notebookEditor: { notebookUri: notebook.uri } })
     return {
       ran: true,
-      summary: ["Operation: restart", "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
+      summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
       data: { path: primaryPath, operation: "restart", reason, requested: true, askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore, durationMs: Date.now() - startedAt },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return { ran: true, summary: `Kernel restart invocation failed: ${message}.`, data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt } }
+    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), `Kernel restart invocation failed: ${message}.`].join("\n"), data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt } }
   } finally {
     if (needsRestore) await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
   }
@@ -329,7 +346,8 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) 
     return {
       ran: true,
       summary: [
-        "Operation: save",
+        // 跳过保存是因为文档未命名，与内核是否存在无关。
+        ...envSummaryHeader(notebook, "save", "skipped", `${notebook.isDirty}->${notebook.isDirty}`),
         "Untitled notebook cannot be saved without a target path.",
         "Use a Save As / create-file workflow first, then save the named notebook.",
         reason ? `Reason: ${reason}` : undefined,
@@ -375,7 +393,8 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) 
   return {
     ran: true,
     summary: [
-      "Operation: save",
+      // 头部复用最终dirty判定及保存前后状态，不改写保存结果。
+      ...envSummaryHeader(notebook, "save", saved ? "saved" : saveError ? "error" : "not-confirmed", `${beforeDirty}->${afterDirty}`),
       `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
       `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
       saveError ? `Save error: ${saveError}` : undefined,
