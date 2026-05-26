@@ -28,6 +28,10 @@ const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
 if (isDaemon) {
   // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
   NetworkProxy.installGlobalFetch()
+  // 非print-logs启动时stdout由launcher丢弃；生命周期消息仍携带结构化原因。
+  const log = {
+    info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
+  }
   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
   let internalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
 
@@ -41,19 +45,24 @@ if (isDaemon) {
   // idle/upgrade timer 先于首次 await 声明，启动期间致命退出也可安全取消它们。
   let idleTimer: ReturnType<typeof setTimeout> | undefined
   let upgradeTimer: ReturnType<typeof setTimeout> | undefined
+  let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
+  let launcherTimer: ReturnType<typeof setInterval> | undefined
 
   // shutdown guard 覆盖 SIGTERM、idle 与 fatal 的并发触发，不能重复 dispose 同一 listener。
   let shutdownInProgress = false
 
   // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
   
-  async function gracefulShutdown(exitCode = 0) {
+  async function gracefulShutdown(exitCode = 0, reason = "unknown") {
     if (shutdownInProgress) return
     shutdownInProgress = true
+    cancelIdleTimer("shutdown")
+    cancelStartupIdleTimer("shutdown")
+    cancelLauncherWatcher("shutdown")
+    log.info("daemon shutting down", { reason, hadClient, sseClients, sessionActivity: SessionActivity.count() })
     // 致命关闭也有上限；只退出当前 daemon，不向其他 owner 发终止信号。
     const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
     shutdownTimer.unref?.()
-    if (idleTimer) clearTimeout(idleTimer)
     if (upgradeTimer) clearTimeout(upgradeTimer)
     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
@@ -68,16 +77,16 @@ if (isDaemon) {
   }
 
   // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
-  process.on("SIGTERM", () => void gracefulShutdown())
+  process.on("SIGTERM", () => void gracefulShutdown(0, "signal:SIGTERM"))
 
   // daemon 致命路径替换线程空监听，启动与空闲阶段共享同一资源清理闭包。
   process.off("unhandledRejection", onUnhandledRejection)
   process.off("uncaughtException", onUncaughtException)
   onUnhandledRejection = (_error: unknown) => {
-    void gracefulShutdown(1)
+    void gracefulShutdown(1, "unhandledRejection")
   }
   onUncaughtException = (_error: Error) => {
-    void gracefulShutdown(1)
+    void gracefulShutdown(1, "uncaughtException")
   }
   process.prependListener("unhandledRejection", onUnhandledRejection)
   process.prependListener("uncaughtException", onUncaughtException)
@@ -101,9 +110,47 @@ if (isDaemon) {
     // #173：NaN/负数回退默认；0 合法（尽快 idle 退出，便于测试）
     return Number.isFinite(value) && value >= 0 ? value : 30_000
   })()
+  const STARTUP_IDLE_TIMEOUT_MS = (() => {
+    const value = Number(process.env.OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS ?? IDLE_TIMEOUT_MS)
+    // #235：非法值回退常规 idle 超时——启动期保护不弱于运行期
+    return Number.isFinite(value) && value >= 0 ? value : IDLE_TIMEOUT_MS
+  })()
+  const LAUNCHER_PID = (() => {
+    const value = Number(process.env.OPENCODE_DAEMON_LAUNCHER_PID)
+    // #235：非正整数视为未提供——launcher watcher 不启用
+    return Number.isInteger(value) && value > 0 ? value : undefined
+  })()
+  // #235：1s 轮询是延迟与开销的折中——launcher 死亡最迟 1s 被发现
+  const LAUNCHER_POLL_MS = 1_000
 
   let hadClient = false
   let sseClients = 0
+
+  // #235：活跃判定统一收敛——SSE client 或 session runner 任一活跃即阻止退出
+  function isActive() {
+    return sseClients > 0 || SessionActivity.count() > 0
+  }
+
+  function cancelIdleTimer(reason: string) {
+    if (!idleTimer) return
+    clearTimeout(idleTimer)
+    idleTimer = undefined
+    log.info("daemon idle shutdown cancelled", { reason })
+  }
+
+  function cancelStartupIdleTimer(reason: string) {
+    if (!startupIdleTimer) return
+    clearTimeout(startupIdleTimer)
+    startupIdleTimer = undefined
+    log.info("daemon startup idle shutdown cancelled", { reason })
+  }
+
+  function cancelLauncherWatcher(reason: string) {
+    if (!launcherTimer) return
+    clearInterval(launcherTimer)
+    launcherTimer = undefined
+    log.info("daemon launcher watcher cancelled", { reason, launcherPID: LAUNCHER_PID })
+  }
 
   // 全部连接断开后仍须等待实际工作结束，不能因 TUI 断线关闭正在生成的会话。
   const armIdleTimer = () => {
@@ -111,23 +158,111 @@ if (isDaemon) {
       clearTimeout(idleTimer)
       idleTimer = undefined
     }
-    if (shutdownInProgress || !hadClient || sseClients > 0 || SessionActivity.count() > 0) return
+    if (shutdownInProgress) return
+    if (!hadClient) {
+      // #235：启动期未接 client 时改走 startup idle——常规 timer 只服务运行期
+      maybeScheduleStartupIdleShutdown()
+      return
+    }
+    if (isActive()) {
+      cancelIdleTimer("active")
+      return
+    }
     idleTimer = setTimeout(() => {
-      if (shutdownInProgress || sseClients > 0 || SessionActivity.count() > 0) return
-      void gracefulShutdown()
+      // #235：fire 时先置空句柄——重排逻辑不依赖旧句柄引用
+      idleTimer = undefined
+      if (shutdownInProgress || isActive()) {
+        log.info("daemon idle shutdown skipped", {
+          reason: "active-at-fire",
+          sseClients,
+          sessionActivity: SessionActivity.count(),
+        })
+        return
+      }
+      void gracefulShutdown(0, "idle-timeout")
     }, IDLE_TIMEOUT_MS)
     idleTimer.unref?.()
+    log.info("daemon idle shutdown scheduled", { timeoutMs: IDLE_TIMEOUT_MS })
+  }
+
+  function maybeScheduleStartupIdleShutdown() {
+    // #235：已接 client 或已有 timer——不重复排程
+    if (shutdownInProgress || hadClient || startupIdleTimer) return
+    startupIdleTimer = setTimeout(() => {
+      startupIdleTimer = undefined
+      if (hadClient || isActive()) {
+        log.info("daemon startup idle shutdown skipped", {
+          reason: "active-at-fire",
+          hadClient,
+          sseClients,
+          sessionActivity: SessionActivity.count(),
+        })
+        return
+      }
+      // #235：launcher 仍存活说明 TUI 可能还在启动——重排而非退出
+      if (LAUNCHER_PID && ServerLock.alive(LAUNCHER_PID)) {
+        log.info("daemon startup idle shutdown skipped", {
+          reason: "launcher-alive",
+          launcherPID: LAUNCHER_PID,
+        })
+        maybeScheduleStartupIdleShutdown()
+        return
+      }
+      void gracefulShutdown(0, "startup-idle-timeout")
+    }, STARTUP_IDLE_TIMEOUT_MS)
+    // #235：startup timer 同样 unref——不阻止进程在正常路径退出
+    startupIdleTimer.unref?.()
+    log.info("daemon startup idle shutdown scheduled", {
+      timeoutMs: STARTUP_IDLE_TIMEOUT_MS,
+      launcherPID: LAUNCHER_PID,
+    })
+  }
+
+  function startLauncherWatcher() {
+    // #235：无 launcher 语义（直连模式）或已启动则跳过
+    if (shutdownInProgress || hadClient || !LAUNCHER_PID || launcherTimer) return
+    launcherTimer = setInterval(() => {
+      if (hadClient) {
+        cancelLauncherWatcher("first-client")
+        return
+      }
+      if (ServerLock.alive(LAUNCHER_PID)) return
+      // #235：先停 watcher 再判活跃——避免退出期间重复触发
+      cancelLauncherWatcher("launcher-exited")
+      // #235：launcher 已死但有活跃工作——不清场，等 idle 路径接管
+      if (isActive()) {
+        log.info("daemon launcher exited before first client but work is active", {
+          launcherPID: LAUNCHER_PID,
+          sseClients,
+          sessionActivity: SessionActivity.count(),
+        })
+        return
+      }
+      void gracefulShutdown(0, "launcher-exited-before-first-client")
+    }, LAUNCHER_POLL_MS)
+    launcherTimer.unref?.()
+    log.info("daemon launcher watcher started", { launcherPID: LAUNCHER_PID, intervalMs: LAUNCHER_POLL_MS })
   }
 
 
   // 内外 listener 继续共用一个计数源，活动变更只重算退出时机。
   const eventClients = EventClients.make((count) => {
+    log.info(count > sseClients ? "global event connected" : "global event disconnected", { sseClientCount: count })
     sseClients = count
-    if (count > 0) hadClient = true
+    if (count > 0) {
+      hadClient = true
+      // #235：首个 client 到达——启动期保护不再需要
+      cancelStartupIdleTimer("first-client")
+      cancelLauncherWatcher("first-client")
+    }
+    log.info("daemon sse client count changed", { count, hadClient })
     armIdleTimer()
   })
 
-  SessionActivity.onChange(armIdleTimer)
+  SessionActivity.onChange(() => {
+    log.info("daemon session activity changed", { count: SessionActivity.count() })
+    armIdleTimer()
+  })
 
   try {
     const sharedServices = HttpApiApp.createSharedServices()
@@ -144,6 +279,10 @@ if (isDaemon) {
     }
     // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
     lockToken = await ServerLock.write(internalServer.port, externalUrl, network)
+    log.info("daemon lock written", { pid: process.pid, port: internalServer.port, externalUrl, launcherPID: LAUNCHER_PID })
+    // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
+    maybeScheduleStartupIdleShutdown()
+    startLauncherWatcher()
     // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。
     setTimeout(() => void AppRuntime.runPromise(Effect.gen(function* () {
       const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
@@ -169,7 +308,7 @@ if (isDaemon) {
     )), 0).unref?.()
   } catch {
     // 启动失败走相同资源清理，明确非零退出，不伪造成功锁。
-    await gracefulShutdown(1)
+    await gracefulShutdown(1, "startup-failed")
   }
 
   // 升级只是 advisory，不能阻塞健康锁发布或作为发现成功的另一个条件。

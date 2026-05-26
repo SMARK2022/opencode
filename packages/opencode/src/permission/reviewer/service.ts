@@ -799,9 +799,12 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
   })
 }
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(LayerNode.compile(Config.node)),
-  Layer.provide(LayerNode.compile(Provider.node)),
+// #235：suspend 延迟 Config/Provider 层实例化——保留 Session↔Permission 类型导入循环边界
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(LayerNode.compile(Config.node)),
+    Layer.provide(LayerNode.compile(Provider.node)),
+  ),
 )
 
 // #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
