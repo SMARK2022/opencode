@@ -10,6 +10,7 @@ import {
   previewText,
   formatBytes,
   quoteForSummary,
+  toPosixPath,
 } from "../util"
 
 export function shortMime(mime: string) {
@@ -191,6 +192,24 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
   if (kernelName) return kernelName
   if (languageName && languageVersion) return `${languageName} ${languageVersion}`
   return languageName ?? null
+}
+
+// 仅展示路径归一化，结构化载荷保留原始fsPath/URI。
+export function notebookPath(notebook: vscode.NotebookDocument) {
+  return toPosixPath(notebook.uri.fsPath || notebook.uri.toString())
+}
+
+// 所有工具共用Notebook与工具名两行头部，可选字段不占空位。
+export function notebookHeader(notebook: vscode.NotebookDocument, label: string, fields: Array<string | undefined>) {
+  return [
+    `Notebook: ${notebookPath(notebook)}`,
+    `${label}: ${fields.filter(Boolean).join(" ")}`,
+  ]
+}
+
+// cN只作显示，稳定ID和类型/语言由既有格身份规则生成。
+export function cellRef(cell: vscode.NotebookCell) {
+  return `c${c1(cell)} id=${copilotLikeCellId(cell)} ${cellTypeLabel(cell.kind)}/${cell.document.languageId}`
 }
 
 /**

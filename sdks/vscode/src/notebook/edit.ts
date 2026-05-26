@@ -21,8 +21,9 @@ import {
   fullDocumentRange,
   documentEol,
   previewText,
+  quoteForSummary,
 } from "../util"
-import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
+import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, notebookHeader, cellRef } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 // 白名单先于编辑副作用校验，未知 editType 不能被当作整格修改。
@@ -142,11 +143,13 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
   // 新格和移位邻居取已同步的结构，不能先按旧 cellCount 读取 index+1。
   const applied = await applyNotebookEditAndWait(notebook, edit)
+  // 同步应用后才存在新格，Inserted行与结构化身份共用它，不改显式保存顺序。
+  const insertedCell = applied ? notebook.cellAt(insertIndex) : undefined
   // 未应用时不能读取 index+1，特别是尾部附近的失败插入可能使它越界。
   const shiftedCell = applied && shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
   if (input.save === true) await saveNotebook(notebook)
   // 新格差分以空源码为起点；实际位置、身份与失败状态沿用结构编辑结果。
-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
+  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, insertedCell, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
 }
 
 async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
@@ -507,6 +510,7 @@ function compactEditResult(
     afterCount: number
     anchorCellIndex?: number
     anchorCell?: vscode.NotebookCell
+    insertedCell?: vscode.NotebookCell
     // 删除字段是提交前快照，旧格代理失效后不能再从 anchorCell 读取这些值。
     deletedCellIndex?: number
     affectedCellIndex?: number
@@ -529,37 +533,50 @@ function compactEditResult(
     afterSource?: string
   },
 ) {
-  const target =
-    // 删除后此位置可能是继任格，摘要只描述当前槽位，不能声称被删除的原格仍存在。
-    info.affectedCellIndex !== undefined && info.affectedCellIndex >= 0 && info.affectedCellIndex < notebook.cellCount
-      ? notebook.cellAt(info.affectedCellIndex)
-      : undefined
+  // 插入区分锚点与新格，删除使用提交前快照，避免复用失效格代理。
+  const target = info.editType === "insert" && info.anchorCell
+    ? `after ${cellRef(info.anchorCell)}`
+    : info.editType === "insert" && info.insertedCell
+      ? `at ${cellRef(info.insertedCell)}`
+      : info.editType === "delete" && info.deletedId
+        ? `c${(info.deletedCellIndex ?? 0) + 1} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang}`
+        : info.anchorCell
+          ? cellRef(info.anchorCell)
+          : `index=${info.opIndex}`
   const lines: Array<string | undefined> = [
-    `Notebook edit: applied=${info.applied} op=${info.editType} at=${info.opIndex} num_cells=${info.beforeCount}->${info.afterCount} dirty=${notebook.isDirty}.`,
+    ...notebookHeader(notebook, "Edit", [
+      `op=${info.editType}`,
+      `applied=${info.applied}`,
+      `dirty=${notebook.isDirty}`,
+      `cells=${info.beforeCount}->${info.afterCount}`,
+      `target=${quoteForSummary(target)}`,
+    ]),
   ]
 
   if (info.editType === "delete" && info.deletedId) {
-    // 删除线展示被移除的原格，而不是删除后占据该槽位的邻居。
     const dIdx = (info.deletedCellIndex ?? 0) + 1
-    lines.push(`Anchor: ~~c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}~~`)
+    // Deleted标记失效的旧ID；存在继任格时由Shifted提供续接身份。
+    lines.push(`Deleted: c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}`)
   } else if (info.anchorCell) {
-    const displayIdx = info.deletedCellIndex !== undefined ? info.deletedCellIndex + 1 : c1(info.anchorCell)
     const anchorId = copilotLikeCellId(info.anchorCell)
     const typePart = info.oldKind
       ? `${info.oldKind}/${info.oldLang}->${info.kind}/${info.language}`
       : `${cellTypeLabel(info.anchorCell.kind)}/${info.anchorCell.document.languageId}`
-    lines.push(`Anchor: c${displayIdx} id=${anchorId} ${typePart}.`)
+    lines.push(`Anchor: c${c1(info.anchorCell)} id=${anchorId} ${typePart}.`)
+    if (info.oldKind) {
+      lines.push(`NOTE: Type change replaced the cell. Use id=${anchorId} for subsequent operations on this cell.`)
+    }
   }
 
-  // 插入后报告实际新格 ID，下一次 source/edit 必须能按它往返定位。
-  if (info.editType === "insert" && target) {
-    lines.push(`Affected: NEW->c${c1(target)} id=${copilotLikeCellId(target)} ${cellTypeLabel(target.kind)}/${target.document.languageId}.`)
+  // Inserted单独标识新格，并在Shifted之前给出可续用ID。
+  if (info.editType === "insert" && info.insertedCell) {
+    lines.push(`Inserted: c${c1(info.insertedCell)} id=${copilotLikeCellId(info.insertedCell)} ${cellTypeLabel(info.insertedCell.kind)}/${info.insertedCell.document.languageId}.`)
   }
-  // 移位邻居统一报告；insert 的新格仍由上方独立的 NEW 条目展示。
+  // Shifted只描述邻居位置移动，不能冒充新插入格。
   if ((info.editType === "delete" || info.editType === "insert") && info.shiftedCell) {
     const oldIdx = (info.shiftedOldIdx ?? 0) + 1
     const newIdx = c1(info.shiftedCell)
-    lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
+    lines.push(`Shifted: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
   }
 
   if (info.contextSummary) {
@@ -571,12 +588,6 @@ function compactEditResult(
     lines.push(`Preview: ${JSON.stringify(previewText(info.sourcePreview, 50))}`)
   }
 
-  // #105：type change 后强制提示新 cellId
-  if (info.oldKind) {
-    const anchorId = info.anchorCell ? copilotLikeCellId(info.anchorCell) : "unknown"
-    lines.push(`NOTE: Type change replaced the cell. Use id=${anchorId} for subsequent operations on this cell.`)
-  }
-
   return {
     ran: false,
     summary: lines.join("\n"),
@@ -586,6 +597,9 @@ function compactEditResult(
       cellCountBefore: info.beforeCount,
       cellCountAfter: info.afterCount,
       anchorCellIndex: info.anchorCellIndex,
+      // 新格索引和ID同源，既有anchorCellIndex仍保留提交前位置。
+      insertedCellIndex: info.insertedCell?.index,
+      insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
       deletedCellIndex: info.deletedCellIndex,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,

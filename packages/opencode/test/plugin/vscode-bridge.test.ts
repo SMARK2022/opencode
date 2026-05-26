@@ -336,6 +336,7 @@ describe("vscode bridge plugin", () => {
     }
   })
 
+  // #233：目标 VscodeBridgePlugin 签名要求 PluginInput——空对象适配，函数体不使用
   // #233：超大 insert 有界预览可见但完整源码不持久化
   test("keeps oversized notebook insert previews visible without persisting the full cell source", async () => {
     const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)

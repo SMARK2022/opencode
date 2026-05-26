@@ -2,6 +2,7 @@
 import vscode from "vscode"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
+import { toPosixPath, quoteForSummary } from "../util"
 /** 输出主定位参数为 Copilot 风格的 cellId；原始字节保留在 notebook-outputs 导出文件中。 */
 import {
   compactCell,
@@ -9,6 +10,7 @@ import {
   isTextLikeMime,
   extensionForMime,
   formatArtifactSummary,
+  cellRef,
 } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
@@ -43,6 +45,8 @@ export function captureNotebookCellOutput(notebook: vscode.NotebookDocument, cel
 async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell) {
   // path、dirty、runtime 与格状态在同一同步边界捕获，不能晚于输出字节选取。
   const snapshot = captureNotebookCellOutput(notebook, cell)
+  // 目标引用与输出同在I/O前固定，不能在导出后重读可变格。
+  const target = cellRef(cell)
   const artifacts = (
     // 任一 item 写入失败都会拒绝整体导出，不能把缺失 artifact 隐藏在成功列表中。
     await Promise.all(
@@ -57,12 +61,12 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
   ).flat()
 
   // ID 与标题同取 I/O 前快照，导出期间插格或第二次运行不能改变本次输出身份。
-  const cellId = snapshot.data.cell.id
   const summaryLines = [
     // 标题只读取快照格编号与 MIME，即使写入期间发生插格或第二次运行也保持 A 的描述。
-    `Cell c${snapshot.data.cell.i} id=${cellId} existing outputs: ${snapshot.data.cell.existing_outs.join(", ") || "none"}.`,
-    `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
+    `Notebook: ${toPosixPath(snapshot.data.path)}`,
+    `Output: target=${quoteForSummary(target)} dirty=${snapshot.data.dirty} runtime=${quoteForSummary(snapshot.data.runtime ?? "unknown")} outs=${quoteForSummary(snapshot.data.cell.existing_outs.join(",") || "none")} artifacts=${artifacts.length}`,
     "",
+    `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
     "Artifacts:",
     // 文本摘要中的路径与 data.artifacts 指向同一次导出，不能返回尚未写入的文件。
     ...artifacts.map((a) => formatArtifactSummary(a)),

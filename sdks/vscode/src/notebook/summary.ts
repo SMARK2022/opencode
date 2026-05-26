@@ -1,7 +1,7 @@
 // summary 只读取结构化状态与实时文档，不根据显示文本推断执行成功。
 import vscode from "vscode"
-import { toPosixPath, quoteForSummary } from "../util"
-import { compactCell, runtimeLabel, computeVirtualRanges } from "./format"
+import { quoteForSummary } from "../util"
+import { compactCell, runtimeLabel, computeVirtualRanges, notebookHeader } from "./format"
 import { resolveNotebook } from "./resolve"
 
 export async function notebookSummary(filePath: string) {
@@ -47,10 +47,15 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
       : `${executed.length}/${code.length} code cells executed`
 
   return [
-    `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
-    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
+    ...notebookHeader(notebook, "Summary", [
+      `type=${notebook.notebookType}`,
+      `dirty=${notebook.isDirty}`,
+      `cells=${notebook.cellCount}`,
+      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
+      `status=${quoteForSummary(status)}`,
+    ]),
     "",
-    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定，类型替换会产生新 ID，以 edit 响应为准；range=[A,B] 是虚拟源码的一基闭区间；格头和视觉分隔行不占编号。`,
+    `Fields: cN is 1-based display position; id is the stable #VSC handle; range=[A,B] uses global virtual source lines.`,
     "",
     'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
     ...cells.map((cell) => {

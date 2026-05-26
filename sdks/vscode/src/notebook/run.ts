@@ -8,6 +8,7 @@ import {
   executionState,
   runtimeLabel,
   formatArtifactSummary,
+  cellRef,
 } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 import { captureNotebookCellOutput, serializeNotebookOutputItem } from "./output"
@@ -158,9 +159,8 @@ function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, end
 
 function describeRunTarget(cells: vscode.NotebookCell[]) {
   // 覆盖全本的 ID 范围仍报告 range，不能重新引入已删除的 all 目标。
-  if (cells.length === 1) return `cell ${c1(cells[0])}`
-  const indices = cells.map((c) => c1(c))
-  return `range ${indices[0]}-${indices[indices.length - 1]}`
+  if (cells.length === 1) return cellRef(cells[0])
+  return `${cellRef(cells[0])}..${cellRef(cells[cells.length - 1])}`
 }
 
 async function compactRunCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell, snapshot: ReturnType<typeof captureNotebookCellOutput>) {
@@ -196,8 +196,7 @@ function runSummaryText(
   return [
     // summary 仅组合 info、完成标志及格快照，与 data 描述同一批已选取输出。
     `Notebook: ${toPosixPath(info.path)}`,
-    `Run: target=${info.target} completed=${completed} dirty=${info.dirty} runtime=${info.runtime ?? "unknown"}`,
-    `ArtifactsRoot: ${artifactRoot}`,
+    `Run: target=${quoteForSummary(info.target)} completed=${completed} dirty=${info.dirty} runtime=${quoteForSummary(info.runtime ?? "unknown")}`,
     "",
     "Cells:",
     ...cells.map(
@@ -205,6 +204,7 @@ function runSummaryText(
         `c${c.i} id=${c.id} exec=${quoteForSummary(c.exec)} outs=${quoteForSummary(c.existing_outs.join(",") || "none")}`,
     ),
     "",
+    `ArtifactsRoot: ${artifactRoot}`,
     "Artifacts:",
     ...cells.flatMap((c) => c.artifacts.map((a) => formatArtifactSummary(a, c.i))),
   ].join("\n")
