@@ -106,6 +106,9 @@ export function tokenAccounting(
 ): TokenAccounting {
   // ── 1. lastUser / requestAssistantIDs ──
   const lastUser = messages.findLast((m) => m.role === "user")
+  const latestRequestAssistant = lastUser
+    ? messages.findLast((m) => m.role === "assistant" && m.parentID === lastUser.id)
+    : undefined
   const requestAssistantIDs = new Set<string>()
   if (lastUser) {
     for (const m of messages) {
@@ -173,7 +176,15 @@ export function tokenAccounting(
       session.cacheWrite += msg.tokens.cache.write
       session.cost += msg.cost ?? 0
       if (isRequest) {
-        confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
+        // The latest assistant for the active user request carries a pre-stream
+        // upload estimate on message.tokens so prompt/sidebar can show input
+        // immediately after Enter.  That input is the current step, not a
+        // completed historical step, so request totals must not count it here
+        // and again below as stepInput.  Output and cost stay on the fallback
+        // path because the upload estimate regression is input-only, and legacy
+        // messages without step-finish parts still need their totals preserved.
+        if (msg.id !== latestRequestAssistant?.id)
+          confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
         confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
         confirmedRequest.cost += msg.cost ?? 0
       }
@@ -251,7 +262,17 @@ export function tokenAccounting(
 
   // ── 6. request totals（confirmed + in-flight）─────────
   // input 和 output 必须分开，stepOutput 不能混进 totalInput
-  const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
+  // When provider usage has arrived but message.completed has not been written
+  // yet, confirmedRequest already contains the latest step-finish input.  The
+  // assistant message may still carry the older pre-stream estimate, so do not
+  // derive pending input by subtracting actual usage from that estimate.  Only
+  // tool results written after the finish are known future input at this point.
+  const inFlightInput = stepConfirmed
+    ? 0
+    : stepSF && latestAssistant?.id === latestRequestAssistant?.id
+      ? pendingToolResultTokens + pendingAttachTokens
+      : stepInput
+  const totalInput = confirmedRequest.input + inFlightInput
   const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
 
   // ── 7. breakdown（固定两层语义：input context composition + current step output）───────

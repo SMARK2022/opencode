@@ -24,6 +24,14 @@ function stepFinish(input: number, output: number, reasoning = 0, cacheRead = 0,
   }
 }
 
+function stepStart(inputTokens: number, inputChars?: number) {
+  return {
+    id: "ss", sessionID: "s", messageID: "m2", type: "step-start",
+    inputTokens,
+    ...(inputChars != null ? { inputChars } : {}),
+  }
+}
+
 function textPart(id: string, text: string) {
   return { id, sessionID: "s", messageID: "m2", type: "text", text }
 }
@@ -44,6 +52,93 @@ describe("tokenAccounting", () => {
     const acc = tokenAccounting(msgs, getParts)
     expect(acc.step.input).toBe(8000)
     expect(acc.step.confirmed).toBe(false)
+  })
+
+  test("request total counts the in-flight upload estimate once across the normal lifecycle", () => {
+    // 正常发送路径会先把 daemon 的 upload estimate 写到 assistant message，
+    // 然后依次出现 step-start、step-finish，最后 message.completed 落库。
+    // request.totalInput 必须表示“已确认步骤 + 当前 in-flight step”，同一轮上传
+    // 在完成前不能同时作为历史累计和当前步骤各算一次。
+    const tokens = { input: 100_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+    const cases = [
+      {
+        name: "pending assistant message",
+        msg: assistantMsg("2", "1", tokens),
+        parts: [],
+        confirmed: false,
+      },
+      {
+        name: "streaming after step-start",
+        msg: assistantMsg("2", "1", tokens),
+        parts: [stepStart(100_000, 400_000)],
+        confirmed: false,
+      },
+      {
+        name: "provider usage received before message completion",
+        msg: assistantMsg("2", "1", tokens),
+        parts: [stepStart(100_000, 400_000), stepFinish(100_000, 0, 0, 0, 0, 400_000)],
+        confirmed: false,
+      },
+      {
+        name: "completed assistant message",
+        msg: assistantMsg("2", "1", tokens, 10),
+        parts: [stepStart(100_000, 400_000), stepFinish(100_000, 0, 0, 0, 0, 400_000)],
+        confirmed: true,
+      },
+    ]
+
+    for (const item of cases) {
+      const acc = tokenAccounting([userMsg("1"), item.msg], () => item.parts)
+      expect(acc.step.input, item.name).toBe(100_000)
+      expect(acc.step.confirmed, item.name).toBe(item.confirmed)
+      expect(acc.request.totalInput, item.name).toBe(100_000)
+    }
+
+    // 多个 assistant 可以归属于同一个 user request；修复 in-flight 双算时，
+    // 仍需保留已确认历史步骤，否则括号累计值会从“双算”退化为“漏算”。
+    const acc = tokenAccounting(
+      [
+        userMsg("1"),
+        assistantMsg("2", "1", { input: 50_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, 5),
+        assistantMsg("3", "1", tokens),
+      ],
+      (id) => (id === "2" ? [stepFinish(50_000, 0, 0, 0, 0, 200_000)] : []),
+    )
+    expect(acc.step.input, "confirmed history plus in-flight assistant").toBe(100_000)
+    expect(acc.request.totalInput, "confirmed history plus in-flight assistant").toBe(150_000)
+  })
+
+  test("latest message-token fallback keeps output and cost while input is counted once", () => {
+    // Some completed or legacy assistant messages can have message.tokens without
+    // step-finish parts.  The input fallback must still avoid the active-step
+    // double count, but output and cost have no equivalent step-finish duplicate
+    // in this shape and must remain visible to request totals.
+    const msg = {
+      ...assistantMsg("2", "1", { input: 10, output: 20, reasoning: 5, cache: { read: 2, write: 3 } }, 10),
+      cost: 0.5,
+    }
+    const acc = tokenAccounting([userMsg("1"), msg], () => [])
+
+    expect(acc.step.input).toBe(15)
+    expect(acc.request.totalInput).toBe(15)
+    expect(acc.request.totalOutput).toBe(25)
+    expect(acc.request.cost).toBe(0.5)
+  })
+
+  test("request total uses provider input when step-finish arrives before message token update", () => {
+    // updatePart(step-finish) and updateMessage(tokens) are separate sync events;
+    // the UI can briefly see confirmed provider usage while the assistant message
+    // still carries the earlier upload estimate.  In that window, the confirmed
+    // step-finish value is authoritative and the estimate/actual delta is not
+    // pending context.
+    const msg = assistantMsg("2", "1", { input: 120, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })
+    const acc = tokenAccounting([userMsg("1"), msg], () => [
+      stepStart(120, 480),
+      stepFinish(100, 0, 0, 0, 0, 400),
+    ])
+
+    expect(acc.step.input).toBe(120)
+    expect(acc.request.totalInput).toBe(100)
   })
 
   test("session accumulates step-finish data across messages", () => {
