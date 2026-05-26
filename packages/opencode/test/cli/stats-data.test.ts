@@ -1,0 +1,167 @@
+import { afterEach, beforeEach, describe, expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { eq } from "drizzle-orm"
+// #236：aggregateStats 聚合 session+part 数据计算工具归因统计
+import { aggregateStats } from "@/cli/cmd/stats-data"
+// #236：renderBreakdown 渲染统计报告——验证 Tool context tokens 文案
+import { renderBreakdown } from "@/cli/cmd/stats-render"
+// #236：Session.Service 提供 create/updateMessage/updatePart 接口
+import { Session } from "@/session/session"
+import { MessageID, PartID } from "@/session/schema"
+import { Database } from "@opencode-ai/core/database/database"
+import { PartTable } from "@opencode-ai/core/session/sql"
+// #236：resetDatabase 清理全局 DB 文件——确保每个用例从干净状态开始
+import { resetDatabase } from "../fixture/db"
+import { testEffect } from "../lib/effect"
+// #236：source 路径 stats/data.ts 在目标扁平化为 stats-data.ts——import 适配
+import { httpApiLayer } from "../server/httpapi-layer"
+
+// #236：目标无 Session.defaultLayer——用 LayerNode + httpApiLayer 组合
+// #236：httpApiLayer 提供 InstanceRef/Config 等 Session 依赖
+const it = testEffect(Layer.mergeAll(LayerNode.compile(LayerNode.group([Session.node, Database.node])), httpApiLayer))
+
+beforeEach(async () => {
+  await resetDatabase()
+})
+
+afterEach(async () => {
+  await resetDatabase()
+})
+
+const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean } = {}) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    const info = yield* session.create({})
+    const user = yield* session.updateMessage({
+      id: MessageID.ascending(),
+      sessionID: info.id,
+      role: "user",
+      agent: "build",
+      // #236：目标 schema 用 ProviderV2/ModelV2 brand——测试用裸字符串 + as never 绕过类型检查
+      model: { providerID: "test", modelID: "test" } as never,
+      time: { created: Date.now() },
+    })
+    const assistant = yield* session.updateMessage({
+      id: MessageID.ascending(),
+      sessionID: info.id,
+      role: "assistant",
+      parentID: user.id,
+      modelID: "test" as never,
+      providerID: "test" as never,
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/tmp/project", root: "/tmp/project" },
+      cost: 0,
+      tokens: { input: 100, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: Date.now(), completed: Date.now() },
+    })
+    const now = Date.now()
+    // #236：step-finish part 的 ID 提前生成——legacy 改写需要引用它
+    const stepPartID = PartID.ascending()
+    // #236：step-finish 数据含完整 inputBreakdown——tools=10 用于工具上下文归因计算
+    const stepData = {
+      type: "step-finish" as const,
+      reason: "stop",
+      cost: 0,
+      tokens: { input: 100, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      inputChars: 100,
+      inputBreakdown: {
+        system: 10,
+        instructions: 10,
+        skills: 0,
+        tools: 10,
+        messages: {
+          userText: 10,
+          assistantText: 10,
+          reasoning: 0,
+          toolInput: 30,
+          toolOutput: 20,
+          attachments: 0,
+          total: 70,
+        },
+      },
+    }
+
+    // #236：tool part 播种——bash 工具调用 completed 状态，output 2 字符
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      sessionID: info.id,
+      messageID: assistant.id,
+      type: "tool",
+      callID: "call_bash",
+      tool: "bash",
+      state: {
+        status: "completed",
+        input: { command: "pwd" },
+        output: "ok",
+        title: "pwd",
+        metadata: {},
+        time: { start: now, end: now },
+      },
+    })
+    // #236：step-finish part 播种——inputBreakdown 的 tools=10 + messages.toolInput=30 + toolOutput=20
+    yield* session.updatePart({ id: stepPartID, sessionID: info.id, messageID: assistant.id, ...stepData })
+
+    if (input.legacyEmptyMessages) {
+      // #236：legacy 场景模拟——1.15.3 历史行的 messages 为空 {}，不含 per-category 计数
+      // #236：直接 Drizzle update 模拟历史行——比原生 SQL 更安全且与目标 schema 一致
+      const { db } = yield* Database.Service
+      yield* db
+        .update(PartTable)
+        // #236：messages 改为 {} 后其余 inputBreakdown 字段保留——测试目标对 legacy 行的兼容性
+        .set({
+          data: { ...stepData, inputBreakdown: { ...stepData.inputBreakdown, messages: {} } } as never,
+        })
+        .where(eq(PartTable.id, stepPartID))
+        .run()
+        // #236：orDie 保证 DB 写入失败时测试硬失败而非吞错
+        .pipe(Effect.orDie)
+    }
+
+    // #236：aggregateStats 从 session+part 数据计算工具归因统计
+    return yield* aggregateStats()
+  })
+
+describe("stats data", () => {
+  // #236：验证完整 breakdown 时 contextTokens=50（toolInput 30 + toolOutput 20）
+  it.instance("attributes tool context tokens from complete input breakdowns", () =>
+    Effect.gen(function* () {
+      const report = yield* seedToolBreakdownReport()
+
+      expect(report.totalTools).toBe(1)
+      expect(report.toolUsage).toEqual([
+        {
+          id: "bash",
+          count: 1,
+          inputChars: expect.any(Number),
+          outputChars: 2,
+          contextTokens: 50,
+        },
+      ])
+      expect(renderBreakdown(report, { color: "never", by: "tool" })).toContain("Tool context tokens")
+    }),
+  )
+
+  // #236：验证 legacy 空 messages 时 contextTokens=0 且 toolSeries 为空——不产生 NaN
+  it.instance("keeps tool breakdown finite for legacy empty message breakdowns", () =>
+    Effect.gen(function* () {
+      const report = yield* seedToolBreakdownReport({ legacyEmptyMessages: true })
+
+      expect(report.toolUsage).toEqual([
+        {
+          id: "bash",
+          count: 1,
+          inputChars: expect.any(Number),
+          outputChars: 2,
+          contextTokens: 0,
+        },
+      ])
+      expect(report.toolUsage.every((tool) => Number.isFinite(tool.contextTokens))).toBe(true)
+      // #236：contextTokens=0 的事件被 filter 掉——toolSeries 为空数组
+      expect(report.toolSeries).toEqual([])
+      // #236：渲染 legacy 报告不抛错——NaN 安全性验证
+      expect(() => renderBreakdown(report, { color: "never", by: "tool" })).not.toThrow()
+    }),
+  )
+})
