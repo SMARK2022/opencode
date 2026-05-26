@@ -19,6 +19,8 @@ import { SessionActivity } from "@/session/activity"
 ensureProcessMetadata("worker")
 NetworkProxy.installGlobalFetch()
 
+const log = Log.create({ service: "daemon" })
+
 await Log.init({
   print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",
   dev: Installation.isLocal(),
@@ -88,6 +90,12 @@ if (externalPort !== undefined) {
 
 // Write the lock file atomically (internal port + optional external URL).
 const lockToken = await ServerLock.write(internalServer.port, externalUrl)
+log.info("daemon lock written", {
+  pid: process.pid,
+  port: internalServer.port,
+  externalUrl,
+  launcherPID: process.env.OPENCODE_DAEMON_LAUNCHER_PID,
+})
 
 // Start the best-effort warm-up only after the lock is visible so a slow npm
 // registry or proxy cannot keep the launcher stuck waiting for daemon health.
@@ -96,10 +104,18 @@ setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
 // ── Graceful shutdown ──────────────────────────────────────────────────────
 let shutdownInProgress = false
 
-async function gracefulShutdown() {
+async function gracefulShutdown(reason = "unknown") {
   if (shutdownInProgress) return
   shutdownInProgress = true
-  Log.Default.info("daemon shutting down")
+  cancelIdleTimer("shutdown")
+  cancelStartupIdleTimer("shutdown")
+  cancelLauncherWatcher("shutdown")
+  log.info("daemon shutting down", {
+    reason,
+    hadClient,
+    sseClients,
+    sessionActivity: SessionActivity.count(),
+  })
   await ServerLock.clearIfOwner(lockToken)
   await InstanceRuntime.disposeAllInstances()
   if (externalServer) await externalServer.stop(true)
@@ -108,7 +124,7 @@ async function gracefulShutdown() {
   process.exit(0)
 }
 
-process.on("SIGTERM", () => void gracefulShutdown())
+process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
 
 // Config reload on SIGUSR2 (Unix only — Windows does not support this signal).
 if (process.platform !== "win32") {
@@ -119,34 +135,75 @@ if (process.platform !== "win32") {
 
 // Ensure lock is cleaned up even when the daemon crashes or receives a fatal
 // signal.  Placed after gracefulShutdown is defined so the closure is valid.
-process.prependListener("unhandledRejection", () => void gracefulShutdown())
-process.prependListener("uncaughtException", () => void gracefulShutdown())
+process.prependListener("unhandledRejection", () => void gracefulShutdown("unhandledRejection"))
+process.prependListener("uncaughtException", () => void gracefulShutdown("uncaughtException"))
 
 // ── Idle timeout ───────────────────────────────────────────────────────────
-// Exit 30 s after the last SSE client disconnects AND no session runners are
-// active.  The timer only starts after the first connection, so a slow-starting
-// TUI does not race the daemon.
+// daemon 有两段空闲退出保护：
+//
+// 1. 启动期：lock 写出后、首个 SSE client 连接前，启动 startup idle timer。
+//    这段覆盖「daemon 已启动但 TUI 在连上 /global/event 前崩溃或退出」的场景，
+//    避免 hadClient 永远为 false 导致 daemon 长时间遗留。
+//
+// 2. 运行期：一旦至少有一个 SSE client 连接过，之后在最后一个 SSE client
+//    断开且没有活跃 session runner 时，按常规 idle timer 延迟退出。
+//
+// 活跃 SSE client 或 SessionActivity 都会阻止退出；launcher watcher 只在首个
+// SSE client 到来前生效，用来更快清理已经失去启动 TUI 接管的孤儿 daemon。
 const IDLE_TIMEOUT_MS = (() => {
   const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
   return Number.isFinite(value) && value >= 0 ? value : 30_000
 })()
+const STARTUP_IDLE_TIMEOUT_MS = (() => {
+  const value = Number(process.env.OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS ?? IDLE_TIMEOUT_MS)
+  return Number.isFinite(value) && value >= 0 ? value : IDLE_TIMEOUT_MS
+})()
+const LAUNCHER_PID = (() => {
+  const value = Number(process.env.OPENCODE_DAEMON_LAUNCHER_PID)
+  return Number.isInteger(value) && value > 0 ? value : undefined
+})()
+const LAUNCHER_POLL_MS = 1_000
 
 let hadClient = false
 let sseClients = 0
 let idleTimer: ReturnType<typeof setTimeout> | undefined
+let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
+let launcherTimer: ReturnType<typeof setInterval> | undefined
 
-function cancelIdleTimer() {
+function isActive() {
+  return sseClients > 0 || SessionActivity.count() > 0
+}
+
+function cancelIdleTimer(reason: string) {
   if (!idleTimer) return
   clearTimeout(idleTimer)
   idleTimer = undefined
+  log.info("daemon idle shutdown cancelled", { reason })
+}
+
+function cancelStartupIdleTimer(reason: string) {
+  if (!startupIdleTimer) return
+  clearTimeout(startupIdleTimer)
+  startupIdleTimer = undefined
+  log.info("daemon startup idle shutdown cancelled", { reason })
+}
+
+function cancelLauncherWatcher(reason: string) {
+  if (!launcherTimer) return
+  clearInterval(launcherTimer)
+  launcherTimer = undefined
+  log.info("daemon launcher watcher cancelled", { reason, launcherPID: LAUNCHER_PID })
 }
 
 function maybeScheduleIdleShutdown() {
-  if (!hadClient) return
+  if (!hadClient) {
+    maybeScheduleStartupIdleShutdown()
+    return
+  }
 
   // Active work prevents idle shutdown.
-  if (sseClients > 0 || SessionActivity.count() > 0) {
-    cancelIdleTimer()
+  if (isActive()) {
+    cancelIdleTimer("active")
     return
   }
 
@@ -154,25 +211,93 @@ function maybeScheduleIdleShutdown() {
   if (idleTimer) return
 
   idleTimer = setTimeout(() => {
+    idleTimer = undefined
     // Re-check at fire time: a client or runner may have appeared.
-    if (sseClients > 0 || SessionActivity.count() > 0) {
-      cancelIdleTimer()
+    if (isActive()) {
+      log.info("daemon idle shutdown skipped", {
+        reason: "active-at-fire",
+        sseClients,
+        sessionActivity: SessionActivity.count(),
+      })
       return
     }
-    void gracefulShutdown()
+    void gracefulShutdown("idle-timeout")
   }, IDLE_TIMEOUT_MS)
   idleTimer.unref?.()
+  log.info("daemon idle shutdown scheduled", { timeoutMs: IDLE_TIMEOUT_MS })
+}
+
+function maybeScheduleStartupIdleShutdown() {
+  if (hadClient || startupIdleTimer) return
+  startupIdleTimer = setTimeout(() => {
+    startupIdleTimer = undefined
+    if (hadClient || isActive()) {
+      log.info("daemon startup idle shutdown skipped", {
+        reason: "active-at-fire",
+        hadClient,
+        sseClients,
+        sessionActivity: SessionActivity.count(),
+      })
+      return
+    }
+    if (LAUNCHER_PID && ServerLock.alive(LAUNCHER_PID)) {
+      log.info("daemon startup idle shutdown skipped", {
+        reason: "launcher-alive",
+        launcherPID: LAUNCHER_PID,
+      })
+      maybeScheduleStartupIdleShutdown()
+      return
+    }
+    void gracefulShutdown("startup-idle-timeout")
+  }, STARTUP_IDLE_TIMEOUT_MS)
+  startupIdleTimer.unref?.()
+  log.info("daemon startup idle shutdown scheduled", {
+    timeoutMs: STARTUP_IDLE_TIMEOUT_MS,
+    launcherPID: LAUNCHER_PID,
+  })
+}
+
+function startLauncherWatcher() {
+  if (!LAUNCHER_PID || launcherTimer) return
+  launcherTimer = setInterval(() => {
+    if (hadClient) {
+      cancelLauncherWatcher("first-client")
+      return
+    }
+    if (ServerLock.alive(LAUNCHER_PID)) return
+    cancelLauncherWatcher("launcher-exited")
+    if (isActive()) {
+      log.info("daemon launcher exited before first client but work is active", {
+        launcherPID: LAUNCHER_PID,
+        sseClients,
+        sessionActivity: SessionActivity.count(),
+      })
+      return
+    }
+    void gracefulShutdown("launcher-exited-before-first-client")
+  }, LAUNCHER_POLL_MS)
+  launcherTimer.unref?.()
+  log.info("daemon launcher watcher started", { launcherPID: LAUNCHER_PID, intervalMs: LAUNCHER_POLL_MS })
 }
 
 onSseClientCountChange((count) => {
   sseClients = count
-  if (count > 0) hadClient = true
+  if (count > 0) {
+    hadClient = true
+    cancelStartupIdleTimer("first-client")
+    cancelLauncherWatcher("first-client")
+  }
+  log.info("daemon sse client count changed", { count, hadClient })
   maybeScheduleIdleShutdown()
 })
 
 SessionActivity.onChange(() => {
+  log.info("daemon session activity changed", { count: SessionActivity.count() })
   maybeScheduleIdleShutdown()
 })
+
+maybeScheduleStartupIdleShutdown()
+startLauncherWatcher()
 
 // [local-devsmark][deprecated-rpc-thread] Upstream's per-TUI RPC surface was
 // intentionally disabled. This worker is the shared daemon process and exposes

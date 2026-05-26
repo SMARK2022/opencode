@@ -198,6 +198,74 @@ describe("daemon lifecycle", () => {
   )
 
   test(
+    "daemon exits if no SSE client connects before startup idle timeout",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+      })
+
+      try {
+        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(exitCode).toBe(0)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "daemon exits when launcher dies before the first SSE client connects",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_LAUNCHER_PID: "987654321",
+      })
+
+      try {
+        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(exitCode).toBe(0)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "daemon does not exit before first SSE while the launcher is alive",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+        OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
+      })
+
+      try {
+        await Bun.sleep(750)
+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeDefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
     "compiled-binary path: spawning with OPENCODE_PROCESS_ROLE=worker env bypasses yargs and starts daemon",
     async () => {
       // This test validates the fix for the compiled-binary bug:

@@ -2,6 +2,12 @@ import { useRenderer } from "@opentui/solid"
 import { createSimpleContext } from "./helper"
 import { FormatError, FormatUnknownError } from "@/cli/error"
 import { win32FlushInputBuffer } from "../win32"
+import * as Log from "@opencode-ai/core/util/log"
+import { onCleanup } from "solid-js"
+
+const log = Log.create({ service: "tui" })
+export const ExitSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
+
 type Exit = ((reason?: unknown) => Promise<void>) & {
   message: {
     set: (value?: string) => () => void
@@ -33,10 +39,12 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
       (reason?: unknown) => {
         if (task) return task
         task = (async () => {
+          log.info("tui exit requested", { reason: exitReason(reason) })
           await input.onBeforeExit?.()
           // Reset window title before destroying renderer
           renderer.setTerminalTitle("")
           renderer.destroy()
+          log.info("tui renderer destroyed")
           win32FlushInputBuffer()
           if (reason) {
             const formatted = FormatError(reason) ?? FormatUnknownError(reason)
@@ -47,6 +55,7 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
           const text = store.get()
           if (text) process.stdout.write(text + "\n")
           await input.onExit?.()
+          log.info("tui exit completed")
         })()
         return task
       },
@@ -54,7 +63,23 @@ export const { use: useExit, provider: ExitProvider } = createSimpleContext({
         message: store,
       },
     )
-    process.on("SIGHUP", () => exit())
+    const signalHandlers = ExitSignals.map((signal) => {
+      const handler = () => {
+        log.info("tui exit signal received", { signal })
+        void exit()
+      }
+      process.on(signal, handler)
+      return () => process.off(signal, handler)
+    })
+    onCleanup(() => {
+      for (const remove of signalHandlers) remove()
+    })
     return exit
   },
 })
+
+function exitReason(reason: unknown) {
+  if (reason === undefined) return "normal"
+  if (reason instanceof Error) return reason.name || "Error"
+  return typeof reason
+}

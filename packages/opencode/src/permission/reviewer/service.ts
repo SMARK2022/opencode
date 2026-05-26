@@ -717,7 +717,9 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
   })
 }
 
-export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer))
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer)),
+)
 
 // Permission.defaultLayer consumes this bundled reviewer layer before building
 // Permission.Service. `Layer.suspend` preserves the historical cycle boundary:

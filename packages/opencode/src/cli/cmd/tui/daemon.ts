@@ -187,6 +187,7 @@ export async function ensure(args: Args) {
       env: {
         ...env,
         ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
+        OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
         ...(external
           ? {
               OPENCODE_EXTERNAL_PORT: String(network.port),

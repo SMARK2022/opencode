@@ -65,7 +65,7 @@ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
   // [local-smark] Track SSE client count for daemon idle-timeout
   sseClientCount++
   onSseCountChange?.(sseClientCount)
-  log.info("global event connected")
+  log.info("global event connected", { sseClientCount })
 
   const stream = new PassThrough()
   const write = (event: GlobalBusEvent) => {
@@ -88,7 +88,7 @@ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
     if (!stream.destroyed) stream.end()
     sseClientCount = Math.max(0, sseClientCount - 1)
     onSseCountChange?.(sseClientCount)
-    log.info("global event disconnected")
+    log.info("global event disconnected", { sseClientCount })
   }
 
   heartbeat.unref?.()

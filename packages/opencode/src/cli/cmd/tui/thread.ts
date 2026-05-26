@@ -1,5 +1,4 @@
 import { cmd } from "@/cli/cmd/cmd"
-import { tui } from "./app"
 import path from "path"
 import { UI } from "@/cli/ui"
 import { errorMessage } from "@/util/error"
@@ -137,6 +136,7 @@ export const TuiThreadCommand = cmd({
         return
       }
 
+      const { tui } = await import("./app")
       await tui({
         url: existingUrl,
         async onSnapshot() {
