@@ -3,7 +3,8 @@ import { Schema } from "effect"
 import { Effect, Option } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { Ripgrep, SearchTooBroadError } from "../file/ripgrep"
+import { PositiveInt } from "@opencode-ai/core/schema"
+import { Ripgrep } from "../file/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
@@ -11,16 +12,40 @@ import { Reference } from "@/reference/reference"
 
 const MAX_LINE_LENGTH = 2000
 const RESULT_LIMIT = 64
+// 默认 10 秒覆盖常规代码库检索；它替代 grep 工具原先的 5000 文件硬拒绝，
+// 让“小文件很多但搜索很快”的仓库能完成，同时仍给低命中大扫描一个确定边界。
+const DEFAULT_TIMEOUT = 10_000
+// 允许用户显式放宽时间预算，但保留 2 分钟上限，避免模型把 grep 当成长时间后台任务。
+const MAX_TIMEOUT = 120_000
+// include/exclude 都允许单个 glob 或 glob 列表；保持一个小 schema 常量，
+// 避免两个参数定义分叉后出现 include 支持数组而 exclude 不支持的回归。
+const PatternList = Schema.Union([Schema.String, Schema.Array(Schema.String)])
 
 export const Parameters = Schema.Struct({
   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
   path: Schema.optional(Schema.String).annotate({
     description: "The directory to search in. Defaults to the current working directory.",
   }),
-  include: Schema.optional(Schema.String).annotate({
-    description: 'File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")',
+  include: Schema.optional(PatternList).annotate({
+    description: 'File pattern(s) to include in the search (e.g. "*.js", ["*.ts", "*.tsx"])',
+  }),
+  exclude: Schema.optional(PatternList).annotate({
+    description: 'File pattern(s) to exclude from the search (e.g. "node_modules/**", ["dist/**", "*.lock"])',
+  }),
+  timeout: Schema.optional(
+    // 机器可读 schema 和描述文字保持同一上限；这样模型/客户端在提交工具调用前
+    // 就能看到 120 秒边界，而不是依赖执行阶段再静默截断。
+    PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_TIMEOUT)),
+  ).annotate({
+    description: `Optional timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT}, maximum ${MAX_TIMEOUT}.`,
   }),
 })
+
+function patterns(input?: string | readonly string[]) {
+  if (!input) return []
+  // 空 glob 没有明确搜索语义，作为 no-op 忽略；真实的 pattern 必填校验仍在执行入口保留。
+  return (Array.isArray(input) ? input : [input]).filter((item) => item.length > 0)
+}
 
 export const GrepTool = Tool.define(
   "grep",
@@ -32,7 +57,7 @@ export const GrepTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
-      execute: (params: { pattern: string; path?: string; include?: string }, ctx: Tool.Context) =>
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const empty = {
             title: params.pattern,
@@ -51,6 +76,8 @@ export const GrepTool = Tool.define(
               pattern: params.pattern,
               path: params.path,
               include: params.include,
+              exclude: params.exclude,
+              timeout: params.timeout,
             },
           })
 
@@ -69,37 +96,34 @@ export const GrepTool = Tool.define(
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
           const cwd = info?.type === "Directory" ? search : path.dirname(search)
           const file = info?.type === "Directory" ? undefined : [path.relative(cwd, search)]
+          const timeout = params.timeout ?? DEFAULT_TIMEOUT
+          const glob = [
+            ...patterns(params.include),
+            ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
+          ]
+          const emptyTimedOut = () => ({
+            title: params.pattern,
+            metadata: { matches: 0, truncated: true, timedOut: true },
+            output: [
+              `Search timed out after ${timeout} ms before finding matches.`,
+              "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.",
+            ].join("\n"),
+          })
 
-          const result = yield* rg
-            .search({
-              cwd,
-              pattern: params.pattern,
-              glob: params.include ? [params.include] : undefined,
-              file,
-              limit: RESULT_LIMIT + 1,
-              signal: ctx.abort,
-            })
-            .pipe(
-              Effect.catchIf(
-                SearchTooBroadError.isInstance,
-                (err) =>
-                  Effect.succeed({
-                    items: [],
-                    partial: false,
-                    truncated: false,
-                    tooBroad: err.data.maxFiles,
-                  }),
-              ),
-            )
-          if ("tooBroad" in result) {
-            return {
-              title: params.pattern,
-              metadata: { matches: 0, truncated: false },
-              output: [
-                `Search scope is too broad: more than ${result.tooBroad} candidate files.`,
-                "Use a narrower path or include pattern before searching file contents.",
-              ].join("\n"),
-            }
+          const result = yield* rg.search({
+            cwd,
+            pattern: params.pattern,
+            glob: glob.length ? glob : undefined,
+            file,
+            limit: RESULT_LIMIT + 1,
+            // grep 用真实执行时间做保护，不再用候选文件数粗暴拒绝；
+            // 小文件多的仓库应允许快速完成，低命中大搜索由 timeout 受控终止。
+            maxFiles: false,
+            timeout,
+            signal: ctx.abort,
+          })
+          if (result.items.length === 0 && result.timedOut) {
+            return emptyTimedOut()
           }
           if (result.items.length === 0) return empty
 
@@ -135,11 +159,19 @@ export const GrepTool = Tool.define(
 
           matches.sort((a, b) => b.mtime - a.mtime)
 
-          const truncated = result.truncated || matches.length > RESULT_LIMIT
-          const final = truncated ? matches.slice(0, RESULT_LIMIT) : matches
+          const resultLimitTruncated = result.truncated || matches.length > RESULT_LIMIT
+          const truncated = resultLimitTruncated || result.timedOut === true
+          const final = resultLimitTruncated ? matches.slice(0, RESULT_LIMIT) : matches
+          // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
+          // 阶段不可用，也不能把未完成搜索降级成确定性的 “No files found”。
+          if (final.length === 0 && result.timedOut) return emptyTimedOut()
           if (final.length === 0) return empty
 
-          const output = [`Found ${truncated ? `${RESULT_LIMIT}+` : final.length} matches${truncated ? ` (showing first ${RESULT_LIMIT})` : ""}`]
+          const output = [
+            `Found ${resultLimitTruncated ? `${RESULT_LIMIT}+` : final.length} matches${
+              resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""
+            }${result.timedOut ? ` before timing out after ${timeout} ms` : ""}`,
+          ]
 
           let current = ""
           for (const match of final) {
@@ -153,10 +185,17 @@ export const GrepTool = Tool.define(
             output.push(`  Line ${match.line}: ${text}`)
           }
 
-          if (truncated) {
+          if (resultLimitTruncated) {
             output.push("")
             output.push(
               `(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`,
+            )
+          }
+
+          if (result.timedOut) {
+            output.push("")
+            output.push(
+              `(Search timed out after ${timeout} ms; results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.)`,
             )
           }
 
@@ -170,6 +209,7 @@ export const GrepTool = Tool.define(
             metadata: {
               matches: final.length,
               truncated,
+              ...(result.timedOut && { timedOut: true }),
             },
             output: output.join("\n"),
           }

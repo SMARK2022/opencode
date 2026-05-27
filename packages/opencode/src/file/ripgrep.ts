@@ -113,6 +113,9 @@ export interface SearchResult {
   items: Item[]
   partial: boolean
   truncated: boolean
+  // true 表示 rg 已被时间预算主动终止；调用方应把 items 当作不完整结果，
+  // 不能把空 items 解释成“全量搜索确认没有匹配”。
+  timedOut?: boolean
 }
 
 export interface FilesInput {
@@ -130,6 +133,9 @@ export interface SearchInput {
   glob?: string[]
   limit?: number
   maxFiles?: number | false
+  // 默认 undefined 保持既有调用方行为；只有显式传入 timeout 的工具调用
+  // 才启用受控终止，避免改变 file API/debug 命令等内部搜索语义。
+  timeout?: number | false
   follow?: boolean
   file?: string[]
   signal?: AbortSignal
@@ -185,6 +191,12 @@ function error(stderr: string, code: number) {
   const err = new Error(stderr.trim() || `ripgrep failed with code ${code}`)
   err.name = "RipgrepError"
   return err
+}
+
+function fatalSearchError(stderr: string) {
+  // timeout 后的普通 stderr 可能只是被截断搜索中的诊断信息；只有 rg 明确
+  // 报告正则/参数类错误时，才覆盖 timeout 语义并向调用方暴露失败。
+  return stderr.includes("regex parse error") || stderr.includes("error parsing regex")
 }
 
 function clean(file: string) {
@@ -443,49 +455,86 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
             const handle = yield* spawner.spawn(yield* command(input.cwd, searchArgs(input)))
             const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
             let truncated = false
+            let timedOut = false
+
+            if (input.timeout !== false && input.timeout !== undefined && input.timeout > 0) {
+              // 搜索超时是“受控截断”而不是工具错误：调用方仍需要已经从
+              // stdout 解析出的匹配项，同时必须确定性终止 rg，避免低命中
+              // 大目录扫描让工具无限等待。forceKillAfter 与 shell 工具保持
+              // 同一个 3 秒升级窗口，先给 rg 正常退出机会，再由 spawner 升级。
+              yield* Effect.forkScoped(
+                Effect.sleep(`${input.timeout} millis`).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      timedOut = true
+                    }),
+                  ),
+                  Effect.flatMap(() => handle.kill({ forceKillAfter: "3 seconds" })),
+                  Effect.ignore,
+                ),
+              )
+            }
 
             const [items, stderr, code] = yield* Effect.all(
               [
                 Stream.decodeText(handle.stdout).pipe(
                   Stream.splitLines,
                   Stream.filter((line) => line.length > 0),
-                  Stream.mapEffect(parse),
-                  Stream.filter((item): item is Match => item.type === "match"),
+                  Stream.mapEffect((line) =>
+                    parse(line).pipe(
+                      Effect.catch((err) => {
+                        // timeout 可能在 rg 写出最后一行 JSON 中途杀进程；这类半行
+                        // 只表示输出被受控截断，不能丢掉此前已解析的 matches。非超时
+                        // 的解析错误仍然上抛，继续暴露真实 rg 输出异常。
+                        if (timedOut) return Effect.succeed(undefined)
+                        return Effect.fail(err)
+                      }),
+                    ),
+                  ),
+                  Stream.filter((item): item is Match => item?.type === "match"),
                   Stream.map((item) => row(item.data)),
-                  // Tool callers usually need a bounded preview, not a precise
-                  // count. Taking one extra row lets us report truncation and
-                  // then terminate rg instead of continuing an expensive full
-                  // repository scan just to discard the remaining output later.
-                  Stream.take(limit === undefined ? Infinity : limit + 1),
+                  // 工具调用方需要有界预览而不是精确总数；多取一条只用于确认
+                  // 截断状态，随后立即终止 rg，避免为了丢弃后续输出而继续扫全库。
+                  Stream.take(limit + 1),
                   Stream.runCollect,
                   Effect.map((chunk) => [...chunk]),
                   Effect.tap((items) =>
                     Effect.gen(function* () {
-                      if (limit === undefined || items.length <= limit) return
+                      if (items.length <= limit) return
                       truncated = true
                       yield* handle.kill().pipe(Effect.ignore)
                     }),
                   ),
-                  Effect.map((items) => (limit === undefined ? items : items.slice(0, limit))),
+                  Effect.map((items) => items.slice(0, limit)),
                 ),
                 Stream.mkString(Stream.decodeText(handle.stderr)),
-                // A limit-triggered kill is a successful bounded search, while
-                // user aborts or real process failures should keep surfacing as
-                // errors through the normal exitCode path.
-                handle.exitCode.pipe(Effect.catch((err) => (truncated ? Effect.succeed(0) : Effect.fail(err)))),
+                // limit/timeout 主动 kill 都是成功的有界搜索；用户 abort 或真实
+                // 进程失败仍通过 exitCode 保持错误语义，不能被普通截断吞掉。
+                handle.exitCode.pipe(
+                  Effect.catch((err) => (truncated || timedOut ? Effect.succeed(0) : Effect.fail(err))),
+                ),
               ],
               { concurrency: "unbounded" },
             )
 
-            if (!truncated && code !== 0 && code !== 1 && code !== 2) {
+            // 极小 timeout 可能先触发 kill，再等到 rg 写出正则错误等 stderr；
+            // 没有任何匹配可保留时应暴露真实错误，不能伪装成空的超时结果。
+            const stderrText = stderr.trim()
+            if (timedOut && items.length === 0 && fatalSearchError(stderrText)) {
               return yield* Effect.fail(error(stderr, code))
             }
-            if (code === 2 && items.length === 0 && stderr.trim()) return yield* Effect.fail(error(stderr, code))
+            if (!truncated && (!timedOut || stderrText) && code !== 0 && code !== 1 && code !== 2) {
+              return yield* Effect.fail(error(stderr, code))
+            }
+            if (code === 2 && items.length === 0 && stderrText && (!timedOut || fatalSearchError(stderrText))) {
+              return yield* Effect.fail(error(stderr, code))
+            }
 
             return {
-              items: code === 1 && !truncated ? [] : items,
+              items: code === 1 && !truncated && !timedOut ? [] : items,
               partial: code === 2 && !truncated,
               truncated,
+              timedOut: timedOut || undefined,
             }
           }),
         )

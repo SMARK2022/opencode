@@ -119,9 +119,33 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "exclude": {
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+      ],
+      "description": "File pattern(s) to exclude from the search (e.g. "node_modules/**", ["dist/**", "*.lock"])",
+    },
     "include": {
-      "description": "File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")",
-      "type": "string",
+      "anyOf": [
+        {
+          "type": "string",
+        },
+        {
+          "items": {
+            "type": "string",
+          },
+          "type": "array",
+        },
+      ],
+      "description": "File pattern(s) to include in the search (e.g. "*.js", ["*.ts", "*.tsx"])",
     },
     "path": {
       "description": "The directory to search in. Defaults to the current working directory.",
@@ -130,6 +154,12 @@ exports[`tool parameters JSON Schema (wire shape) grep 1`] = `
     "pattern": {
       "description": "The regex pattern to search for in file contents",
       "type": "string",
+    },
+    "timeout": {
+      "description": "Optional timeout in milliseconds. Defaults to 10000, maximum 120000.",
+      "exclusiveMinimum": 0,
+      "maximum": 120000,
+      "type": "integer",
     },
   },
   "required": [

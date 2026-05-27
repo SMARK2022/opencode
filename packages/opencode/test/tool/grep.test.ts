@@ -115,6 +115,150 @@ describe("tool.grep", () => {
     }),
   )
 
+  it.instance("supports include and exclude filters together", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const search = path.join(test.directory, "space dir")
+      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
+      // 搜索路径包含空格，覆盖参数数组传递到 rg 时不能依赖 shell 引号的边界；
+      // include/exclude 同时存在时，exclude 必须继续收窄 include 已经选中的候选文件。
+      yield* Effect.promise(() => Bun.write(path.join(search, "keep.ts"), "const value = 'needle'\n"))
+      yield* Effect.promise(() => Bun.write(path.join(search, "keep.tsx"), "const value = 'needle'\n"))
+      yield* Effect.promise(() => Bun.write(path.join(search, "skip.test.ts"), "const value = 'needle'\n"))
+      yield* Effect.promise(() => fs.mkdir(path.join(search, "dist"), { recursive: true }))
+      yield* Effect.promise(() => Bun.write(path.join(search, "dist", "skip.ts"), "const value = 'needle'\n"))
+
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: search,
+          include: ["*.ts", "*.tsx"],
+          exclude: ["*.test.ts", "dist/**"],
+        },
+        ctx,
+      )
+
+      expect(result.metadata.matches).toBe(2)
+      expect(result.output).toContain(path.join(search, "keep.ts"))
+      expect(result.output).toContain(path.join(search, "keep.tsx"))
+      expect(result.output).not.toContain("skip.test.ts")
+      expect(result.output).not.toContain("dist")
+    }),
+  )
+
+  it.instance("searches more than the legacy candidate file limit when work is fast", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const search = path.join(test.directory, "many-small-files")
+      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
+      // 5001 个空文件会触发旧的候选文件硬上限；现在 grep 依赖时间预算，
+      // 因此“小文件很多但搜索很快”的场景应返回真实匹配而不是 scope-too-broad。
+      yield* Effect.forEach(
+        Array.from({ length: 5_001 }, (_, index) => path.join(search, `empty-${index}.txt`)),
+        (file) => Effect.promise(() => Bun.write(file, "")),
+        { concurrency: 64, discard: true },
+      )
+      yield* Effect.promise(() => Bun.write(path.join(search, "match.txt"), "needle\n"))
+
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: search,
+          include: "*.txt",
+        },
+        ctx,
+      )
+
+      expect(result.metadata.matches).toBe(1)
+      expect(result.output).toContain("match.txt")
+      expect(result.output).not.toContain("Search scope is too broad")
+    }),
+  )
+
+  it.instance("reports timeout without claiming no files were found", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "match.txt")
+      yield* Effect.promise(() => Bun.write(file, "needle\n"))
+
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            search: () =>
+              Effect.succeed({
+                items: [],
+                partial: false,
+                truncated: false,
+                timedOut: true,
+              }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+          timeout: 1,
+        },
+        ctx,
+      )
+
+      expect(result.metadata.matches).toBe(0)
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain("timed out")
+      expect(result.output).not.toBe("No files found")
+    }),
+  )
+
+  it.instance("keeps partial matches when search times out", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "match.txt")
+      yield* Effect.promise(() => Bun.write(file, "needle\n"))
+
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            search: () =>
+              Effect.succeed({
+                items: [
+                  {
+                    path: { text: "match.txt" },
+                    lines: { text: "needle" },
+                    line_number: 1,
+                    absolute_offset: 0,
+                    submatches: [],
+                  },
+                ],
+                partial: false,
+                truncated: false,
+                timedOut: true,
+              }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+          timeout: 1,
+        },
+        ctx,
+      )
+
+      expect(result.metadata.matches).toBe(1)
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain("Line 1: needle")
+      expect(result.output).toContain("timed out")
+    }),
+  )
+
   it.instance("does not ask for external_directory when alias path is allowed", () =>
     Effect.gen(function* () {
       if (process.platform === "win32") return

@@ -143,6 +143,38 @@ describe("file.ripgrep", () => {
     }),
   )
 
+  it.live("search timeout returns a bounded partial result instead of failing", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir((dir) =>
+        Effect.gen(function* () {
+          // 真实 rg 进程需要足够大的输入才能稳定越过 1ms 预算；该测试验证公开
+          // Ripgrep.search 行为，不断言内部 kill 调用形状，避免和进程实现耦合。
+          yield* write(path.join(dir, "large.txt"), "x".repeat(32 * 1024 * 1024))
+        }),
+      )
+
+      const result = yield* Ripgrep.Service.use((rg) => rg.search({ cwd: dir, pattern: "needle", timeout: 1 }))
+
+      expect(result.items).toEqual([])
+      expect(result.timedOut).toBe(true)
+      expect(result.truncated).toBe(false)
+    }),
+  )
+
+  it.live("search timeout does not hide invalid regex errors", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdir((dir) => write(path.join(dir, "match.txt"), "needle\n"))
+
+      // timeout 存在时，正则语法错误仍是 rg 的真实失败，
+      // 不能被降级成“超时后的空部分结果”。
+      const exit = yield* Ripgrep.Service.use((rg) => rg.search({ cwd: dir, pattern: "(", timeout: 1000 })).pipe(
+        Effect.exit,
+      )
+
+      expect(exit._tag).toBe("Failure")
+    }),
+  )
+
   it.live("files returns empty when glob matches no files", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdir((dir) =>

@@ -154,6 +154,24 @@ describe("tool parameters", () => {
       expect(parsed.path).toBe("/tmp")
       expect(parsed.include).toBe("*.ts")
     })
+    test("accepts include and exclude arrays plus timeout", () => {
+      // grep 的过滤参数需要表达“包含这些文件、排除这些文件”的搜索语义；
+      // 这里固定 wire-level 行为，避免后续重构退回只能传单个 include 的窄接口。
+      const parsed = parse(Grep, {
+        pattern: "TODO",
+        include: ["*.ts", "*.tsx"],
+        exclude: ["dist/**", "*.test.ts"],
+        timeout: 5000,
+      })
+      expect(parsed.include).toEqual(["*.ts", "*.tsx"])
+      expect(parsed.exclude).toEqual(["dist/**", "*.test.ts"])
+      expect(parsed.timeout).toBe(5000)
+    })
+    test("rejects timeout beyond the documented maximum", () => {
+      // timeout 的 schema 上限必须和工具说明保持一致，避免调用方以为能提交
+      // 超过 120 秒的长搜索，实际执行时又被内部逻辑改变。
+      expect(accepts(Grep, { pattern: "TODO", timeout: 120_001 })).toBe(false)
+    })
     test("rejects missing pattern", () => {
       expect(accepts(Grep, {})).toBe(false)
     })
