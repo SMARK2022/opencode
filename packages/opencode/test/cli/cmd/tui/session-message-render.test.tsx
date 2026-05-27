@@ -517,6 +517,70 @@ test("completed notebook edit uses notebook language for supported diff syntax h
   )
 })
 
+test("completed shell edit uses the existing bash parser for shellscript file extensions", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_shell_edit_highlight", 1)],
+    {
+      msg_shell_edit_highlight: [
+        completedToolPart(
+          "part_shell_edit_highlight",
+          "msg_shell_edit_highlight",
+          "edit",
+          { filePath: "scripts/install.sh" },
+          {
+            diff: [
+              "--- scripts/install.sh",
+              "+++ scripts/install.sh",
+              "@@ -1 +1 @@",
+              "-echo \"old\"",
+              "+echo \"new\"",
+            ].join("\n"),
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes('echo "new"')))
+      // 这里刻意通过最终渲染颜色区分行为，而不是检查 parser 配置项本身：
+      // `.sh` 在 LSP 语义上仍然是 `shellscript`，TUI 高亮必须由已有 bash
+      // parser 的 alias 承接，后续重构只要用户可见颜色行为不退化即可。
+      await waitForDistinctSpanColors(app, 'echo "new"', "echo", '"new"')
+    },
+  )
+})
+
+test("completed toml edit uses the registered toml parser", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_toml_edit_highlight", 1)],
+    {
+      msg_toml_edit_highlight: [
+        completedToolPart(
+          "part_toml_edit_highlight",
+          "msg_toml_edit_highlight",
+          "edit",
+          { filePath: "config/opencode.toml" },
+          {
+            diff: [
+              "--- config/opencode.toml",
+              "+++ config/opencode.toml",
+              "@@ -1 +1 @@",
+              "-name = \"old\"",
+              "+name = \"opencode\"",
+            ].join("\n"),
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes('name = "opencode"')))
+      // `.toml` 之前没有扩展名映射，虽然 parser 已注册也无法被 edit diff 使用；
+      // 这里通过 key/value 颜色差异锁定用户可见行为，避免未来只保留 parser
+      // 配置却丢失扩展名入口时测试仍然误通过。
+      await waitForDistinctSpanColors(app, 'name = "opencode"', "name", '"opencode"')
+    },
+  )
+})
+
 test("completed oversized notebook insert renders inserted source preview when the full diff is omitted", async () => {
   await withRenderedSession(
     [assistantMessage("msg_notebook_insert_preview", 1)],
@@ -1752,6 +1816,33 @@ async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predica
     const frame = rows(app.captureCharFrame())
     if (predicate(frame)) return frame
     if (Date.now() - start > 2_000) throw new Error(`timed out waiting for frame:\n${frame.join("\n")}`)
+    await Bun.sleep(10)
+  }
+}
+
+async function waitForDistinctSpanColors(
+  app: Awaited<ReturnType<typeof testRender>>,
+  lineText: string,
+  leftText: string,
+  rightText: string,
+) {
+  const start = Date.now()
+
+  for (;;) {
+    await app.renderOnce()
+    const line = app.captureSpans().lines.find((item) =>
+      item.spans.map((span) => span.text).join("").includes(lineText),
+    )
+    const left = line?.spans.find((span) => span.text.includes(leftText))
+    const right = line?.spans.find((span) => span.text.includes(rightText))
+    // Tree-sitter 高亮由 OpenTUI worker 异步回填，字符帧先出现不代表颜色已稳定；
+    // 这里等待同一可见行里的两个语法片段呈现不同前景色，`leftText`/`rightText`
+    // 只描述用户可见 token，不绑定 parser 名称、查询文件或内部 capture 结构。
+    if (left && right && JSON.stringify(left.fg) !== JSON.stringify(right.fg)) break
+    if (Date.now() - start > 2_000) {
+      expect(left?.fg).not.toEqual(right?.fg)
+      break
+    }
     await Bun.sleep(10)
   }
 }
