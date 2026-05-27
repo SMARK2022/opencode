@@ -7,7 +7,6 @@ import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
-import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionPrompt } from "@/session/prompt"
@@ -56,7 +55,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     // 稳定服务在 handler layer 捕获，查询不重新构造数据库层或项目作用域。
     const usageSvc = yield* SessionRequestUsage.Service
     const revertSvc = yield* SessionRevert.Service
-    const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
     const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
@@ -305,22 +303,28 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       yield* inSessionDirectory(
         ctx.params.sessionID,
         Effect.gen(function* () {
+          // #242：busy 会话先拒绝——revert 清理或模型选择前拦截，避免手动 compact
+          // 改完状态后又在进行中的 prompt 后面空转
+          yield* SessionError.mapBusy(runState.assertNotBusy(info.id))
           yield* revertSvc.cleanup(info)
           const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
           const defaultAgent = yield* agentSvc.defaultAgent()
           // 空会话回退 defaultAgent，保证 compaction 始终有可用 agent
           const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
 
-          yield* compactSvc.create({
-            sessionID: ctx.params.sessionID,
-            agent: currentAgent,
-            model: {
-              providerID: ctx.payload.providerID,
-              modelID: ctx.payload.modelID,
-            },
-            auto: ctx.payload.auto ?? false,
-          })
-          yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+          // #242：Summarize 直接经 SessionPrompt 执行 compaction——取消归属 runner，
+          // 历史中不再遗留可被后续请求重放的 pending compact 命令
+          yield* SessionError.mapBusy(
+            promptSvc.compact({
+              sessionID: ctx.params.sessionID,
+              agent: currentAgent,
+              model: {
+                providerID: ctx.payload.providerID,
+                modelID: ctx.payload.modelID,
+              },
+              auto: ctx.payload.auto ?? false,
+            }),
+          )
         }),
       )
       return true

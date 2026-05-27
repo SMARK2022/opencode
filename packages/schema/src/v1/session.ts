@@ -82,11 +82,17 @@ export const Format = Schema.Union([OutputFormatText, OutputFormatJsonSchema]).a
 export type OutputFormat = Schema.Schema.Type<typeof Format>
 
 // #98：撤销软隐藏元数据
+// #242：compaction-cancelled 是独立的维护操作取消原因——不能与 undo（用户主动回滚）混同，
+// 否则被取消的压缩会误判为用户请求回滚
 export const Hidden = Schema.Struct({
   time: NonNegativeInt,
-  // repair-empty-dangling-assistant：cancel 产生的空体 assistant 专用隐藏原因，
-  // 与 undo 隐藏区分开，便于审计两类来源不同的隐藏消息
-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
+  // #153：soft-hide 原因扩展 cancel 空 dangling；#242：再加压缩取消的 scratch 标记
+  reason: Schema.Literals([
+    "undo",
+    "repair-empty-dangling-assistant",
+    "permission-reviewer-protocol-retry",
+    "compaction-cancelled",
+  ]),
 })
 export type Hidden = Schema.Schema.Type<typeof Hidden>
 

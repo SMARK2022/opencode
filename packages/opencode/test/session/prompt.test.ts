@@ -1229,17 +1229,17 @@ it.instance("manual compaction stops after summarizing retained tool tail", () =
     yield* seed(chat.id, { finish: "stop" })
     const keep = yield* seed(chat.id, { finish: "stop" })
     yield* addCompletedTool(chat.id, keep.assistant.id)
-    yield* compact.create({
+    // #137：仅排队一次摘要响应，用于断言 hits===1
+    yield* llm.text("summary")
+
+    // #242：loop 的 compaction task 分支已移除——手动压缩经 compact 直调生产者，
+    // 持久化 marker 只作为已完成边界，不再成为 loop 可拾取的排队命令
+    const result = yield* prompt.compact({
       sessionID: chat.id,
       agent: "build",
       model: ref,
       auto: false,
     })
-    // #137：仅排队一次摘要响应，用于断言 hits===1
-    yield* llm.text("summary")
-
-    // #137：loop 应在摘要后 break，不得再发起 build 调用
-    const result = yield* prompt.loop({ sessionID: chat.id })
     const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
 
     // #137：核心断言——手动压缩后 provider 只调用一次
@@ -1325,16 +1325,24 @@ it.instance("auto compaction resumes without compacting retained old tail usage 
     yield* sessions.updateMessage(old.assistant)
     yield* addCompletedTool(chat.id, old.assistant.id)
     yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
-    yield* compact.create({
+    // #242: run consumes the summary immediately; markers are not replayable work.
+    yield* llm.text("summary")
+    yield* llm.text("resumed")
+    const compacted = yield* compact.run({
       sessionID: chat.id,
       agent: "build",
       model: ref,
       auto: true,
     })
-    yield* llm.text("summary")
-    yield* llm.text("resumed")
+
+    expect(compacted).toBe("continue")
+    const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
+    expect(filtered.map((msg) => msg.info.id)).toContain(old.user.id)
+    expect(filtered.map((msg) => msg.info.id)).toContain(old.assistant.id)
+    expect(filtered.some(msg => msg.info.role === "user" && msg.parts.some(part => part.type === "text" && part.metadata?.compaction_continue === true))).toBe(true)
 
     const result = yield* prompt.loop({ sessionID: chat.id })
+    if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
     const all = yield* sessions.messages({ sessionID: chat.id })
     const compactions = all.flatMap((msg) => msg.parts).filter((part) => part.type === "compaction")
 
@@ -3029,7 +3037,43 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>
     const exit = yield* run.assertNotBusy(chat.id).pipe(Effect.exit)
     expect(Exit.isSuccess(exit)).toBe(true)
   }),
+  15_000,
 )
+
+it.instance(
+  "compact rejects with BusyError when loop running",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      yield* llm.hang
+
+      const chat = yield* sessions.create({})
+      yield* user(chat.id, "hi")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      const exit = yield* prompt
+        .compact({ sessionID: chat.id, agent: "build", model: ref })
+        .pipe(Effect.timeout("250 millis"), Effect.exit)
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
+        expect(Cause.squash(exit.cause)).toMatchObject({ _tag: "SessionBusyError", sessionID: chat.id })
+      }
+      expect(messages.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
+
+      yield* prompt.cancel(chat.id)
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+  // #242：V2 cancel-processor cleanup 链在 Windows 实测 4-12s——超时放宽到 15s，断言语义不变
+  15_000,
+  )
 
 // Shell semantics
 
