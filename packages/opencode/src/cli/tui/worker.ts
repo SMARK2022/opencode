@@ -104,11 +104,12 @@ if (isDaemon) {
     })
   }
 
-  // #173：OPENCODE_DAEMON_IDLE_TIMEOUT_MS 可配置；非法值回退 30s
+  // #173：OPENCODE_DAEMON_IDLE_TIMEOUT_MS可配置；非法值回退4秒，零值仍合法。
   const IDLE_TIMEOUT_MS = (() => {
-    const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
+    // 缩短默认空闲窗口：最后一个 TUI 断开后守护进程只作短暂收尾，防孤儿 daemon 长驻拖机
+    const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 4_000)
     // #173：NaN/负数回退默认；0 合法（尽快 idle 退出，便于测试）
-    return Number.isFinite(value) && value >= 0 ? value : 30_000
+    return Number.isFinite(value) && value >= 0 ? value : 4_000
   })()
   const STARTUP_IDLE_TIMEOUT_MS = (() => {
     const value = Number(process.env.OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS ?? IDLE_TIMEOUT_MS)
