@@ -151,8 +151,9 @@ process.prependListener("uncaughtException", () => void gracefulShutdown("uncaug
 // 活跃 SSE client 或 SessionActivity 都会阻止退出；launcher watcher 只在首个
 // SSE client 到来前生效，用来更快清理已经失去启动 TUI 接管的孤儿 daemon。
 const IDLE_TIMEOUT_MS = (() => {
-  const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
-  return Number.isFinite(value) && value >= 0 ? value : 30_000
+  // [local-smark] After the last TUI disconnects, keep the daemon around for at most 8s by default.
+  const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 4_000)
+  return Number.isFinite(value) && value >= 0 ? value : 4_000
 })()
 const STARTUP_IDLE_TIMEOUT_MS = (() => {
   const value = Number(process.env.OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS ?? IDLE_TIMEOUT_MS)
