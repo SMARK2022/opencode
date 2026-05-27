@@ -32,7 +32,13 @@ import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
 const log = Log.create({ service: "provider" })
+// Keep transport diagnostics under a separate service so provider catalogue
+// loading remains readable and callers can filter only fetch/SSE milestones.
+const fetchLog = Log.create({ service: "provider.fetch" })
 const DEFAULT_TIMEOUT_MS = 300_000
+// Process-local correlation is enough here: the id only ties fetch.start,
+// fetch.response and SSE milestones inside one daemon log, never across runs.
+let providerFetchRequestID = 0
 const SDK_DEFAULT_API_URL: Record<string, string> = {
   "@ai-sdk/anthropic": "https://api.anthropic.com/v1",
   "@ai-sdk/google": "https://generativelanguage.googleapis.com/v1beta",
@@ -75,17 +81,69 @@ function shouldUseCopilotResponsesApi(modelID: string): boolean {
   return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
 }
 
-function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+type FetchTiming = {
+  requestID: number
+  providerID: string
+  modelID: string
+  sessionID?: string
+  startedAt: number
+}
+
+function timing(input: FetchTiming, phase: string, extra?: Record<string, unknown>) {
+  // Phase names are the stable contract for diagnosing whether a stall happens
+  // before headers, before raw SSE chunks, or before AI SDK semantic events.
+  fetchLog.info("timing", {
+    phase,
+    requestID: input.requestID,
+    providerID: input.providerID,
+    modelID: input.modelID,
+    sessionID: input.sessionID,
+    elapsedMs: Date.now() - input.startedAt,
+    ...extra,
+  })
+}
+
+function errorFields(error: unknown) {
+  if (error instanceof Error) {
+    const code = "code" in error && typeof error.code === "string" ? error.code : undefined
+    return { errorName: error.name, errorMessage: error.message, errorCode: code }
+  }
+  return { errorMessage: String(error) }
+}
+
+function bodyBytes(body: unknown) {
+  // Only measure already-buffered bodies. Streams and form bodies are not read
+  // here because diagnostics must not consume or duplicate provider requests.
+  if (typeof body === "string") return new TextEncoder().encode(body).byteLength
+  if (body instanceof Uint8Array) return body.byteLength
+  return undefined
+}
+
+function wrapSSE(res: Response, ms: number, ctl: AbortController, timingInput: FetchTiming) {
   if (typeof ms !== "number" || ms <= 0) return res
   if (!res.body) return res
   if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
 
   const reader = res.body.getReader()
+  let chunkCount = 0
+  let bytes = 0
+  let maxGapMs = 0
+  let lastChunkAt = Date.now()
   const body = new ReadableStream<Uint8Array>({
     async pull(ctrl) {
       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+        // `chunkTimeout` measures raw SSE body progress, not AI SDK semantic
+        // parts. Logging the timeout with raw counts distinguishes a missing
+        // HTTP/SSE body from heartbeats that never become model output.
         const id = setTimeout(() => {
           const err = Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
+          timing(timingInput, "sse.timeout", {
+            chunkTimeoutMs: ms,
+            idleMs: Date.now() - lastChunkAt,
+            chunkCount,
+            bytes,
+            maxGapMs,
+          })
           ctl.abort(err)
           void reader.cancel(err)
           reject(err)
@@ -101,13 +159,27 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
             reject(err)
           },
         )
+      }).catch((error) => {
+        const fields = errorFields(error)
+        if (fields.errorCode !== "SSE_READ_TIMEOUT") {
+          timing(timingInput, "sse.error", { chunkCount, bytes, maxGapMs, ...fields })
+        }
+        throw error
       })
 
       if (part.done) {
+        timing(timingInput, "sse.end", { chunkCount, bytes, maxGapMs })
         ctrl.close()
         return
       }
 
+      const now = Date.now()
+      const gapMs = now - lastChunkAt
+      lastChunkAt = now
+      chunkCount++
+      bytes += part.value.byteLength
+      maxGapMs = Math.max(maxGapMs, gapMs)
+      if (chunkCount === 1) timing(timingInput, "sse.first_chunk", { gapMs, bytes: part.value.byteLength })
       ctrl.enqueue(part.value)
     },
     async cancel(reason) {
@@ -1797,17 +1869,49 @@ export const layer = Layer.effect(
             }
           }
 
-          const res = customFetch
-            ? await NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
-            : await NetworkProxy.fetch(input, {
+          const headers = new Headers(opts.headers)
+          const timingInput = {
+            requestID: ++providerFetchRequestID,
+            providerID: model.providerID,
+            modelID: model.id,
+            sessionID: headers.get("x-session-affinity") ?? headers.get("x-opencode-session") ?? undefined,
+            startedAt: Date.now(),
+          }
+          const timeoutMs =
+            options["timeout"] === false ? undefined : typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS
+
+          // This timing is deliberately provider-local and payload-free: it
+          // captures request size and transport milestones without logging body
+          // content, authorization headers, prompts, tool outputs, or raw chunks.
+          timing(timingInput, "fetch.start", {
+            method: opts.method,
+            timeoutMs,
+            chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
+            bodyBytes: bodyBytes(opts.body),
+          })
+
+          const res = await (customFetch
+            ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
+            : NetworkProxy.fetch(input, {
                 ...opts,
                 purpose: "provider",
                 // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
                 timeout: false,
               })
+          ).catch((error) => {
+            timing(timingInput, "fetch.error", errorFields(error))
+            throw error
+          })
+
+          const contentType = res.headers.get("content-type") ?? undefined
+          timing(timingInput, "fetch.response", {
+            status: res.status,
+            contentType,
+            isSSE: contentType?.includes("text/event-stream") ?? false,
+          })
 
           if (!chunkAbortCtl) return res
-          return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          return wrapSSE(res, chunkTimeout, chunkAbortCtl, timingInput)
         }
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]

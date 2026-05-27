@@ -1,5 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Global } from "@opencode-ai/core/global"
+import * as Log from "@opencode-ai/core/util/log"
 import { Deferred, Effect, Layer, Schema } from "effect"
 import { Bus } from "../../src/bus"
 import { BusEvent } from "../../src/bus/bus-event"
@@ -12,6 +14,20 @@ const TestEvent = {
 }
 
 const it = testEffect(Layer.mergeAll(Bus.layer, CrossSpawnSpawner.defaultLayer))
+
+function readLog(file: string) {
+  return Effect.promise(async () => {
+    let content = ""
+    for (let i = 0; i < 20; i++) {
+      content = await Bun.file(file)
+        .text()
+        .catch(() => "")
+      if (content) return content
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return content
+  })
+}
 
 describe("Bus", () => {
   afterEach(() => disposeAllInstances())
@@ -74,6 +90,37 @@ describe("Bus", () => {
       Effect.gen(function* () {
         const bus = yield* Bus.Service
         yield* bus.publish(TestEvent.Ping, { value: 1 })
+      }),
+    )
+
+    it.instance("publish still delivers when info-level publish logs are suppressed", () =>
+      Effect.gen(function* () {
+        const previous = Global.Path.log
+        const dir = yield* tmpdirScoped()
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(async () => {
+            Global.Path.log = previous
+            await Log.init({ print: false, dev: true, level: "DEBUG" })
+          }),
+        )
+
+        Global.Path.log = dir
+        yield* Effect.promise(() => Log.init({ print: false, dev: false, level: "INFO" }))
+        const logFile = Log.file()
+        const bus = yield* Bus.Service
+        const received: number[] = []
+        const done = yield* Deferred.make<void>()
+
+        yield* bus.subscribeCallback(TestEvent.Ping, (evt) => {
+          received.push(evt.properties.value)
+          Deferred.doneUnsafe(done, Effect.void)
+        })
+        yield* bus.publish(TestEvent.Ping, { value: 7 })
+        yield* Deferred.await(done).pipe(Effect.timeout("2 seconds"))
+
+        const content = yield* readLog(logFile)
+        expect(received).toEqual([7])
+        expect(content).not.toContain("type=test.ping publishing")
       }),
     )
   })

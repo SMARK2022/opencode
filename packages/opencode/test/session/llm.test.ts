@@ -7,6 +7,8 @@ import { makeRuntime } from "../../src/effect/run-service"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { LLM } from "../../src/session/llm"
 import type { InstanceContext } from "../../src/project/instance-context"
+import { Global } from "@opencode-ai/core/global"
+import * as Log from "@opencode-ai/core/util/log"
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelsDev } from "@opencode-ai/core/models"
@@ -155,6 +157,38 @@ function timeout(ms: number) {
   return new Promise<never>((_, reject) => {
     setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms)
   })
+}
+
+async function readLogUntil(file: string, ready: (content: string) => boolean) {
+  let content = ""
+  for (let i = 0; i < 50; i++) {
+    content = await Bun.file(file)
+      .text()
+      .catch(() => "")
+    if (ready(content)) return content
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return content
+}
+
+async function withInfoLog<T>(fn: (file: string) => Promise<T>) {
+  const previous = Global.Path.log
+  await using tmp = await tmpdir()
+  Global.Path.log = tmp.path
+  await Log.init({ print: false, dev: false, level: "INFO" })
+  try {
+    return await fn(Log.file())
+  } finally {
+    Global.Path.log = previous
+    await Log.init({ print: false, dev: true, level: "DEBUG" })
+  }
+}
+
+function providerFetchEvents(content: string) {
+  return content
+    .split("\n")
+    .filter((line) => line.includes("service=provider.fetch"))
+    .map((line) => Object.fromEntries(Array.from(line.matchAll(/([A-Za-z.]+)=([^\s]+)/g), (match) => [match[1], match[2]])))
 }
 
 function waitStreamingRequest(pathname: string) {
@@ -320,7 +354,165 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
   })
 }
 
+function createStalledEventResponse() {
+  const encoder = new TextEncoder()
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(": heartbeat\n\n"))
+      },
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    },
+  )
+}
+
 describe("session.llm.stream", () => {
+  test("logs provider response and first raw SSE chunk when chunk timeout is enabled", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "timed-openai-compatible"
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await withInfoLog(async (logFile) => {
+      await using tmp = await tmpdir({
+        config: {
+          enabled_providers: [providerID],
+          provider: {
+            [providerID]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Timed Provider",
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 1_000 },
+              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+            },
+          },
+        },
+      })
+
+      await withTestInstance({
+        directory: tmp.path,
+        fn: async (ctx) => {
+          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
+          const sessionID = SessionID.make("session-provider-fetch-timing")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          await drain(
+            {
+              user: {
+                id: MessageID.make("msg_user-provider-fetch-timing"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: agent.name,
+                model: { providerID: ProviderID.make(providerID), modelID: model.id },
+              },
+              sessionID,
+              model,
+              agent,
+              system: ["You are a helpful assistant."],
+              messages: [{ role: "user", content: "Hello" }],
+              tools: {},
+            },
+            ctx,
+          )
+        },
+      })
+
+      await request
+      const events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.end")))
+      expect(events.map((event) => event.phase)).toEqual([
+        "fetch.start",
+        "fetch.response",
+        "sse.first_chunk",
+        "sse.end",
+      ])
+      expect(events.find((event) => event.phase === "fetch.response")?.status).toBe("200")
+      expect(events.find((event) => event.phase === "fetch.response")?.isSSE).toBe("true")
+      expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
+      expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
+    })
+  })
+
+  test("logs SSE timeout when a streaming response stalls after the first raw chunk", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "stalled-openai-compatible"
+    const request = waitRequest("/chat/completions", createStalledEventResponse())
+
+    await withInfoLog(async (logFile) => {
+      await using tmp = await tmpdir({
+        config: {
+          enabled_providers: [providerID],
+          provider: {
+            [providerID]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Stalled Provider",
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 25 },
+              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+            },
+          },
+        },
+      })
+
+      await withTestInstance({
+        directory: tmp.path,
+        fn: async (ctx) => {
+          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
+          const sessionID = SessionID.make("session-provider-fetch-timeout")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          await expect(
+            drain(
+              {
+                user: {
+                  id: MessageID.make("msg_user-provider-fetch-timeout"),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: agent.name,
+                  model: { providerID: ProviderID.make(providerID), modelID: model.id },
+                },
+                sessionID,
+                model,
+                agent,
+                system: ["You are a helpful assistant."],
+                messages: [{ role: "user", content: "Hello" }],
+                tools: {},
+              },
+              ctx,
+            ),
+          ).rejects.toThrow()
+        },
+      })
+
+      await request
+      const events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.timeout")))
+      expect(events.map((event) => event.phase)).toContain("fetch.response")
+      expect(events.map((event) => event.phase)).toContain("sse.timeout")
+      expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
+      expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
+      expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(25)
+    })
+  })
+
   for (const item of [
     { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } } },
     { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" } },

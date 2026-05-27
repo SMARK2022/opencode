@@ -99,7 +99,10 @@ export const layer = Layer.effect(
       return Effect.gen(function* () {
         const s = yield* InstanceState.get(state)
         const payload: Payload = { id: options?.id ?? createID(), type: def.type, properties }
-        log.info("publishing", { type: def.type })
+        // Bus publish is on the token-delta hot path, so INFO logging here can
+        // dominate daemon logs without adding timing or payload diagnostics.
+        // Keep the event available at DEBUG while preserving delivery semantics.
+        log.debug("publishing", { type: def.type })
 
         const ps = s.typed.get(def.type)
         if (ps) yield* PubSub.publish(ps, payload)
