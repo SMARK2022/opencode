@@ -583,13 +583,14 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   let retain: MessageID | undefined
   // #205：hidden 消息仍可作结构压缩锚点，但 undo/repair 后绝不能重放给 provider
   // #205：边界遍历时保留它们，仅从返回的 prompt 窗口剔除
-  const visible = (items: WithParts[]) =>
+  // #242：悬挂 compaction 清理链在 #205 hidden 剔除之后执行——hidden 锚点参与边界遍历、
+// 但与被取消的压缩标记一样绝不能出现在返回的 prompt 窗口
+const visible = (items: SessionV1.WithParts[]) =>
+  visibleCompactions(
     items
       .filter((msg) => !msg.info.hidden)
-      .map((msg) => ({
-        ...msg,
-        parts: msg.parts.filter((part) => !part.hidden),
-      }))
+      .map((msg) => ({ ...msg, parts: msg.parts.filter((part) => !part.hidden) })),
+  )
   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
   for (const msg of ordered) {
     result.push(msg)
@@ -605,8 +606,6 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       if (msg.info.id === retain) break
       continue
     }
-    if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
-      break
     if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
       completed.add(msg.info.parentID)
     }
@@ -641,6 +640,34 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   return visible(result)
 }
 
+function visibleCompactions(items: SessionV1.WithParts[]) {
+  // #242：只有 user(compaction) 与已完成且无错的摘要 assistant 配对才是持久边界；
+  // 悬挂标记/摘要是本地维护残渣——在 prompt 重放与 latest 任务检测看到它们之前剔除，
+  // 否则会复活旧 compact 或把「What did we do so far?」注入后续 user prompt
+  const compactions = new Set(
+    items
+      .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
+      .map((msg) => msg.info.id),
+  )
+  const completed = new Set(
+    items.flatMap((msg): MessageID[] => {
+      if (msg.info.role !== "assistant") return []
+      if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
+      if (!compactions.has(msg.info.parentID)) return []
+      return [msg.info.parentID]
+    }),
+  )
+  return items.filter((msg) => {
+    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
+      return completed.has(msg.info.id)
+    }
+    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) {
+      return completed.has(msg.info.parentID)
+    }
+    return true
+  })
+}
+
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
   // #205：压缩恢复需要 hidden 结构锚点作为边界；visible() 会从返回的 prompt 窗口剔除它们
   return filterCompacted(yield* stream(sessionID, { includeHidden: true }))
@@ -650,6 +677,8 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array
 // position is not chronological. IDs are only a deterministic tie-breaker
 // because imported messages do not necessarily have monotonic IDs.
+// #242：compaction 不再是可重放任务——生产者直接执行，消费端只保留已完成边界，
+// 这防止旧 compact 标记重启压缩。tasks 因此只剩 subtask
 export function latest(msgs: WithParts[]) {
   let user: User | undefined
   let assistant: Assistant | undefined
@@ -663,7 +692,7 @@ export function latest(msgs: WithParts[]) {
   const tasks = msgs.flatMap((m) =>
     finished && !isAfter(m.info, finished)
       ? []
-      : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
+      : m.parts.filter((p): p is SubtaskPart => p.type === "subtask"),
   )
   return { user, assistant, finished, tasks }
 }

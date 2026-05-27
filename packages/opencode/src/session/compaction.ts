@@ -1,5 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { AbortedError, SessionV1 } from "@opencode-ai/core/v1/session"
+// #242：AbortedError 随取消语义从 core 错误模型直接引入，避免经 MessageV2 间接引用
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
@@ -13,7 +14,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
-import { Effect, Option, Layer, Context } from "effect"
+import { Effect, Exit, Option, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -177,6 +178,13 @@ export interface Interface {
     model: Provider.Model
   }) => Effect.Effect<boolean>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
+  readonly run: (input: {
+    sessionID: SessionID
+    agent: string
+    model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+    auto: boolean
+    overflow?: boolean
+  }) => Effect.Effect<"continue" | "stop">
   readonly process: (input: {
     parentID: MessageID
     messages: SessionV1.WithParts[]
@@ -190,7 +198,7 @@ export interface Interface {
     model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
     auto: boolean
     overflow?: boolean
-  }) => Effect.Effect<void>
+  }) => Effect.Effect<SessionV1.User>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
@@ -611,11 +619,83 @@ const layer = Layer.effect(
         auto: input.auto,
         overflow: input.overflow,
       })
+      // user 标记先于摘要 assistant 落库，流式与旧测试可观察同一持久化边界形态；
+      // processCompaction 写入成功摘要前它仍是 scratch 状态，prompt 消费端刻意忽略未完成标记
+      return msg
+    })
+
+    // #242：中断清理的唯一入口——只处理可见的未完成 compaction 对，不动已完成边界
+    const hideIncomplete = Effect.fn("SessionCompaction.hideIncomplete")(function* (input: {
+      sessionID: SessionID
+      parentID: MessageID
+    }) {
+      // 中断可能发生在 scratch 标记可见后、摘要请求开始前。只隐藏这对 compaction，
+      // 且仅当无成功摘要存在——完成的边界继续锚定历史
+      const messages = yield* session
+        .messages({ sessionID: input.sessionID })
+        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as SessionV1.WithParts[])))
+      const completed = messages.some(
+        (msg) =>
+          msg.info.role === "assistant" &&
+          msg.info.parentID === input.parentID &&
+          msg.info.summary &&
+          msg.info.finish &&
+          !msg.info.error,
+      )
+      if (completed) return
+      const now = Date.now()
+      for (const msg of messages) {
+        const marker = msg.info.id === input.parentID && msg.parts.some((part) => part.type === "compaction")
+        const summary = msg.info.role === "assistant" && msg.info.parentID === input.parentID && msg.info.summary
+        if (!marker && !summary) continue
+        const next = {
+          ...msg.info,
+          // #242：compaction-cancelled 与 undo 语义分离——维护操作取消不得冒充用户回滚
+          hidden: { time: now, reason: "compaction-cancelled" as const },
+        }
+        if (next.role === "assistant" && !next.time.completed) {
+          next.time.completed = now
+          // #242：错误回填仅在缺失时——保留上游已记录的失败原因，中断只是兜底解释
+          next.error ??= new AbortedError({ message: "Aborted by compact cancellation" }).toObject()
+        }
+        yield* session.updateMessage(next)
+      }
+    })
+
+    // #242：run 是 compaction 的唯一执行主路径——摘要经 LLM 流式落库，取消经 onExit 归 hideIncomplete
+    const run = Effect.fn("SessionCompaction.run")(function* (input: {
+      sessionID: SessionID
+      agent: string
+      model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+      auto: boolean
+      overflow?: boolean
+    }) {
+      let parentID: MessageID | undefined
+      return yield* Effect.gen(function* () {
+        const msg = yield* create(input)
+        parentID = msg.id
+        return yield* processCompaction({
+          parentID: msg.id,
+          messages: yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie),
+          sessionID: input.sessionID,
+          auto: input.auto,
+          overflow: input.overflow,
+        })
+      }).pipe(
+        Effect.onExit((exit) => {
+          // compact 标记在成功摘要 assistant 出现前都是 scratch 状态。中断清理保持
+          // 可见历史整洁（Ctrl-C/abort），而 MessageV2.filterCompacted 仍是硬退出时
+          // finalizer 无法运行场景下的正确性护栏
+          if (Exit.isSuccess(exit) || !parentID) return Effect.void
+          return hideIncomplete({ sessionID: input.sessionID, parentID })
+        }),
+      )
     })
 
     return Service.of({
       isOverflow,
       prune,
+      run,
       process: processCompaction,
       create,
     })

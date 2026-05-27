@@ -182,6 +182,13 @@ export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
+  readonly compact: (input: {
+    sessionID: SessionID
+    agent: string
+    model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+    auto?: boolean
+    overflow?: boolean
+  }) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
@@ -1273,6 +1280,30 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
+    // #242：compact 走与普通 prompt 相同的 runner/cancel 边界，但直调生产者——
+    // 持久化 compact 标记只会是已完成边界，不会成为后续 loop 从旧历史拾取的排队命令
+    const compact: Interface["compact"] = Effect.fn("SessionPrompt.compact")(function* (input) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      // Runner.ensureRunning 会加入既有 prompt 而非排队新工作；compact 必须显式
+      // 拒绝 busy 会话，调用方看到真实 busy 响应而非成功空操作
+      yield* state.assertNotBusy(input.sessionID)
+      yield* revert.cleanup(session)
+      return yield* state.ensureRunning(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        Effect.gen(function* () {
+          yield* compaction.run({
+            sessionID: input.sessionID,
+            agent: input.agent,
+            model: input.model,
+            auto: input.auto ?? false,
+            overflow: input.overflow,
+          })
+          return yield* lastAssistant(input.sessionID)
+        }),
+      )
+    })
+
     // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 #194 TokenEstimate
     const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
       messages: SessionV1.WithParts[]
@@ -1406,22 +1437,6 @@ const layer = Layer.effect(
 
           if (task?.type === "subtask") {
             yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
-            continue
-          }
-
-          if (task?.type === "compaction") {
-            const result = yield* compaction.process({
-              messages: msgs,
-              parentID: lastUser.id,
-              sessionID,
-              auto: task.auto,
-              overflow: task.overflow,
-            })
-            if (result === "stop") break
-            // #137：手动压缩是终态维护；filterCompacted 保留 tail 后不得继续当新 build 回合
-            // #137：自动压缩可 continue（可能有合成 follow-up 续跑）
-            // #137：!task.auto 时立即 break，防止旧 tool tail 被当新请求
-            if (!task.auto) break
             continue
           }
 
@@ -1591,13 +1606,16 @@ const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
-              yield* compaction.create({
+              // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
+              // 执行 compaction，不留可重放标记给下一轮 loop
+              const compacted = yield* compaction.run({
                 sessionID,
                 agent: lastUser.agent,
                 model: lastUser.model,
                 auto: true,
                 overflow: !handle.message.finish,
               })
+              if (compacted === "stop") return "break" as const
             }
             return "continue" as const
           }).pipe(
@@ -1759,6 +1777,7 @@ const layer = Layer.effect(
       cancel,
       prompt,
       loop,
+      compact,
       shell,
       command,
       resolvePromptParts,

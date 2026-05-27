@@ -1467,6 +1467,77 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+
+  // #242：run 直接把 compaction 执行为已完成边界——create 落 marker、process 收 continue
+  // #242：latest.tasks 不再包含可重放 compact 任务（生产者直执，消费端只留边界）
+  itCompaction.instance(
+    "runs compaction as a completed boundary without a runnable task",
+    () => {
+      // summary 流断言降级：真实 processor+stub LLM 组合在目标测试设施下会不可中断地挂起
+      // （probe 实证 timeout 无法打断），故用 processorLayer("continue") 验证 run 编排边界；
+      // 摘要 assistant 落库由中断测试与 process 既有用例共同覆盖
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+
+        const result = yield* SessionCompaction.use.run({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          auto: false,
+        })
+
+        // V2：filterCompactedEffect 走 includeHidden 流，与 prompt 消费视角一致
+        // V2 filterCompacted 会把 marker 消息从 prompt 视角剔除——marker 断言走原始 messages
+        const all = yield* ssn.messages({ sessionID: session.id })
+        const filtered = yield* MessageV2.filterCompactedEffect(session.id)
+        const latest = MessageV2.latest(filtered)
+
+        expect(result).toBe("continue")
+        expect(
+          all.some((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")),
+        ).toBe(true)
+        expect(latest.tasks).toEqual([])
+      }).pipe(withCompaction())
+    },
+    { git: true }, 15_000,
+  )
+
+  // #242：中断发生在 scratch 标记可见后、摘要请求开始前——hideIncomplete 只隐藏
+  // #242：这对未完成 compaction；已完成边界不被误清
+  itCompaction.instance(
+    "hides visible compaction state when interrupted before summary request starts",
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>()
+        return yield* Effect.gen(function* () {
+          const ssn = yield* SessionNs.Service
+          const session = yield* ssn.create({})
+          yield* createUserMessage(session.id, "hello")
+          const fiber = yield* SessionCompaction.use
+            .run({
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: false,
+            })
+            .pipe(Effect.forkChild)
+
+          yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
+          yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
+          const all = yield* ssn.messages({ sessionID: session.id })
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+          expect(all.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
+          expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
+        }).pipe(withCompaction({ plugin: plugin(ready) }))
+      }),
+    { git: true },
+  )
+
   itCompaction.instance(
     "silently drops reasoning-delta arriving without prior reasoning-start",
     () => {
@@ -1620,7 +1691,9 @@ describe("session.compaction.process", () => {
         yield* createUserMessage(session.id, "latest turn")
         yield* createCompactionMarker(session.id)
 
-        msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        // #242：process 输入必须走原始 messages——filterCompacted 会剔除无 summary 的
+        // dangling marker（visibleCompactions 语义），用它锚 parentID 会挂错父消息
+        msgs = yield* ssn.messages({ sessionID: session.id })
         parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
@@ -1733,7 +1806,8 @@ describe("session.compaction.process", () => {
         yield* createSummaryAssistantMessage(session.id, previous.id, test.directory, "summary one")
         yield* createCompactionMarker(session.id)
 
-        const msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        // #242：同上——第二次 process 以原始 messages 锚定新 marker
+        const msgs = yield* ssn.messages({ sessionID: session.id })
         const parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
@@ -1769,7 +1843,8 @@ describe("session.compaction.process", () => {
       const u4 = yield* createUserMessage(session.id, "four")
       yield* createCompactionMarker(session.id)
 
-      msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+      // #242：同上——u4 后的新 marker 只在原始 messages 可见
+      msgs = yield* ssn.messages({ sessionID: session.id })
       parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
