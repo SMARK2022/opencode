@@ -53,6 +53,27 @@ export function createThrottledSignal<T>(value: T, ms: number): [Accessor<T>, (v
   return [get, throttled]
 }
 
+// 默认 1s 与 footer 秒级显示粒度一致；调小只增加重绘频率不改变口径
+export function createRefreshClock(active: Accessor<boolean>, ms = 1000) {
+  const [now, setNow] = createSignal(Date.now())
+
+  createEffect(
+    on(active, (enabled) => {
+      // 这个 clock 只负责驱动 UI 重新计算"当前时间"，不持有业务计时起点。
+      // 耗时边界必须继续来自 session messages，保证重连和组件重挂载后口径不变。
+      // 切换 active 时先立即对时一次，避免启用瞬间显示陈旧时间
+      setNow(Date.now())
+      if (!enabled) return
+
+      // interval 只写 now 信号；所有耗时 memo 派生自它，卸载时随 onCleanup 终止
+      const timer = setInterval(() => setNow(Date.now()), ms)
+      onCleanup(() => clearInterval(timer))
+    }),
+  )
+
+  // now 作为只读 Accessor 下发；调用方不得写入，起点权威始终在 session messages
+  return now
+}
 export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>) {
   const [alpha, setAlpha] = createSignal(show() ? 1 : 0)
   let revealed = show()

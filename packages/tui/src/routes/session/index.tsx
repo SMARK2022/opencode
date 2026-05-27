@@ -66,7 +66,12 @@ import {
 // #224：notebook 工具的 inline/block 视图 seam——把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的描述
 import { useVscodeNotebookToolView } from "./notebook-tool"
 // #154：pending/streaming 判定抽到 util，便于单测与去重
-import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
+import {
+  assistantTurnDuration,
+  hasStreamingAssistant,
+  pendingAssistantIndex,
+  shouldRefreshStaleBusyStatus,
+} from "../../util/session-pending"
 import type {
   AssistantMessage,
   Part,
@@ -1627,11 +1632,13 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   })
 
   const duration = createMemo(() => {
+    // final() 在 assistant completed 后为真；未完成时 footer 不显示耗时
     if (!final()) return 0
-    if (!props.message.time.completed) return 0
-    const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
-    if (!user || !user.time) return 0
-    return props.message.time.completed - user.time.created
+    // #243：消息 footer 是完成态的权威展示，耗时必须和运行中 footer 共用
+    // parent user -> assistant completed 的 transcript 口径，避免两套算法漂移。
+    // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
+    // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
+    return assistantTurnDuration(messages(), props.message)
   })
 
   const childShortcut = useCommandShortcut("session.child.first")
@@ -1711,7 +1718,8 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
               <span style={{ fg: theme.textMuted }}> · {model()}</span>
               <Show when={duration()}>
-                <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
+                <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
+                {/* #243：durationClock 入参毫秒，与运行中 footer 同一口径 */}
               </Show>
               <Show when={props.message.error?.name === "MessageAbortedError"}>
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>

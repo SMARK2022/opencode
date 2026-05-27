@@ -41,7 +41,7 @@ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
-import { formatDuration, formatDurationCompact } from "../../util/format"
+import { formatDuration } from "../../util/format"
 import { getContextLimit } from "../../util/token-estimate"
 import { tokenAccounting } from "../../util/token-accounting"
 // #122：统一 token 统计入口
@@ -51,7 +51,8 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
-import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { activeTurnDuration } from "../../util/session-pending"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
@@ -274,6 +275,7 @@ export function Prompt(props: PromptProps) {
   // 主值是请求累计，括号是全局累计；数值字段仍供节流后的增长脉冲比较。
   // context 与 cost 继续是文本，不混入 token 信号的比较口径。
   type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
+  const isRunning = createMemo(() => status().type !== "idle")
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     if (!props.sessionID) return
@@ -350,7 +352,6 @@ export function Prompt(props: PromptProps) {
     extmarkToPartIndex: Map<number, number>
     interrupt: number
     placeholder: number
-    agentLoopStartTime: number | undefined
   }>({
     placeholder: randomIndex(list().length),
     prompt: {
@@ -360,7 +361,6 @@ export function Prompt(props: PromptProps) {
     mode: "normal",
     extmarkToPartIndex: new Map(),
     interrupt: 0,
-    agentLoopStartTime: undefined,
   })
 
   createEffect(
@@ -373,37 +373,16 @@ export function Prompt(props: PromptProps) {
     ),
   )
 
-  createEffect(
-    on(
-      () => [props.sessionID, status().type] as const,
-      ([sessionID, currentType], previous) => {
-        // idle 结束循环；缺省 Session 不能留下上一页面的计时器。
-        if (!sessionID || currentType === "idle") {
-          setStore("agentLoopStartTime", undefined)
-          return
-        }
-        // Session 切换即使同为 busy 也重置，避免沿用另一会话的耗时；首次 retry 从本地计时，不伪造服务端起点。
-        // 同 Session 的 busy→retry→busy 保留已有起点，恢复状态不会重新开始计时。
-        if (sessionID !== previous?.[0] || store.agentLoopStartTime === undefined) {
-          setStore("agentLoopStartTime", Date.now())
-        }
-      },
-    ),
-  )
-
-  const [elapsedSeconds, setElapsedSeconds] = createSignal(0)
-  // effect 只跟踪起点，retry 通知不重建 interval，每秒只更新独立 signal。
-  createEffect(() => {
-    const start = store.agentLoopStartTime
-    // 毫秒零也是合法起点，只有 undefined 才代表没有循环。
-    if (start === undefined) {
-      setElapsedSeconds(0)
-      return
-    }
-    setElapsedSeconds(Math.floor((Date.now() - start) / 1000))
-    const interval = setInterval(() => { setElapsedSeconds(Math.floor((Date.now() - start) / 1000)) }, 1000)
-    // 起点变化与组件卸载都由创建 interval 的 effect owner 清理旧 tick。
-    onCleanup(() => clearInterval(interval))
+  // #243：耗时口径统一——运行中 footer 用 transcript 时间戳（parent user.created）+
+  // 刷新时钟，重挂载/重连不重新起算
+  // 时钟仅绑定 isRunning：idle 后停 tick，重进 busy 重新起 tick（口径边界不变）
+  const now = createRefreshClock(isRunning)
+  // activeDuration 派生自 now 信号：now 不变时 memo 不重算，tick 成本仅为一次比较
+  const activeDuration = createMemo(() => {
+    // 无 sessionID 时组件尚未绑定会话，耗时无意义；0 让 Show 直接隐藏 footer 计时
+    if (!props.sessionID) return 0
+    // messages 来自 sync 缓存：SSE 重连恢复后时间戳仍在，耗时天然连续
+    return activeTurnDuration(sync.data.message[props.sessionID] ?? [], status(), now())
   })
 
   const promptCommands = createMemo(() =>
@@ -1623,7 +1602,7 @@ export function Prompt(props: PromptProps) {
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between">
           <Switch>
-            <Match when={status().type !== "idle"}>
+            <Match when={isRunning()}>
               <box
                 flexDirection="row"
                 gap={1}
@@ -1656,16 +1635,13 @@ export function Prompt(props: PromptProps) {
                         if (!r) return false
                         return r.message.length > 120
                       })
-                      const [seconds, setSeconds] = createSignal(0)
-                      onMount(() => {
-                        const timer = setInterval(() => {
-                          const next = retry()?.next
-                          if (next) setSeconds(Math.round((next - Date.now()) / 1000))
-                        }, 1000)
-
-                        onCleanup(() => {
-                          clearInterval(timer)
-                        })
+                      // retry 倒计时与耗时显示共享同一 now，两个 UI 不各自持表
+                      const seconds = createMemo(() => {
+                        const next = retry()?.next
+                        // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
+                        // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
+                        // next 是 daemon 下发的重试时间戳；差值不足 1s 时显示 0，不向上取整
+        return next ? Math.round((next - now()) / 1000) : 0
                       })
                       const handleMessageClick = () => {
                         const r = retry()
@@ -1703,10 +1679,11 @@ export function Prompt(props: PromptProps) {
                     </span>
                   </text>
                   {/* 同一运行区在 retry 时仍可见，正秒数才占用 footer 的横向空间。 */}
-                  <Show when={store.agentLoopStartTime !== undefined && elapsedSeconds() > 0}>
+                  <Show when={activeDuration() > 0}>
+                      {/* 0 值隐藏：会话尚未产生任何 assistant 消息时不占 footer 空间 */}
                     <text fg={theme.textMuted}>
                       {"· "}
-                      <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
+                      <span style={{ fg: theme.text }}>{Locale.durationClock(activeDuration())}</span>
                     </text>
                   </Show>
                 </box>
