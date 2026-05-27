@@ -121,6 +121,9 @@ export const LANGUAGE_EXTENSIONS: Record<string, string> = {
   ".mli": "ocaml",
   ".tf": "terraform",
   ".tfvars": "terraform-vars",
+  // #245：TUI 高亮与 LSP 是两张独立扩展名表，源树单表结构下 toml 条目隐含共享；
+  // 目标双表拆分后必须在此显式补入口，否则 edit diff 渲染 .toml 时 filetype() 返回 undefined
+  ".toml": "toml",
   ".hcl": "hcl",
   ".nix": "nix",
   ".typ": "typst",

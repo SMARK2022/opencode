@@ -70,6 +70,11 @@ export default {
     },
     {
       filetype: "bash",
+      // TUI 的文件路径映射沿用 VS Code/LSP 的 `shellscript` 命名，不能为了高亮
+      // 把全局 language id 改成 `bash`，否则会影响 LSP 兼容性。这里仅在
+      // OpenTUI parser 层把常见 shell info-string/扩展名别名收敛到已有 bash
+      // parser，保持行为影响范围只限终端代码高亮，不新增下载项或运行依赖。
+      aliases: ["shellscript", "shell", "sh", "zsh", "ksh"],
       wasm: "https://github.com/tree-sitter/tree-sitter-bash/releases/download/v0.25.0/tree-sitter-bash.wasm",
       queries: {
         highlights: [

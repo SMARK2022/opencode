@@ -114,6 +114,10 @@ export const LANGUAGE_EXTENSIONS: Record<string, string> = {
   ".mli": "ocaml",
   ".tf": "terraform",
   ".tfvars": "terraform-vars",
+  // #245：该表供 LSP 客户端按扩展名选择 language server，toml 缺席会让 TOML 文件
+  // `toml` 是 VS Code 与 OpenTUI parser 共用的标准 language id；这里只补
+  // 已注册 parser 的文件扩展名入口，不改变其他语言的 LSP 语义，也不新增依赖。
+  ".toml": "toml",
   ".hcl": "hcl",
   ".nix": "nix",
   ".typ": "typst",
