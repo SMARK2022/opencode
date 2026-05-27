@@ -58,6 +58,27 @@ export function duration(input: number) {
   return `${days}d ${hours}h`
 }
 
+export function durationClock(input: number) {
+  // 面向“正在刷新”的 turn/clock 展示：起点来自持久化 message timestamp，
+  // 和本地刷新 tick 通常不会整秒对齐；这里必须向下取整，避免 1.1s、2.1s
+  // 这种看起来像计时漂移的小数秒，同时不夸大已经经过的真实耗时。
+  if (input < 1000) return `${input}ms`
+  if (input < 60000) return `${Math.floor(input / 1000)}s`
+  if (input < 3600000) {
+    const minutes = Math.floor(input / 60000)
+    const seconds = Math.floor((input % 60000) / 1000)
+    return `${minutes}m ${seconds}s`
+  }
+  if (input < 86400000) {
+    const hours = Math.floor(input / 3600000)
+    const minutes = Math.floor((input % 3600000) / 60000)
+    return `${hours}h ${minutes}m`
+  }
+  const days = Math.floor(input / 86400000)
+  const hours = Math.floor((input % 86400000) / 3600000)
+  return `${days}d ${hours}h`
+}
+
 export function truncate(str: string, len: number): string {
   if (str.length <= len) return str
   let end = len - 1

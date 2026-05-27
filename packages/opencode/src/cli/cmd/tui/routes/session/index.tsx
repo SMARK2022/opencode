@@ -107,7 +107,12 @@ import { PathFormatterProvider, usePathFormatter } from "../../context/path-form
 // [local-smark] Local TUI features
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
 import { previewDiff } from "@tui/util/preview-diff"
-import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
+import {
+  assistantTurnDuration,
+  pendingAssistantID,
+  shouldCullSessionViewport,
+  shouldRefreshStaleBusyStatus,
+} from "@tui/util/session-pending"
 import { ConnectionError } from "../../util/connection-error"
 import { ContextUsagePanel } from "./context-usage"
 import {
@@ -1588,10 +1593,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
 
   const duration = createMemo(() => {
     if (!final()) return 0
-    if (!props.message.time.completed) return 0
-    const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
-    if (!user || !user.time) return 0
-    return props.message.time.completed - user.time.created
+    // 消息 footer 是完成态的权威展示，耗时必须和运行中 footer 共用
+    // parent user -> assistant completed 的 transcript 口径，避免两套算法漂移。
+    return assistantTurnDuration(messages(), props.message)
   })
 
   const childShortcut = useCommandShortcut("session.child.first")
@@ -1674,7 +1678,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
               <span style={{ fg: theme.textMuted }}> · {model()}</span>
               <Show when={duration()}>
-                <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
+                <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
               </Show>
               <Show when={props.message.error?.name === "MessageAbortedError"}>
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>

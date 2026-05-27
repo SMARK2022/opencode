@@ -42,7 +42,7 @@ import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
 import { tokenAccounting } from "@/token/accounting"
-import { formatDuration, formatDurationCompact } from "@/util/format"
+import { formatDuration } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
@@ -50,7 +50,8 @@ import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 // [local-smark] Token flow pulse and throttled signal for usage display
-import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { activeTurnDuration } from "../../util/session-pending"
 import { DialogSkill } from "../dialog-skill"
 import {
   confirmWorkspaceFileChanges,
@@ -412,7 +413,6 @@ export function Prompt(props: PromptProps) {
     extmarkToPartIndex: Map<number, number>
     interrupt: number
     placeholder: number
-    agentLoopStartTime: number | undefined
   }>({
     placeholder: randomIndex(list().length),
     prompt: {
@@ -422,7 +422,15 @@ export function Prompt(props: PromptProps) {
     mode: "normal",
     extmarkToPartIndex: new Map(),
     interrupt: 0,
-    agentLoopStartTime: undefined,
+  })
+
+  const running = createMemo(() => status().type !== "idle")
+  const now = createRefreshClock(running)
+  const activeDuration = createMemo(() => {
+    if (!props.sessionID) return 0
+    // 左下角耗时只复用 transcript 时间戳口径；now 只是刷新中的临时 end。
+    // 这样权限弹窗、/context 面板或 SSE 重连造成 Prompt 重挂载时不会重新起算。
+    return activeTurnDuration(sync.data.message[props.sessionID] ?? [], status(), now())
   })
 
   createEffect(
@@ -434,35 +442,6 @@ export function Prompt(props: PromptProps) {
       { defer: true },
     ),
   )
-
-  // Track agent loop start time
-  createEffect(
-    on(
-      () => status().type,
-      (currentType, prevType) => {
-        if (currentType === "busy" && prevType !== "busy") {
-          setStore("agentLoopStartTime", Date.now())
-        } else if (currentType === "idle" && prevType !== "idle") {
-          setStore("agentLoopStartTime", undefined)
-        }
-      },
-    ),
-  )
-
-  // Timer signal for agent loop elapsed time
-  const [elapsedSeconds, setElapsedSeconds] = createSignal(0)
-
-  createEffect(() => {
-    if (store.agentLoopStartTime) {
-      const interval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - store.agentLoopStartTime!) / 1000)
-        setElapsedSeconds(elapsed)
-      }, 1000)
-      onCleanup(() => clearInterval(interval))
-    } else {
-      setElapsedSeconds(0)
-    }
-  })
 
   // Initialize agent/model/variant from last user message when session changes.
   //
@@ -1810,7 +1789,7 @@ export function Prompt(props: PromptProps) {
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between">
           <Switch>
-            <Match when={status().type !== "idle"}>
+            <Match when={running()}>
               <box
                 flexDirection="row"
                 gap={1}
@@ -1843,16 +1822,11 @@ export function Prompt(props: PromptProps) {
                         if (!r) return false
                         return r.message.length > 120
                       })
-                      const [seconds, setSeconds] = createSignal(0)
-                      onMount(() => {
-                        const timer = setInterval(() => {
-                          const next = retry()?.next
-                          if (next) setSeconds(Math.round((next - Date.now()) / 1000))
-                        }, 1000)
-
-                        onCleanup(() => {
-                          clearInterval(timer)
-                        })
+                      const seconds = createMemo(() => {
+                        const next = retry()?.next
+                        // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
+                        // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
+                        return next ? Math.round((next - now()) / 1000) : 0
                       })
                       const handleMessageClick = () => {
                         const r = retry()
@@ -1889,10 +1863,10 @@ export function Prompt(props: PromptProps) {
                       {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
                     </span>
                   </text>
-                  <Show when={store.agentLoopStartTime && elapsedSeconds() > 0}>
+                  <Show when={activeDuration() > 0}>
                     <text fg={theme.textMuted}>
                       {"· "}
-                      <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
+                      <span style={{ fg: theme.text }}>{Locale.durationClock(activeDuration())}</span>
                     </text>
                   </Show>
                 </box>

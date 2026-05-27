@@ -17,6 +17,24 @@ export function createThrottledSignal<T>(value: T, ms: number): [Accessor<T>, (v
   return [get, trigger]
 }
 
+export function createRefreshClock(active: Accessor<boolean>, ms = 1000) {
+  const [now, setNow] = createSignal(Date.now())
+
+  createEffect(
+    on(active, (enabled) => {
+      // 这个 clock 只负责驱动 UI 重新计算“当前时间”，不持有业务计时起点。
+      // 耗时边界必须继续来自 session messages，保证重连和组件重挂载后口径不变。
+      setNow(Date.now())
+      if (!enabled) return
+
+      const timer = setInterval(() => setNow(Date.now()), ms)
+      onCleanup(() => clearInterval(timer))
+    }),
+  )
+
+  return now
+}
+
 export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>) {
   const [alpha, setAlpha] = createSignal(show() ? 1 : 0)
   let revealed = show()
