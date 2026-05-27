@@ -830,6 +830,69 @@ describe("session.compaction.prune", () => {
 })
 
 describe("session.compaction.process", () => {
+  itCompaction.instance(
+    "runs compaction as a completed boundary without a runnable task",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+
+        const result = yield* SessionCompaction.use.run({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          auto: false,
+        })
+
+        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
+        const latest = MessageV2.latest(filtered)
+
+        expect(result).toBe("continue")
+        expect(filtered.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(true)
+        expect(
+          filtered.some((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")),
+        ).toBe(true)
+        expect(latest.tasks).toEqual([])
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "hides visible compaction state when interrupted before summary request starts",
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>()
+        return yield* Effect.gen(function* () {
+          const ssn = yield* SessionNs.Service
+          const session = yield* ssn.create({})
+          yield* createUserMessage(session.id, "hello")
+          const fiber = yield* SessionCompaction.use
+            .run({
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: false,
+            })
+            .pipe(Effect.forkChild)
+
+          yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
+          yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
+          const all = yield* ssn.messages({ sessionID: session.id })
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+          expect(all.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
+          expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
+        }).pipe(withCompaction({ plugin: plugin(ready) }))
+      }),
+    { git: true },
+  )
+
   it.instance(
     "throws when parent is not a user message",
     Effect.gen(function* () {
@@ -1512,7 +1575,7 @@ describe("session.compaction.process", () => {
         yield* createUserMessage(session.id, "latest turn")
         yield* createCompactionMarker(session.id)
 
-        msgs = MessageV2.filterCompacted(MessageV2.stream(session.id))
+        msgs = yield* ssn.messages({ sessionID: session.id })
         parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
@@ -1548,7 +1611,7 @@ describe("session.compaction.process", () => {
       const u4 = yield* createUserMessage(session.id, "four")
       yield* createCompactionMarker(session.id)
 
-      msgs = MessageV2.filterCompacted(MessageV2.stream(session.id))
+      msgs = yield* ssn.messages({ sessionID: session.id })
       parent = msgs.at(-1)?.info.id
       expect(parent).toBeTruthy()
       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })

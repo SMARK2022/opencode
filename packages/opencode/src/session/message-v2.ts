@@ -69,11 +69,19 @@ export { isMedia }
 // Hidden messages remain persisted for audit/recovery, but are removed from
 // normal prompt replay and visible history. Each reason names the workflow that
 // owns the invisibility boundary: undo hides reverted turns, repair hides empty
-// dangling assistants, and permission-reviewer protocol retry hides malformed
-// reviewer attempts before the same permission request is retried once.
+// dangling assistants, permission-reviewer protocol retry hides malformed
+// reviewer attempts before the same permission request is retried once, and
+// compaction-cancelled hides scratch compact markers that never became a
+// completed summary boundary. The last case must stay distinct from undo so a
+// cancelled maintenance operation cannot be mistaken for user-request rollback.
 const Hidden = Schema.Struct({
   time: NonNegativeInt,
-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
+  reason: Schema.Literals([
+    "undo",
+    "repair-empty-dangling-assistant",
+    "permission-reviewer-protocol-retry",
+    "compaction-cancelled",
+  ]),
 })
 
 // OutputLengthError is re-exported from ./message-error above
@@ -1136,10 +1144,13 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   const completed = new Set<string>()
   let retain: MessageID | undefined
   // Hidden messages can still be structural compaction anchors, but they must
-  // never be replayed to providers after undo/repair.  Keep them during the
-  // boundary walk and strip them only from the returned prompt window.
+  // never be replayed to providers after undo/repair. Keep them during the
+  // boundary walk and strip them only from the returned prompt window. A
+  // compaction marker is replayable only after a successful summary exists;
+  // dangling markers are maintenance scratch state and would otherwise revive a
+  // stale compact or inject "What did we do so far?" into later user prompts.
   const visible = (items: WithParts[]) =>
-    items
+    visibleCompactions(items)
       .filter((msg) => !msg.info.hidden)
       .map((msg) => ({
         ...msg,
@@ -1159,8 +1170,6 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       if (msg.info.id === retain) break
       continue
     }
-    if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
-      break
     if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
       completed.add(msg.info.parentID)
     }
@@ -1195,6 +1204,35 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   return visible(result)
 }
 
+function visibleCompactions(items: WithParts[]) {
+  // Only a user(compaction) paired with a finished, non-errored summary assistant
+  // is a durable boundary. Failed or abandoned markers are local maintenance
+  // debris: keep unrelated messages, but remove the marker/summary pair before
+  // prompt replay and latest-task detection see it.
+  const compactions = new Set(
+    items
+      .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
+      .map((msg) => msg.info.id),
+  )
+  const completed = new Set(
+    items.flatMap((msg): MessageID[] => {
+      if (msg.info.role !== "assistant") return []
+      if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
+      if (!compactions.has(msg.info.parentID)) return []
+      return [msg.info.parentID]
+    }),
+  )
+  return items.filter((msg) => {
+    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
+      return completed.has(msg.info.id)
+    }
+    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) {
+      return completed.has(msg.info.parentID)
+    }
+    return true
+  })
+}
+
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
   return filterCompacted(stream(sessionID))
 })
@@ -1203,9 +1241,9 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array
 // position is not chronological. Derive each binding by max id (MessageID
 // is monotonic via MessageID.ascending) so a pre-compaction overflowing tail
-// assistant doesn't get mistaken for the most recent turn. tasks are
-// compaction/subtask parts attached to user messages newer than the latest
-// finished assistant — i.e. unprocessed work.
+// assistant doesn't get mistaken for the most recent turn. Compaction is not a
+// replayable task anymore: producers run it directly, and consumers only keep
+// completed boundaries, which prevents stale compact markers from restarting.
 export function latest(msgs: WithParts[]) {
   let user: User | undefined
   let assistant: Assistant | undefined
@@ -1219,7 +1257,7 @@ export function latest(msgs: WithParts[]) {
   const tasks = msgs.flatMap((m) =>
     finished && m.info.id <= finished.id
       ? []
-      : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
+      : m.parts.filter((p): p is SubtaskPart => p.type === "subtask"),
   )
   return { user, assistant, finished, tasks }
 }

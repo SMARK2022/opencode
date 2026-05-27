@@ -653,20 +653,20 @@ describe("MessageV2.filterCompacted", () => {
     }),
   )
 
-  it.instance("does not break on compaction part without matching summary", () =>
+  it.instance("drops compaction marker without matching summary", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "hello")
         yield* addCompactionPart(sessionID, u1)
-        yield* addUser(sessionID, "world")
+        const u2 = yield* addUser(sessionID, "world")
 
         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
-        expect(result).toHaveLength(2)
+        expect(result.map((item) => item.info.id)).toEqual([u2])
       }),
     ),
   )
 
-  it.instance("skips assistant with error even if marked as summary", () =>
+  it.instance("drops compaction marker with errored summary", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "hello")
@@ -677,16 +677,15 @@ describe("MessageV2.filterCompacted", () => {
           isRetryable: true,
         }).toObject() as MessageV2.Assistant["error"]
         yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
-        yield* addUser(sessionID, "retry")
+        const retry = yield* addUser(sessionID, "retry")
 
         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
-        // Error assistant doesn't add to completed, so compaction boundary never triggers
-        expect(result).toHaveLength(3)
+        expect(result.map((item) => item.info.id)).toEqual([retry])
       }),
     ),
   )
 
-  it.instance("skips assistant without finish even if marked as summary", () =>
+  it.instance("drops compaction marker with unfinished summary", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "hello")
@@ -694,10 +693,25 @@ describe("MessageV2.filterCompacted", () => {
 
         // summary=true but no finish
         yield* addAssistant(sessionID, u1, { summary: true })
-        yield* addUser(sessionID, "next")
+        const next = yield* addUser(sessionID, "next")
 
         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
-        expect(result).toHaveLength(3)
+        expect(result.map((item) => item.info.id)).toEqual([next])
+      }),
+    ),
+  )
+
+  it.instance("does not expose incomplete compaction as a runnable task", () =>
+    withSession(({ sessionID }) =>
+      Effect.gen(function* () {
+        const u1 = yield* addUser(sessionID, "hello")
+        yield* addCompactionPart(sessionID, u1)
+        const u2 = yield* addUser(sessionID, "world")
+
+        const result = MessageV2.latest(MessageV2.filterCompacted(MessageV2.stream(sessionID)))
+
+        expect(result.user?.id).toBe(u2)
+        expect(result.tasks).toEqual([])
       }),
     ),
   )

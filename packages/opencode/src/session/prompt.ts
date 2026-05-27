@@ -297,6 +297,13 @@ export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts>
+  readonly compact: (input: {
+    sessionID: SessionID
+    agent: string
+    model: { providerID: ProviderID; modelID: ModelID }
+    auto?: boolean
+    overflow?: boolean
+  }) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
@@ -1928,6 +1935,34 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       throw new Error("Impossible")
     })
 
+    const compact: Interface["compact"] = Effect.fn("SessionPrompt.compact")(function* (input) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      // Runner.ensureRunning joins an existing prompt instead of queueing new
+      // work. Compact must reject busy sessions explicitly so the caller sees a
+      // real busy response rather than a successful no-op, while still avoiding
+      // the old persisted pending-marker queue.
+      yield* state.assertNotBusy(input.sessionID)
+      yield* revert.cleanup(session)
+      return yield* state.ensureRunning(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        Effect.gen(function* () {
+          // Manual compact uses the same runner/cancel boundary as normal prompts,
+          // but it invokes the producer directly. The persisted compaction marker
+          // is therefore a completed boundary only, never a queued command that a
+          // future loop can pick up from stale history.
+          yield* compaction.run({
+            sessionID: input.sessionID,
+            agent: input.agent,
+            model: input.model,
+            auto: input.auto ?? false,
+            overflow: input.overflow,
+          })
+          return yield* lastAssistant(input.sessionID)
+        }),
+      )
+    })
+
     const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
       messages: MessageV2.WithParts[]
       model: Provider.Model
@@ -2022,27 +2057,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (task?.type === "subtask") {
             yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
-            continue
-          }
-
-          if (task?.type === "compaction") {
-            const result = yield* compaction.process({
-              messages: msgs,
-              parentID: lastUser.id,
-              sessionID,
-              auto: task.auto,
-              overflow: task.overflow,
-            })
-            if (result === "stop") break
-            // Manual compaction is a terminal maintenance action: the user asked only
-            // to rewrite history into a summary.  After compaction, filterCompacted()
-            // intentionally appends the retained tail after the summary so the next
-            // model request can still see recent context.  If we immediately loop
-            // again for a manual compaction, that retained tail can look like the
-            // newest build turn and resume old tool-call work without a user prompt.
-            // Auto-compaction keeps looping because it may have created an explicit
-            // synthetic follow-up message to continue the interrupted request.
-            if (!task.auto) break
             continue
           }
 
@@ -2257,12 +2271,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 model,
               })
             ) {
-              yield* compaction.create({
+              // Auto-compaction is executed directly instead of queued as a
+              // history task. This keeps the producer side from persisting a
+              // stale compact command that a later prompt or undo could replay.
+              const compacted = yield* compaction.run({
                 sessionID,
                 agent: lastUser.agent,
                 model: lastUser.model,
                 auto: true,
               })
+              if (compacted === "stop") return "break" as const
               return "continue" as const
             }
             handle.message.tokens.input = estimatedInput
@@ -2310,13 +2328,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
-              yield* compaction.create({
+              // Provider overflow happens after a real assistant attempt, so run
+              // compaction immediately against the current session snapshot rather
+              // than leaving a replayable marker behind for the next loop pass.
+              const compacted = yield* compaction.run({
                 sessionID,
                 agent: lastUser.agent,
                 model: lastUser.model,
                 auto: true,
                 overflow: !handle.message.finish,
               })
+              if (compacted === "stop") return "break" as const
             }
             return "continue" as const
           }).pipe(
@@ -2467,6 +2489,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       cancel,
       prompt,
       loop,
+      compact,
       shell,
       command,
       resolvePromptParts,

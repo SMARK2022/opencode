@@ -2002,6 +2002,40 @@ it.instance(
   { git: true },
 )
 
+it.instance(
+  "compact rejects with BusyError when loop running",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      yield* llm.hang
+
+      const chat = yield* sessions.create({})
+      yield* user(chat.id, "hi")
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      const exit = yield* prompt
+        .compact({ sessionID: chat.id, agent: "build", model: ref })
+        .pipe(Effect.timeout("250 millis"), Effect.exit)
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
+        expect(Cause.squash(exit.cause)).toMatchObject({ _tag: "SessionBusyError", sessionID: chat.id })
+      }
+      expect(messages.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
+
+      yield* prompt.cancel(chat.id)
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+  3_000,
+)
+
 // Shell semantics
 
 it.instance(

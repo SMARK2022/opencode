@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 import { ModelID, ProviderID } from "@/provider/schema"
-import { Effect, Layer, Context, Option, Schema } from "effect"
+import { Effect, Layer, Context, Option, Schema, Exit } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
@@ -208,6 +208,13 @@ export interface Interface {
     model: Provider.Model
   }) => Effect.Effect<boolean>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
+  readonly run: (input: {
+    sessionID: SessionID
+    agent: string
+    model: { providerID: ProviderID; modelID: ModelID }
+    auto: boolean
+    overflow?: boolean
+  }) => Effect.Effect<"continue" | "stop">
   readonly process: (input: {
     parentID: MessageID
     messages: MessageV2.WithParts[]
@@ -221,7 +228,7 @@ export interface Interface {
     model: { providerID: ProviderID; modelID: ModelID }
     auto: boolean
     overflow?: boolean
-  }) => Effect.Effect<void>
+  }) => Effect.Effect<MessageV2.User>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
@@ -671,6 +678,10 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      // The user marker is written before the summary assistant so streaming and
+      // legacy tests can observe the same persisted boundary shape. It remains
+      // scratch state until processCompaction writes a successful summary; prompt
+      // consumers deliberately ignore incomplete markers.
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
@@ -694,11 +705,79 @@ export const layer = Layer.effect(
           reason: input.auto ? "auto" : "manual",
         })
       }
+      return msg
+    })
+
+    const hideIncomplete = Effect.fn("SessionCompaction.hideIncomplete")(function* (input: {
+      sessionID: SessionID
+      parentID: MessageID
+    }) {
+      // Interrupts can happen after the scratch marker is visible but before the
+      // summary request starts. Hide only this compaction pair, and only if no
+      // successful summary exists, so completed boundaries keep anchoring history.
+      const messages = yield* session
+        .messages({ sessionID: input.sessionID })
+        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as MessageV2.WithParts[])))
+      const completed = messages.some(
+        (msg) =>
+          msg.info.role === "assistant" &&
+          msg.info.parentID === input.parentID &&
+          msg.info.summary &&
+          msg.info.finish &&
+          !msg.info.error,
+      )
+      if (completed) return
+      const now = Date.now()
+      for (const msg of messages) {
+        const marker = msg.info.id === input.parentID && msg.parts.some((part) => part.type === "compaction")
+        const summary = msg.info.role === "assistant" && msg.info.parentID === input.parentID && msg.info.summary
+        if (!marker && !summary) continue
+        const next = {
+          ...msg.info,
+          hidden: { time: now, reason: "compaction-cancelled" as const },
+        }
+        if (next.role === "assistant" && !next.time.completed) {
+          next.time.completed = now
+          next.error ??= new MessageV2.AbortedError({ message: "Aborted by compact cancellation" }).toObject()
+        }
+        yield* session.updateMessage(next)
+      }
+    })
+
+    const run = Effect.fn("SessionCompaction.run")(function* (input: {
+      sessionID: SessionID
+      agent: string
+      model: { providerID: ProviderID; modelID: ModelID }
+      auto: boolean
+      overflow?: boolean
+    }) {
+      let parentID: MessageID | undefined
+      return yield* Effect.gen(function* () {
+        const msg = yield* create(input)
+        parentID = msg.id
+        return yield* processCompaction({
+          parentID: msg.id,
+          messages: yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie),
+          sessionID: input.sessionID,
+          auto: input.auto,
+          overflow: input.overflow,
+        })
+      }).pipe(
+        Effect.onExit((exit) => {
+          // Compact markers are scratch state until a successful summary assistant
+          // exists. Interrupt cleanup keeps visible history tidy for Ctrl-C/abort,
+          // while MessageV2.filterCompacted remains the correctness guard for hard
+          // process exits where finalizers cannot run.
+          if (Exit.isSuccess(exit) || !parentID) return Effect.void
+          return hideIncomplete({ sessionID: input.sessionID, parentID })
+        }),
+      )
     })
 
     return Service.of({
       isOverflow,
       prune,
+      run,
       process: processCompaction,
       create,
     })
