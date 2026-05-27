@@ -84,7 +84,10 @@ export interface GrepInput {
   readonly cwd: string
   readonly pattern: string
   readonly file?: string
-  readonly include?: string
+  // 未传预算的内部调用保持原行为；交互工具使用同一入口展开过滤与受控中止。
+  readonly include?: string | readonly string[]
+  readonly exclude?: string | readonly string[]
+  readonly timeout?: number | false
   readonly limit: number
   // #138：false 关闭候选上限
   readonly maxFiles?: number | false
@@ -95,6 +98,8 @@ export interface SearchResult {
   readonly items: readonly Match[]
   readonly truncated: boolean
   readonly partial: boolean
+  // 时间截断独立于数量截断，空items不能被解释为完整搜索无匹配。
+  readonly timedOut?: boolean
 }
 
 export interface Interface {
@@ -123,6 +128,7 @@ const layer = Layer.effect(
       readonly args: string[]
       readonly limit: number
       readonly signal?: AbortSignal
+      readonly timeout?: number | false
       readonly parse: (line: string) => Effect.Effect<A | undefined, Error>
       readonly pattern?: string
       readonly onItem?: (item: A) => Effect.Effect<void>
@@ -132,6 +138,17 @@ const layer = Layer.effect(
           const handle = yield* process.spawn(
             ChildProcess.make(yield* binary.filepath, input.args, { cwd: input.cwd, extendEnv: true, stdin: "ignore" }),
           )
+          // 预算仅终止本次rg，保留已解析结果；用户取消仍由原race与作用域清理负责。
+          let timedOut = false
+          if (input.timeout !== false && input.timeout !== undefined && input.timeout > 0) {
+            yield* Effect.forkScoped(
+              Effect.sleep(`${input.timeout} millis`).pipe(
+                Effect.tap(() => Effect.sync(() => { timedOut = true })),
+                Effect.flatMap(() => handle.kill({ forceKillAfter: "3 seconds" })),
+                Effect.ignore,
+              ),
+            )
+          }
           const stderrFiber = yield* collectStream(handle.stderr, ERROR_BYTES).pipe(
             Effect.map((output) => output.buffer.toString("utf8")),
             Effect.forkScoped,
@@ -140,7 +157,12 @@ const layer = Layer.effect(
           const rows = yield* Stream.decodeText(handle.stdout).pipe(
             Stream.splitLines,
             Stream.filter((line) => line.length > 0),
-            Stream.mapEffect(input.parse),
+            Stream.mapEffect((line) =>
+              input.parse(line).pipe(
+                // 超时kill可能截断末行JSON；普通解析失败依旧暴露，不丢此前完整匹配。
+                Effect.catch((err) => timedOut ? Effect.succeed(undefined) : Effect.fail(err)),
+              ),
+            ),
             Stream.filter((row): row is A => row !== undefined),
             Stream.tap((row) => {
               if (!input.onItem || observed++ >= input.limit) return Effect.void
@@ -154,20 +176,32 @@ const layer = Layer.effect(
           if (truncated) {
             // #138：达到结果上限后主动 kill，避免超大仓库继续全量扫描
             yield* handle.kill().pipe(Effect.ignore)
-            return { items: rows.slice(0, input.limit), truncated, partial: false }
+            return { items: rows.slice(0, input.limit), truncated, partial: false, timedOut: timedOut || undefined }
           }
 
-          const code = yield* handle.exitCode
+          const code = yield* handle.exitCode.pipe(
+            // 主动预算中止不是运输失败，外部取消和其他进程故障保持原错误通道。
+            Effect.catch((err) => timedOut ? Effect.succeed(0) : Effect.fail(err)),
+          )
           const stderr = yield* Fiber.join(stderrFiber)
           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
           }
           // 原 source 对无匹配且带诊断的 exit2 判为失败，不能伪装成 partial 空结果。
-          if (code === 2 && rows.length === 0 && stderr.trim()) return yield* failure(stderr.trim())
+          if (code === 2 && rows.length === 0 && stderr.trim() && !timedOut) return yield* failure(stderr.trim())
           if (code !== 0 && code !== 1 && code !== 2) {
             return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
           }
-          return { items: code === 1 ? [] : rows, truncated: false, partial: code === 2 }
+          // kill与正则诊断可能竞态，空结果仍须暴露已确认的无效表达式。
+          if (timedOut && rows.length === 0 && input.pattern && isInvalidPattern(stderr)) {
+            return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
+          }
+          return {
+            items: code === 1 && !timedOut ? [] : rows,
+            truncated: false,
+            partial: code === 2,
+            timedOut: timedOut || undefined,
+          }
         }),
       )
       const abortable = input.signal ? program.pipe(Effect.raceFirst(waitForAbort(input.signal))) : program
@@ -179,6 +213,10 @@ const layer = Layer.effect(
         ),
       )
     }
+
+    // 空glob不改变搜索语义，复制数组后复用同一service及既有find/glob布局。
+    const patterns = (input?: string | readonly string[]) =>
+      !input ? [] : (Array.isArray(input) ? [...input] : [input]).filter((item) => item.length > 0)
 
     const service: Interface = {
       glob: (input) =>
@@ -248,6 +286,11 @@ const layer = Layer.effect(
       grep: (input) => service.search(input).pipe(Effect.map((result) => result.items)),
       search: (input) =>
         Effect.gen(function* () {
+          // 排除项放在包含项之后收窄候选，已有!保持原意，两个扫描阶段共用顺序。
+          const globs = [
+            ...patterns(input.include),
+            ...patterns(input.exclude).map((item) => item.startsWith("!") ? item : `!${item}`),
+          ]
           // #138：先限制候选文件数
           const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
           if (maxFiles !== undefined) {
@@ -266,7 +309,7 @@ const layer = Layer.effect(
                   "--no-config",
                   "--files",
                   "--hidden",
-                  ...(input.include ? [`--glob=${input.include}`] : []),
+                  ...globs.map((item) => `--glob=${item}`),
                   "--glob=!**/.git/**",
                   input.file ?? ".",
                 ],
@@ -294,7 +337,7 @@ const layer = Layer.effect(
             "--json",
             "--hidden",
             "--no-messages",
-            ...(input.include ? [`--glob=${input.include}`] : []),
+            ...globs.map((item) => `--glob=${item}`),
             "--glob=!**/.git/**",
             "--",
             input.pattern,

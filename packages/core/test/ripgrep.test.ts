@@ -29,6 +29,8 @@ describe("Ripgrep", () => {
         yield* Effect.promise(() => Bun.write(path.join(tmp.path, "exact.txt"), "needle\n".repeat(64)))
         const limits: number[] = []
         const sizes: number[] = []
+        const searches: Ripgrep.GrepInput[] = []
+        let forced: Ripgrep.SearchResult | undefined
         const assertions: PermissionV2.AssertInput[] = []
         let kills = 0
         // 只观察实际 handle.kill 的执行，stdout、退出码和作用域清理仍由真实进程提供。
@@ -51,9 +53,9 @@ describe("Ripgrep", () => {
           const native = yield* Ripgrep.Service
           return Ripgrep.Service.of({
             ...native,
-            // 单文件保留正式默认预算；目录用小候选门限验证真实拒绝和模型纠正提示。
-            search: (input) => Effect.sync(() => limits.push(input.limit)).pipe(
-              Effect.andThen(native.search({ ...input, maxFiles: input.file ? input.maxFiles : 1 })),
+            // 交互工具必须显式关闭候选预算；内部调用仍以小门限验证原拒绝语义。
+            search: (input) => Effect.sync(() => { limits.push(input.limit); searches.push(input) }).pipe(
+              Effect.andThen(Effect.suspend(() => forced ? Effect.succeed(forced) : native.search({ ...input, maxFiles: input.maxFiles === false ? false : input.file ? input.maxFiles : 1 }))),
               Effect.tap((result) => Effect.sync(() => sizes.push(result.items.length))),
             ),
           })
@@ -91,11 +93,28 @@ describe("Ripgrep", () => {
           expect(kills).toBe(3)
           expect(limits).toEqual([64, 3, 80, 64])
           expect(sizes).toEqual([64, 3, 80, 64])
-          const broad = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "grep-broad", name: "grep", input: { pattern: "needle", path: "." } } })
-          const failure = broad.result.type === "error" ? String(broad.result.value) : ""
-          expect(failure).toContain("more than 1 candidate files")
-          expect(failure).toContain("Use a narrower path or include pattern before searching file contents.")
-          expect(assertions).toHaveLength(5)
+          // 真实过滤与Native显式limit共同生效，交互搜索不再按文件数拒绝。
+          const broad = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "grep-broad", name: "grep", input: { pattern: "needle", path: ".", include: ["*.txt"], exclude: ["exact.txt"], limit: 3 } } })
+          const filtered = Schema.decodeUnknownSync(GrepTool.Output)(broad.output?.structured)
+          expect(filtered.items).toHaveLength(3)
+          expect(filtered.items.every((match) => match.entry.path === "matches.txt")).toBe(true)
+          expect(searches.at(-1)).toMatchObject({ include: ["*.txt"], exclude: ["exact.txt"], timeout: 10_000, maxFiles: false })
+          const internal = yield* Ripgrep.Service.use((rg) => rg.grep({ cwd: tmp.path, pattern: "needle", limit: 3, maxFiles: 1 })).pipe(Effect.provide(LayerNode.compile(Ripgrep.node)), Effect.flip)
+          expect(internal).toBeInstanceOf(Ripgrep.SearchTooBroadError)
+          // 只替换搜索结果来验证真实leaf投影；空和部分超时均不能伪装为无匹配。
+          for (const items of [[], filtered.items.slice(0, 1)]) {
+            forced = { items, partial: false, truncated: false, timedOut: true }
+            const timed = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: `grep-timeout-${items.length}`, name: "grep", input: { pattern: "needle", path: ".", timeout: 1 } } })
+            const output = Schema.decodeUnknownSync(GrepTool.Output)(timed.output?.structured)
+            expect(output.timedOut).toBe(true)
+            expect(output.timeout).toBe(1)
+            const text = timed.result.type === "text" ? timed.result.value : ""
+            expect(text).toContain("timed out after 1 ms")
+            expect(text).not.toContain("No files found")
+            if (items.length) expect(text).toContain("Line 1: needle")
+            expect(searches.at(-1)).toMatchObject({ timeout: 1, maxFiles: false })
+          }
+          expect(assertions).toHaveLength(7)
           expect(assertions.every((input) => input.action === "grep" && input.source?.type === "tool")).toBe(true)
         }).pipe(Effect.provide(graph))
       }),
@@ -217,6 +236,56 @@ describe("Ripgrep", () => {
           const single = yield* ripgrep.search({ cwd: tmp.path, file: "one.txt", pattern: "needle", limit: 10, maxFiles: 1 })
           expect(single.items).toHaveLength(1)
           expect(single.truncated).toBe(false)
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // #244：真实 rg 进程需要足够大的输入才能稳定越过 1ms 预算；该测试验证公开
+  // Ripgrep.search 行为，不断言内部 kill 调用形状，避免和进程实现耦合
+  it.live("search timeout returns a bounded partial result instead of failing", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "large.txt"), "x".repeat(4 * 1024 * 1024)))
+
+          const result = yield* (yield* Ripgrep.Service).search({
+            cwd: tmp.path,
+            pattern: "needle",
+            limit: 10,
+            timeout: 1,
+          })
+
+          // #244：truncated=false 锁定「时间截断≠条数截断」，避免误报上限提示
+          // #244：timedOut 必须置位且 truncated 不置位——两者语义独立：
+          // 时间预算耗尽 ≠ 结果条数达到上限，调用方依赖这个区别生成提示
+          expect(result.items).toEqual([])
+          expect(result.timedOut).toBe(true)
+          expect(result.truncated).toBe(false)
+          // #244：partial 恒为 false 的契约——受控截断不等于路径不可访问，
+          // 两者语义正交，调用方需分别提示
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // #244：timeout 存在时，正则语法错误仍是 rg 的真实失败，
+  // 不能被降级成「超时后的空部分结果」
+  it.live("search timeout does not hide invalid regex errors", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.txt"), "needle\n"))
+
+          const exit = yield* (yield* Ripgrep.Service)
+            .search({ cwd: tmp.path, pattern: "(", limit: 10, timeout: 1000 })
+            .pipe(Effect.exit)
+
+          // #244：1000ms 预算远长于正则错误浮出时间——确保失败来自真实正则错误
+          // 而非超时路径，锁定错误语义优先级：真实失败 > 受控截断
+          expect(exit._tag).toBe("Failure")
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
