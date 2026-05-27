@@ -1,11 +1,51 @@
-import { Effect, Schedule, Stream } from "effect"
-import { Headers, HttpClientRequest } from "effect/unstable/http"
+import { Cause, Clock, Effect, Schedule, Stream } from "effect"
+import { Headers, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
+import { FetchTiming } from "../http-timing"
 import { Auth } from "../auth"
 import { render as renderEndpoint } from "../endpoint"
 import { Framing, type Framing as FramingDef } from "../framing"
 import type { Transport, TransportPrepareInput } from "./index"
 import * as ProviderShared from "../../protocols/shared"
 import { LLMError, TransportReason, mergeJsonRecords, type LLMRequest } from "../../schema"
+
+function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LLMRequest) {
+  const timing = FetchTiming.responses.get(response)
+  if (!timing || !response.headers["content-type"]?.includes("text/event-stream")) return response.stream
+  return Stream.unwrap(Effect.gen(function* () {
+    let lastChunkAt = yield* Clock.currentTimeMillis
+    let chunkCount = 0
+    let bytes = 0
+    let maxGapMs = 0
+    const log = (phase: string, extra: Record<string, unknown> = {}) => Clock.currentTimeMillis.pipe(
+      Effect.flatMap((now) => Effect.logInfo("timing", {
+        phase, requestID: timing.requestID, elapsedMs: now - timing.startedAt,
+        providerID: request.model.provider, modelID: request.model.id,
+        sessionID: response.request.headers["x-session-affinity"] ?? response.request.headers["x-opencode-session"],
+        chunkCount, bytes, maxGapMs, idleMs: now - lastChunkAt, ...extra,
+      })),
+      Effect.annotateLogs({ service: "provider.fetch" }),
+    )
+    return response.stream.pipe(
+      Stream.tap((chunk) => Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const gapMs = now - lastChunkAt
+        lastChunkAt = now
+        chunkCount++
+        bytes += chunk.byteLength
+        maxGapMs = Math.max(maxGapMs, gapMs)
+        // 心跳先计原始首块，191的started仍只在交付协议frame时改变。
+        if (chunkCount === 1) yield* log("sse.first_chunk", { gapMs, bytes: chunk.byteLength })
+      })),
+      Stream.tapError((error) => {
+        const cause = "cause" in error.reason ? error.reason.cause : undefined
+        const timeout = Cause.isTimeoutError(cause) || (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "SSE_READ_TIMEOUT")
+        return log(timeout ? "sse.timeout" : "sse.error", { errorName: error.name, errorKind: error.reason._tag })
+      }),
+      // 只在原始EOF记end；语义提前结束或取消不额外drain，也不伪报完成。
+      Stream.onEnd(log("sse.end")),
+    )
+  }))
+}
 
 export type JsonRequestInput<Body> = TransportPrepareInput<Body>
 
@@ -132,9 +172,10 @@ export const httpJson = <Body, Frame>(input: HttpJsonInput<Body, Frame>): HttpJs
       let started = false
       const frames = Stream.unwrap(
         runtime.http.execute(prepared.request).pipe(
+          Effect.annotateLogs({ providerID: request.model.provider, modelID: request.model.id, sessionID: prepared.request.headers["x-session-affinity"] ?? prepared.request.headers["x-opencode-session"] }),
           Effect.map((response) =>
             prepared.framing.frame(
-              response.stream.pipe(
+              observeSSE(response, request).pipe(
                 // 字节读取失败是运输故障；协议/JSON解码仍在原有不可重试分支。
                 Stream.mapError((error) => new LLMError({
                   module: "HttpTransport",

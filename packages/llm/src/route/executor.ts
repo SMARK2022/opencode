@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Layer, Random } from "effect"
+import { Cause, Clock, Context, Effect, Layer, Random } from "effect"
 import {
   FetchHttpClient,
   Headers,
@@ -23,6 +23,7 @@ import {
   UnknownProviderReason,
 } from "../schema"
 import { isContextOverflow } from "../provider-error"
+import { FetchTiming } from "./http-timing"
 
 export interface Interface {
   readonly execute: (
@@ -369,10 +370,25 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
     const http = yield* HttpClient.HttpClient
     const executeOnce = (request: HttpClientRequest.HttpClientRequest) =>
       Effect.gen(function* () {
+        const timing = FetchTiming.begin(yield* Clock.currentTimeMillis)
+        const log = (phase: string, fields: Record<string, unknown> = {}) => Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) => Effect.logInfo("timing", { phase, requestID: timing.requestID, elapsedMs: now - timing.startedAt, ...fields })),
+          Effect.annotateLogs({ service: "provider.fetch" }),
+        )
+        // 重试每次真实发出请求都取得独立ID；只量已缓冲字节，不读取正文或凭据。
+        yield* log("fetch.start", { method: request.method, bodyBytes: request.body._tag === "Uint8Array" ? request.body.body.byteLength : undefined })
         const redactedNames = yield* Headers.CurrentRedactedNames
-        return yield* http
+        const response = yield* http
           .execute(request)
-          .pipe(Effect.mapError(toHttpError(redactedNames)), Effect.flatMap(statusError(request, redactedNames)))
+          .pipe(
+            Effect.mapError(toHttpError(redactedNames)),
+            Effect.tapError((error) => log("fetch.error", { errorName: error.name, errorKind: error.reason._tag, errorCode: error.reason._tag === "Transport" ? error.reason.kind : undefined })),
+          )
+        FetchTiming.responses.set(response, timing)
+        const contentType = response.headers["content-type"]
+        // 响应头先于状态分类记录，非2xx不能被误判为尚未收到HTTP响应。
+        yield* log("fetch.response", { status: response.status, contentType, isSSE: contentType?.includes("text/event-stream") ?? false })
+        return yield* statusError(request, redactedNames)(response)
       })
     return Service.of({
       execute: (request) => retryStatusFailures(executeOnce(request)),

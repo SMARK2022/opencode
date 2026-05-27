@@ -1,3 +1,4 @@
+import { Logger } from "effect"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
@@ -752,6 +753,43 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
   })
 }
 
+  // #240：心跳注释块是合法 SSE 帧但非模型输出——首块计数为 1 后永久停滞
+function createStalledEventResponse() {
+  const encoder = new TextEncoder()
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(": heartbeat\n\n"))
+      },
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    },
+  )
+}
+
+  // #240：真实 Logger 捕获而非 console 替换——bridge fork 的日志继承测试环境
+function withProviderLogs<A, E, R>(fn: (logs: Record<string, unknown>[]) => Effect.Effect<A, E, R>) {
+  return Effect.suspend(() => {
+    // 每次执行独立收集，不替换全局 console，也不依赖文件 logger 的批量刷盘时序。
+    const logs: Record<string, unknown>[] = []
+    const logger = Logger.make(({ message }) => {
+      for (const value of Array.isArray(message) ? message : [message]) {
+        // 捕获真实结构化字段；timing 与错误日志分别在各自断言中筛选。
+        if (value && typeof value === "object" && !Array.isArray(value)) logs.push(value)
+      }
+    })
+    // 整个测试 Effect 都带此 logger，SDK 构建时捕获的 bridge 才能继承它。
+    return fn(logs).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger])))
+  })
+}
+
+  // #240：phase+requestID 双键过滤——只保留 fetch/SSE 里程碑，排除其他日志噪音
+function providerFetchEvents(lines: Record<string, unknown>[]) {
+  return lines.filter((line) => "phase" in line && "requestID" in line).map((line) => Object.fromEntries(Object.entries(line).map(([key, value]) => [key, String(value)])))
+}
+
 describe("session.llm.stream", () => {
   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
   const opencodeFixture = { providerID: "opencode-test", modelID: vivgridFixture.modelID }
@@ -832,6 +870,146 @@ describe("session.llm.stream", () => {
     )
   }
 
+  // #240：从真实 Effect logger 检查 fetch/SSE 顺序，CLI stdout 不承担诊断传输。
+  it.instance(
+    "logs provider response and first raw SSE chunk when chunk timeout is enabled",
+    () =>
+      withProviderLogs((logs) => Effect.gen(function* () {
+        const request = waitRequest(
+          "/chat/completions",
+          new Response(createChatStream("Hello"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        )
+
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("timed-openai-compatible"), ModelV2.ID.make("gpt-test"))
+        const sessionID = SessionID.make("session-provider-fetch-timing")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-provider-fetch-timing"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make("timed-openai-compatible"), modelID: resolved.id },
+        } satisfies SessionV1.User
+
+        // #240：drain 走完整 LLM Service 流——诊断断言覆盖真实消费链路而非纯函数调用
+        yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        })
+        yield* Effect.promise(() => request)
+
+        const events = providerFetchEvents(logs)
+        expect(events.map((event) => event.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
+        expect(events.find((event) => event.phase === "fetch.response")?.status).toBe("200")
+        expect(events.find((event) => event.phase === "fetch.response")?.isSSE).toBe("true")
+        expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
+        expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
+      })),
+    {
+      config: () => ({
+        enabled_providers: ["timed-openai-compatible"],
+        provider: {
+          "timed-openai-compatible": {
+            npm: "@ai-sdk/openai-compatible",
+            name: "Timed Provider",
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 1_000 },
+            models: {
+              "gpt-test": {
+                name: "GPT Test",
+                limit: { context: 400000, input: 272000, output: 128000 },
+                modalities: { input: ["text"], output: ["text"] },
+              },
+            },
+          },
+        },
+      }),
+    },
+  )
+
+
+  // #240：SSE 首块后停滞必须触发 sse.timeout 诊断——wrapSSE 超时分支的唯一回归覆盖。
+  // #240：createStalledEventResponse 只发一个心跳注释块后不再 enqueue，模拟真实停滞流。
+  it.instance(
+    "logs SSE timeout when a streaming response stalls after the first raw chunk",
+    () =>
+      withProviderLogs((logs) => Effect.gen(function* () {
+        // #240：waitRequest 锁定 HTTP 服务端响应——断言与请求落点同源
+        const request = waitRequest("/chat/completions", createStalledEventResponse())
+
+        // #240：模型经真实 Provider 解析——诊断链随真实 getModel 路径走，不做 model stub
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("stalled-openai-compatible"), ModelV2.ID.make("gpt-test"))
+        const sessionID = SessionID.make("session-provider-fetch-timeout")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-provider-fetch-timeout"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make("stalled-openai-compatible"), modelID: resolved.id },
+        } satisfies SessionV1.User
+
+        // 停滞流在 chunkTimeout 后以 SSE_READ_TIMEOUT 失败/死亡——exit 统一捕获两种失败形态
+        yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        }).pipe(Effect.exit)
+        yield* Effect.promise(() => request)
+
+        const events = providerFetchEvents(logs)
+        expect(events.map((event) => event.phase)).toContain("fetch.response")
+        // #240：sse.timeout 存在性是本测试的判别核心——wrapSSE 超时分支唯一触发路径
+        expect(events.map((event) => event.phase)).toContain("sse.timeout")
+        // 断言字符串值：结构化日志字段统一为字符串序列化形态
+        expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
+        // #240：chunkTimeoutMs 回显配置值 25——证明超时来自该 provider 的配置而非默认
+        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
+        expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(25)
+      })),
+    {
+      config: () => ({
+        enabled_providers: ["stalled-openai-compatible"],
+        provider: {
+          "stalled-openai-compatible": {
+            npm: "@ai-sdk/openai-compatible",
+            name: "Stalled Provider",
+            options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 25 },
+            models: {
+              "gpt-test": {
+                name: "GPT Test",
+                limit: { context: 400000, input: 272000, output: 128000 },
+                modalities: { input: ["text"], output: ["text"] },
+              },
+            },
+          },
+        },
+      }),
+    },
+  )
   // #169：openai 别名 provider 上配置 UA 必须无条件到达线上（验证 #169 去掉 startsWith 守卫）
   it.instance(
     "uses configured provider User-Agent for OpenAI alias providers",

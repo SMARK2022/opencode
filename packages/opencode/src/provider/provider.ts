@@ -67,17 +67,77 @@ export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
   return headerUserAgent ?? (typeof options["header-ua"] === "string" ? options["header-ua"] : undefined)
 }
 
-function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+// 进程内关联 id：只串联同一次 daemon log 内的 fetch.start/response 与 SSE 里程碑，不跨运行
+  // #240：请求序号只用于日志关联——单调递增，不参与任何控制流
+let providerFetchRequestID = 0
+
+  // #240：timing 载荷契约：requestID 贯穿 fetch/SSE 全阶段，字段统一字符串化便于结构化日志
+type FetchTiming = {
+  requestID: number
+  providerID: string
+  modelID: string
+  sessionID?: string
+  startedAt: number
+  log: (fields: Record<string, unknown>) => void
+}
+
+  // #240：诊断直写 Effect logger——payload-free，不改变调用方错误通道
+function timing(input: FetchTiming, phase: string, extra?: Record<string, unknown>) {
+  // phase 字符串是稳定契约：区分停滞发生在响应头前、原始 SSE 块前还是 AI SDK 语义事件前
+  // 原生回调必须复用所属 Provider 的 logger；裸 runSync 会把诊断写进 CLI stdout。
+  input.log({
+    phase,
+    requestID: input.requestID,
+    providerID: input.providerID,
+    modelID: input.modelID,
+    sessionID: input.sessionID,
+    elapsedMs: Date.now() - input.startedAt,
+    ...extra,
+  })
+}
+
+  // #240：错误字段白名单提取——未知错误形状不进日志，防敏感信息泄漏
+function errorFields(error: unknown) {
+  if (error instanceof Error) {
+    const code = "code" in error && typeof error.code === "string" ? error.code : undefined
+    return { errorName: error.name, errorMessage: error.message, errorCode: code }
+  }
+  return { errorMessage: String(error) }
+}
+
+  // #240：体积探测只取已知形状——避免对大响应体做昂贵序列化
+function bodyBytes(body: unknown) {
+  // 只度量已缓冲的 body；流与表单不读取——诊断不得消费或复制 provider 请求
+  if (typeof body === "string") return new TextEncoder().encode(body).byteLength
+  if (body instanceof Uint8Array) return body.byteLength
+  return undefined
+}
+
+  // #240：wrapSSE 仅包装 SSE 响应——非 event-stream 原样返回，不注入额外读取层
+function wrapSSE(res: Response, ms: number, ctl: AbortController, timingInput: FetchTiming) {
   if (typeof ms !== "number" || ms <= 0) return res
   if (!res.body) return res
   if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
 
   const reader = res.body.getReader()
+  // #240：每个 chunk 独立计数——心跳/注释块同样计入，诊断口径与原始读取一致
+  let chunkCount = 0
+  let bytes = 0
+  let maxGapMs = 0
+  let lastChunkAt = Date.now()
   const body = new ReadableStream<Uint8Array>({
     async pull(ctrl) {
       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
         const id = setTimeout(() => {
           const err = Object.assign(new ProviderError.ResponseStreamError("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
+          // 记录原始 body 层停滞计数：区分「HTTP/SSE body 缺失」与「心跳未变成模型输出」
+          timing(timingInput, "sse.timeout", {
+            chunkTimeoutMs: ms,
+            idleMs: Date.now() - lastChunkAt,
+            chunkCount,
+            bytes,
+            maxGapMs,
+          })
           ctl.abort(err)
           reader.cancel(err).catch(() => {})
           reject(err)
@@ -90,16 +150,32 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
           },
           (err) => {
             clearTimeout(id)
+            const fields = errorFields(err)
+            // SSE_READ_TIMEOUT 已在超时分支记录，这里只补记其它读取错误，避免双条
+            if (fields.errorCode !== "SSE_READ_TIMEOUT") {
+              // #240：读错误与超时双记抑制——同一中断只保留语义更强的那个事件
+              timing(timingInput, "sse.error", { chunkCount, bytes, maxGapMs, ...fields })
+            }
             reject(err)
           },
         )
       })
 
       if (part.done) {
+        // #240：流结束才写终态计数——半开流由 timeout/error 分支兜底，不重复收尾
+        timing(timingInput, "sse.end", { chunkCount, bytes, maxGapMs })
         ctrl.close()
         return
       }
 
+      const now = Date.now()
+      const gapMs = now - lastChunkAt
+      lastChunkAt = now
+      // #240：chunk 到达即重置停滞计时——只有持续无数据才推进超时判定
+      chunkCount++
+      bytes += part.value.byteLength
+      maxGapMs = Math.max(maxGapMs, gapMs)
+      if (chunkCount === 1) timing(timingInput, "sse.first_chunk", { gapMs, bytes: part.value.byteLength })
       ctrl.enqueue(part.value)
     },
     async cancel(reason) {
@@ -126,7 +202,8 @@ function timeoutController(ms: number) {
 
 // Applies the `headerTimeout`, `chunkTimeout` (SSE idle) and `timeout` provider options at the
 // fetch layer, on top of `options.fetch` when a custom fetch is configured.
-function timeoutFetch(options: Record<string, any>) {
+// 共享包装显式接收请求身份与所属日志环境，普通SDK和Gateway不再依赖旧内联闭包。
+function timeoutFetch(options: Record<string, any>, model: { providerID: string; id: string }, bridge: EffectBridge.Shape) {
   const customFetch = options["fetch"]
   const chunkTimeout = options["chunkTimeout"] ?? 300_000
   const headerTimeout = options["headerTimeout"] ?? 300_000
@@ -159,6 +236,31 @@ function timeoutFetch(options: Record<string, any>) {
           }
 
     // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
+          const timingHeaders = new Headers(opts.headers)
+          const timingInput = {
+            requestID: ++providerFetchRequestID,
+            providerID: model.providerID,
+            modelID: model.id,
+            sessionID: timingHeaders.get("x-session-affinity") ?? timingHeaders.get("x-opencode-session") ?? undefined,
+            startedAt: Date.now(),
+            // 保留 Effect 运行环境的 logger 与级别，计时回调不自行创建全局运行时。
+            log: (fields: Record<string, unknown>) =>
+              bridge.fork(Effect.logInfo("timing", fields).pipe(Effect.annotateLogs({ service: "provider.fetch" }))),
+          }
+          // 诊断刻意只保留 provider 本地的传输里程碑与请求大小：
+          // 不记录 body 内容、鉴权头、prompt、工具输出或原始 chunk
+          timing(timingInput, "fetch.start", {
+            method: opts.method,
+            chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
+            bodyBytes: bodyBytes(opts.body),
+            // #240：请求级超时上限入诊断——区分「停滞本应被请求超时中止」与依赖 chunk 超时
+            timeoutMs:
+              options["timeout"] === false
+                ? undefined
+                : typeof options["timeout"] === "number"
+                  ? options["timeout"]
+                  : DEFAULT_TIMEOUT_MS,
+          })
     const res = await (
       customFetch
         ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
@@ -168,10 +270,22 @@ function timeoutFetch(options: Record<string, any>) {
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
             timeout: false,
           })
-    ).finally(() => headerTimeoutCtl?.clear())
+          )
+            .catch((error) => {
+              timing(timingInput, "fetch.error", errorFields(error))
+              throw error
+            })
+            .finally(() => headerTimeoutCtl?.clear())
+
+          const contentType = res.headers.get("content-type") ?? undefined
+          timing(timingInput, "fetch.response", {
+            status: res.status,
+            contentType,
+            isSSE: contentType?.includes("text/event-stream") ?? false,
+          })
 
     if (!chunkAbortCtl) return res
-    return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          return wrapSSE(res, chunkTimeout, chunkAbortCtl, timingInput)
   }
 }
 
@@ -937,6 +1051,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       const { createOpenAI } = yield* Effect.promise(() => import("ai-gateway-provider/providers/openai"))
       const { createAnthropic } = yield* Effect.promise(() => import("ai-gateway-provider/providers/anthropic"))
       const { createOpenAICompatible } = yield* Effect.promise(() => import("@ai-sdk/openai-compatible"))
+      const bridge = yield* EffectBridge.make()
 
       const metadata = iife(() => {
         if (input.options?.metadata) return input.options.metadata
@@ -962,7 +1077,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         async getModel(_sdk: any, modelID: string, options?: Record<string, any>) {
           // This loader builds its own clients instead of using the SDK from resolveSDK, so the
           // timeout options have to be applied to the requests it makes explicitly.
-          const gatewayFetch = timeoutFetch(options ?? {})
+          const gatewayFetch = timeoutFetch(options ?? {}, { providerID: input.id, id: modelID }, bridge)
           // ai-gateway-provider's REST path always calls the global fetch. Its binding path hands
           // the request to `run`, so send the same request the REST path would (options as
           // request-level cf-aig-* headers) through the timeout-aware fetch instead.
@@ -1990,7 +2105,7 @@ const layer = Layer.effect(
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
-    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
+    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>, bridge: EffectBridge.Shape) {
       try {
         const provider = s.providers[model.providerID]
         const options = { ...provider.options }
@@ -2060,7 +2175,7 @@ const layer = Layer.effect(
         const existing = s.sdk.get(key)
         if (existing) return existing
 
-        options["fetch"] = timeoutFetch(options)
+        options["fetch"] = timeoutFetch(options, model, bridge)
         delete options["chunkTimeout"]
         delete options["headerTimeout"]
 
@@ -2135,10 +2250,12 @@ const layer = Layer.effect(
       const key = `${model.providerID}/${model.id}`
       if (s.models.has(key)) return s.models.get(key)!
 
+      // 在 Effect 主路径捕获实例与观测环境，再交给 SDK 的异步 fetch/SSE 回调。
+      const bridge = yield* EffectBridge.make()
       const provider = s.providers[model.providerID]
       return yield* EffectPromise.refineRejection(
         async () => {
-          const sdk = await resolveSDK(model, s, envs)
+          const sdk = await resolveSDK(model, s, envs, bridge)
           const language = s.modelLoaders[model.providerID]
             ? await s.modelLoaders[model.providerID](
                 sdk,

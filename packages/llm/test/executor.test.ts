@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
-import { Effect, Fiber, Layer, Random, Ref } from "effect"
+import { Cause, Effect, Fiber, Layer, Logger, Random, Ref, References, Stream } from "effect"
 import * as TestClock from "effect/testing/TestClock"
-import { Headers, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import { Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { LLM, LLMError } from "../src"
 import { LLMClient, RequestExecutor } from "../src/route"
 import * as OpenAIChat from "../src/protocols/openai-chat"
@@ -9,6 +9,8 @@ import { dynamicResponse } from "./lib/http"
 import { deltaChunk } from "./lib/openai-chunks"
 import { sseRaw } from "./lib/sse"
 import { it } from "./lib/effect"
+import { Framing } from "../src/route/framing"
+import { HttpTransport } from "../src/route/transport"
 
 const request = HttpClientRequest.post("https://provider.test/v1/chat?api_key=secret&key=secret&debug=1").pipe(
   HttpClientRequest.setHeaders(Headers.fromInput({ authorization: "Bearer secret", "x-safe": "visible" })),
@@ -499,4 +501,83 @@ describe("RequestExecutor", () => {
       expect(yield* Ref.get(attempts)).toBe(1)
     }),
   )
+
+  it.live("correlates native fetch and raw SSE timing without exposing payload or changing cancellation", () => Effect.suspend(() => {
+    const logs: Record<string, unknown>[] = []
+    const all: Record<string, unknown>[] = []
+    let firstRaw: (() => void) | undefined
+    const logger = Logger.make((options) => {
+      for (const value of Array.isArray(options.message) ? options.message : [options.message]) {
+        if (!value || typeof value !== "object" || !("phase" in value)) continue
+        const entry = { ...options.fiber.getRef(References.CurrentLogAnnotations), ...value }
+        logs.push(entry)
+        all.push(entry)
+        if (value.phase === "sse.first_chunk") firstRaw?.()
+      }
+    })
+    return Effect.gen(function* () {
+      const encoder = new TextEncoder()
+      const native = LLM.request({ model: OpenAIChat.route.model({ id: "timed-native" }), prompt: "PRIVATE_PAYLOAD" })
+      const prepared = { request: request.pipe(HttpClientRequest.bodyText("PRIVATE_PAYLOAD"), HttpClientRequest.setHeader("x-session-affinity", "ses_timing")), framing: Framing.sse }
+      const collect = (responses: Response[]) => Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* HttpTransport.sseJson.with<unknown>().frames(prepared, native, { http: executor }).pipe(Stream.runCollect)
+      }).pipe(Effect.provide(responsesLayer(responses)), Effect.scoped)
+      const body = new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(encoder.encode(": heartbeat\n\n"))
+        controller.enqueue(encoder.encode("data: ok\n\n"))
+        controller.close()
+      } })
+      expect(yield* collect([new Response(body, { headers: { "content-type": "text/event-stream" } })])).toEqual(["ok"])
+      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
+      expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
+      expect(logs[0]).toMatchObject({ method: "POST", service: "provider.fetch", providerID: native.model.provider, modelID: "timed-native", sessionID: "ses_timing", bodyBytes: 15 })
+      expect(logs.at(-1)).toMatchObject({ chunkCount: 2, bytes: encoder.encode(": heartbeat\n\ndata: ok\n\n").byteLength })
+      // 状态失败也必须先记录真实响应，不能把HTTP错误当成尚未收到响应头。
+      logs.length = 0
+      const denied = yield* collect([new Response("PRIVATE_RESPONSE", { status: 400 })]).pipe(Effect.exit)
+      expect(denied._tag).toBe("Failure")
+      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response"])
+      logs.length = 0
+      const failedHTTP = RequestExecutor.layer.pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient,
+        HttpClient.make((request) => Effect.fail(new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({ request, cause: new Error("PRIVATE_TRANSPORT_ERROR") }) }))),
+      )))
+      const failed = yield* Effect.gen(function* () {
+        const executor = yield* RequestExecutor.Service
+        return yield* executor.execute(prepared.request)
+      }).pipe(Effect.provide(failedHTTP), Effect.exit)
+      expect(failed._tag).toBe("Failure")
+      expect(logs.map((entry) => entry.phase)).toEqual(Array.from({ length: 3 }, () => ["fetch.start", "fetch.error"]).flat())
+      expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(3)
+      // 已有typed timeout与普通读错误保持失败，不额外设置计时器或重放已交付frame。
+      for (const timeout of [false, true]) {
+        logs.length = 0
+        let pulls = 0
+        const broken = new ReadableStream<Uint8Array>({ pull(controller) {
+          if (pulls++ === 0) {
+            controller.enqueue(encoder.encode(": heartbeat\n\ndata: ok\n\n"))
+            return
+          }
+          controller.error(timeout ? new Cause.TimeoutError() : new Error("PRIVATE_BODY_ERROR"))
+        } })
+        const exit = yield* collect([new Response(broken, { headers: { "content-type": "text/event-stream" } })]).pipe(Effect.exit)
+        expect(exit._tag).toBe("Failure")
+        expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", timeout ? "sse.timeout" : "sse.error"])
+        expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
+        expect(JSON.stringify(logs)).not.toContain("PRIVATE_BODY_ERROR")
+      }
+      logs.length = 0
+      const ready = Promise.withResolvers<void>()
+      firstRaw = () => ready.resolve()
+      const stalled = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(": heartbeat\n\n")) } })
+      const pending = yield* collect([new Response(stalled, { headers: { "content-type": "text/event-stream" } })]).pipe(Effect.forkScoped)
+      yield* Effect.promise(() => ready.promise)
+      yield* Fiber.interrupt(pending)
+      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk"])
+      // 所有阶段均只输出计数/分类；不能把error.message、请求URL或正文送入日志。
+      expect(JSON.stringify(all)).not.toContain("PRIVATE_")
+      expect(JSON.stringify(all)).not.toContain("secret")
+      expect(JSON.stringify(all)).not.toContain("heartbeat")
+    }).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger])))
+  }))
 })
