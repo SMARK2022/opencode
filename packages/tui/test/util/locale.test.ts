@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { truncate, truncateMiddle } from "../../src/util/locale"
+import { durationClock, truncate, truncateMiddle } from "../../src/util/locale"
 
 // #160：代理对安全截断单测（emoji / CJK 扩展 B）
 describe("Locale.truncate", () => {
@@ -99,5 +99,29 @@ describe("Locale.truncateMiddle", () => {
         expect(prev >= 0xd800 && prev <= 0xdbff).toBe(true)
       }
     }
+  })
+})
+
+describe("Locale.durationClock", () => {
+  // #243：入口为毫秒（transcript 时间戳差），显示须向下取整避免计时漂移观感
+  test("formats millisecond range without rounding up", () => {
+    expect(durationClock(0)).toBe("0ms")
+    expect(durationClock(999)).toBe("999ms")
+  })
+
+  test("formats second range with floored seconds", () => {
+    expect(durationClock(1_000)).toBe("1s")
+    expect(durationClock(59_900)).toBe("59s")
+  })
+
+  test("formats minute and hour ranges", () => {
+    expect(durationClock(61_000)).toBe("1m 1s")
+    expect(durationClock(3_600_000)).toBe("1h 0m")
+    expect(durationClock(7_385_000)).toBe("2h 3m")
+  })
+
+  // #243：超长会话降级到天粒度——footer 宽度约束
+  test("formats day range", () => {
+    expect(durationClock(90_060_000)).toBe("1d 1h")
   })
 })

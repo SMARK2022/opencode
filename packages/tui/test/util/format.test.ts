@@ -1,19 +1,21 @@
 import { describe, expect, test } from "bun:test"
-import { formatDuration, formatDurationCompact } from "../../src/util/format"
+import { formatDuration } from "../../src/util/format"
+import { durationClock } from "../../src/util/locale"
 
 describe("util.format", () => {
   test("compact loop duration preserves second and day boundaries", () => {
-    // 紧凑循环计时与旧倒计时格式独立，边界不能通过只测试旧导出来认证。
-    expect(formatDurationCompact(-1)).toBe("0s")
-    expect(formatDurationCompact(0)).toBe("0s")
-    expect(formatDurationCompact(59)).toBe("59s")
-    expect(formatDurationCompact(60)).toBe("1m0s")
-    expect(formatDurationCompact(3599)).toBe("59m59s")
-    expect(formatDurationCompact(3600)).toBe("1h0m")
-    expect(formatDurationCompact(3601)).toBe("1h0m1s")
-    expect(formatDurationCompact(86399)).toBe("23h59m59s")
-    expect(formatDurationCompact(86400)).toBe("1d0h")
-    expect(formatDurationCompact(90000)).toBe("1d1h")
+    // 循环展示改用毫秒入口，保留全部分段边界；小时及以上按源时钟格式收敛到分钟/小时。
+    // 负时序由transcript耗时owner钳制；formatter仍按源规则直接展示输入，不另加校验。
+    expect(durationClock(-1_000)).toBe("-1000ms")
+    expect(durationClock(0)).toBe("0ms")
+    expect(durationClock(59_000)).toBe("59s")
+    expect(durationClock(60_000)).toBe("1m 0s")
+    expect(durationClock(3_599_000)).toBe("59m 59s")
+    expect(durationClock(3_600_000)).toBe("1h 0m")
+    expect(durationClock(3_601_000)).toBe("1h 0m")
+    expect(durationClock(86_399_000)).toBe("23h 59m")
+    expect(durationClock(86_400_000)).toBe("1d 0h")
+    expect(durationClock(90_000_000)).toBe("1d 1h")
   })
   describe("formatDuration", () => {
     test("returns empty string for zero or negative values", () => {
