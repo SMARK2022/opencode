@@ -1,5 +1,7 @@
 import { Config } from "@/config/config"
+import { Auth } from "@/auth"
 import { Provider } from "@/provider/provider"
+import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
 import { ProviderTransform } from "@/provider/transform"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
@@ -85,6 +87,7 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
+    const auth = yield* Auth.Service
     const provider = yield* Provider.Service
     const sessions = yield* Session.Service
     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
@@ -336,13 +339,31 @@ export const layer = Layer.effect(
         Effect.sync(() => new AbortController()),
         (abort) =>
           Effect.gen(function* () {
-            const language = yield* provider.getLanguage(model)
-            const providerInfo = yield* provider.getProvider(model.providerID)
+            const [language, providerInfo, cfg, authInfo] = yield* Effect.all(
+              [
+                provider.getLanguage(model),
+                provider.getProvider(model.providerID),
+                config.get(),
+                auth.get(model.providerID),
+              ],
+              { concurrency: "unbounded" },
+            )
             const sessionID = persist?.sessionID ?? "permission-reviewer"
-            const options = mergeOptions(
+            const baseOptions = mergeOptions(
               ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
               model.options,
             )
+            const isOpenaiOauth =
+              isOpenaiOauthProvider(providerInfo.id, buildBaseProviderMap(cfg.provider ?? {})) && authInfo?.type === "oauth"
+            // OpenAI OAuth/Codex 后端要求顶层 instructions；普通 Responses 会把
+            // system message 降成 input item，但 Codex 路径会因此 400。这里只移动
+            // 可信 reviewer 指令，transcript、precheck reason 和 planned action 仍留在
+            // user message，避免把不可信证据提升成高优先级指令。
+            const reviewerInstructions = isOpenaiOauth
+              ? messages.flatMap((message) => (message.role === "system" ? [message.content] : [])).join("\n")
+              : undefined
+            const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
+            const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
             const result = streamText({
               model: wrapLanguageModel({
                 model: language,
@@ -362,7 +383,7 @@ export const layer = Layer.effect(
                   },
                 ],
               }),
-              messages: [...messages],
+              messages: [...reviewerMessages],
               tools: {
                 permission_review_decision: tool({
                   description: "Submit the structured allow/deny decision for this permission review.",
@@ -718,7 +739,14 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
 }
 
 export const defaultLayer = Layer.suspend(() =>
-  layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer)),
+  layer.pipe(
+    // reviewer 请求落点现在需要读取 auth，才能只在 OpenAI OAuth/Codex 路径把同一份
+    // 可信策略放进 Responses `instructions`；默认层必须随现有 config/provider 一起
+    // 提供 Auth，否则生产默认 wiring 会缺少这个 provider 判定边界。
+    Layer.provide(Auth.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Provider.defaultLayer),
+  ),
 )
 
 // Permission.defaultLayer consumes this bundled reviewer layer before building
