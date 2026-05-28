@@ -45,7 +45,7 @@ export const EditInput = Schema.Struct({
   // 缺省源码与显式空串不同；语言变更不能被CLI悄悄转换成清空单元格。
   oldCode: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({ description: "Existing source fragment to replace inside the target cell. It must identify one unique match; include enough surrounding lines from vscode_notebook_source." }).pipe(Schema.optional),
   newCode: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({ description: "New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content." }).pipe(Schema.optional),
-  language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source." }).pipe(Schema.optional),
+  language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode." }).pipe(Schema.optional),
 })
 // 四操作与原生唯一env入口一致，不能在CLI缺省成info而丢弃模型的操作意图。
 export const EnvInput = Schema.Struct({
@@ -107,7 +107,10 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
       ) }), "edit"),
     vscode_notebook_env: Tool.make({ ...common("/notebook/env"), description: VscodeNotebookDescriptions.env, input: EnvInput,
       // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
-      execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
+      execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(
+        // save写回磁盘，专属审批通过后仍须服从通用edit，拒绝时不发现或调用桥。
+        Effect.andThen(args.operation === "save" ? ask("edit", args, context) : Effect.void),
+        Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
   }).pipe(Effect.orDie)
 }))
 

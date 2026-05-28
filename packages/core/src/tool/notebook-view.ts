@@ -75,6 +75,9 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
   const editType = stringValue(data.editType) ?? stringValue(args.editType)
+  const requestedCellId = stringValue(args.cellId)
+  // 插入与类型替换会分配新句柄；续用结果身份，同时保留不同的请求锚点。
+  const cellId = stringValue(data.insertedCellId) ?? stringValue(data.updatedCellId) ?? requestedCellId
   // #233：insert 有 afterSource 时生成有界预览——TUI 用代码渲染器展示插入内容
   const insertedSourcePreview = editType === "insert" && after !== undefined
     ? previewNotebookInsertSource(after)
@@ -83,7 +86,8 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
     view: "edit",
     path,
     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
-    cellId: stringValue(args.cellId),
+    cellId,
+    requestedCellId: requestedCellId && requestedCellId !== cellId ? requestedCellId : undefined,
     editType,
     cellCountBefore: numberValue(data.cellCountBefore),
     cellCountAfter: numberValue(data.cellCountAfter),

@@ -89,10 +89,11 @@ const editArgs = {
     .union([z.string(), z.array(z.string())])
     .optional()
     .describe("New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content."),
+  // 仅语言编辑必须真正省略源码，空字符串和空数组不能冒充缺省字段。
   language: z
     .string()
     .optional()
-    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
+    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode."),
 }
 
 async function callRaw(
@@ -193,6 +194,8 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
       execute: async (args, context) => {
         // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
         await ask(context, "vscode_notebook_env", args)
+        // save 写回磁盘，专属工具许可之后仍须通过通用 edit 门禁。
+        if (args.operation === "save") await ask(context, "edit", args)
         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
       },
     }),

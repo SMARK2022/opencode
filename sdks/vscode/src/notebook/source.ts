@@ -106,8 +106,21 @@ export async function notebookSource(input: Record<string, unknown>) {
       const outLine = `${globalLineNum}: ${sourceLine}`
       // UTF-8 预算包括真实行号前缀，多字节正文不能用字符数冒充输出字节。
       const outBytes = Buffer.byteLength(outLine, "utf8")
-      // 首个正文行允许推进，未编号格头不能让空正文页永远重复同一 offset。
-      if (bytes + outBytes > maxBytes && renderedLines > 0) {
+      // 首行超整页预算时保留编号与有界前缀，避免只返回格头而无法推进分页。
+      if (bytes + outBytes > maxBytes) {
+        if (renderedLines > 0) {
+          // 当前页放不下的完整行留给下一页，不能按字节裁掉无法续读的后缀。
+          bytesCut = true
+          break
+        }
+        const prefix = `${globalLineNum}: `
+        const prefixBytes = Buffer.byteLength(prefix, "utf8")
+        const available = maxBytes - bytes - prefixBytes
+        if (available > 0) {
+          outputCells.push(prefix + takeUtf8Prefix(sourceLine, available))
+          renderedLines++
+          lastRenderedLine = globalLineNum
+        }
         bytesCut = true
         break
       }
@@ -182,4 +195,21 @@ function lastRangeEnd(ranges: Map<number, { start: number; end: number }>) {
     if (r.end > max) max = r.end
   }
   return max > 0 ? max : undefined
+}
+
+function takeUtf8Prefix(text: string, maxBytes: number) {
+  // #252：按码点迭代而非按字节切片——预览保持合法 UTF-8，同时尊重字节预算
+  // #252：多字节字符被腰斩会产生无效序列，下游终端渲染直接损坏
+  // Iterate by Unicode code point instead of slicing bytes directly. This keeps
+  // the preview valid UTF-8 while still honoring the byte budget enforced by the
+  // notebook source tool output cap.
+  let bytes = 0
+  let out = ""
+  for (const char of text) {
+    const next = Buffer.byteLength(char, "utf8")
+    if (bytes + next > maxBytes) return out
+    bytes += next
+    out += char
+  }
+  return out
 }

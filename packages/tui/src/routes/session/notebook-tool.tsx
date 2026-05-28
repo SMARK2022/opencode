@@ -112,7 +112,9 @@ export function useVscodeNotebookToolView(props: {
       "←",
       notebookEditLabel(editType),
       notebookTarget(stringValue(metadata.path)),
-      stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
+      stringValue(metadata.cellLabel),
+      // 旧锚点仅用于追踪，箭头右侧为SDK实际返回的新句柄。
+      [stringValue(metadata.requestedCellId), stringValue(metadata.cellId)].filter(Boolean).join(" -> "),
         stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
     ].filter(Boolean).join(" ")
     const filePath = notebookDiffPath(metadata)

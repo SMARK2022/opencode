@@ -65,6 +65,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
       return `c${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} ${rangeText} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`
     }),
     "",
-    "后续：用 vscode_notebook_source 的 cellId=#VSC-xxx、offset=1、limit=120 读取源码；用 vscode_notebook_run 执行、vscode_notebook_output 读取输出、vscode_notebook_edit 修改。",
+    // 单格 offset 仍是全局虚拟行号，省略默认值可避免后续格错误地从全局第一行读取。
+    "后续：单格源码用 vscode_notebook_source 的 cellId=#VSC-xxx 并省略 offset；全局分页才使用 offset/limit。用 vscode_notebook_run 执行、vscode_notebook_output 读取输出、vscode_notebook_edit 修改。",
   ].join("\n")
 }
