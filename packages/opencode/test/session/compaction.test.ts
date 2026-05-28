@@ -1590,6 +1590,80 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  itCompaction.instance(
+    "updates compacted summaries without replaying already summarized head",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(reply("PREVIOUS SUMMARY"))
+      stub.push(
+        reply("UPDATED SUMMARY", (input) => {
+          captured = JSON.stringify(input.messages)
+        }),
+      )
+
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const old = yield* createUserMessage(session.id, "OLD_HEAD_USER_SHOULD_NOT_REAPPEAR")
+        const oldReply = yield* createAssistantMessage(session.id, old.id, test.directory)
+        // 旧 head 里的大 tool result 模拟真实会话中已被 summary 覆盖的工具历史；
+        // 第二次压缩必须只基于 compacted active window 更新 summary，不能把这段
+        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
+        // 再次截断并累计，重新膨胀本应被压缩的上下文。
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: oldReply.id,
+          sessionID: session.id,
+          type: "tool",
+          callID: "old-call",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: { command: "print old head" },
+            output: `OLD_HEAD_TOOL_OUTPUT_SHOULD_NOT_REAPPEAR ${"x".repeat(4_000)}`,
+            title: "print old head",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        })
+        const active = yield* createUserMessage(session.id, "ACTIVE_TAIL_SHOULD_REMAIN")
+        const activeReply = yield* createAssistantMessage(session.id, active.id, test.directory)
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: activeReply.id,
+          sessionID: session.id,
+          type: "text",
+          text: "ACTIVE_TAIL_REPLY_SHOULD_REMAIN",
+        })
+        yield* createCompactionMarker(session.id)
+
+        let msgs = yield* ssn.messages({ sessionID: session.id })
+        let parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        yield* createUserMessage(session.id, "LATEST_TAIL_SHOULD_STAY_OUT_OF_SUMMARY")
+        yield* createCompactionMarker(session.id)
+
+        msgs = yield* ssn.messages({ sessionID: session.id })
+        parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        expect(captured).toContain("<previous-summary>")
+        expect(captured).toContain("PREVIOUS SUMMARY")
+        expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
+        expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")
+        expect(captured).not.toContain("OLD_HEAD_USER_SHOULD_NOT_REAPPEAR")
+        expect(captured).not.toContain("OLD_HEAD_TOOL_OUTPUT_SHOULD_NOT_REAPPEAR")
+        expect(captured).not.toContain("LATEST_TAIL_SHOULD_STAY_OUT_OF_SUMMARY")
+      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }) }))
+    },
+    { git: true },
+  )
+
   itCompaction.instance("keeps recent pre-compaction turns across repeated compactions", () => {
     const stub = llm()
     stub.push(reply("summary one"))
@@ -1637,6 +1711,7 @@ describe("session.compaction.process", () => {
       const test = yield* TestInstance
       const session = yield* ssn.create({})
       yield* createUserMessage(session.id, "older")
+      const anchor = yield* createUserMessage(session.id, "existing retained anchor")
       const keep = yield* createUserMessage(session.id, "keep this turn")
       const keepReply = yield* createAssistantMessage(session.id, keep.id, test.directory)
       yield* ssn.updatePart({
@@ -1648,8 +1723,17 @@ describe("session.compaction.process", () => {
       })
 
       yield* createCompactionMarker(session.id)
-      const firstCompaction = (yield* ssn.messages({ sessionID: session.id })).at(-1)?.info.id
+      const firstCompactionMsg = (yield* ssn.messages({ sessionID: session.id })).at(-1)
+      const firstCompaction = firstCompactionMsg?.info.id
       expect(firstCompaction).toBeTruthy()
+      const firstCompactionPart = firstCompactionMsg?.parts.find(
+        (item): item is MessageV2.CompactionPart => item.type === "compaction",
+      )
+      expect(firstCompactionPart?.type).toBe("compaction")
+      // 这个 fixture 显式模拟已经完成且可重放的 compacted boundary：anchor 是上一轮
+      // summary 后仍需保留的 tail 起点，keep 是本轮应继续保留的下一段 active tail；
+      // previous summary 文本本身很长，但它只是锚点，不能挤掉这个已持久化 tail 边界。
+      yield* ssn.updatePart({ ...firstCompactionPart!, tail_start_id: anchor.id })
       yield* createSummaryAssistantMessage(session.id, firstCompaction!, test.directory, "summary ".repeat(800))
 
       const recent = yield* createUserMessage(session.id, "recent turn")

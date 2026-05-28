@@ -432,7 +432,12 @@ export const layer = Layer.effect(
           variant: userMessage.model.variant,
         })
       const cfg = yield* config.get()
-      const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      // 压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
+      // 会保留已被 summary 覆盖的旧 head 作为审计/恢复数据，但这些旧 tool results 不能在
+      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
+      // 重新截断并累计，导致本应压缩的可见会话膨胀成远超模型窗口的压缩请求。
+      const history = MessageV2.filterCompacted(rawHistory)
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
