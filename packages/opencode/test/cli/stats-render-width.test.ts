@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import type { SessionID } from "../../src/session/schema"
 import type { InputComponentTotals, StatsReport, TokenTotals, UsageTotals } from "../../src/cli/cmd/stats/data"
-import { renderBreakdown, renderDashboard, renderSessions } from "../../src/cli/cmd/stats/render"
+import { renderInsights } from "../../src/cli/cmd/stats/insights"
+import { renderBreakdown, renderDashboard, renderSessions, renderTimeline } from "../../src/cli/cmd/stats/render"
 import { fitVisible, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
 
 const day = 86_400_000
@@ -202,6 +203,21 @@ const calendarRows = (output: string) =>
     .map(stripAnsi)
     .filter((line) => /^\s+\d{1,2}\s+[·░▒▓█]/.test(line))
 
+const concreteBackgroundAnsi = (output: string) =>
+  // SGR 可以把多个属性合在同一个 escape 里，例如 0;44m 或 39;48;5;12m；
+  // 这里解析完整参数列表，确保只允许 49m 默认背景重置，不漏掉组合背景色。
+  (output.match(/\x1b\[[0-9;]*m/g) ?? []).filter((code) => {
+    const values = code.slice(2, -1).split(";").map(Number)
+    for (let index = 0; index < values.length; index++) {
+      const value = values[index]
+      if ((value >= 40 && value <= 47) || (value >= 100 && value <= 107)) return true
+      if (value === 48 && (values[index + 1] === 2 || values[index + 1] === 5)) return true
+      if (value === 38 && values[index + 1] === 2) index += 4
+      if (value === 38 && values[index + 1] === 5) index += 2
+    }
+    return false
+  })
+
 describe("stats render width", () => {
   test("counts CJK text by terminal display columns", () => {
     expect(visibleLength("中文abc")).toBe(7)
@@ -321,6 +337,28 @@ describe("stats render width", () => {
       const bucketLines = lines.slice(start, start + 8).filter((line) => /<100K|100K-1M|1M-5M|5M-50M|>50M/.test(stripAnsi(line)))
       const colors = new Set(bucketLines.flatMap((line) => Array.from(line.matchAll(/\x1b\[38;2;[^m]+m/g), (match) => match[0])))
       expect(colors.size).toBeGreaterThan(1)
+    })
+  })
+
+  test("never emits terminal background ANSI in color output", () => {
+    // 回归测试：stats 只能把背景重置为终端默认值，不能选择任何具体背景色。
+    // 49m 是“恢复默认背景”；40-47/100-107/48;2/48;5 才会绘制实际背景色。
+    // 覆盖主渲染路径，避免后续重构让整行空格再次继承上游残留背景状态。
+    withColumns(140, () => {
+      for (const output of [
+        renderDashboard(report(), { color: "always" }),
+        renderBreakdown(report(), { color: "always", by: "tool" }),
+        renderSessions(report(), { color: "always" }),
+        renderTimeline(report(), { color: "always" }),
+        renderInsights(report(), { color: "always" }),
+      ]) {
+        expect(concreteBackgroundAnsi(output)).toEqual([])
+        expect(output.split("\n").every((line) => line.startsWith("\x1b[49m") && line.endsWith("\x1b[49m"))).toBe(true)
+      }
+
+      for (const output of [renderDashboard(report(), { color: "never" }), renderInsights(report(), { color: "never" })]) {
+        expect(output).not.toContain("\x1b[49m")
+      }
     })
   })
 

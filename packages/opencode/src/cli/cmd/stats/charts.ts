@@ -2,9 +2,10 @@ import { formatNumber } from "../../format"
 import type { TokenPartSeries, UsageSeries } from "./data"
 import type { ColorMode } from "./render"
 
-const RESET = "\x1b[0m"
 const BOLD = "\x1b[1m"
 const TEXT_RESET = "\x1b[22m\x1b[39m"
+// 49m 只恢复终端默认背景，不指定具体颜色；独立 panel 同样需要清掉上游背景状态。
+const BACKGROUND_RESET = "\x1b[49m"
 const ANSI_RE = /\x1b\[[0-9;]*m/g
 const ANSI_PREFIX_RE = /^\x1b\[[0-9;]*m/
 const DEFAULT_PANEL_WIDTH = 104
@@ -12,7 +13,6 @@ const MIN_PANEL_WIDTH = 58
 const PANEL_PADDING = 2
 
 const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
-const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
 
 export type ChartColor =
   | "axis"
@@ -28,7 +28,6 @@ export type ChartColor =
   | "pink"
   | "red"
   | "white"
-  | "panel"
   | "grid"
 
 export type ChartStyle = {
@@ -105,7 +104,6 @@ const palette: Record<ChartColor, string> = {
   pink: fg(239, 119, 178),
   red: fg(246, 111, 125),
   white: fg(248, 244, 250),
-  panel: bg(19, 6, 24),
   grid: fg(74, 45, 82),
 }
 
@@ -795,7 +793,7 @@ export function renderPanel(input: { title?: string; lines: string[]; color?: Co
   const innerWidth = statsContentWidth(width)
   const lines = content.map((line) => `${" ".repeat(PANEL_PADDING)}${fitVisible(line, innerWidth)}${" ".repeat(PANEL_PADDING)}`)
   if (!ctx.color) return lines.join("\n")
-  return lines.map((line) => `${palette.panel}${line}${RESET}`).join("\n")
+  return lines.map((line) => `${BACKGROUND_RESET}${line}${BACKGROUND_RESET}`).join("\n")
 }
 
 export function renderTwoColumn(left: string[], right: string[], gap = 4, width = statsContentWidth(), leftFraction = 0.5) {

@@ -31,15 +31,14 @@ import {
 
 export { formatNumber } from "../../format"
 
-const RESET = "\x1b[0m"
 const BOLD = "\x1b[1m"
 const TEXT_RESET = "\x1b[22m\x1b[39m"
+// 49m 只恢复终端默认背景，不指定具体颜色；stats 的行填充必须避免继承上游残留背景。
+const BACKGROUND_RESET = "\x1b[49m"
 
 const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
-const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
 
 const theme = {
-  bg: bg(19, 6, 24),
   title: fg(246, 241, 248),
   subtitle: fg(198, 171, 207),
   muted: fg(158, 130, 170),
@@ -88,7 +87,7 @@ const color = (text: string, name: keyof typeof theme, enabled: boolean, bold = 
 const panel = (lines: string[], enabled: boolean) => {
   const rows = lines.map((line) => `  ${fitVisible(line, statsContentWidth())}  `)
   if (!enabled) return rows.join("\n")
-  return rows.map((line) => `${theme.bg}${line}${RESET}`).join("\n")
+  return rows.map((line) => `${BACKGROUND_RESET}${line}${BACKGROUND_RESET}`).join("\n")
 }
 
 const dateRange = (report: StatsReport) => {
