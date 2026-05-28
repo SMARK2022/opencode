@@ -1338,6 +1338,85 @@ test("completed apply_patch without auto review keeps per-file blocks only", asy
   )
 })
 
+test("completed apply_patch with delete file shows diff content and stats in title", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_patch_delete_diff", 1)],
+    {
+      msg_patch_delete_diff: [
+        completedToolPart(
+          "part_patch_delete_diff",
+          "msg_patch_delete_diff",
+          "apply_patch",
+          { patchText: "*** Begin Patch\n*** Delete File: src/old.ts\n*** End Patch" },
+          {
+            files: [
+              {
+                filePath: "/tmp/test/src/old.ts",
+                relativePath: "src/old.ts",
+                type: "delete",
+                // 删除文件的 patch 是带有完整 - 行的 unified diff，
+                // DiffView 应将其逐行渲染而非降级为纯 -N lines 摘要。
+                // "KEEP_THIS" 用作断言锚点，确保 diff 内容真实可见。
+                patch: ["--- src/old.ts", "+++ src/old.ts", "@@ -1,3 +0,0 @@", "-KEEP_THIS_first", "-KEEP_THIS_second", "-KEEP_THIS_third", "\\ No newline at end of file"].join("\n"),
+                additions: 0,
+                deletions: 3,
+              },
+            ],
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Deleted src/old.ts")))
+      // 标题应包含 +0 -3 行数统计，与 add/update/write/edit 风格一致
+      const titleLine = findRow(frame, "Deleted src/old.ts")
+      expect(frame[titleLine]).toContain("+0")
+      expect(frame[titleLine]).toContain("-3")
+      // 删除文件的 patch 通过 DiffView 渲染后，应能直接看到删除内容行，
+      // 而非只有纯文本 '-N lines' 摘要（摘要只在 legacy 无 patch 时兜底）。
+      // KEEP_THIS 是 patch fixture 中的唯一锚点文本，出现在任何行即证明 diff 已渲染。
+      expect(frame.some((line) => line.includes("KEEP_THIS"))).toBe(true)
+    },
+  )
+})
+
+test("completed apply_patch with delete file and no patch falls back to -N lines", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_patch_delete_legacy", 1)],
+    {
+      msg_patch_delete_legacy: [
+        completedToolPart(
+          "part_patch_delete_legacy",
+          "msg_patch_delete_legacy",
+          "apply_patch",
+          { patchText: "*** Begin Patch\n*** Delete File: src/stale.ts\n*** End Patch" },
+          {
+            files: [
+              {
+                filePath: "/tmp/test/src/stale.ts",
+                relativePath: "src/stale.ts",
+                type: "delete",
+                // 旧格式 metadata 可能没有 patch 字段，此时应退回 -N lines 文本摘要
+                additions: 0,
+                deletions: 5,
+              },
+            ],
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Deleted src/stale.ts")))
+      // legacy 数据无 patch 时标题不显示 stats（diffLineStats 无数据可算）
+      const titleLine = findRow(frame, "Deleted src/stale.ts")
+      expect(frame[titleLine]).not.toContain("+0")
+      expect(frame[titleLine]).not.toContain("-5")
+      // 退回纯 -N lines 摘要作为兜底
+      expect(frame.some((line) => line.includes("-5 lines"))).toBe(true)
+    },
+  )
+})
+
 test("shell auto review status is not duplicated by generic tool chrome", async () => {
   await withRenderedSession(
     [assistantMessage("msg_shell_no_duplicate", 1)],

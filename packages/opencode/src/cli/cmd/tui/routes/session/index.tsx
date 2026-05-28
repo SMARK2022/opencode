@@ -2908,7 +2908,10 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
       return "← Patched " + file.relativePath
     })()
 
-    if (file.type === "delete" || !file.patch) return baseTitle
+    // 删除文件的 patch 字段同样包含完整 unified diff（apply_patch.ts 会读取原文件
+    // 内容并生成 deleteDiff），不再按 type 特殊短路。仅在有 patch 数据时才附加行数
+    // 统计；legacy 会话的 metadata 可能缺失 patch 字段，此时跳过 stats 保持兼容。
+    if (!file.patch) return baseTitle
     const stats = diffLineStats(file.patch)
     if (stats.added === 0 && stats.removed === 0) return baseTitle
     return `${baseTitle} +${stats.added} -${stats.removed}`
@@ -2938,7 +2941,11 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                 autoReview={false}
                 preview={
                   <Show
-                    when={file.type !== "delete"}
+                    // 从 file.type 硬编码断路改为按 patch 数据是否就绪来判断:
+                    // 删除文件的 metadata 已包含完整 unified diff（包含被删除内容
+                    // 的每一行），因此可以通过 DiffPreview 展示折叠态预览;
+                    // legacy 数据无 patch 时退回 -N lines 纯文本摘要。
+                    when={!!file.patch}
                     fallback={
                       <text fg={theme.diffRemoved} paddingLeft={1}>
                         -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
@@ -2956,7 +2963,10 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
               >
                 <box gap={1} flexDirection="column">
                   <Show
-                    when={file.type !== "delete"}
+                    // 与 preview 分支保持一致：从 type 断路改为 patch 数据就绪判断，
+                    // 删除文件的完整 unified diff 通过 DiffView 渲染，legacy 无 patch
+                    // 时退回 -N lines 纯文本摘要。
+                    when={!!file.patch}
                     fallback={
                       <text fg={theme.diffRemoved} paddingLeft={1}>
                         -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
