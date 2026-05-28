@@ -106,7 +106,9 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
         let textOutput = ""
         return yield* client.stream(LLM.request({
-          model: selected.model, system, prompt: attemptPrompt,
+          model: selected.model, prompt: attemptPrompt,
+          // 两次尝试移动同一可信原话；证据与协议修复提示始终留在user通道。
+          ...(selected.openaiOAuth ? { providerOptions: { openai: { instructions: system } } } : { system }),
           tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
             description: "Submit the structured allow/deny decision for this permission review.",
             parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,

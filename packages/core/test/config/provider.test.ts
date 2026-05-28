@@ -21,6 +21,22 @@ import { ConfigMigrateV1 } from "@opencode-ai/core/v1/config/migrate"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "../plugin/fixture"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+import { Database } from "@opencode-ai/core/database/database"
+import { Location } from "@opencode-ai/core/location"
+import { PermissionReviewer } from "@opencode-ai/core/permission/reviewer"
+import { PermissionReviewerPrompt } from "@opencode-ai/core/permission/reviewer/prompt"
+import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { HttpClient, HttpClientResponse } from "effect/unstable/http"
+import { node } from "@opencode-ai/core/session/runner/llm"
+import { SessionRunner } from "@opencode-ai/core/session/runner"
+import { Snapshot } from "@opencode-ai/core/snapshot"
+import { AgentV2 } from "@opencode-ai/core/agent"
 
 const it = testEffect(PluginTestLayer)
 
@@ -66,6 +82,175 @@ function request(headers: Record<string, string>, variant?: string) {
 const decode = Schema.decodeUnknownSync(Config.Info)
 
 describe("ConfigProviderPlugin.Plugin", () => {
+  it.effect("binds native reviewer instructions to the selected OAuth identity and final wire body", () => withEnv({ NATIVE_REVIEW_KEY: undefined }, () =>
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      const integrations = yield* Integration.Service
+      const credentials = yield* Credential.Service
+      const location = yield* Location.Service
+      const agents = yield* AgentV2.Service
+      let selected = "openai"
+      let reviewing = true
+      const id = ModelV2.ID.make("review-model")
+      const methodID = Integration.MethodID.make("review-oauth")
+      const config = Config.Service.of({ entries: () => Effect.succeed([
+        new Config.Document({ type: "document", info: decode({ approvals_reviewer: "auto_review", auto_review: { model: `${selected}/${id}`, policy: "TRUSTED_TENANT_POLICY" }, providers: {
+          "review-direct": { extends: "openai" }, "review-late": { extends: "openai" },
+          "review-nested": { extends: "review-direct" }, "review-switch": { extends: "openai" },
+        } }) }),
+        // 后层只改名称不能清掉直接继承；明确换基础则必须改变资格。
+        new Config.Document({ type: "document", info: decode({ providers: { "review-late": { name: "Later", api: { settings: { codexApiEndpoint: "https://custom-codex.fixture.invalid/responses?tenant=fixture" } } }, "review-switch": { extends: "review-spoof" } } }) }),
+      ]) })
+      yield* integrations.transform((draft) => {
+        for (const provider of ["openai", "review-spoof"]) {
+          const integrationID = Integration.ID.make(provider)
+          draft.method.update({ integrationID, method: { type: "key", label: "Fixture key" } })
+          draft.method.update({ integrationID, method: { type: "env", names: ["NATIVE_REVIEW_KEY"] } })
+          draft.method.update({ integrationID, method: { type: "oauth", id: methodID, label: "Fixture OAuth" },
+            authorize: () => Effect.die("Fixture must not authorize"), refresh: () => Effect.die("Fixture must not refresh"),
+          })
+        }
+      })
+      yield* catalog.transform((draft) => {
+        for (const provider of ["openai", "review-spoof"]) {
+          const providerID = ProviderV2.ID.make(provider)
+          draft.provider.update(providerID, (value) => {
+            value.integrationID = Integration.ID.make(provider)
+            value.api = { type: "aisdk", package: "@ai-sdk/openai", url: "https://api.openai.com/v1", settings: {} }
+            value.request.body = { apiKey: "configured-key" }
+          })
+          draft.model.update(providerID, id, (value) => {
+            value.api.id = ModelV2.ID.make("gpt-5")
+            // 相同SDK、URL和身份头不能让自定义OAuth冒充OpenAI。
+            value.request.headers = { originator: "codex-tui" }
+            value.request.body = { instructions: "MODEL_RAW_POLICY", custom_extension: { kept: true } }
+            value.request.variant = ModelV2.VariantID.make("review-variant")
+            value.variants = [{ id: ModelV2.VariantID.make("review-variant"), headers: {}, body: { instructions: "VARIANT_RAW_POLICY" } }]
+            value.capabilities.tools = true
+            value.limit = { context: 128000, output: 4096 }
+          })
+        }
+      })
+      const plugin = yield* PluginV2.Service
+      const host = yield* PluginHost.make(plugin)
+      yield* ConfigProviderPlugin.Plugin.effect(host).pipe(Effect.provideService(Config.Service, config))
+      const Wire = Schema.Struct({ instructions: Schema.optional(Schema.String), input: Schema.Array(Schema.Struct({ role: Schema.optional(Schema.String), content: Schema.Unknown })), custom_extension: Schema.optional(Schema.Unknown) })
+      const bodies: (typeof Wire.Type)[] = []
+      const prepared: (typeof Wire.Type)[] = []
+      const texts: string[] = []
+      const auth: string[] = []
+      const urls: string[] = []
+      const accounts: (string | null)[] = []
+      const accepted = { outcome: "allow", rationale: "bounded fixture", risk_level: "low", user_authorization: "high" }
+      const http = Layer.succeed(HttpClient.HttpClient, HttpClient.make((request) => Effect.gen(function* () {
+        const web = yield* HttpClientRequest.toWeb(request).pipe(Effect.orDie)
+        const text = yield* Effect.promise(() => web.text())
+        bodies.push(Schema.decodeUnknownSync(Schema.fromJsonString(Wire))(text))
+        texts.push(text)
+        auth.push(web.headers.get("authorization") ?? "")
+        urls.push(web.url)
+        accounts.push(web.headers.get("chatgpt-account-id"))
+        // 第一轮缺少裁决触发真实一次修复；第二轮经Responses解析真实tool call。
+        const events = !reviewing ? [
+          { type: "response.created", response: { id: "resp_normal", created_at: 0, model: "gpt-5" } },
+          { type: "response.output_text.delta", item_id: "text", output_index: 0, content_index: 0, delta: "NORMAL_WIRE_RESPONSE" },
+          { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+        ] : bodies.length === 1 ? [
+          { type: "response.created", response: { id: "resp_first", created_at: 0, model: "gpt-5" } },
+          { type: "response.output_text.delta", item_id: "text", output_index: 0, content_index: 0, delta: "Missing decision" },
+          { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+        ] : [
+          { type: "response.created", response: { id: "resp_second", created_at: 0, model: "gpt-5" } },
+          { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: "" } },
+          { type: "response.function_call_arguments.delta", item_id: "fc_review", output_index: 0, delta: JSON.stringify(accepted) },
+          { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: JSON.stringify(accepted), status: "completed" } },
+          { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+        ]
+        return HttpClientResponse.fromWeb(request, new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } }))
+      })))
+      const client = Layer.effect(LLMClient.Service, Effect.gen(function* () {
+        const actual = yield* LLMClient.Service
+        return LLMClient.Service.of({ ...actual, stream: (request) => actual.stream(request, body => Effect.sync(() => prepared.push(Schema.decodeUnknownSync(Wire)(body)))) })
+      })).pipe(Layer.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(http))))))
+      const graph = AppNodeBuilder.build(LayerNode.group([Database.node, SessionStore.node, PermissionReviewer.node, node]), [
+        [Catalog.node, Layer.succeed(Catalog.Service, catalog)], [Integration.node, Layer.succeed(Integration.Service, integrations)],
+        [Config.node, Layer.succeed(Config.Service, config)], [Location.node, Layer.succeed(Location.Service, location)], [LayerNodePlatform.llmClient, client],
+        [AgentV2.node, Layer.succeed(AgentV2.Service, agents)], [Snapshot.node, Layer.mock(Snapshot.Service, { capture: () => Effect.succeed(undefined) })],
+      ])
+      yield* Effect.gen(function* () {
+        const database = yield* Database.Service
+        const reviewer = yield* PermissionReviewer.Service
+        const sessionID = SessionSchema.ID.make("ses_native_oauth_wire")
+        yield* database.db.insert(ProjectTable).values({ id: ProjectV2.ID.global, worktree: location.directory, sandboxes: [] }).onConflictDoNothing().run().pipe(Effect.orDie)
+        yield* database.db.insert(SessionTable).values({ id: sessionID, project_id: ProjectV2.ID.global, slug: "fixture", directory: location.directory, title: "Fixture", version: "test", agent: "build", model: { id, providerID: "openai" } }).run().pipe(Effect.orDie)
+        const evidence = { time: { created: 1 }, text: "TRANSCRIPT_EVIDENCE" }
+        yield* database.db.insert(SessionMessageTable).values({ id: SessionMessage.ID.make("msg_native_oauth_evidence"), session_id: sessionID, type: "user", seq: 1, data: evidence }).run().pipe(Effect.orDie)
+        const save = (provider: string, type: "key" | "oauth") => credentials.create({ integrationID: Integration.ID.make(provider), value: type === "key"
+          ? Credential.Key.make({ type: "key", key: `stored-key-${provider}` })
+          : Credential.OAuth.make({ type: "oauth", methodID, access: `access-${provider}`, refresh: "REFRESH_SECRET", expires: Number.MAX_SAFE_INTEGER, metadata: { accountID: `account-${provider}`, credential_marker: "OAUTH_METADATA" } }),
+        })
+        const expected = PermissionReviewerPrompt.buildSystemPrompt(`${PermissionReviewerPrompt.DEFAULT_TENANT_POLICY}\n\nTRUSTED_TENANT_POLICY`)
+        const cases = [
+          { provider: "openai", type: "oauth", promote: true }, { provider: "openai", type: "key", promote: false },
+          { provider: "openai", type: "env", promote: false }, { provider: "openai", type: "config", promote: false },
+          { provider: "review-spoof", type: "oauth", promote: false },
+          // 基础和别名的凭据交叉，锁定本次实际选择，不能偷用基础账号。
+          { provider: "review-direct", type: "oauth", base: "key", promote: true }, { provider: "review-direct", type: "key", base: "oauth", promote: false },
+          { provider: "review-late", type: "oauth", promote: true }, { provider: "review-nested", type: "oauth", promote: false },
+          { provider: "review-switch", type: "oauth", promote: false },
+        ] as const
+        for (const scenario of cases) {
+          selected = scenario.provider
+          if (scenario.type === "env") process.env.NATIVE_REVIEW_KEY = "environment-key"
+          else delete process.env.NATIVE_REVIEW_KEY
+          for (const value of yield* credentials.list(Integration.ID.make(selected))) yield* credentials.remove(value.id)
+          if ("base" in scenario) yield* save("openai", scenario.base)
+          if (scenario.type === "key" || scenario.type === "oauth") yield* save(selected, scenario.type)
+          bodies.length = prepared.length = texts.length = auth.length = urls.length = accounts.length = 0
+          expect(yield* reviewer.review({ sessionID, reviewID: `review_${selected}_${scenario.type}`, permission: "bash", patterns: ["PLANNED_ACTION"], metadata: { command: "COMMAND_EVIDENCE $HOME > out", cwd: location.directory }, precheck: { level: "cautious", reason: "PRECHECK_EVIDENCE" } })).toMatchObject({ action: "allow" })
+          expect(bodies).toHaveLength(2)
+          expect(prepared).toHaveLength(2)
+          for (const [index, body] of bodies.entries()) {
+            // 同时核对lowering与最终HTTP正文，禁止raw overlay重新抢回策略字段。
+            expect(body.instructions).toBe(scenario.promote ? expected : "VARIANT_RAW_POLICY")
+            expect(prepared[index]?.instructions).toBe(body.instructions)
+            expect(body.input.some(item => item.role === "system" || item.role === "developer")).toBe(!scenario.promote)
+            if (!scenario.promote) expect(body.input.filter(item => item.role === "system" || item.role === "developer").map(item => JSON.stringify(item.content)).join("\n")).toContain("TRUSTED_TENANT_POLICY")
+            const evidence = body.input.filter(item => item.role === "user").map(item => JSON.stringify(item.content)).join("\n")
+            for (const value of ["TRANSCRIPT_EVIDENCE", "PLANNED_ACTION", "COMMAND_EVIDENCE $HOME > out", "PRECHECK_EVIDENCE"]) {
+              expect(evidence).toContain(value)
+              expect(body.instructions).not.toContain(value)
+            }
+            expect(evidence.includes(JSON.stringify(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT).slice(1, -1))).toBe(index === 1) // JSON证据中的换行与引号必须按同一编码比较完整原话。
+            expect(body.instructions).not.toContain(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT)
+            expect(body.custom_extension).toEqual({ kept: true })
+            expect(urls[index]).toBe(!scenario.promote ? "https://api.openai.com/v1/responses" : selected === "review-late" ? "https://custom-codex.fixture.invalid/responses?tenant=fixture" : "https://chatgpt.com/backend-api/codex/responses")
+            expect(accounts[index]).toBe(scenario.promote ? `account-${selected}` : null)
+            // token只进入真实认证头；OAuth metadata与refresh绝不混进模型JSON。
+            for (const secret of ["access-", "REFRESH_SECRET", "OAUTH_METADATA", "configured-key", "environment-key", "stored-key-"]) expect(texts[index]).not.toContain(secret)
+            expect(auth[index]).toBe(`Bearer ${scenario.type === "oauth" ? `access-${selected}` : scenario.type === "key" ? `stored-key-${selected}` : scenario.type === "env" ? "environment-key" : "configured-key"}`)
+          }
+        }
+        // 同一真实resolver还服务普通turn和手动摘要，不能只认证审查器的专属请求。
+        reviewing = false
+        selected = "openai"
+        yield* save(selected, "oauth")
+        yield* agents.transform(draft => draft.update(AgentV2.ID.make("build"), value => { value.system = "NORMAL_SYSTEM_POLICY" }))
+        const runner = yield* SessionRunner.Service
+        for (const maintenance of [undefined, "compact"] as const) {
+          bodies.length = prepared.length = texts.length = auth.length = urls.length = accounts.length = 0
+          yield* runner.run({ sessionID, force: true, ...(maintenance ? { maintenance } : {}) })
+          expect(bodies).toHaveLength(1)
+          expect(bodies[0]?.instructions).toContain("NORMAL_SYSTEM_POLICY")
+          expect(bodies[0]?.instructions).not.toContain("TRANSCRIPT_EVIDENCE")
+          expect(bodies[0]?.input.some(item => item.role === "system" || item.role === "developer")).toBe(false)
+          expect(urls[0]).toBe("https://chatgpt.com/backend-api/codex/responses")
+          expect(accounts[0]).toBe("account-openai")
+          expect(texts[0]).toContain(maintenance ? "NORMAL_WIRE_RESPONSE" : "TRANSCRIPT_EVIDENCE")
+        }
+      }).pipe(Effect.provide(graph))
+    }),
+  ))
   it.effect("inherits alias authentication without sharing credentials or refresh ownership", () =>
     Effect.gen(function* () {
       const integrations = yield* Integration.Service
@@ -162,9 +347,10 @@ describe("ConfigProviderPlugin.Plugin", () => {
             options: { apiKey: "configured-key", version },
           }])),
         }))
-        yield* addPlugin(Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) }))
+        const config = Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) })
+        yield* addPlugin(config)
         if (cc === undefined) expect(yield* catalog.provider.get(ProviderV2.ID.make("claudecode"))).toBeUndefined()
-        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
+        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer.pipe(Layer.provide(Layer.succeed(Config.Service, config)))))
         for (const provider of providers) {
           const claudecode = ["claudecode", "explicit-claudecode", "cubence"].includes(provider)
           const inherited = required(yield* catalog.model.get(provider, id))
@@ -559,7 +745,7 @@ describe("ConfigProviderPlugin.Plugin", () => {
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
         })
-        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
+        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer.pipe(Layer.provide(Layer.succeed(Config.Service, config)))))
         const unauth = yield* resolver.resolve(session)
         expect(unauth.model.id).toBe(ModelID.make("beta"))
         expect(unauth.model.route.endpoint.baseURL).toBe("https://base-b.test")
@@ -670,7 +856,7 @@ describe("ConfigProviderPlugin.Plugin", () => {
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
         })
-        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
+        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer.pipe(Layer.provide(Layer.succeed(Config.Service, config)))))
         const selected = (yield* resolver.resolve(session)).model
         // 真实 Location resolver 保留派生 provider 与 wire ID，冻结预算不随 Catalog 别名重写。
         expect(selected.provider).toBe(ProviderID.make(providerID))

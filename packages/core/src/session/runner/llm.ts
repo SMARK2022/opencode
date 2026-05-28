@@ -303,11 +303,13 @@ const layer = Layer.effect(
         },
         // Agent 的显式开关覆盖 model/variant 默认值，false 不能被真值判断吞掉。
         providerOptions: { openai: { promptCacheKey,
+          // 普通turn与审查器共用真实OAuth资格，完整可信system原话只提升一次。
+          ...(selection.openaiOAuth ? { instructions: systemParts.map(part => part.text).join("\n") } : {}),
           ...(agent.info?.request.body.parallelToolCalls !== undefined || agent.info?.request.body.parallel_tool_calls !== undefined
             ? { parallelToolCalls: agent.info.request.body.parallelToolCalls ?? agent.info.request.body.parallel_tool_calls } : {}),
         } },
         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
-        system: systemParts,
+        system: selection.openaiOAuth ? undefined : systemParts,
         messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep || decide ? "none" : undefined,
@@ -576,6 +578,10 @@ const layer = Layer.effect(
         const request = LLM.request({
           model: selection.model,
           messages: [],
+          // 手动摘要没有普通turn request，仍从现有可信agent与epoch构造指令。
+          ...(selection.openaiOAuth ? { providerOptions: { openai: { instructions: [
+            agent.info?.system ?? SessionPrompts.provider(String(selection.model.id), String(selection.model.provider)), system.baseline,
+          ].filter(Boolean).join("\n") } } } : {}),
           http: { headers: {
             "x-session-affinity": session.id,
             "X-Session-Id": session.id,
