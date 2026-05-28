@@ -220,6 +220,11 @@ export const dict: Record<string, string> = {
   "ui.common.submit": "Submit",
   "ui.common.showMore": "Show more",
 
+  "ui.tool.grep.matches.one": "{{count}} match",
+  "ui.tool.grep.matches.other": "{{count}} matches",
+  "ui.tool.grep.truncated": "{{count}}+ matches",
+  "ui.tool.grep.timedOut": "timed out",
+  "ui.tool.grep.incomplete": "{{result}}, timed out",
   "ui.permission.deny": "Deny",
   "ui.permission.allowAlways": "Allow always",
   "ui.permission.allowOnce": "Allow once",

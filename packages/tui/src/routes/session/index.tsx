@@ -2881,15 +2881,55 @@ function Read(props: ToolProps) {
   )
 }
 
+// #246：TUI 侧 grep 摘要与 run 模式同语义；目标 ToolProps 的 input/metadata
+// 是 Record<string, unknown>，helper 用 typeof 收窄而非具体工具类型。
+// helpers 与 Grep 组件同文件同居——这三个 helper 只服务 TUI inline 渲染，
+// 抽到共享模块反而让 run/tui 两侧产生跨包依赖
+function grepPatterns(value: unknown, exclude = false) {
+  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  // #246：数组形态来自 PatternList，脏项（非 string）静默剔除而非抛错，
+  // 避免 V1 历史会话的残留 input 让 TUI 渲染整条消息失败
+  // TUI 的 grep 行必须保持短促；不显示 include=/exclude= 字段名，
+  // exclude 用 !glob 表达真实过滤语义，和 rg/glob 习惯保持一致。
+  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
+}
+
+function grepFilter(value: unknown, exclude = false) {
+  const items = grepPatterns(value, exclude)
+  if (items.length === 0) return ""
+  // exclude 往往比 include 更长，显示第一个并压缩其余项，避免 inline 行横向溢出；
+  // include 最多显示两个常见扩展名，保留足够上下文但不降级成参数 dump。
+  const shown = items.slice(0, exclude ? 1 : 2)
+  const hidden = items.length - shown.length
+  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
+}
+
+// #246：numberValue 收窄后的 matches 才参与单复数与截断判断；
+// 字段缺失或类型不符时退化为空串/超时提示，不渲染误导性数字。
+function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
+  const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
+  const timedOut = metadata.timedOut === true
+  // #246：TUI 与 run 模式的超时/截断组合语义保持一致——
+  // metadata 缺 matches 字段时只显示 timed out，绝不渲染 undefined 字符串
+  if (matches === undefined) return timedOut ? "timed out" : ""
+  if (matches === 0 && timedOut) return "timed out"
+  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
+  return timedOut ? `${label}, timed out` : label
+}
+
 function Grep(props: ToolProps) {
   const pathFormatter = usePathFormatter()
+  // #246：filters/result 各自 memo 化，输入段与结果段独立响应 metadata 回填
+  // #246：filters 段在 start 阶段即可渲染（仅依赖 input），
+  // result 段等待 metadata 回填——两个 memo 分离避免回显闪断
+  const filters = createMemo(() => [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "))
+  const result = createMemo(() => grepResult(props.metadata))
   return (
     <InlineTool icon="✱" pending="Searching content…" complete={stringValue(props.input.pattern)} part={props.part}>
       Grep "{stringValue(props.input.pattern)}"{" "}
       <Show when={stringValue(props.input.path)}>in {pathFormatter.format(stringValue(props.input.path))} </Show>
-      <Show when={numberValue(props.metadata.matches)}>
-        ({numberValue(props.metadata.matches)} {numberValue(props.metadata.matches) === 1 ? "match" : "matches"})
-      </Show>
+      <Show when={filters()}>· {filters()} </Show>
+      <Show when={result()}>({result()})</Show>
     </InlineTool>
   )
 }

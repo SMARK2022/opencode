@@ -285,6 +285,55 @@ function count(n: number, label: string): string {
   return `${n} ${label}${n === 1 ? "" : "es"}`
 }
 
+// #246：run 模式与 TUI 滚动回显共用同一套 grep 摘要语义；helper 放在
+// tool.ts 顶层供 runGrep/scrollGrepStart 复用，避免两处各写一份漂移。
+function grepPatterns(value: unknown, exclude = false): string[] {
+  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  // #246：exclude 项已带 ! 前缀时不重复添加，保持 rg 的幂等语义；
+  // 非 string 数组项直接丢弃，不报错——历史会话的 input 可能不完整
+  // grep 的 inline 行是给人扫一眼的摘要，不展示 include=/exclude= 字段名；
+  // exclude 直接沿用 ripgrep 的 !glob 语义，既短又能和普通 include 区分。
+  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
+}
+
+function grepFilter(value: unknown, exclude = false): string {
+  const items = grepPatterns(value, exclude)
+  // #246：空 filter 必须返回空串而非占位符，否则 grepDetails 会拼接出孤立的 · 分段
+  if (items.length === 0) return ""
+  // include 通常只有一两个扩展名，最多展示两个；exclude 往往更长，
+  // 只展示第一个并用 +N 表示其余项，避免把 inline tool 行变成参数列表。
+  const shown = items.slice(0, exclude ? 1 : 2)
+  const hidden = items.length - shown.length
+  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
+}
+
+// #246：matches/truncated/timedOut 三个字段组合出用户可读结果——
+// 0 匹配且超时优先显示 timed out，截断用 + 后缀而非省略匹配数。
+function grepResult(metadata: ToolDict): string {
+  const matches = num(metadata.matches)
+  const timedOut = metadata.timedOut === true
+  // #246：matches=1 且未截断用单数 match；截断后单复数统一为 matches，
+  // 因为 + 后缀已表示「至少还有更多」，单数形式会产生语义矛盾
+  if (matches === undefined) return timedOut ? "timed out" : ""
+  if (matches === 0 && timedOut) return "timed out"
+  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
+  // #246：timed out 后置而非替换匹配数，保留「搜到了多少」的信息量
+  return timedOut ? `${label}, timed out` : label
+}
+
+// #246：输入段（path/include/exclude）与结果段用 ` · ` 分段拼接；
+// metadata 缺省时只渲染输入段，供 start 阶段滚动回显复用。
+function grepDetails(input: ToolDict, metadata?: ToolDict): string {
+  const parts = [
+    // #246：path 缺失时跳过 in 段而不是渲染 "in "，无根目录的搜索同样成立
+    text(input.path) ? `in ${toolPath(text(input.path))}` : "",
+    grepFilter(input.include),
+    grepFilter(input.exclude, true),
+    metadata ? grepResult(metadata) : "",
+  ].filter(Boolean)
+  return parts.join(" · ")
+}
+
 function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
   const root = p.input.path ?? ""
   const title = `Glob "${p.input.pattern ?? ""}"`
@@ -299,11 +348,9 @@ function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
 }
 
 function runGrep(p: ToolProps<typeof GrepTool>): ToolInline {
-  const root = p.input.path ?? ""
   const title = `Grep "${p.input.pattern ?? ""}"`
-  const suffix = root ? `in ${toolPath(root)}` : ""
-  const matches = p.metadata.matches
-  const description = matches === undefined ? suffix : `${suffix}${suffix ? " · " : ""}${count(matches, "match")}`
+  // #246：description 统一走 grepDetails，与滚动回显保持同一摘要口径
+  const description = grepDetails(p.input, p.metadata)
   return {
     icon: "✱",
     title,
@@ -881,12 +928,13 @@ function scrollGlobFinal(p: ToolProps<typeof GlobTool>): string {
 function scrollGrepStart(p: ToolProps<typeof GrepTool>): string {
   const pattern = p.input.pattern ?? ""
   const head = pattern ? `✱ Grep "${pattern}"` : "✱ Grep"
-  const dir = p.input.path ?? ""
-  if (!dir) {
+  // #246：start 阶段尚无 metadata，grepDetails 退化为纯输入段摘要
+  const details = grepDetails(p.input)
+  if (!details) {
     return head
   }
 
-  return `${head} in ${toolPath(dir)}`
+  return `${head} ${details}`
 }
 
 function scrollListStart(p: ToolProps): string {
