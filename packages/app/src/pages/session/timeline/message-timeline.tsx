@@ -796,7 +796,7 @@ export function MessageTimeline(props: {
     try {
       const data = await fetchSessionExport({
         sessionID,
-        client: sdk().client,
+        ...sdk(),
       })
       const filename = sessionExportFilename(data.info)
       downloadSessionExport(filename, data)
