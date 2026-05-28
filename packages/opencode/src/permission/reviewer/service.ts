@@ -5,6 +5,8 @@ import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
+import { Auth } from "@/auth"
+import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
 import { SessionRetry } from "@/session/retry"
 import { Database } from "@opencode-ai/core/database/database"
 
@@ -101,6 +103,8 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
+    // #250：auth.get(providerID) 判定凭据类型——只有 openai+oauth 才走 instructions 提升
+    const auth = yield* Auth.Service
     const provider = yield* Provider.Service
     // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
     const database = yield* Database.Service
@@ -377,15 +381,35 @@ export const layer = Layer.effect(
         Effect.sync(() => new AbortController()),
         (abort) =>
           Effect.gen(function* () {
-            const language = yield* provider.getLanguage(model)
-            const providerInfo = yield* provider.getProvider(model.providerID)
+            // #250：四项依赖互不依赖，Effect.all unbounded 合并发射减少 reviewer 延迟；
+            // config 与 auth 是 OAuth 判定的新增输入
+            const [language, providerInfo, cfg, authInfo] = yield* Effect.all(
+              [
+                provider.getLanguage(model),
+                provider.getProvider(model.providerID),
+                config.get(),
+                auth.get(model.providerID),
+              ],
+              { concurrency: "unbounded" },
+            )
             // #209：无 persist 时用固定标识——ProviderTransform.options 需要一个 sessionID 做 provider 适配键，无子会话时用常量避免空值
             const sessionID = persist?.sessionID ?? "permission-reviewer"
             // #209：合并 provider options 与 model.options——与 SessionPrompt 保持一致的 provider 适配，避免 reviewer 流缺少必要选项
-            const options = mergeOptions(
+            const baseOptions = mergeOptions(
               ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
               model.options,
             )
+            const isOpenaiOauth =
+              isOpenaiOauthProvider(providerInfo.id, buildBaseProviderMap(cfg.provider ?? {})) && authInfo?.type === "oauth"
+            // OpenAI OAuth/Codex 后端要求顶层 instructions；普通 Responses 会把
+            // system message 降成 input item，但 Codex 路径会因此 400。这里只移动
+            // 可信 reviewer 指令，transcript、precheck reason 和 planned action 仍留在
+            // user message，避免把不可信证据提升成高优先级指令。
+            const reviewerInstructions = isOpenaiOauth
+              ? messages.flatMap((message) => (message.role === "system" ? [message.content] : [])).join("\n")
+              : undefined
+            const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
+            const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
             // #209：wrapLanguageModel 注入 message 归一化中间件——reviewer 流与 SessionPrompt 共享同一 provider 适配层
             const result = streamText({
               model: wrapLanguageModel({
@@ -404,7 +428,7 @@ export const layer = Layer.effect(
                   },
                 ],
               }),
-              messages: [...messages],
+              messages: [...reviewerMessages],
               tools: {
                 permission_review_decision: tool({
                   description: "Submit the structured allow/deny decision for this permission review.",
@@ -892,6 +916,8 @@ function recordJsonFallbackDecision(
 
 // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
 // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Database.node] })
+// #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
+// node deps 显式加入 Auth.node，LayerNode 依赖图在编译期保持完整
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node] })
 
 export * as PermissionReviewer from "./service"

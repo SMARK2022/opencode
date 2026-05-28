@@ -259,6 +259,8 @@ export const make = (dependencies: Dependencies) => {
         LLM.request({
           model: input.model,
           http: input.request.http,
+          // 摘要继承本次真实请求的可信指令；conversation仍留在user正文。
+          providerOptions: input.request.providerOptions,
           messages: [Message.user(summaryPrompt)],
           tools: [],
           generation: { maxTokens: summaryOutput },
