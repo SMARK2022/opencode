@@ -3,6 +3,9 @@ import { normalize, type ViewDiff } from "./session-diff"
 type Kind = "add" | "update" | "delete" | "move"
 
 type Raw = {
+  // Native沿canonical FileDiff传值；历史V1形状继续由同一个展示owner接纳。
+  file?: string
+  status?: "added" | "deleted" | "modified"
   filePath?: string
   relativePath?: string
   type?: Kind
@@ -39,8 +42,9 @@ export function patchFile(raw: unknown): ApplyPatchFile | undefined {
   if (!raw || typeof raw !== "object") return
 
   const value = raw as Raw
-  const type = kind(value.type)
-  const filePath = typeof value.filePath === "string" ? value.filePath : undefined
+  // 删除diff已经存在，不能因为字段改名把正文和统计一起过滤。
+  const type = kind(value.type) ?? (value.status === "added" ? "add" : value.status === "deleted" ? "delete" : value.status === "modified" ? "update" : undefined)
+  const filePath = typeof value.filePath === "string" ? value.filePath : typeof value.file === "string" ? value.file : undefined
   const relativePath = typeof value.relativePath === "string" ? value.relativePath : filePath
   const patch = typeof value.patch === "string" ? value.patch : typeof value.diff === "string" ? value.diff : undefined
   const before = typeof value.before === "string" ? value.before : undefined

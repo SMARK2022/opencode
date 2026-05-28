@@ -3241,8 +3241,8 @@ function ApplyPatch(props: ToolProps) {
       return "← Patched " + file.relativePath
     })()
 
-    // 删除计数仍由 delete 分支展示，不重复从空 patch 推导统计。
-    if (file.type === "delete" || !file.patch) return baseTitle
+    // 删除带真实patch时沿同一hunk统计；legacy缺少patch才保留纯动作标题。
+    if (!file.patch) return baseTitle
 
     // 与 Edit 共享按 hunk 解析的统计，包含多文件与 ++counter/--counter 内容。
     const stats = getRevertDiffFiles(file.patch).reduce(
@@ -3278,16 +3278,17 @@ function ApplyPatch(props: ToolProps) {
 
             return (
             <BlockTool
-              // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
+              // 文件各自拥有展开状态；有patch的删除项也预览diff，legacy仍走删除摘要。
           // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
           autoReview={false}
-              preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
+              preview={!!file.patch && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
               title={title(file)}
               part={props.part}
-              onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
+              onClick={!!file.patch && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}
             >
               <Show
-                when={file.type !== "delete"}
+                // 正文与折叠预览按相同patch就绪条件分流，避免删除diff只能看到预览。
+                when={!!file.patch}
                 fallback={
                   // 删除文件仍显示权威 deletions，缩进与普通 diff 的内容列一致。
                   <text fg={theme.diffRemoved} paddingLeft={1}>
@@ -3471,10 +3472,13 @@ export function parseApplyPatchFiles(value: unknown) {
     const type = stringValue(file.type)
     const relativePath = stringValue(file.relativePath)
     const filePath = stringValue(file.filePath)
-    const patch = stringValue(file.patch)
     const deletions = numberValue(file.deletions)
-    if (!type || !relativePath || !filePath || patch === undefined || deletions === undefined) return []
-    return [{ type, relativePath, filePath, patch, deletions, movePath: stringValue(file.movePath) }]
+    // #248：仅 delete 允许 patch 缺失（legacy V1 删除条目仍可渲染 -N lines 摘要）；
+    // 其余类型无 patch 无法渲染 diff，继续丢弃
+    const patch = stringValue(file.patch)
+    if (!type || !relativePath || !filePath || deletions === undefined) return []
+    if (patch === undefined && type !== "delete") return []
+    return [{ type, relativePath, filePath, patch: patch ?? "", deletions, movePath: stringValue(file.movePath) }]
   })
 }
 

@@ -2473,6 +2473,8 @@ ToolRegistry.register({
                                       <span data-slot="apply-patch-change" data-type="removed">
                                         {i18n.t("ui.patch.action.deleted")}
                                       </span>
+                                      {/* 多文件删除与单文件标题共用真实计数，不再只显示动作标签。 */}
+                                      <DiffChanges changes={{ additions: file.additions, deletions: file.deletions }} />
                                     </Match>
                                     <Match when={file.type === "move"}>
                                       <span data-slot="apply-patch-change" data-type="modified">
