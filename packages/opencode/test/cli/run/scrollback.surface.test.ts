@@ -649,6 +649,44 @@ test("does not double-space before completed bash output when inline tool header
   }
 })
 
+test("renders grep filters compactly in scrollback headers", async () => {
+  const out = await setup()
+
+  try {
+    await out.scrollback.append(
+      toolCommit({
+        tool: "grep",
+        phase: "start",
+        toolState: "running",
+        state: {
+          status: "running",
+          input: {
+            pattern: "function",
+            path: "node_modules",
+            include: "*.js",
+            exclude: ["**/.cache/**", "**/.bin/**", "**/micromark-core-commonmark/**"],
+            timeout: 1000,
+          },
+          time: { start: 1 },
+        },
+      }),
+    )
+
+    const commits = claim(out.renderer)
+    try {
+      const output = render(commits)
+      expect(output).toContain('✱ Grep "function" in node_modules · *.js · !**/.cache/** +2')
+      expect(output).not.toContain("include=")
+      expect(output).not.toContain("exclude=")
+      expect(output).not.toContain("timeout")
+    } finally {
+      destroy(commits)
+    }
+  } finally {
+    out.scrollback.destroy()
+  }
+})
+
 test("does not emit blank patch snapshots between edit and task", async () => {
   const out = await setup()
 

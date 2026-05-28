@@ -2669,14 +2669,41 @@ function Read(props: ToolProps<typeof ReadTool>) {
   )
 }
 
+function grepPatterns(value: unknown, exclude = false) {
+  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  // TUI 的 grep 行必须保持短促；不显示 include=/exclude= 字段名，
+  // exclude 用 !glob 表达真实过滤语义，和 rg/glob 习惯保持一致。
+  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
+}
+
+function grepFilter(value: unknown, exclude = false) {
+  const items = grepPatterns(value, exclude)
+  if (items.length === 0) return ""
+  // exclude 往往比 include 更长，显示第一个并压缩其余项，避免 inline 行横向溢出；
+  // include 最多显示两个常见扩展名，保留足够上下文但不降级成参数 dump。
+  const shown = items.slice(0, exclude ? 1 : 2)
+  const hidden = items.length - shown.length
+  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
+}
+
+function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
+  const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
+  const timedOut = metadata.timedOut === true
+  if (matches === undefined) return timedOut ? "timed out" : ""
+  if (matches === 0 && timedOut) return "timed out"
+  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
+  return timedOut ? `${label}, timed out` : label
+}
+
 function Grep(props: ToolProps<typeof GrepTool>) {
   const pathFormatter = usePathFormatter()
+  const filters = createMemo(() => [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "))
+  const result = createMemo(() => grepResult(props.metadata))
   return (
     <InlineTool icon="✱" pending="Searching content..." complete={props.input.pattern} part={props.part}>
       Grep "{props.input.pattern}" <Show when={props.input.path}>in {pathFormatter.format(props.input.path)} </Show>
-      <Show when={props.metadata.matches}>
-        ({props.metadata.matches} {props.metadata.matches === 1 ? "match" : "matches"})
-      </Show>
+      <Show when={filters()}>· {filters()} </Show>
+      <Show when={result()}>({result()})</Show>
     </InlineTool>
   )
 }

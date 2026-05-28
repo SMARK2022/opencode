@@ -285,6 +285,42 @@ function count(n: number, label: string): string {
   return `${n} ${label}${n === 1 ? "" : "es"}`
 }
 
+function grepPatterns(value: unknown, exclude = false): string[] {
+  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  // grep 的 inline 行是给人扫一眼的摘要，不展示 include=/exclude= 字段名；
+  // exclude 直接沿用 ripgrep 的 !glob 语义，既短又能和普通 include 区分。
+  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
+}
+
+function grepFilter(value: unknown, exclude = false): string {
+  const items = grepPatterns(value, exclude)
+  if (items.length === 0) return ""
+  // include 通常只有一两个扩展名，最多展示两个；exclude 往往更长，
+  // 只展示第一个并用 +N 表示其余项，避免把 inline tool 行变成参数列表。
+  const shown = items.slice(0, exclude ? 1 : 2)
+  const hidden = items.length - shown.length
+  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
+}
+
+function grepResult(metadata: ToolDict): string {
+  const matches = num(metadata.matches)
+  const timedOut = metadata.timedOut === true
+  if (matches === undefined) return timedOut ? "timed out" : ""
+  if (matches === 0 && timedOut) return "timed out"
+  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
+  return timedOut ? `${label}, timed out` : label
+}
+
+function grepDetails(input: ToolDict, metadata?: ToolDict): string {
+  const parts = [
+    text(input.path) ? `in ${toolPath(text(input.path))}` : "",
+    grepFilter(input.include),
+    grepFilter(input.exclude, true),
+    metadata ? grepResult(metadata) : "",
+  ].filter(Boolean)
+  return parts.join(" · ")
+}
+
 function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
   const root = p.input.path ?? ""
   const title = `Glob "${p.input.pattern ?? ""}"`
@@ -299,11 +335,8 @@ function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
 }
 
 function runGrep(p: ToolProps<typeof GrepTool>): ToolInline {
-  const root = p.input.path ?? ""
   const title = `Grep "${p.input.pattern ?? ""}"`
-  const suffix = root ? `in ${toolPath(root)}` : ""
-  const matches = p.metadata.matches
-  const description = matches === undefined ? suffix : `${suffix}${suffix ? " · " : ""}${count(matches, "match")}`
+  const description = grepDetails(p.input, p.metadata)
   return {
     icon: "✱",
     title,
@@ -879,12 +912,12 @@ function scrollGlobFinal(p: ToolProps<typeof GlobTool>): string {
 function scrollGrepStart(p: ToolProps<typeof GrepTool>): string {
   const pattern = p.input.pattern ?? ""
   const head = pattern ? `✱ Grep "${pattern}"` : "✱ Grep"
-  const dir = p.input.path ?? ""
-  if (!dir) {
+  const details = grepDetails(p.input)
+  if (!details) {
     return head
   }
 
-  return `${head} in ${toolPath(dir)}`
+  return `${head} ${details}`
 }
 
 function scrollListStart(p: ToolProps): string {
