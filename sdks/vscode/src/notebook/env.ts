@@ -314,7 +314,8 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
   }
   if (!jupyter.isActive) await jupyter.activate()
-  const allCommands = await vscode.commands.getCommands(true)
+  // Jupyter 可注册隐藏命令，查询面必须包含 executeCommand 能调用的完整列表。
+  const allCommands = await vscode.commands.getCommands(false)
   if (!allCommands.includes(RESTART_CMD)) {
     return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "jupyter.restartkernel command is not registered."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
   }

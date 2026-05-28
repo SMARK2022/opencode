@@ -18,6 +18,8 @@ export const notebookFields = [
   ["operation", "ui.notebook.operation"],
   ["editType", "ui.notebook.operation"],
   ["target", "ui.notebook.target"],
+  ["cellId", "ui.notebook.cellId"],
+  ["requestedCellId", "ui.notebook.requestedCellId"],
   ["cellCountBefore", "ui.notebook.beforeCells"],
   ["cellCountAfter", "ui.notebook.afterCells"],
   ["added", "ui.notebook.added"],

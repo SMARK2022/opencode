@@ -24,7 +24,8 @@ export function NotebookTool(props: ToolProps & { title: (typeof notebookTools)[
   const cells = () => [...notebookRows(view()?.cells), ...notebookRows(view()?.cell ? [view()?.cell] : [])].filter((cell) => notebookLine(cell))
   return (
     <BasicTool {...props} icon="code-lines" defaultOpen allowOpenWhilePending trigger={(open) => <div class="flex min-w-0 flex-col gap-1 text-left">
-      <span>{title()} {path()} {notebookValue(view()?.cellLabel ?? props.input.cellId)} {notebookValue(view()?.editType ?? props.input.operation)}</span>
+      {/* 格序号和可续用句柄同时显示，不能让cN遮住类型替换后的新身份。 */}
+      <span>{title()} {path()} {notebookValue(view()?.cellLabel)} {notebookValue(view()?.cellId ?? props.input.cellId)} {notebookValue(view()?.editType ?? props.input.operation)}</span>
       <Show when={!open()}>
         <For each={notebookPreviewCells(cells())}>{(cell) => <pre style={{ "white-space": "pre-wrap" }}>{notebookLine(cell)}</pre>}</For>
         <Show when={cells().flatMap((cell) => notebookRows(cell.artifacts)).length}>{(count) => <span>{i18n.t("ui.notebook.availableArtifacts", { count: count() })}</span>}</Show>

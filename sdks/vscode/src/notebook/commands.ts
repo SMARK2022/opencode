@@ -241,7 +241,8 @@ async function editNotebookCommand() {
     ? undefined
     : await vscode.window.showInputBox({
         title: "vscode_notebook_edit newCode",
-        prompt: "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。",
+        // 输入框的空串仍是显式清空；仅修改语言需要桥接 API 真正省略源码字段。
+        prompt: "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。仅修改语言请通过桥接 API 省略 oldCode/newCode。",
         value: editType === "edit" && cell ? cell.cell.document.getText().replace(/\n/g, "\\n") : "",
         ignoreFocusOut: true,
       })

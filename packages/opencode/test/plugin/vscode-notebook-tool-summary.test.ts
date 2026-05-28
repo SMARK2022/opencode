@@ -7,6 +7,21 @@ const notebookPath = "/tmp/notebook tool demo.ipynb"
 let activeNotebook: ReturnType<typeof createNotebook>
 let cellSequence = 0
 let executionOrder = 0
+// The fake VS Code command registry intentionally separates public commands
+// (`getCommands(true)`) from the full extension-host surface (`getCommands(false)`).
+// Jupyter contributes some commands as hidden/internal commands, so this fixture
+// must preserve that distinction to catch restart regressions without depending
+// on a real VS Code extension host.
+let commandLists = {
+  public: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+  all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+}
+let executedCommands: string[] = []
+// Keep extension activation injectable per test. Most notebook tests should see
+// no Jupyter/Python extension, while restart/configure tests can provide only the
+// public shape they need; this avoids a broad mock that would hide missing-env
+// behavior exercised elsewhere in the file.
+let extensionLookup = new Map<string, { isActive: boolean; packageJSON?: Record<string, unknown>; exports?: unknown; activate(): Promise<unknown> }>()
 const notebookListeners = new Set<(event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void>()
 const textListeners = new Set<(event: { document: NotebookCell["document"] }) => void>()
 
@@ -86,15 +101,16 @@ const vscode = {
     },
   },
   commands: {
-    getCommands: async () => ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+    getCommands: async (filterInternal = false) => filterInternal ? commandLists.public : commandLists.all,
     executeCommand: async (command: string) => {
+      executedCommands.push(command)
       if (command === "notebook.cell.execute") executeSelectedCell()
       if (command === "notebook.selectKernel") return true
       return undefined
     },
   },
   extensions: {
-    getExtension: () => undefined,
+    getExtension: (id: string) => extensionLookup.get(id),
   },
   CancellationTokenSource: class {
     readonly token = {}
@@ -125,6 +141,12 @@ beforeEach(() => {
   vscodeMock.workspace.notebookDocuments = [activeNotebook]
   vscodeMock.window.activeNotebookEditor = undefined
   vscodeMock.window.visibleNotebookEditors = []
+  commandLists = {
+    public: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+  }
+  executedCommands = []
+  extensionLookup = new Map()
   notebookListeners.clear()
   textListeners.clear()
 })
@@ -164,6 +186,119 @@ test("source rejects stale cell IDs instead of reading a different notebook rang
 })
 
 // #234：insert 结果的 insertedCellId 是模型后续 run/source 的直接输入
+test("edit rejects empty source arrays before they can clear a notebook cell", async () => {
+  // #252：空数组是合法 JSON 但歧义的编辑意图——在文档变更前拒绝，保留显式空串清空路径
+  // Empty arrays are valid JSON but ambiguous notebook-edit intent. The public
+  // behavior should reject them before any document mutation, preserving the
+  // existing explicit-empty-string path for callers that really want to clear a
+  // cell.
+  await expect(editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [] })).rejects.toThrow("newCode cannot be an empty array")
+  // #252：错误消息必须点名字段并给出两条出路，调用方才能自行纠正意图
+})
+
+test("language-only edit preserves source and returns the replacement cell ID", async () => {
+  // #252：language-only 契约的完整链路——源保持不变、旧句柄失效、新句柄可用且 kind 变 Markup
+  const beforeSource = activeNotebook.cellAt(1).document.getText()
+  const oldCellId = cellFragment(2)
+  const result = await editNotebook({ filePath: notebookPath, cellId: oldCellId, editType: "edit", language: "markdown" })
+  const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
+
+  expect(typeof updatedCellId).toBe("string")
+  expect(updatedCellId).not.toBe(oldCellId)
+  await expect(notebookSource({ filePath: notebookPath, cellId: oldCellId })).rejects.toThrow("Notebook cell not found")
+  const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
+  expect(source.summary).toContain(beforeSource)
+  expect(activeNotebook.cellAt(1).kind).toBe(NotebookCellKind.Markup)
+  expect(activeNotebook.cellAt(1).document.languageId).toBe("markdown")
+  // #252：source 保持不变是「language-only 不破坏内容」的核心用户可见承诺
+})
+
+test("language-only edit changes kind even when the language ID already matches", async () => {
+  // #252：混合态回归——languageId 已匹配不代表 kind 匹配，编辑仍需触发 kind 转换
+  // A code cell can report languageId="markdown" while still being a code cell.
+  // The language-only edit contract is about the notebook cell kind as well as
+  // languageId, so this regression test keeps that mixed-state boundary covered.
+  activeNotebook.cells.push(createCell(activeNotebook, NotebookCellKind.Code, "markdown", "# markdown stored as code"))
+  updateIndexes(activeNotebook)
+
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(3), editType: "edit", language: "markdown" })
+  const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
+  const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
+
+  expect(activeNotebook.cellAt(2).kind).toBe(NotebookCellKind.Markup)
+  expect(source.summary).toContain("# markdown stored as code")
+  // #252：kind 转换后原文本必须原样保留——转换不是重建
+})
+
+test("string edit preserves CRLF notebook cell content around the replacement", async () => {
+  // #252：CRLF cell 的坐标不变量——替换后 EOL 保持 CRLF 且相邻行不被偏移损坏
+  const cell = activeNotebook.cellAt(1)
+  cell.document.eol = EndOfLine.CRLF
+  cell.document.setText("alpha\r\nbeta\r\ngamma")
+
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "beta", newCode: "BETA" })
+
+  expect((result.data as Record<string, unknown>).afterSource).toBe("alpha\r\nBETA\r\ngamma")
+  expect(cell.document.getText()).toBe("alpha\r\nBETA\r\ngamma")
+  // #252：文档级 EOL 不变量与返回的 afterSource 双重锁定，防止实现只修一层
+})
+
+test("source includes a bounded preview for a single oversized source line", async () => {
+  // #252：单行超整页预算时必须有界预览——无锚点会诱发 offset=0 这类非法分页
+  activeNotebook.cellAt(1).document.setText(`visible-prefix-${"x".repeat(20_000)}-hidden-suffix`)
+
+  const result = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 5 })
+
+  expect((result.data as Record<string, unknown>).returned).toBe(1)
+  // #252：returned=1 锁定「只渲染超长行自身」——隐式吞掉下一行即失败
+  expect(result.summary).toContain("visible-prefix")
+  expect(result.summary).not.toContain("hidden-suffix")
+  expect(result.summary).not.toContain("Use offset=0")
+  // #252：合法分页提示不得指向不存在的 offset=0——有界预览同时修复提示有效性
+})
+
+test("source does not consume a normal line that only overflows the current page", async () => {
+  // #252：分页按虚拟源行推进——当前页放不下的整行必须留给下一页而非截断吞掉
+  const secondLine = `second-line-fits-next-page-${"y".repeat(600)}`
+  activeNotebook.cellAt(1).document.setText(`${"x".repeat(15_900)}\n${secondLine}`)
+
+  const firstPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 10 })
+  const secondPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), offset: 5, limit: 10 })
+
+  expect((firstPage.data as Record<string, unknown>).returned).toBe(1)
+  expect(firstPage.summary).not.toContain(secondLine)
+  expect(firstPage.summary).toContain("Use offset=5")
+  expect(secondPage.summary).toContain(secondLine)
+  // #252：被换页保留的行必须在下一页完整出现——「不吞行」的正反两面都要锁
+})
+
+test("restart can invoke a Jupyter command that is hidden from the public command list", async () => {
+  // #252：隐藏命令可执行性回归——restart 的门禁检查面必须与 executeCommand 的可调用面一致
+  // VS Code exposes hidden commands to extensions through getCommands(false).
+  // The restart tool should use that full surface because executeCommand can
+  // still invoke Jupyter's restart command even when it is absent from the
+  // public command-palette list.
+  commandLists = {
+    public: ["notebook.cell.execute", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "notebook.selectKernel", "jupyter.restartkernel"],
+  }
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: {},
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
+  })
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "restart" })
+
+  expect((result.data as Record<string, unknown>).requested).toBe(true)
+  expect(executedCommands).toContain("jupyter.restartkernel")
+  // #252：requested=true 不够——命令必须真的被执行，才证明检查面与执行面一致
+})
+
 // #234：Shifted 行不能与 Inserted 行混淆——两者语义完全不同
 test("insert result identifies the inserted cell ID before reporting shifted cells", async () => {
   const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(1), editType: "insert", newCode: "value = 1", language: "python" })
@@ -244,7 +379,7 @@ function createDocument(value: string, fragment: string, languageId: string, tex
   return {
     uri: createUri(value, fragment),
     languageId,
-    eol: EndOfLine.LF,
+    eol: EndOfLine.LF as number,
     version: 1,
     get lineCount() {
       return this.getText().split("\n").length
@@ -264,6 +399,7 @@ function createUri(value: string, fragment = ""): UriLike {
   return {
     fsPath: value.split("#")[0],
     fragment,
+    scheme: "file",
     toString: () => `file://${value}`,
   }
 }
@@ -303,7 +439,7 @@ function executeSelectedCell() {
   for (const listener of notebookListeners) listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
 }
 
-type UriLike = { fsPath: string; fragment: string; toString(): string }
+type UriLike = { fsPath: string; fragment: string; scheme: string; toString(): string }
 type ToolResult = { summary: string; data?: unknown }
 type NotebookEditor = { notebook: typeof activeNotebook; selection: { start: number; end: number }; revealRange(range: { start: number; end: number }): void }
 type NotebookCell = {

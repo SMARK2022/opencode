@@ -122,6 +122,96 @@ describe("vscode bridge plugin", () => {
     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
   })
 
+  test("keeps notebook save covered by the generic edit permission gate", async () => {
+    // #252：save 是 env 的持久化分支——必须被通用 edit 门禁覆盖，防止绕过文件写入边界
+    // Use shell-looking characters as literal path data. Permission matching must
+    // receive the exact notebook path string and must not normalize, split, or
+    // interpret quotes, environment-variable text, pipes, redirection, or
+    // subcommand-looking fragments before the approval/deny boundary runs.
+    const filePath = String.raw`F:\project with spaces\$(noop) '$HOME' | redirect > demo.ipynb`
+    const stop = "generic edit denied for notebook save"
+    const calls: string[] = []
+    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: true,
+      summary: "save should not be reached when generic edit is denied",
+      data: { path: filePath, operation: "save", saved: true },
+    })
+
+    await expect(
+      plugin.tool!.vscode_notebook_env.execute(
+        {
+          filePath,
+          operation: "save",
+          reason: "permission boundary regression test",
+        },
+        {
+          sessionID: "ses_test",
+          messageID: "msg_test",
+          agent: "build",
+          directory: "F:\\project with spaces",
+          worktree: "F:\\project with spaces",
+          abort: new AbortController().signal,
+          metadata: () => undefined,
+          async ask(input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) {
+            calls.push(input.permission)
+            expect(input.patterns).toEqual([filePath])
+            expect(input.always).toEqual([filePath])
+            expect(input.metadata.args).toMatchObject({ filePath, operation: "save" })
+            if (input.permission === "edit") throw new Error(stop)
+          },
+        },
+      ),
+    ).rejects.toThrow(stop)
+
+    expect(calls).toEqual(["vscode_notebook_env", "edit"])
+    expect(bridge).not.toHaveBeenCalled()
+    // #252：edit 拒绝时 bridge 零调用——门禁在 IO 之前，拒绝路径无副作用
+  })
+
+  test("returns the next usable cell ID after notebook insert and type-change edits", async () => {
+    // #252：句柄失效场景——metadata 必须同时给出新 cellId 与原 requestedCellId
+    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
+    const requestedCellId = "#VSC-oldcell"
+    const updatedCellId = "#VSC-newcell"
+    // The bridge data shape mirrors a VS Code replaceCells type-change result:
+    // the originally requested #VSC handle is stale, and the renderer metadata
+    // must surface the new handle as the next safe value for follow-up tools.
+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: false,
+      summary: "Notebook edit: applied=true op=edit at=2 num_cells=3->3 dirty=true.",
+      data: {
+        path: filePath,
+        editType: "edit",
+        cellCountBefore: 3,
+        cellCountAfter: 3,
+        anchorCellIndex: 1,
+        dirty: true,
+        kind: "markdown",
+        language: "markdown",
+        updatedCellId,
+        beforeSource: "print('converted')\n",
+        afterSource: "print('converted')\n",
+      },
+    })
+
+    const result = await plugin.tool!.vscode_notebook_edit.execute(
+      { filePath, cellId: requestedCellId, editType: "edit", language: "markdown" },
+      allowContext(filePath),
+    )
+
+    expect(result).toMatchObject({
+      metadata: {
+        vscodeNotebook: {
+          view: "edit",
+          cellId: updatedCellId,
+          requestedCellId,
+          // #252：双句柄并存是渲染器兼容的关键——只发新句柄会让审计锚丢失
+    // #252：mock 形态取自真实 type-change 响应——字段缺一会静默退化成旧句柄
+        },
+      },
+    })
+  })
+
   // #224：验证 notebook edit 从 bridge 返回的 beforeSource/afterSource 生成 diff metadata
   // #224：notebookResult 从 bridge data 的 before/after 生成 unified diff 并写入 metadata
   test("returns notebook edit diff metadata from bridge before and after source", async () => {

@@ -167,6 +167,8 @@ export const dict: Record<string, string> = {
   "ui.tool.agent.default": "Agent",
   "ui.tool.skill": "Skill",
 
+  "ui.notebook.cellId": "Cell ID",
+  "ui.notebook.requestedCellId": "Requested cell ID",
   "ui.notebook.summary": "Notebook summary",
   "ui.notebook.source": "Notebook source",
   "ui.notebook.run": "Notebook run",

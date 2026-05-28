@@ -192,6 +192,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-9" } },
       { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-10" } },
       { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-11" } },
+      { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-11" } },
       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
     ])
     // 只验证原生五态响应穿过真实CLI，不在fixture重演或伪造内核判态算法。
@@ -211,7 +212,7 @@ it.live("registers Notebook tools through the real bridge and preserves native r
     }
     expect(received).toHaveLength(15)
     expect(received.slice(-5).map(item => item.body)).toEqual(["configured", "selected", "needs-selection", "selection-requested", "failed"].map(reason => ({ filePath, operation: "configure", reason })))
-    expect(permissions).toHaveLength(15)
+    expect(permissions).toHaveLength(16)
     // 专属edit、通用edit和env各自拒绝都必须零RPC，不能靠registry广告隐藏替代执行授权。
     for (const action of ["vscode_notebook_edit", "edit", "vscode_notebook_env"]) {
       deniedAction = action
@@ -224,6 +225,13 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       expect(received).toHaveLength(beforeRPC)
       expect(permissions.slice(beforePermissions).map((item) => item.action)).toEqual(action === "edit" ? ["vscode_notebook_edit", "edit"] : [action])
     }
+    deniedAction = "edit"
+    const beforeSaveRPC = received.length
+    const beforeSavePermissions = permissions.length
+    // save与格编辑一样受通用门禁约束，拒绝后不能进入发现或RPC。
+    expect((yield* invoke("vscode_notebook_env", { filePath, operation: "save" })).result.type).toBe("error")
+    expect(received).toHaveLength(beforeSaveRPC)
+    expect(permissions.slice(beforeSavePermissions).map(item => item.action)).toEqual(["vscode_notebook_env", "edit"])
     deniedAction = undefined
     // 大格源码仍在完整原生data；仅展示差分受原有16Ki字符预算约束。
     responses["/notebook/edit"] = { ...responses["/notebook/edit"], data: { beforeSource: "old\n", afterSource: "new line\n".repeat(3000), affectedCellIndex: 0, editType: "edit" } }
@@ -240,9 +248,10 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       ["visible-prefix-" + "x".repeat(20_000) + "-hidden-suffix", 1, true],
       [Array.from({ length: 10 }, (_, index) => `line_${index + 1}`).join("\n") + "\n", 10, false],
     ] as const) {
-      responses["/notebook/edit"] = { ran: false, summary: "insert", data: { beforeSource: "", afterSource: source, affectedCellIndex: 0, editType: "insert", language: "python" } }
+      responses["/notebook/edit"] = { ran: false, summary: "insert", data: { beforeSource: "", afterSource: source, affectedCellIndex: 0, editType: "insert", language: "python", insertedCellId: "#VSC-inserted" } }
       const result = yield* invoke("vscode_notebook_edit", { filePath, cellId: "BOTTOM", editType: "insert", newCode: "RAW_INPUT_NOT_RENDERED" })
       const view = notebookMetadata(result.output?.structured).vscodeNotebook
+      expect(view).toMatchObject({ cellId: "#VSC-inserted", requestedCellId: "BOTTOM" })
       expect(view).toMatchObject({ view: "edit", editType: "insert", language: "python", added, removed: 0, insertedSourcePreviewTruncated: truncated })
       expect(typeof view.insertedSourcePreview).toBe("string")
       expect(String(view.insertedSourcePreview).length).toBeLessThanOrEqual(4096)
@@ -252,6 +261,13 @@ it.live("registers Notebook tools through the real bridge and preserves native r
       if (source.includes("hidden-suffix")) expect(view.insertedSourcePreview).not.toContain("hidden-suffix")
       if (added > 3000) expect(view).toHaveProperty("diffOmitted", "too-large")
     }
+    responses["/notebook/edit"] = { ran: false, summary: "language-only", data: { beforeSource: "same", afterSource: "same", editType: "edit", updatedCellId: "#VSC-updated", language: "markdown" } }
+    const changed = yield* invoke("vscode_notebook_edit", { filePath, cellId: "#VSC-old", editType: "edit", language: "markdown" })
+    expect(notebookMetadata(changed.output?.structured).vscodeNotebook).toMatchObject({ cellId: "#VSC-updated", requestedCellId: "#VSC-old" })
+    // 真正字段省略一直传到桥，不能由CLI序列化成清空内容。
+    expect(received.at(-1)?.body).not.toHaveProperty("oldCode")
+    expect(received.at(-1)?.body).not.toHaveProperty("newCode")
+    expect(changed.result.type).toBe("text")
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
     [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(

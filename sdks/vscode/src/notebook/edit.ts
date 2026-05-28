@@ -45,6 +45,10 @@ export async function editNotebook(input: Record<string, unknown>) {
   // TOP/BOTTOM 的合法性归 insert；入口只排除缺失身份，不把其它操作猜作位置编辑。
   if (!cellId) throw new Error("cellId is required")
 
+  // 空数组不能代表省略源码；在任何写入前拒绝，显式清空仍使用空字符串。
+  rejectEmptySourceArray(input, "oldCode")
+  rejectEmptySourceArray(input, "newCode")
+
   // 结构编辑会改变 cellCount，差分基线必须在 applyEdit 前记录，不能在返回后反推原格数。
   const beforeCount = notebook.cellCount
 
@@ -175,15 +179,15 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   const language = stringProp(input, "language")
   // oldCode 从格内文本定位，不接受仍可能随编辑漂移的 range 坐标。
   const oldCodeRaw = sourceProp(input, "oldCode")
-  // python 到 javascript 也需要结构替换，即使二者的 NotebookCellKind 都是 Code。
-  const typeChange = language !== undefined && language !== targetCell.document.languageId
+  // 语言与结构类型联合判定，Code格已有markdown语言时仍须转换为Markup。
+  const newKind = language === undefined ? undefined : kindFromLang(language)
+  const typeChange = language !== undefined && (language !== targetCell.document.languageId || newKind !== targetCell.kind)
 
   if (typeChange) {
-    const newKind = kindFromLang(language!)
     // 旧语言和类型在替换前捕获，不能从新格反推转换箭头的左侧。
     const oldKind = cellTypeLabel(targetCell.kind)
     const oldLang = targetCell.document.languageId
-    return await handleTypeChange(notebook, targetCell, input, newKind, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
+    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
   }
 
   if (oldCodeRaw) {
@@ -432,6 +436,12 @@ function stripCodeFence(source: string) {
   return match ? match[1] : source
 }
 
+function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" | "newCode") {
+  if (Array.isArray(input[key]) && input[key].length === 0) {
+    throw new Error(`${key} cannot be an empty array. Omit ${key} for language-only edits, or pass an explicit empty string to clear source.`)
+  }
+}
+
 async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
   // 提交前版本是本次修改的基线，不能在 applyEdit 的 await 返回后才采样。
   const beforeVersion = notebook.version
@@ -600,6 +610,8 @@ function compactEditResult(
       // 新格索引和ID同源，既有anchorCellIndex仍保留提交前位置。
       insertedCellIndex: info.insertedCell?.index,
       insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
+      // 类型替换产生新格句柄，后续调用使用同步完成后捕获的anchorCell身份。
+      updatedCellId: info.editType === "edit" && info.anchorCell ? copilotLikeCellId(info.anchorCell) : undefined,
       deletedCellIndex: info.deletedCellIndex,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,
