@@ -1064,8 +1064,6 @@ export function Session() {
         try {
           const sessionData = session()
           if (!sessionData) return
-          const sessionMessages = messages()
-
           const defaultFilename = `session-${sessionData.id.slice(0, 8)}.md`
 
           const options = await DialogExportOptions.show(
@@ -1079,9 +1077,15 @@ export function Session() {
 
           if (options === null) return
 
+          // 导出必须绕过 TUI 本地 200 条渲染窗口，直接让 daemon 从数据库分页读取完整可见会话；
+          // 这样只影响 export 的快照来源，不改变当前页面渲染、copy transcript 或 sync store 的内存边界。
+          const sessionMessages = await sdk.client.session.messages({ sessionID: sessionData.id }, { throwOnError: true })
+          // 200 响应必须携带 messages 数组；如果 SDK/daemon 返回异常形态，应沿用现有失败 toast，不能静默写出空 Markdown。
+          if (!sessionMessages.data) throw new Error("Missing session messages for export")
+
           const transcript = formatTranscript(
             sessionData,
-            sessionMessages.map((msg) => ({ info: msg, parts: sync.data.part[msg.id] ?? [] })),
+            sessionMessages.data,
             {
               thinking: options.thinking,
               toolDetails: options.toolDetails,
