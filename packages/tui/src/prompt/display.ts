@@ -1,5 +1,7 @@
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 
+// Textarea 的 offset 不是 JS 字符索引：换行占 1 个位置，宽字符按终端显示宽度计算。
+// #247：prompt 组件与 display 系列函数共享这一口径——所有 source offset 换算都以此为准。
 export function promptOffsetWidth(value: string) {
   let width = 0
   for (const part of graphemes.segment(value)) {

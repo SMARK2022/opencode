@@ -526,7 +526,12 @@ export function Prompt(props: PromptProps) {
               // if the virtual text is deleted, remove the part
               if (newStart === -1) return null
 
-              const newEnd = newStart + virtualText.length
+              // #247：Editor 回调给的是 JS 字符索引；part source 保存 Textarea offset，
+              // 宽字符下两者不一致，必须用 promptOffsetWidth 转换后再恢复高亮。
+              const start = promptOffsetWidth(normalized.slice(0, newStart))
+              // #247：end 用同口径累加而非 promptOffsetWidth(normalized) 全量计算，
+              // 避免占位符后缀里的宽字符影响本段边界
+              const end = start + promptOffsetWidth(virtualText)
 
               if (part.type === "file" && part.source?.text) {
                 return {
@@ -535,8 +540,8 @@ export function Prompt(props: PromptProps) {
                     ...part.source,
                     text: {
                       ...part.source.text,
-                      start: newStart,
-                      end: newEnd,
+                      start,
+                      end,
                     },
                   },
                 }
@@ -547,8 +552,8 @@ export function Prompt(props: PromptProps) {
                   ...part,
                   source: {
                     ...part.source,
-                    start: newStart,
-                    end: newEnd,
+                    start,
+                    end,
                   },
                 }
               }
@@ -564,7 +569,9 @@ export function Prompt(props: PromptProps) {
             parts: updatedNonTextParts,
           })
           restoreExtmarksFromParts(updatedNonTextParts)
-          input.cursorOffset = Bun.stringWidth(normalized)
+          // #247：cursorOffset 用显示宽度口径——换行按 1 计，Bun.stringWidth 按 0 计；
+          // 若与 source offsets 口径不一致，恢复后光标会落在占位符中间
+          input.cursorOffset = promptOffsetWidth(normalized)
         },
       },
       {
@@ -758,36 +765,79 @@ export function Prompt(props: PromptProps) {
 
   function syncExtmarksWithPromptParts() {
     const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
-    setStore(
-      produce((draft) => {
-        const newMap = new Map<number, number>()
-        const newParts: typeof draft.prompt.parts = []
+    // #247：直接信任 extmark 坐标会把漂移同步回 parts——OpenTUI 按 JS 长度
+    // 移动 extmark，中文/emoji 前插后坐标已不可靠，必须以可见文本重建。
+    // 从 store 而非 produce draft 读取：漂移数据禁止进入写事务，
+    // 重建完成前 store 保持上一个一致状态。
+    const text = input.plainText
+    const used: Array<{ start: number; end: number }> = []
+    const parts: PromptInfo["parts"] = []
 
-        for (const extmark of allExtmarks) {
-          const partIndex = draft.extmarkToPartIndex.get(extmark.id)
-          if (partIndex !== undefined) {
-            const part = draft.prompt.parts[partIndex]
-            if (part) {
-              if (part.type === "agent" && part.source) {
-                part.source.start = extmark.start
-                part.source.end = extmark.end
-              } else if (part.type === "file" && part.source?.text) {
-                part.source.text.start = extmark.start
-                part.source.text.end = extmark.end
-              } else if (part.type === "text" && part.source?.text) {
-                part.source.text.start = extmark.start
-                part.source.text.end = extmark.end
-              }
-              newMap.set(extmark.id, newParts.length)
-              newParts.push(part)
-            }
-          }
+    for (const extmark of allExtmarks) {
+      const partIndex = store.extmarkToPartIndex.get(extmark.id)
+      if (partIndex === undefined) continue
+
+      const part = store.prompt.parts[partIndex]
+      if (!part) continue
+
+      const virtualText = part.type === "agent" ? part.source?.value : part.source?.text?.value
+      // #247：value 是用户可见的占位符文本（含方括号样式），而非底层文件路径——
+      // 用它做 indexOf 才能命中编辑器里实际渲染的那段字符串
+      if (!virtualText) continue
+
+      // 以当前可见占位符文本为准重建 span：选距 extmark.start 最近且不重叠的出现位置，
+      // 找不到则丢弃该 part，绝不把漂移坐标写回 store。
+      let from = 0
+      let best: { start: number; end: number; distance: number } | undefined
+      // #247：同一占位符文本可能出现多次，used 数组保证已分配区间不重叠，
+      // 距离最近的候选优先——extmark 只作为近似锚点参与排序，不参与坐标计算
+      while (true) {
+        const index = text.indexOf(virtualText, from)
+        if (index === -1) break
+
+        // #247：from 按 JS 索引推进（indexOf 语义），换算只在 span 边界处发生
+        const start = promptOffsetWidth(text.slice(0, index))
+        const end = start + promptOffsetWidth(virtualText)
+        if (!used.some((span) => span.start < end && start < span.end)) {
+          // #247：与漂移后的 extmark.start 比距离——extmark 是唯一可用的近似锚点
+          const distance = Math.abs(start - extmark.start)
+          if (!best || distance < best.distance) best = { start, end, distance }
         }
 
-        draft.extmarkToPartIndex = newMap
-        draft.prompt.parts = newParts
-      }),
-    )
+        from = index + virtualText.length
+      }
+      if (!best) continue
+      // #247：丢弃无候选的 part 是刻意的——保留它会带着漂移坐标进入下一轮，
+      // 而用户已删除的占位符本就不该继续占位
+
+      used.push(best)
+      // #247：agent part 的 source 顶层直接持有 start/end，与 file/text 的嵌套 text 形状不同
+      if (part.type === "agent" && part.source) {
+        parts.push({ ...part, source: { ...part.source, start: best.start, end: best.end } })
+        continue
+      }
+      // #247：file part 保留 source 的其余字段（mime/path 等），只替换 text 的坐标
+      if (part.type === "file" && part.source?.text) {
+        parts.push({
+          ...part,
+          source: { ...part.source, text: { ...part.source.text, start: best.start, end: best.end } },
+        })
+        continue
+      }
+      if (part.type === "text" && part.source?.text) {
+        // #247：text part 的 source 形状没有外层 source 字段，重建时直接换 text 键，
+        // 其余 part 类型保持既有 source 结构展开
+        parts.push({
+          ...part,
+          source: { text: { ...part.source.text, start: best.start, end: best.end } },
+        })
+      }
+    }
+
+    // #247：先替换 parts 再 restore extmarks——restore 以重建后的 offset 为准，
+    // 顺序颠倒会把刚算好的坐标立即覆盖回漂移值
+    setStore("prompt", "parts", parts)
+    restoreExtmarksFromParts(parts)
   }
 
   const stashCommands = createMemo(() =>
