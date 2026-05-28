@@ -2,8 +2,8 @@
   "name": "opencode-ide-bridge",
   "displayName": "OpenCode IDE Bridge",
   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
-  "version": "1.19.11",
-  "//": "#218：版本格式已正确——源 patch 修正 1.15.3.0→1.15.3，目标 1.19.11 已为规范三段格式无需改动",
+  "version": "1.19.12",
+  "//": "#253：协同升号 1.19.11→1.19.12——source 谱系 1.15.3→1.15.3→1.15.4 逐级映射，格式保持三段式",
   "homepage": "https://github.com/anomalyco/opencode",
   "publisher": "SMARK2022",
   "repository": {
@@ -102,7 +102,7 @@
   },
   "scripts": {
 
-    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.19.11.vsix",
+    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.19.12.vsix",
     "compile": "bun run check-types && bun run lint && node esbuild.js",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
