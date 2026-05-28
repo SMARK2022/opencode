@@ -1,6 +1,7 @@
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 
-function promptOffsetWidth(value: string) {
+// Textarea 的 offset 不是 JS 字符索引：换行占 1 个位置，宽字符按终端显示宽度计算。
+export function promptOffsetWidth(value: string) {
   let width = 0
   for (const part of graphemes.segment(value)) {
     // Textarea offsets count newlines as one position; Bun.stringWidth counts them as zero.

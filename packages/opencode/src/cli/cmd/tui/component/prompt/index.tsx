@@ -66,6 +66,7 @@ import { type WorkspaceStatus } from "../workspace-label"
 import { useCommandPalette } from "../../context/command-palette"
 import { useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../context/tui-config"
+import { promptOffsetWidth } from "@/cli/cmd/prompt-display"
 
 export type PromptProps = {
   sessionID?: string
@@ -619,7 +620,9 @@ export function Prompt(props: PromptProps) {
               // if the virtual text is deleted, remove the part
               if (newStart === -1) return null
 
-              const newEnd = newStart + virtualText.length
+              // Editor 返回 JS 字符索引；part source 保存 Textarea offset，必须转换后再恢复高亮。
+              const start = promptOffsetWidth(content.slice(0, newStart))
+              const end = start + promptOffsetWidth(virtualText)
 
               if (part.type === "file" && part.source?.text) {
                 return {
@@ -628,8 +631,8 @@ export function Prompt(props: PromptProps) {
                     ...part.source,
                     text: {
                       ...part.source.text,
-                      start: newStart,
-                      end: newEnd,
+                      start,
+                      end,
                     },
                   },
                 }
@@ -640,8 +643,8 @@ export function Prompt(props: PromptProps) {
                   ...part,
                   source: {
                     ...part.source,
-                    start: newStart,
-                    end: newEnd,
+                    start,
+                    end,
                   },
                 }
               }
@@ -657,7 +660,7 @@ export function Prompt(props: PromptProps) {
             parts: updatedNonTextParts,
           })
           restoreExtmarksFromParts(updatedNonTextParts)
-          input.cursorOffset = Bun.stringWidth(content)
+          input.cursorOffset = promptOffsetWidth(content)
         },
       },
       {
@@ -850,36 +853,61 @@ export function Prompt(props: PromptProps) {
 
   function syncExtmarksWithPromptParts() {
     const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
-    setStore(
-      produce((draft) => {
-        const newMap = new Map<number, number>()
-        const newParts: typeof draft.prompt.parts = []
+    const text = input.plainText
+    const used: Array<{ start: number; end: number }> = []
+    const parts: PromptInfo["parts"] = []
 
-        for (const extmark of allExtmarks) {
-          const partIndex = draft.extmarkToPartIndex.get(extmark.id)
-          if (partIndex !== undefined) {
-            const part = draft.prompt.parts[partIndex]
-            if (part) {
-              if (part.type === "agent" && part.source) {
-                part.source.start = extmark.start
-                part.source.end = extmark.end
-              } else if (part.type === "file" && part.source?.text) {
-                part.source.text.start = extmark.start
-                part.source.text.end = extmark.end
-              } else if (part.type === "text" && part.source?.text) {
-                part.source.text.start = extmark.start
-                part.source.text.end = extmark.end
-              }
-              newMap.set(extmark.id, newParts.length)
-              newParts.push(part)
-            }
-          }
+    for (const extmark of allExtmarks) {
+      const partIndex = store.extmarkToPartIndex.get(extmark.id)
+      if (partIndex === undefined) continue
+
+      const part = store.prompt.parts[partIndex]
+      if (!part) continue
+
+      const virtualText = part.type === "agent" ? part.source?.value : part.source?.text?.value
+      if (!virtualText) continue
+
+      // OpenTUI 会按 JS 长度移动 extmark；中文/emoji 前插会让坐标漂移。
+      // 以当前可见占位符文本为准重建 span，避免把漂移坐标同步回 prompt parts。
+      let from = 0
+      let best: { start: number; end: number; distance: number } | undefined
+      while (true) {
+        const index = text.indexOf(virtualText, from)
+        if (index === -1) break
+
+        const start = promptOffsetWidth(text.slice(0, index))
+        const end = start + promptOffsetWidth(virtualText)
+        if (!used.some((span) => span.start < end && start < span.end)) {
+          const distance = Math.abs(start - extmark.start)
+          if (!best || distance < best.distance) best = { start, end, distance }
         }
 
-        draft.extmarkToPartIndex = newMap
-        draft.prompt.parts = newParts
-      }),
-    )
+        from = index + virtualText.length
+      }
+      if (!best) continue
+
+      used.push(best)
+      if (part.type === "agent" && part.source) {
+        parts.push({ ...part, source: { ...part.source, start: best.start, end: best.end } })
+        continue
+      }
+      if (part.type === "file" && part.source?.text) {
+        parts.push({
+          ...part,
+          source: { ...part.source, text: { ...part.source.text, start: best.start, end: best.end } },
+        })
+        continue
+      }
+      if (part.type === "text" && part.source?.text) {
+        parts.push({
+          ...part,
+          source: { text: { ...part.source.text, start: best.start, end: best.end } },
+        })
+      }
+    }
+
+    setStore("prompt", "parts", parts)
+    restoreExtmarksFromParts(parts)
   }
 
   const stashCommands = createMemo(() =>
@@ -1368,7 +1396,8 @@ export function Prompt(props: PromptProps) {
   function pasteText(text: string, virtualText: string) {
     const currentOffset = input.visualCursor.offset
     const extmarkStart = currentOffset
-    const extmarkEnd = extmarkStart + Bun.stringWidth(virtualText)
+    // extmark start 来自 Textarea visual offset，end 必须使用同一 offset 口径。
+    const extmarkEnd = extmarkStart + promptOffsetWidth(virtualText)
 
     input.insertText(virtualText + " ")
 
@@ -1469,7 +1498,8 @@ export function Prompt(props: PromptProps) {
       return x.mime.startsWith("image/")
     }).length
     const virtualText = pdf ? `[PDF ${count + 1}]` : `[Image ${count + 1}]`
-    const extmarkEnd = extmarkStart + Bun.stringWidth(virtualText)
+    // 图片/PDF 占位符与粘贴摘要共享 extmark 不变量：start/end 都是 Textarea offset。
+    const extmarkEnd = extmarkStart + promptOffsetWidth(virtualText)
     const textToInsert = virtualText + " "
 
     input.insertText(textToInsert)

@@ -288,11 +288,98 @@ test("accepted TUI slash-command submission clears without waiting for completio
   })
 })
 
+test("TUI prompt keeps pasted text summary highlighted after wide text is inserted before it", async () => {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+
+  await withPrompt(
+    (url) => {
+      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
+      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
+      if (url.pathname === "/agent") return json([agent])
+    },
+    async (_prompt, _route, app) => {
+      // 三行 bracketed paste 会触发产品内置的摘要文案；prefix 刻意使用中文宽字符复现坐标漂移。
+      const summary = "[Pasted ~3 lines]"
+      const prefix = "就按照这种来修改 "
+
+      await app.mockInput.pasteBracketedText("one\ntwo\nthree")
+      await wait(() => app.captureCharFrame().includes(summary))
+
+      app.mockInput.pressKey("HOME")
+      await app.mockInput.typeText(prefix)
+
+      // 行为断言走真实 TUI 渲染帧：用户可见的黄色高亮必须只覆盖粘贴摘要，
+      // 不能因为摘要前插入中文宽字符而吞掉前缀或漏掉摘要尾部。
+      const line = await waitForSpanLine(app, prefix.trim(), summary)
+      const prefixSpan = line.spans.find((span) => span.text.includes(prefix.trim()))
+      const summarySpan = line.spans.find((span) => span.text === summary)
+
+      expect(prefixSpan).toBeDefined()
+      expect(summarySpan).toBeDefined()
+      expect(colorKey(summarySpan!.bg)).not.toBe(colorKey(prefixSpan!.bg))
+    },
+  ).finally(() => {
+    Global.Path.state = previous
+  })
+})
+
+test("TUI prompt keeps image placeholder highlighted after wide text is inserted before it", async () => {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+
+  await withPrompt(
+    (url) => {
+      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
+      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
+      if (url.pathname === "/agent") return json([agent])
+    },
+    async (prompt, _route, app) => {
+      // [Image 1] 是首个图片附件的用户可见占位符；中文 prefix 用来验证文件 extmark 不被前插宽字符拖偏。
+      const placeholder = "[Image 1]"
+      const prefix = "就按照这种来修改 "
+
+      prompt.set({
+        input: `${placeholder} `,
+        parts: [
+          {
+            type: "file",
+            mime: "image/png",
+            filename: "clipboard.png",
+            url: "data:image/png;base64,abc",
+            // 模拟真实图片粘贴后的可见占位符；断言用户可见 span，不依赖内部 extmark id。
+            source: { type: "file", path: "clipboard.png", text: { start: 0, end: placeholder.length, value: placeholder } },
+          },
+        ],
+      })
+      await wait(() => app.captureCharFrame().includes(placeholder))
+
+      app.mockInput.pressKey("HOME")
+      await app.mockInput.typeText(prefix)
+
+      // 图片占位符使用文件 extmark 样式；这里比较前景色，避免绑定具体主题色值。
+      const line = await waitForSpanLine(app, prefix.trim(), placeholder)
+      const prefixSpan = line.spans.find((span) => span.text.includes(prefix.trim()))
+      const imageSpan = line.spans.find((span) => span.text === placeholder)
+
+      expect(prefixSpan).toBeDefined()
+      expect(imageSpan).toBeDefined()
+      expect(colorKey(imageSpan!.fg)).not.toBe(colorKey(prefixSpan!.fg))
+    },
+  ).finally(() => {
+    Global.Path.state = previous
+  })
+})
+
 type FetchHandler = Parameters<typeof createFetch>[0]
 
 async function withPrompt(
   override: FetchHandler,
-  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>) => Promise<void>,
+  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>, app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
   options: { initialRoute?: Route; promptSessionID?: string } = {},
 ) {
   const calls = createFetch(override)
@@ -336,10 +423,29 @@ async function withPrompt(
   try {
     await mounted
     await wait(() => sync.status === "complete" && local.model.ready)
-    await run(prompt, route)
+    // 只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略第三个参数。
+    await run(prompt, route, app)
   } finally {
     app.renderer.destroy()
   }
+}
+
+async function waitForSpanLine(app: Awaited<ReturnType<typeof testRender>>, ...texts: string[]) {
+  // captureSpans 按样式切分文本；等待包含所有可见片段的行，避免断言依赖 DOM/组件结构。
+  let frame = app.captureSpans()
+  await wait(() => {
+    frame = app.captureSpans()
+    return frame.lines.some((line) => texts.every((text) => line.spans.map((span) => span.text).join("").includes(text)))
+  })
+
+  const line = frame.lines.find((line) => texts.every((text) => line.spans.map((span) => span.text).join("").includes(text)))
+  if (!line) throw new Error(`missing span line containing ${texts.join(", ")}`)
+  return line
+}
+
+function colorKey(color: { buffer: ArrayLike<number> }) {
+  // 颜色由 OpenTUI 暴露为 RGBA buffer；序列化后只比较“是否同色”，不绑定具体主题色值。
+  return Array.from(color.buffer).join(",")
 }
 
 function PromptHarness(props: {
