@@ -1,7 +1,26 @@
 import { describe, expect, test } from "bun:test"
+import { grepSummary } from "./grep-summary"
+import { dict } from "@opencode-ai/ui/i18n/en"
+import type { UiI18n } from "@opencode-ai/ui/context/i18n"
 import { readPartText } from "./message-part-text"
 import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
 import { notebookInsertSource, notebookLanguage, notebookLine, notebookMetadata, notebookPreviewCells, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
+
+test("shares compact grep filters and incomplete results across both display entrances", () => {
+  const t: UiI18n["t"] = (key, params) => dict[key].replace(/{{(\w+)}}/g, (_, name: string) => String(params?.[name] ?? ""))
+  const i18n = { t, plural: ((_key, count) => t(count === 1 ? "ui.tool.grep.matches.one" : "ui.tool.grep.matches.other", { count })) satisfies UiI18n["plural"] }
+  const input = { pattern: "function", include: ["*.ts", "*.tsx", "*.js"], exclude: ["cache/**", "!bin/**", "vendor/**"], timeout: 1000 }
+  const expected = ["function", "*.ts,*.tsx +1", "!cache/** +2", "64+ matches, timed out"]
+  // canonical items与V1 matches经过同一个实际消费者，不能只测试手工摘要字符串。
+  expect(grepSummary(input, { items: Array(64), truncated: true, timedOut: true }, i18n)).toEqual(expected)
+  expect(grepSummary(input, { matches: 64, truncated: true, timedOut: true }, i18n)).toEqual(expected)
+  expect(grepSummary({ include: "*.ts", exclude: "!cache/**" }, { items: [1] }, i18n)).toEqual(["*.ts", "!cache/**", "1 match"])
+  expect(grepSummary({}, { items: [], timedOut: true }, i18n)).toEqual(["timed out"])
+  expect(grepSummary({}, { matches: 0 }, i18n)).toEqual(["0 matches"])
+  expect(grepSummary(input, {}, i18n).join(" ")).not.toContain("include=")
+  expect(grepSummary(input, {}, i18n).join(" ")).not.toContain("exclude=")
+  expect(grepSummary(input, {}, i18n).join(" ")).not.toContain("1000")
+})
 
 describe("readPartText", () => {
   test("returns empty string when accum is undefined and part text is undefined", () => {

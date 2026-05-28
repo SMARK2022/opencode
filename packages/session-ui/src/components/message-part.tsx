@@ -65,6 +65,7 @@ import { partDefaultOpen } from "./part-default-open"
 import { animate } from "motion"
 import { attached, inline, kind, typeLabel } from "./message-file"
 import { readPartText } from "./message-part-text"
+import { grepSummary } from "./grep-summary"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
 import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
 import { notebookTools } from "./notebook-tool"
@@ -852,7 +853,6 @@ function contextToolTrigger(part: ToolPart, i18n: ReturnType<typeof useI18n>) {
   const path = typeof input.path === "string" ? input.path : "/"
   const filePath = typeof input.filePath === "string" ? input.filePath : undefined
   const pattern = typeof input.pattern === "string" ? input.pattern : undefined
-  const include = typeof input.include === "string" ? input.include : undefined
   const offset = typeof input.offset === "number" ? input.offset : undefined
   const limit = typeof input.limit === "number" ? input.limit : undefined
 
@@ -879,13 +879,10 @@ function contextToolTrigger(part: ToolPart, i18n: ReturnType<typeof useI18n>) {
         args: pattern ? ["pattern=" + pattern] : [],
       }
     case "grep": {
-      const args: string[] = []
-      if (pattern) args.push("pattern=" + pattern)
-      if (include) args.push("include=" + include)
       return {
         title: i18n.t("ui.tool.grep"),
         subtitle: getDirectory(path),
-        args,
+        args: grepSummary(input, "metadata" in part.state ? part.state.metadata ?? {} : {}, i18n),
       }
     }
     default: {
@@ -1880,9 +1877,6 @@ ToolRegistry.register({
   name: "grep",
   render(props) {
     const i18n = useI18n()
-    const args: string[] = []
-    if (props.input.pattern) args.push("pattern=" + props.input.pattern)
-    if (props.input.include) args.push("include=" + props.input.include)
     return (
       <BasicTool
         {...props}
@@ -1890,7 +1884,7 @@ ToolRegistry.register({
         trigger={{
           title: i18n.t("ui.tool.grep"),
           subtitle: getDirectory(props.input.path || "/"),
-          args,
+          args: grepSummary(props.input, props.metadata, i18n),
         }}
       >
         <Show when={props.output}>

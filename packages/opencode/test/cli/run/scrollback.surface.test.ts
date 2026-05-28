@@ -853,6 +853,49 @@ test("does not double-space before completed bash output when inline tool header
   }
 })
 
+test("renders grep filters compactly in scrollback headers", async () => {
+  const out = await setup()
+
+  try {
+    await out.scrollback.append(
+      toolCommit({
+        tool: "grep",
+        phase: "start",
+        toolState: "running",
+        // #246：start 阶段无 metadata——断言纯输入摘要路径，
+        // 与 completed 阶段（entry.body 测试）互补覆盖两条渲染分支
+        state: {
+          status: "running",
+          input: {
+            pattern: "function",
+            path: "node_modules",
+            include: "*.js",
+            exclude: ["**/.cache/**", "**/.bin/**", "**/micromark-core-commonmark/**"],
+            timeout: 1000,
+          },
+          time: { start: 1 },
+        },
+      }),
+    )
+
+    const commits = claim(out.renderer)
+    try {
+      const output = render(commits)
+      // #246：start 阶段只有输入段摘要；!glob 与 +N 压缩必须在滚动回显
+      // 中与 run 模式一致，且同样不得泄漏参数名（头格式的回归门）
+      expect(output).toContain('✱ Grep "function" in node_modules · *.js · !**/.cache/** +2')
+      expect(output).not.toContain("include=")
+      expect(output).not.toContain("exclude=")
+      // #246：滚动回显与 inline 行共用同一条负向断言口径，双路径缺一即漏
+      expect(output).not.toContain("timeout")
+    } finally {
+      destroy(commits)
+    }
+  } finally {
+    out.scrollback.destroy()
+  }
+})
+
 test("does not emit blank patch snapshots between edit and task", async () => {
   const out = await setup()
 

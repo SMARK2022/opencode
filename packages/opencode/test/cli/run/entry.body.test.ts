@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { ToolPart } from "@opencode-ai/sdk/v2"
 import { entryBody, entryCanStream, entryDone } from "@/cli/cmd/run/entry.body"
+import { toolInlineInfo } from "@/cli/cmd/run/tool"
 import type { StreamCommit, ToolSnapshot } from "@/cli/cmd/run/types"
 
 function commit(input: Partial<StreamCommit> & Pick<StreamCommit, "kind" | "text" | "phase" | "source">): StreamCommit {
@@ -514,6 +515,44 @@ describe("run entry body", () => {
       type: "text",
       content: "No such file or directory: '/tmp/demo/run'",
     })
+  })
+
+  test("summarizes grep filters and incomplete results without exposing parameter names", () => {
+    const inline = toolInlineInfo(
+      toolPart("grep", {
+        status: "completed",
+        input: {
+          pattern: "function",
+          path: "node_modules",
+          include: "*.js",
+          exclude: ["**/.cache/**", "**/.bin/**", "**/micromark-core-commonmark/**"],
+          timeout: 1000,
+        },
+        output: "",
+        title: "function",
+        // #246：timeout 字段留在输入里但断言其不得出现在 description——
+        // 超时是执行细节，泄漏到 inline 行会被误读为过滤条件
+        metadata: {
+          matches: 64,
+          truncated: true,
+          timedOut: true,
+        },
+        time: { start: 1, end: 2 },
+      }),
+    )
+
+    // #246：正负断言成对出现——锁定紧凑摘要格式的同时，防止字段名
+    // include=/exclude=/timeout 重新泄漏回 inline 描述
+    expect(inline).toEqual({
+      icon: "✱",
+      title: 'Grep "function"',
+      description: "in node_modules · *.js · !**/.cache/** +2 · 64+ matches, timed out",
+    })
+    expect(inline.description).not.toContain("include=")
+    expect(inline.description).not.toContain("exclude=")
+    // #246：三条 not.toContain 独立成行——任何一条参数名回归都能
+    // 精确定位到具体字段，而不是笼统的格式断言失败
+    expect(inline.description).not.toContain("timeout")
   })
 
   test("renders interrupted assistant finals as text", () => {
