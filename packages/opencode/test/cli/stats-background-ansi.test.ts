@@ -1,0 +1,69 @@
+import { describe, expect, test } from "bun:test"
+import { renderBreakdown, renderDashboard, renderTimeline, renderSessions } from "../../src/cli/cmd/stats-render"
+import { renderInsights } from "../../src/cli/cmd/stats-insights"
+import type { StatsReport } from "../../src/cli/cmd/stats-data"
+
+// #249：fixture 是最小 StatsReport——各渲染函数只读取自身需要的序列，
+// 空数组代表无数据视图；背景色发射与数据内容无关，不影响本回归的有效性
+
+// #249：解析完整 SGR 参数表判断是否发射具体背景色——组合序列（如 0;44m、
+// 39;48;5;12m）拆参后逐段判断；38;2/38;5 是前景色按参数个数跳过，避免误报
+function concreteBackgroundAnsi(text: string): string[] {
+  const hits: string[] = []
+  const re = /\x1b\[([0-9;]*)m/g
+  for (const match of text.matchAll(re)) {
+    const params = match[1].split(";").filter(Boolean)
+    for (let i = 0; i < params.length; i++) {
+      const code = Number(params[i])
+      if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+        // #249：标准 8 色与高亮 8 色背景区间一次性命中，避免逐码展开漏判
+        hits.push(match[0])
+        break
+      }
+      if ((code === 48 || code === 38) && (params[i + 1] === "2" || params[i + 1] === "5")) {
+        // #249：48 是背景色直接命中；38 是前景色，跳过其后的色彩空间与参数继续扫描
+        if (code === 48) {
+          hits.push(match[0])
+          break
+        }
+        i += params[i + 1] === "2" ? 4 : 3
+      }
+    }
+  }
+  return hits
+}
+
+// #249：source 谱系曾用深紫面板背景（48;2 系）与 49m 行包装；目标 stats 渲染链
+// 重写为 box-drawing 面板后已天然不发射任何具体背景 ANSI——本套回归锁定该性质，
+// 防止未来渲染路径重新拼入背景色导致终端主题被覆盖
+const report = {
+  totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
+  dateRange: { earliest: 0, latest: 1 },
+  total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
+  models: [], providers: [], agents: [], sources: [], statuses: [], projects: [],
+  daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+  tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
+  tokensPerSession: 25, medianTokensPerSession: 25,
+} as unknown as StatsReport
+
+describe("stats background ansi (#249)", () => {
+  test("never emits terminal background ANSI in color output", () => {
+    // #249：五条渲染路径全开颜色模式逐一路径断言；背景色一旦回归会直接命中
+    const outputs = [
+      renderDashboard(report, { color: "always", limit: 5 }),
+      renderBreakdown(report, { color: "always", by: "tool", metric: "tokens" }),
+      renderSessions(report, { color: "always", limit: 5 }),
+      // #249：timeline 与 sessions 无 limit 也必须安全——参数可选性本身是渲染入口契约
+      renderTimeline(report, { color: "always" }),
+      renderInsights(report, { color: "always", limit: 5 }),
+    ]
+    for (const output of outputs) {
+      // #249：dashboard 是聚合入口、breakdown 是明细主路径——两者共同覆盖
+      // 面板包装与彩色柱状图两类发射点；后三者补齐会话/时间线/洞察视图
+      // #249：既不允许具体背景色（40-47/100-107/48;2/48;5），
+      // 也不依赖 49m 重置——目标实现根本不进入背景色状态机
+      expect(concreteBackgroundAnsi(output)).toEqual([])
+      expect(output).not.toContain("49m")
+    }
+  })
+})
