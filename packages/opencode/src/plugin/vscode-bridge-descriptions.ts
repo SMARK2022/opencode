@@ -35,7 +35,7 @@ export const VscodeNotebookDescriptions = {
   edit: [
     "Edit VS Code notebook cells with editType=insert, edit, or delete.",
     "For insert, cellId=TOP inserts at the top, cellId=BOTTOM appends, and cellId=#VSC-xxx inserts after that anchor cell. newCode is required.",
-    "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source.",
+    "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source only when oldCode and newCode are omitted entirely; empty strings mean explicit empty source.",
     "For delete, pass cellId=#VSC-xxx. Use language='markdown' for Markdown cells; other languages create or keep code cells, usually 'python'. Do not use this tool for ordinary text files.",
     "The edit response includes the updated cell ID and shifted neighbor info.",
   ].join("\n"),

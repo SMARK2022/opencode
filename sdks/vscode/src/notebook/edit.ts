@@ -49,6 +49,16 @@ export async function editNotebook(input: Record<string, unknown>) {
   const cellId = stringProp(input, "cellId")
   if (!cellId) throw new Error("cellId is required")
 
+  // Empty arrays are almost always produced by a caller trying to express
+  // "no source argument" through a JSON shape that still contains the field.
+  // The edit contract treats omitted fields as language-only preservation and
+  // present fields as source replacement, so accepting [] would silently become
+  // an empty string via sourceProp(...). Reject it before any notebook mutation
+  // can clear a cell by accident; callers that intentionally want an empty cell
+  // must pass the explicit string "" so the destructive intent is unambiguous.
+  rejectEmptySourceArray(input, "oldCode")
+  rejectEmptySourceArray(input, "newCode")
+
   const beforeCount = notebook.cellCount
 
   if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount)
@@ -151,13 +161,17 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   }
   const language = stringProp(input, "language")
   const oldCodeRaw = sourceProp(input, "oldCode")
-  const typeChange = language !== undefined && language !== targetCell.document.languageId
+  // `language` maps to both the TextDocument languageId and the notebook cell
+  // kind. Comparing only languageId misses mixed states such as a code cell whose
+  // language is already "markdown"; language-only edits must still replace the
+  // cell so Markup/Code kind matches the requested language contract.
+  const newKind = language === undefined ? undefined : kindFromLang(language)
+  const typeChange = language !== undefined && (language !== targetCell.document.languageId || newKind !== targetCell.kind)
 
   if (typeChange) {
-    const newKind = kindFromLang(language!)
     const oldKind = cellTypeLabel(targetCell.kind)
     const oldLang = targetCell.document.languageId
-    return await handleTypeChange(notebook, targetCell, input, newKind, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
+    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
   }
 
   // --- TextEdit (no type change) ---
@@ -306,10 +320,17 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
     }
   }
 
-  const source = content.substring(0, matchIdx) + replacement + content.substring(matchIdx + matchLen)
+  // All matching is performed against LF-normalized text so model-provided
+  // snippets work the same for LF and CRLF notebooks. The replacement must be
+  // assembled from the same normalized coordinate space; slicing the original
+  // CRLF string with LF offsets shifts by one character for every preceding
+  // CRLF pair and corrupts the cell. Convert back to the document EOL only after
+  // the replacement is complete so existing CRLF notebooks keep their line
+  // separator invariant.
+  const source = (src.substring(0, matchIdx) + replacement + src.substring(matchIdx + matchLen)).replace(/\n/g, documentEol(targetCell.document))
 
   // Compute 1-based (local) line range of the match for context
-  const preMatch = content.substring(0, matchIdx)
+  const preMatch = src.substring(0, matchIdx)
   const preLines = preMatch.split(/\r?\n/)
   const matchStartLine = preLines.length
   const matchLines = oldCode.split(/\r?\n/)
@@ -417,6 +438,12 @@ function kindFromLang(language?: string) {
 function stripCodeFence(source: string) {
   const match = source.match(/^```[\w-]*\r?\n([\s\S]*?)\r?\n```$/)
   return match ? match[1] : source
+}
+
+function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" | "newCode") {
+  if (Array.isArray(input[key]) && input[key].length === 0) {
+    throw new Error(`${key} cannot be an empty array. Omit ${key} for language-only edits, or pass an explicit empty string to clear source.`)
+  }
 }
 
 async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
@@ -572,6 +599,11 @@ function compactEditResult(
       anchorCellIndex: info.anchorCell?.index,
       insertedCellIndex: info.insertedCell?.index,
       insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
+      // Type changes replace a notebook cell and therefore invalidate the old
+      // Copilot-style #VSC handle. Surface the replacement id in data so plugin
+      // renderers and subsequent tool calls can continue with the durable handle
+      // that VS Code assigned after replaceCells completed.
+      updatedCellId: info.editType === "edit" && info.anchorCell ? copilotLikeCellId(info.anchorCell) : undefined,
       deletedCellIndex: info.deletedCellIndex,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,

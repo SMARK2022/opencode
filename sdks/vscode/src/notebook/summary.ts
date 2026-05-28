@@ -73,6 +73,9 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
       return `c${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} ${rangeText} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`
     }),
     "",
-    "Next: use vscode_notebook_source with cellId=#VSC-xxx, offset=1, limit=120 for source; use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
+    // With a cellId, offset is still a global virtual line number. Keep the
+    // default next-step hint offset-free so agents do not pass offset=1 for a
+    // later cell and trigger an avoidable out-of-range warning.
+    "Next: use vscode_notebook_source with cellId=#VSC-xxx and omit offset for one cell; use offset/limit only for global paging. Use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
   ].join("\n")
 }

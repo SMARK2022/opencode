@@ -109,7 +109,29 @@ export async function notebookSource(input: Record<string, unknown>) {
       const sourceLine = cell.document.lineAt(i).text
       const outLine = `${globalLineNum}: ${sourceLine}`
       const outBytes = Buffer.byteLength(outLine, "utf8")
-      if (bytes + outBytes > maxBytes && outputCells.length > 0) {
+      if (bytes + outBytes > maxBytes) {
+        if (renderedLines > 0) {
+          // The current line can be rendered intact on the next page. Do not
+          // consume it here with a partial preview, because pagination is by
+          // virtual source line rather than byte column and the skipped suffix
+          // would otherwise be unrecoverable.
+          bytesCut = true
+          break
+        }
+        // A single notebook source line can be wider than the entire 16 KB tool
+        // response budget. Returning only the cell header gives the agent no
+        // source anchor and can produce invalid pagination such as offset=0.
+        // Keep the line-number prefix and a UTF-8 bounded prefix of the source,
+        // then mark the response truncated; the tool remains line-paginated, so
+        // the next offset still advances to the following virtual source line.
+        const prefix = `${globalLineNum}: `
+        const prefixBytes = Buffer.byteLength(prefix, "utf8")
+        const available = maxBytes - bytes - prefixBytes
+        if (available > 0) {
+          outputCells.push(prefix + takeUtf8Prefix(sourceLine, available))
+          renderedLines++
+          lastRenderedLine = globalLineNum
+        }
         bytesCut = true
         break
       }
@@ -188,4 +210,19 @@ function lastRangeEnd(ranges: Map<number, { start: number; end: number }>) {
     if (r.end > max) max = r.end
   }
   return max > 0 ? max : undefined
+}
+
+function takeUtf8Prefix(text: string, maxBytes: number) {
+  // Iterate by Unicode code point instead of slicing bytes directly. This keeps
+  // the preview valid UTF-8 while still honoring the byte budget enforced by the
+  // notebook source tool output cap.
+  let bytes = 0
+  let out = ""
+  for (const char of text) {
+    const next = Buffer.byteLength(char, "utf8")
+    if (bytes + next > maxBytes) return out
+    bytes += next
+    out += char
+  }
+  return out
 }

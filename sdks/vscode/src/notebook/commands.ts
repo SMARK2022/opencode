@@ -231,11 +231,15 @@ async function editNotebookCommand() {
     ? undefined
     : await vscode.window.showInputBox({
         title: "vscode_notebook_edit newCode",
-        prompt: "newCode. Use \\n for newlines. Empty = type-only (edit) / no-source.",
+        prompt: "newCode. Use \\n for newlines. Empty sends an explicit empty source; language-only edits require omitting oldCode/newCode through the bridge API.",
         value: editType === "edit" && cell ? cell.document.getText().replace(/\n/g, "\\n") : "",
         ignoreFocusOut: true,
       })
 
+  // Keep the command-palette tester backward compatible: an empty input box
+  // still sends the explicit empty string that clears a cell. The prompt points
+  // language-only callers to the bridge API because that mode depends on true
+  // field omission, which this simple input box cannot distinguish safely.
   return await editNotebook({
     filePath: notebook.uri.toString(),
     editType,

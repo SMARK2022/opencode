@@ -117,6 +117,51 @@ describe("vscode bridge plugin", () => {
     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
   })
 
+  test("keeps notebook save covered by the generic edit permission gate", async () => {
+    const plugin = await VscodeBridgePlugin()
+    // Use shell-looking characters as literal path data. Permission matching must
+    // receive the exact notebook path string and must not normalize, split, or
+    // interpret quotes, environment-variable text, pipes, redirection, or
+    // subcommand-looking fragments before the approval/deny boundary runs.
+    const filePath = String.raw`F:\project with spaces\$(noop) '$HOME' | redirect > demo.ipynb`
+    const stop = "generic edit denied for notebook save"
+    const calls: string[] = []
+    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: true,
+      summary: "save should not be reached when generic edit is denied",
+      data: { path: filePath, operation: "save", saved: true },
+    })
+
+    await expect(
+      plugin.tool.vscode_notebook_env.execute(
+        {
+          filePath,
+          operation: "save",
+          reason: "permission boundary regression test",
+        },
+        {
+          sessionID: "ses_test",
+          messageID: "msg_test",
+          agent: "build",
+          directory: "F:\\project with spaces",
+          worktree: "F:\\project with spaces",
+          abort: new AbortController().signal,
+          metadata: () => undefined,
+          ask(input) {
+            calls.push(input.permission)
+            expect(input.patterns).toEqual([filePath])
+            expect(input.always).toEqual([filePath])
+            expect(input.metadata.args).toMatchObject({ filePath, operation: "save" })
+            return input.permission === "edit" ? Effect.die(new Error(stop)) : Effect.void
+          },
+        },
+      ),
+    ).rejects.toThrow(stop)
+
+    expect(calls).toEqual(["vscode_notebook_env", "edit"])
+    expect(bridge).not.toHaveBeenCalled()
+  })
+
   test("returns notebook edit diff metadata from bridge before and after source", async () => {
     const plugin = await VscodeBridgePlugin()
     const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
@@ -258,6 +303,48 @@ describe("vscode bridge plugin", () => {
     expect((result.metadata?.vscodeNotebook as Record<string, string>).diff).toContain("#c4")
     expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("print('new cell')")
     expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("++ legal source prefix")
+  })
+
+  test("returns the next usable cell ID after notebook insert and type-change edits", async () => {
+    const plugin = await VscodeBridgePlugin()
+    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
+    const requestedCellId = "#VSC-oldcell"
+    const updatedCellId = "#VSC-newcell"
+    // The bridge data shape mirrors a VS Code replaceCells type-change result:
+    // the originally requested #VSC handle is stale, and the renderer metadata
+    // must surface the new handle as the next safe value for follow-up tools.
+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+      ran: false,
+      summary: "Notebook edit: applied=true op=edit at=2 num_cells=3->3 dirty=true.",
+      data: {
+        path: filePath,
+        editType: "edit",
+        cellCountBefore: 3,
+        cellCountAfter: 3,
+        anchorCellIndex: 1,
+        dirty: true,
+        kind: "markdown",
+        language: "markdown",
+        updatedCellId,
+        beforeSource: "print('converted')\n",
+        afterSource: "print('converted')\n",
+      },
+    })
+
+    const result = await plugin.tool.vscode_notebook_edit.execute(
+      { filePath, cellId: requestedCellId, editType: "edit", language: "markdown" },
+      allowContext(filePath),
+    )
+
+    expect(result).toMatchObject({
+      metadata: {
+        vscodeNotebook: {
+          view: "edit",
+          cellId: updatedCellId,
+          requestedCellId,
+        },
+      },
+    })
   })
 
   test("omits oversized notebook edit diffs from persisted metadata", async () => {

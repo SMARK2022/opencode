@@ -7,6 +7,21 @@ const notebookPath = "/tmp/notebook tool demo.ipynb"
 let activeNotebook: ReturnType<typeof createNotebook>
 let cellSequence = 0
 let executionOrder = 0
+// The fake VS Code command registry intentionally separates public commands
+// (`getCommands(true)`) from the full extension-host surface (`getCommands(false)`).
+// Jupyter contributes some commands as hidden/internal commands, so this fixture
+// must preserve that distinction to catch restart regressions without depending
+// on a real VS Code extension host.
+let commandLists = {
+  public: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+  all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+}
+let executedCommands: string[] = []
+// Keep extension activation injectable per test. Most notebook tests should see
+// no Jupyter/Python extension, while restart/configure tests can provide only the
+// public shape they need; this avoids a broad mock that would hide missing-env
+// behavior exercised elsewhere in the file.
+let extensionLookup = new Map<string, { isActive: boolean; packageJSON?: Record<string, unknown>; exports?: unknown; activate(): Promise<unknown> }>()
 const notebookListeners = new Set<(event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void>()
 const textListeners = new Set<(event: { document: NotebookCell["document"] }) => void>()
 
@@ -88,15 +103,16 @@ mock.module("vscode", () => ({
     },
   },
   commands: {
-    getCommands: async () => ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+    getCommands: async (filterInternal = false) => filterInternal ? commandLists.public : commandLists.all,
     executeCommand: async (command: string) => {
+      executedCommands.push(command)
       if (command === "notebook.cell.execute") executeSelectedCell()
       if (command === "notebook.selectKernel") return true
       return undefined
     },
   },
   extensions: {
-    getExtension: () => undefined,
+    getExtension: (id: string) => extensionLookup.get(id),
   },
   CancellationTokenSource: class {
     readonly token = {}
@@ -126,6 +142,12 @@ beforeEach(() => {
   vscodeMock.workspace.notebookDocuments = [activeNotebook]
   vscodeMock.window.activeNotebookEditor = undefined
   vscodeMock.window.visibleNotebookEditors = []
+  commandLists = {
+    public: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
+  }
+  executedCommands = []
+  extensionLookup = new Map()
   notebookListeners.clear()
   textListeners.clear()
 })
@@ -158,6 +180,104 @@ test("notebook tools expose a consistent Notebook plus tool header before detail
 
 test("source rejects stale cell IDs instead of reading a different notebook range", async () => {
   await expect(notebookSource({ filePath: notebookPath, cellId: "#VSC-deadbeef", offset: 1, limit: 5 })).rejects.toThrow("Notebook cell not found")
+})
+
+test("edit rejects empty source arrays before they can clear a notebook cell", async () => {
+  // Empty arrays are valid JSON but ambiguous notebook-edit intent. The public
+  // behavior should reject them before any document mutation, preserving the
+  // existing explicit-empty-string path for callers that really want to clear a
+  // cell.
+  await expect(editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [] })).rejects.toThrow("newCode cannot be an empty array")
+})
+
+test("language-only edit preserves source and returns the replacement cell ID", async () => {
+  const beforeSource = activeNotebook.cellAt(1).document.getText()
+  const oldCellId = cellFragment(2)
+  const result = await editNotebook({ filePath: notebookPath, cellId: oldCellId, editType: "edit", language: "markdown" })
+  const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
+
+  expect(typeof updatedCellId).toBe("string")
+  expect(updatedCellId).not.toBe(oldCellId)
+  await expect(notebookSource({ filePath: notebookPath, cellId: oldCellId })).rejects.toThrow("Notebook cell not found")
+  const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
+  expect(source.summary).toContain(beforeSource)
+  expect(activeNotebook.cellAt(1).kind).toBe(NotebookCellKind.Markup)
+  expect(activeNotebook.cellAt(1).document.languageId).toBe("markdown")
+})
+
+test("language-only edit changes kind even when the language ID already matches", async () => {
+  // A code cell can report languageId="markdown" while still being a code cell.
+  // The language-only edit contract is about the notebook cell kind as well as
+  // languageId, so this regression test keeps that mixed-state boundary covered.
+  activeNotebook.cells.push(createCell(activeNotebook, NotebookCellKind.Code, "markdown", "# markdown stored as code"))
+  updateIndexes(activeNotebook)
+
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(3), editType: "edit", language: "markdown" })
+  const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
+  const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
+
+  expect(activeNotebook.cellAt(2).kind).toBe(NotebookCellKind.Markup)
+  expect(source.summary).toContain("# markdown stored as code")
+})
+
+test("string edit preserves CRLF notebook cell content around the replacement", async () => {
+  const cell = activeNotebook.cellAt(1)
+  cell.document.eol = EndOfLine.CRLF
+  cell.document.setText("alpha\r\nbeta\r\ngamma")
+
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "beta", newCode: "BETA" })
+
+  expect((result.data as Record<string, unknown>).afterSource).toBe("alpha\r\nBETA\r\ngamma")
+  expect(cell.document.getText()).toBe("alpha\r\nBETA\r\ngamma")
+})
+
+test("source includes a bounded preview for a single oversized source line", async () => {
+  activeNotebook.cellAt(1).document.setText(`visible-prefix-${"x".repeat(20_000)}-hidden-suffix`)
+
+  const result = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 5 })
+
+  expect((result.data as Record<string, unknown>).returned).toBe(1)
+  expect(result.summary).toContain("visible-prefix")
+  expect(result.summary).not.toContain("hidden-suffix")
+  expect(result.summary).not.toContain("Use offset=0")
+})
+
+test("source does not consume a normal line that only overflows the current page", async () => {
+  const secondLine = `second-line-fits-next-page-${"y".repeat(600)}`
+  activeNotebook.cellAt(1).document.setText(`${"x".repeat(15_900)}\n${secondLine}`)
+
+  const firstPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 10 })
+  const secondPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), offset: 5, limit: 10 })
+
+  expect((firstPage.data as Record<string, unknown>).returned).toBe(1)
+  expect(firstPage.summary).not.toContain(secondLine)
+  expect(firstPage.summary).toContain("Use offset=5")
+  expect(secondPage.summary).toContain(secondLine)
+})
+
+test("restart can invoke a Jupyter command that is hidden from the public command list", async () => {
+  // VS Code exposes hidden commands to extensions through getCommands(false).
+  // The restart tool should use that full surface because executeCommand can
+  // still invoke Jupyter's restart command even when it is absent from the
+  // public command-palette list.
+  commandLists = {
+    public: ["notebook.cell.execute", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "notebook.selectKernel", "jupyter.restartkernel"],
+  }
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: {},
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
+  })
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "restart" })
+
+  expect((result.data as Record<string, unknown>).requested).toBe(true)
+  expect(executedCommands).toContain("jupyter.restartkernel")
 })
 
 test("insert result identifies the inserted cell ID before reporting shifted cells", async () => {
@@ -239,7 +359,7 @@ function createDocument(value: string, fragment: string, languageId: string, tex
   return {
     uri: createUri(value, fragment),
     languageId,
-    eol: EndOfLine.LF,
+    eol: EndOfLine.LF as number,
     version: 1,
     get lineCount() {
       return this.getText().split("\n").length
@@ -259,6 +379,7 @@ function createUri(value: string, fragment = ""): UriLike {
   return {
     fsPath: value.split("#")[0],
     fragment,
+    scheme: "file",
     toString: () => `file://${value}`,
   }
 }
@@ -296,7 +417,7 @@ function executeSelectedCell() {
   for (const listener of notebookListeners) listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
 }
 
-type UriLike = { fsPath: string; fragment: string; toString(): string }
+type UriLike = { fsPath: string; fragment: string; scheme: string; toString(): string }
 type ToolResult = { summary: string; data?: unknown }
 type NotebookEditor = { notebook: typeof activeNotebook; selection: { start: number; end: number }; revealRange(range: { start: number; end: number }): void }
 type NotebookCell = {

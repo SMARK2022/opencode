@@ -99,10 +99,14 @@ const editArgs = {
     .union([z.string(), z.array(z.string())])
     .optional()
     .describe("New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content."),
+  // Language-only edit is represented by an omitted source field, not an empty
+  // value. The description says this explicitly because model/tool callers can
+  // otherwise serialize "no source" as "" or [] and accidentally request a real
+  // full-cell replacement.
   language: z
     .string()
     .optional()
-    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
+    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode."),
 }
 
 const envArgs = {
@@ -200,6 +204,13 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
   const editType = stringValue(data.editType) ?? stringValue(args.editType)
+  const requestedCellId = stringValue(args.cellId)
+  // Notebook insert and type-change edits can invalidate the requested handle:
+  // insert creates a new cell, and type-change replaceCells gives the target a
+  // new VS Code document URI. Keep `cellId` as the next usable handle while also
+  // preserving `requestedCellId` when it differs, so existing renderers can show
+  // the safe continuation point without losing the original anchor/debug value.
+  const cellId = stringValue(data.insertedCellId) ?? stringValue(data.updatedCellId) ?? requestedCellId
   const insertedSourcePreview = editType === "insert" && after !== undefined
     ? previewNotebookInsertSource(after)
     : undefined
@@ -207,7 +218,8 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
     view: "edit",
     path,
     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
-    cellId: stringValue(args.cellId),
+    cellId,
+    requestedCellId: requestedCellId && requestedCellId !== cellId ? requestedCellId : undefined,
     editType,
     cellCountBefore: numberValue(data.cellCountBefore),
     cellCountAfter: numberValue(data.cellCountAfter),
@@ -414,6 +426,10 @@ export const VscodeBridgePlugin = async () => ({
         // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
         // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
         await ask(context, "vscode_notebook_env", args)
+        // save 是 env 工具中的持久化分支，会把 notebook 文档写回磁盘。
+        // 因此它必须继续服从通用 edit 门禁；否则用户只禁止 edit 时，仍可
+        // 通过 vscode_notebook_env.save 绕过普通文件写入边界。
+        if (args.operation === "save") await ask(context, "edit", args)
         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
       },
     }),

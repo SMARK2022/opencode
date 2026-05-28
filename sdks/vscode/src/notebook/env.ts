@@ -595,8 +595,12 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   }
   if (!jupyter.isActive) await jupyter.activate()
 
-  // Ensure the public restart command is registered
-  const allCommands = await vscode.commands.getCommands(true)
+  // Restart is contributed by the Jupyter extension as a command that may be
+  // hidden from VS Code's public command list. Use getCommands(false) so the
+  // bridge checks the same full command surface that executeCommand can invoke;
+  // otherwise restart incorrectly reports "not registered" even though the
+  // command is available to the extension host.
+  const allCommands = await vscode.commands.getCommands(false)
   if (!allCommands.includes(RESTART_CMD)) {
     return {
       ran: true,
