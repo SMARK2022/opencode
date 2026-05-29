@@ -37,6 +37,8 @@ if (isDaemon) {
 
   // 外部 listener 与内部 listener 使用同一服务树，不能另建应用 runtime 或另一份计数。
   let externalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
+  // 私有控制监听归同一 owner，绑定或写锁失败也进入统一清理。
+  let controlServer: ReturnType<typeof Bun.serve> | undefined
   let externalUrl: string | undefined
 
   // 只有启动成功写锁后才拥有 token；绑定失败的清理不能删除磁盘上的其他 owner。
@@ -67,7 +69,11 @@ if (isDaemon) {
     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
-    const stopped = await Promise.allSettled([externalServer?.stop(true), internalServer?.stop(true)])
+    const stopped = await Promise.allSettled([
+      Promise.resolve().then(() => controlServer?.stop(true)),
+      Promise.resolve().then(() => externalServer?.stop(true)),
+      Promise.resolve().then(() => internalServer?.stop(true)),
+    ])
     // 停止监听后才释放发现锁，避免另一个启动方在旧端口尚被占用时替换 owner。
     const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
     const runtime = await Promise.allSettled([AppRuntime.dispose()])
@@ -278,9 +284,26 @@ if (isDaemon) {
       externalServer = await Server.listen({ ...network, eventClients, sharedServices })
       externalUrl = externalServer.url.toString()
     }
+    // 控制面仅绑定本机随机端口，以当前 lock token 保护 stop/status。
+    controlServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
+          return new Response("unauthorized", { status: 401 })
+        const url = new URL(request.url)
+        if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH)
+          return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
+        if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+          return new Response("not found", { status: 404 })
+        // 先返回停止响应，再进入既有关闭闭包，避免在 handler 内中断响应。
+        setTimeout(() => void gracefulShutdown(0, "daemon-stop"), 0).unref?.()
+        return Response.json({ ok: true })
+      },
+    })
     // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
-    lockToken = await ServerLock.write(internalServer.port, externalUrl, network)
-    log.info("daemon lock written", { pid: process.pid, port: internalServer.port, externalUrl, launcherPID: LAUNCHER_PID })
+    lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
+    log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
     maybeScheduleStartupIdleShutdown()
     startLauncherWatcher()

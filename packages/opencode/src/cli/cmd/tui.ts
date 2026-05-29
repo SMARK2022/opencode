@@ -95,6 +95,8 @@ export const DAEMON_START_TIMEOUT_MS = 60_000
 export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
 export const SERVER_ELECTION_STALE_MS = 5_000
 export const SERVER_POLL_INTERVAL_MS = 200
+// #259：daemon status 返回的类型——tuiClients 和 sessionActivity 用于退出提示
+export type Status = { tuiClients: number; sessionActivity: number }
 
 
 // 子进程快照只在唯一 spawn 前归一，父进程的 HTTP/HTTPS/ALL 代理与 CA 配置保持原值。
@@ -168,7 +170,7 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
 export async function discoverOrSpawnDaemon(
   networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
   deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
-): Promise<{ url: string; fwdPid?: number }> {
+): Promise<{ url: string; fwdPid?: number; lockPath?: string }> {
   // 父进程健康探测直接调用 fetch，首次读锁前就须补回环绕过，不能仅在 spawn 后保护子进程。
   const noProxy = NetworkProxy.noProxyString(
     [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
@@ -220,7 +222,7 @@ export async function discoverOrSpawnDaemon(
       if (!existingUrl && lock) await deps.clear(lock.token, lockPath)
 
       if (existingUrl) {
-        return { url: existingUrl }
+        return { url: existingUrl, lockPath }
       } else {
         const daemonFile = await deps.resolveDaemonFile()
         const printLogs = process.argv.includes("--print-logs")
@@ -328,7 +330,7 @@ export async function discoverOrSpawnDaemon(
   }
 
   if (!existingUrl) throw new Error("Opencode daemon discovery produced no ready listener")
-  return { url: existingUrl, fwdPid }
+  return { url: existingUrl, fwdPid, lockPath }
 }
 
 async function input(value?: string) {
@@ -342,6 +344,36 @@ export function resolveThreadDirectory(project?: string, envPWD = process.env.PW
   const root = Filesystem.resolve(envPWD ?? cwd)
   if (project) return Filesystem.resolve(path.isAbsolute(project) ? project : path.join(root, project))
   return Filesystem.resolve(cwd)
+}
+
+// #259：status 走 lock token 保护的本机私有 control port；失败时保持静默
+// 因为它只用于 TUI 退出后的提示，不能影响主流程退出
+export async function status(lockPath = ServerLock.placement()): Promise<Status | undefined> {
+  // 独立 status 调用也可能跳过发现，回环绕过不能只依赖 TUI 启动时设置。
+  const noProxy = NetworkProxy.noProxyString(
+    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+  )
+  process.env.NO_PROXY = noProxy
+  process.env.no_proxy = noProxy
+  const lock = await ServerLock.read(lockPath).catch(() => undefined)
+  // #259：controlPort 与 pid 存活双重校验——旧 lock 或已死 daemon 都直接静默退出
+  if (!lock?.controlPort || !ServerLock.alive(lock.pid)) return
+
+  const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
+    headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
+    // #259：500ms 有界——status 是退出路径上的旁路查询，不能拖慢主流程退出
+    signal: AbortSignal.timeout(500),
+  }).catch(() => undefined)
+  if (!response?.ok) return
+  return parseStatus(await response.json().catch(() => undefined))
+}
+
+function parseStatus(input: unknown): Status | undefined {
+  if (!input || typeof input !== "object") return
+  if (!("tuiClients" in input) || !("sessionActivity" in input)) return
+  if (typeof input.tuiClients !== "number" || typeof input.sessionActivity !== "number") return
+  // 只提取 worker 的两个计数，响应的其他字段不会进入退出提示。
+  return { tuiClients: input.tuiClients, sessionActivity: input.sessionActivity }
 }
 
 export const TuiThreadCommand = cmd({
@@ -464,6 +496,8 @@ export const TuiThreadCommand = cmd({
     const unguard = win32InstallCtrlCGuard()
     // 转发句柄属于 TUI，选举租约在 discoverOrSpawnDaemon 内部闭合。
     let fwdReload: (() => void) | undefined
+    // 退出提示沿用发现路径；重连交付新 owner 后同步更新，不能退回旧的默认锁。
+    let daemonLockPath: string | undefined
     try {
       const { TuiConfig } = await import("@/config/tui")
       if (args.fork && !args.continue && !args.session) {
@@ -491,6 +525,7 @@ export const TuiThreadCommand = cmd({
       try {
         const discovered = await discoverOrSpawnDaemon(args)
         existingUrl = discovered.url
+        daemonLockPath = discovered.lockPath
         // Windows 不注册不支持的 SIGUSR2；TUI 也不能因重载信号走共享服务的退出路径。
         if (discovered.fwdPid !== undefined && process.platform !== "win32") {
           const pid = discovered.fwdPid
@@ -549,6 +584,7 @@ export const TuiThreadCommand = cmd({
             reconnect: async () => {
               const discovered = await discoverOrSpawnDaemon(args)
               existingUrl = discovered.url
+              daemonLockPath = discovered.lockPath
               // #139：每次 respawn 必须重绑 SIGUSR2 转发到新 daemon PID
               if (process.platform !== "win32") {
                 if (fwdReload) {
@@ -592,7 +628,26 @@ export const TuiThreadCommand = cmd({
         unguard?.()
       } catch {}
     }
+    // #259：退出前提示 daemon 状态——仅当有活跃连接/会话时显示 stop 命令
+    await printDaemonExitHint(daemonLockPath)
     process.exit()
   },
 })
+
+// 退出提示只查询已经连接的发现路径，不启动或重连 daemon。
+export async function printDaemonExitHint(lockPath?: string) {
+  const snapshot = await status(lockPath).catch(() => undefined)
+  if (!snapshot || (snapshot.tuiClients === 0 && snapshot.sessionActivity === 0)) return
+
+  UI.println(
+    UI.Style.TEXT_DIM + "Daemon still running: " + UI.Style.TEXT_NORMAL,
+    [count(snapshot.tuiClients, "TUI connection"), count(snapshot.sessionActivity, "active session")].join(", "),
+    UI.Style.TEXT_DIM + "- stop with",
+    UI.Style.TEXT_INFO_BOLD + "opencode daemon stop" + UI.Style.TEXT_NORMAL,
+  )
+}
+
+function count(value: number, label: string) {
+  return `${value} ${label}${value === 1 ? "" : "s"}`
+}
 // scratch
