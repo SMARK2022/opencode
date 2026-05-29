@@ -416,9 +416,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       yield* requireSession(ctx.params.sessionID)
       const usage = yield* SessionRequestUsage.Service
-      return yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
+      const result = yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
         Effect.mapError(() => new HttpApiError.NotFound({})),
       )
+      if (!result) return yield* new HttpApiError.NotFound({})
+      return result
     })
 
     const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: {
@@ -426,6 +428,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       yield* requireSession(ctx.params.sessionID)
       const usage = yield* SessionRequestUsage.Service
+      // assistant 明细属于具体 request_usage 记录；先确认父请求存在，
+      // 避免缺失 request 被误解释成“存在但 assistant 为空”的成功列表。
+      const result = yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
+        Effect.mapError(() => new HttpApiError.NotFound({})),
+      )
+      if (!result) return yield* new HttpApiError.NotFound({})
       return yield* usage.assistants({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
         Effect.mapError(() => new HttpApiError.NotFound({})),
       )

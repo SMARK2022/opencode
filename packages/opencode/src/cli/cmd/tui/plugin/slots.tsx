@@ -13,6 +13,7 @@ export type HostSlots = {
     (plugin: HostSlotPlugin): () => void
     <Slots extends Record<string, object>>(plugin: HostSlotPlugin<Slots>): () => void
   }
+  dispose: () => void
 }
 
 function empty<Name extends string>(_props: TuiSlotProps<Name>) {
@@ -51,10 +52,17 @@ export function setupSlots(api: HostPluginApi): HostSlots {
 
   const slot = createSlot<RuntimeSlotMap, TuiSlotContext>(reg)
   view = (props) => slot(props)
+  const current = view
   return {
     register(plugin: HostSlotPlugin) {
       if (!isHostSlotPlugin(plugin)) return () => {}
       return reg.register(plugin)
+    },
+    dispose() {
+      // TUI 插件 runtime 是单例，Slot 视图同样是模块级全局入口。
+      // dispose 后必须恢复 no-op，否则后续未初始化 runtime 的测试/实例会继续渲染上一轮
+      // slot registry 的 fallback children，改变会话布局并泄漏上一轮 renderer 上下文。
+      if (view === current) view = empty
     },
   }
 }

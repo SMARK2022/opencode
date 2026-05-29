@@ -998,7 +998,10 @@ it.instance(
   "auto permission reviewer fails closed after one malformed protocol retry",
   () =>
     Effect.gen(function* () {
-      const { llm } = yield* useServerConfig(providerCfg)
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        permission: { auto_review: { fallback: "deny" } },
+      }))
       const permissions = yield* Permission.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })

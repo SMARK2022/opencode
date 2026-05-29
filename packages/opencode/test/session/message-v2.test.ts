@@ -1627,7 +1627,7 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks).toEqual([])
   })
 
-  test("a fresh compaction-user newer than the latest summary surfaces in tasks", () => {
+  test("a fresh compaction-user newer than the latest summary is not replayed as a task", () => {
     const newCompactionUser: MessageV2.WithParts = {
       info: userInfo(NEW_COMPACTION_USER),
       parts: [
@@ -1650,8 +1650,7 @@ describe("session.message-v2.latest", () => {
 
     expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
     expect(state.user?.id).toBe(NEW_COMPACTION_USER)
-    expect(state.tasks).toHaveLength(1)
-    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
+    expect(state.tasks).toEqual([])
   })
 })
 

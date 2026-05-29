@@ -111,10 +111,12 @@ describe("cross-spawn spawner", () => {
             ChildProcess.make(process.execPath, ["-e", "process.stdout.write(process.cwd())"], { cwd: tmp.path }),
           ),
         )
-        // On macOS, /var is a symlink to /private/var, so the child process
-        // reports the realpath. Compare resolved paths for cross-platform correctness.
+        // macOS can report /private/var for /var, and Windows runners can report
+        // an 8.3 short path such as RUNNER~1. Normalize both sides through the
+        // filesystem so this test asserts the spawned cwd, not its display form.
         const expected = yield* Effect.promise(() => fs.realpath(tmp.path))
-        expect(out).toBe(expected)
+        const actual = yield* Effect.promise(() => fs.realpath(out))
+        expect(path.normalize(actual)).toBe(path.normalize(expected))
       }),
     )
 

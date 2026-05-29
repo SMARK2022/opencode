@@ -16,6 +16,7 @@ import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Permission } from "@/permission"
 import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
@@ -486,7 +487,7 @@ describe("tool.task", () => {
 
         const child = yield* sessions.get(result.metadata.sessionId)
         expect(child.parentID).toBe(chat.id)
-        expect(child.permission).toContainEqual({ permission: "external_directory", pattern: "*", action: "ask" })
+        expect(Permission.evaluate("external_directory", "/tmp/outside", child.permission ?? []).action).toBe("ask")
         expect(child.permission).toContainEqual({ permission: "todowrite", pattern: "*", action: "deny" })
         expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "allow" })
         expect(child.permission).toContainEqual({ permission: "read", pattern: "*", action: "allow" })

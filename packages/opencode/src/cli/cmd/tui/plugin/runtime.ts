@@ -1039,16 +1039,19 @@ export async function installPlugin(spec: string, options?: { global?: boolean }
 
 export async function dispose() {
   const task = loaded
+  const state = runtime
   loaded = undefined
   dir = ""
   if (task) await task
-  const state = runtime
-  runtime = undefined
+  // dispose() 允许旧 load 完成后再清理；期间新的 init() 可能已经建立下一轮 runtime。
+  // 只有全局 runtime 仍指向本轮 state 时才清空，避免旧 dispose 误停新实例。
+  if (runtime === state) runtime = undefined
   if (!state) return
   const queue = [...state.plugins].reverse()
   for (const plugin of queue) {
     await deactivatePluginEntry(state, plugin, false)
   }
+  state.slots.dispose()
   state.dispose?.()
 }
 
@@ -1091,8 +1094,10 @@ async function load(input: { api: Api; config: TuiConfig.Resolved; dispose?: () 
       })
     }
 
-    // [local-smark] Non-blocking external plugin loading for daemon multi-instance
-    // Activate built-in plugins first, then load external plugins asynchronously
+    // Activate built-ins first, then finish external plugin resolution before
+    // init() resolves. The TUI can render with built-ins while loading, but tests
+    // and callers that await init() need a stable plugin lifecycle boundary so
+    // temporary plugin files are not cleaned up before imports and disposers run.
     applyInitialPluginEnabledState(next, config)
     for (const plugin of next.plugins) {
       if (!plugin.enabled) continue
@@ -1103,17 +1108,13 @@ async function load(input: { api: Api; config: TuiConfig.Resolved; dispose?: () 
       await activatePluginEntry(next, plugin, false)
     }
 
-    void (async () => {
-      const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
-      const added = await addExternalPluginEntries(next, ready)
-      applyInitialPluginEnabledState(next, config)
-      for (const plugin of added.plugins) {
-        if (!plugin.enabled) continue
-        await activatePluginEntry(next, plugin, false)
-      }
-    })().catch((error) => {
-      fail("failed to load external tui plugins", { directory: cwd, error })
-    })
+    const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+    const added = await addExternalPluginEntries(next, ready)
+    applyInitialPluginEnabledState(next, config)
+    for (const plugin of added.plugins) {
+      if (!plugin.enabled) continue
+      await activatePluginEntry(next, plugin, false)
+    }
   } catch (error) {
     fail("failed to load tui plugins", { directory: cwd, error })
   }

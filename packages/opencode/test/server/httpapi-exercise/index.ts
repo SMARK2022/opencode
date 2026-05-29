@@ -879,6 +879,39 @@ const scenarios: Scenario[] = [
       check(stable(body) === stable(ctx.state.todos), "todos should match seeded state")
     }),
   http.protected
+    .get("/session/{sessionID}/request_usage", "session.request_usage.list")
+    .seeded((ctx) => ctx.session({ title: "Request usage session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/request_usage", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
+      array(body)
+      check(body.length === 0, "new session should have no request usage rows")
+    }),
+  http.protected
+    .get("/session/{sessionID}/request_usage/{requestID}", "session.request_usage.get.missing")
+    .seeded((ctx) => ctx.session({ title: "Missing request usage session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/request_usage/{requestID}", {
+        sessionID: ctx.state.id,
+        requestID: "msg_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .status(404),
+  http.protected
+    .get("/session/{sessionID}/request_usage/{requestID}/assistant", "session.request_usage.assistants.missing")
+    .seeded((ctx) => ctx.session({ title: "Missing assistant usage session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/request_usage/{requestID}/assistant", {
+        sessionID: ctx.state.id,
+        requestID: "msg_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .status(404),
+  http.protected
     .get("/session/{sessionID}/diff", "session.diff")
     .seeded((ctx) => ctx.session({ title: "Diff session" }))
     .at((ctx) => ({ path: route("/session/{sessionID}/diff", { sessionID: ctx.state.id }), headers: ctx.headers() }))

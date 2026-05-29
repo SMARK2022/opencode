@@ -70,7 +70,7 @@ describe("permission reviewer prompt", () => {
     expect(prompt).toContain("# User Authorization Scoring")
     expect(prompt).toContain("# Base Risk Taxonomy")
     expect(prompt).toContain("Deny pushes unless the user explicitly asks for push.")
-    expect(prompt).toContain("Use this JSON schema for every decision")
+    expect(prompt).toContain("Use this tool input schema for every decision")
     expect(prompt).toContain('"risk_level": "low" | "medium" | "high" | "critical"')
     expect(prompt).toContain('"outcome": "allow" | "deny"')
   })

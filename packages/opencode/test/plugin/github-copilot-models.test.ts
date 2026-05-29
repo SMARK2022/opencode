@@ -8,59 +8,63 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-test("preserves temperature support from existing provider models", async () => {
-  globalThis.fetch = mock(() =>
-    Promise.resolve(
-      new Response(
-        JSON.stringify({
-          data: [
-            {
-              model_picker_enabled: true,
-              id: "gpt-4o",
-              name: "GPT-4o",
-              version: "gpt-4o-2024-05-13",
-              capabilities: {
-                family: "gpt",
-                limits: {
-                  max_context_window_tokens: 64000,
-                  max_output_tokens: 16384,
-                  max_prompt_tokens: 64000,
-                },
-                supports: {
-                  streaming: true,
-                  tool_calls: true,
-                },
-              },
-            },
-            {
-              model_picker_enabled: true,
-              id: "brand-new",
-              name: "Brand New",
-              version: "brand-new-2026-04-01",
-              capabilities: {
-                family: "test",
-                limits: {
-                  max_context_window_tokens: 32000,
-                  max_output_tokens: 8192,
-                  max_prompt_tokens: 32000,
-                },
-                supports: {
-                  streaming: true,
-                  tool_calls: false,
-                },
-              },
-            },
-          ],
-        }),
-        { status: 200 },
-      ),
-    ),
-  ) as unknown as typeof fetch
+async function withModelsServer<T>(body: unknown, fn: (baseURL: string) => Promise<T>) {
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      return Response.json(body)
+    },
+  })
+  try {
+    return await fn(server.url.origin)
+  } finally {
+    server.stop(true)
+  }
+}
 
-  const models = await CopilotModels.get(
-    "https://api.githubcopilot.com",
-    {},
+test("preserves temperature support from existing provider models", async () => {
+  const models = await withModelsServer(
     {
+      data: [
+        {
+          model_picker_enabled: true,
+          id: "gpt-4o",
+          name: "GPT-4o",
+          version: "gpt-4o-2024-05-13",
+          capabilities: {
+            family: "gpt",
+            limits: {
+              max_context_window_tokens: 64000,
+              max_output_tokens: 16384,
+              max_prompt_tokens: 64000,
+            },
+            supports: {
+              streaming: true,
+              tool_calls: true,
+            },
+          },
+        },
+        {
+          model_picker_enabled: true,
+          id: "brand-new",
+          name: "Brand New",
+          version: "brand-new-2026-04-01",
+          capabilities: {
+            family: "test",
+            limits: {
+              max_context_window_tokens: 32000,
+              max_output_tokens: 8192,
+              max_prompt_tokens: 32000,
+            },
+            supports: {
+              streaming: true,
+              tool_calls: false,
+            },
+          },
+        },
+      ],
+    },
+    (baseURL) => CopilotModels.get(baseURL, {}, {
       "gpt-4o": {
         id: "gpt-4o",
         providerID: "github-copilot",
@@ -110,7 +114,7 @@ test("preserves temperature support from existing provider models", async () => 
         variants: {},
         status: "active",
       },
-    },
+    }),
   )
 
   expect(models["gpt-4o"].capabilities.temperature).toBe(true)
@@ -118,42 +122,32 @@ test("preserves temperature support from existing provider models", async () => 
 })
 
 test("clears existing variants so refreshed models calculate provider-specific variants", async () => {
-  globalThis.fetch = mock(() =>
-    Promise.resolve(
-      new Response(
-        JSON.stringify({
-          data: [
-            {
-              model_picker_enabled: true,
-              id: "claude-opus-4.7",
-              name: "Claude Opus 4.7",
-              version: "claude-opus-4.7-2026-04-16",
-              supported_endpoints: ["/v1/messages"],
-              capabilities: {
-                family: "claude-opus",
-                limits: {
-                  max_context_window_tokens: 144000,
-                  max_output_tokens: 64000,
-                  max_prompt_tokens: 128000,
-                },
-                supports: {
-                  adaptive_thinking: true,
-                  streaming: true,
-                  tool_calls: true,
-                },
-              },
-            },
-          ],
-        }),
-        { status: 200 },
-      ),
-    ),
-  ) as unknown as typeof fetch
-
-  const models = await CopilotModels.get(
-    "https://api.githubcopilot.com",
-    {},
+  const models = await withModelsServer(
     {
+      data: [
+        {
+          model_picker_enabled: true,
+          id: "claude-opus-4.7",
+          name: "Claude Opus 4.7",
+          version: "claude-opus-4.7-2026-04-16",
+          supported_endpoints: ["/v1/messages"],
+          capabilities: {
+            family: "claude-opus",
+            limits: {
+              max_context_window_tokens: 144000,
+              max_output_tokens: 64000,
+              max_prompt_tokens: 128000,
+            },
+            supports: {
+              adaptive_thinking: true,
+              streaming: true,
+              tool_calls: true,
+            },
+          },
+        },
+      ],
+    },
+    (baseURL) => CopilotModels.get(baseURL, {}, {
       "claude-opus-4.7": {
         id: "claude-opus-4.7",
         providerID: "github-copilot",
@@ -208,7 +202,7 @@ test("clears existing variants so refreshed models calculate provider-specific v
         },
         status: "active",
       },
-    },
+    }),
   )
 
   expect(models["claude-opus-4.7"].api.npm).toBe("@ai-sdk/anthropic")
