@@ -5,6 +5,12 @@ export type ClientOptions = {
 }
 
 export type Event =
+  | EventTuiPromptAppend
+  | EventTuiCommandExecute
+  | EventTuiToastShow1
+  | EventTuiSessionSelect
+  | EventServerConnected
+  | EventGlobalDisposed
   | EventServerInstanceDisposed
   | EventFileEdited
   | EventFileWatcherUpdated
@@ -13,6 +19,10 @@ export type Event =
   | EventMessagePartDelta
   | EventPermissionAsked
   | EventPermissionReplied
+  | EventPermissionReviewCompleted
+  | EventPermissionReviewStarted
+  | EventPermissionReviewFailed
+  | EventPermissionReviewCircuitBroken1
   | EventSessionDiff
   | EventSessionError
   | EventQuestionAsked
@@ -21,10 +31,6 @@ export type Event =
   | EventTodoUpdated
   | EventSessionStatus
   | EventSessionIdle
-  | EventTuiPromptAppend
-  | EventTuiCommandExecute
-  | EventTuiToastShow1
-  | EventTuiSessionSelect
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
@@ -75,8 +81,6 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
-  | EventServerConnected
-  | EventGlobalDisposed
   | EventCatalogModelUpdated
 
 export type OAuth = {
@@ -103,6 +107,61 @@ export type WellKnownAuth = {
 }
 
 export type Auth = OAuth | ApiAuth | WellKnownAuth
+
+export type EventTuiPromptAppend = {
+  id: string
+  type: "tui.prompt.append"
+  properties: {
+    text: string
+  }
+}
+
+export type EventTuiCommandExecute = {
+  id: string
+  type: "tui.command.execute"
+  properties: {
+    command:
+      | "session.list"
+      | "session.new"
+      | "session.share"
+      | "session.interrupt"
+      | "session.compact"
+      | "session.page.up"
+      | "session.page.down"
+      | "session.line.up"
+      | "session.line.down"
+      | "session.half.page.up"
+      | "session.half.page.down"
+      | "session.first"
+      | "session.last"
+      | "prompt.clear"
+      | "prompt.submit"
+      | "agent.cycle"
+      | string
+  }
+}
+
+export type EventTuiToastShow = {
+  id: string
+  type: "tui.toast.show"
+  properties: {
+    title?: string
+    message: string
+    variant: "info" | "success" | "warning" | "error"
+    duration?: number
+  }
+}
+
+export type EventTuiSessionSelect = {
+  id: string
+  type: "tui.session.select"
+  properties: {
+    /**
+     * Session ID to navigate to
+     */
+    sessionID: string
+  }
+}
 
 export type PermissionRequest = {
   id: string
@@ -281,61 +340,6 @@ export type SessionStatus =
       type: "busy"
     }
 
-export type EventTuiPromptAppend = {
-  id: string
-  type: "tui.prompt.append"
-  properties: {
-    text: string
-  }
-}
-
-export type EventTuiCommandExecute = {
-  id: string
-  type: "tui.command.execute"
-  properties: {
-    command:
-      | "session.list"
-      | "session.new"
-      | "session.share"
-      | "session.interrupt"
-      | "session.compact"
-      | "session.page.up"
-      | "session.page.down"
-      | "session.line.up"
-      | "session.line.down"
-      | "session.half.page.up"
-      | "session.half.page.down"
-      | "session.first"
-      | "session.last"
-      | "prompt.clear"
-      | "prompt.submit"
-      | "agent.cycle"
-      | string
-  }
-}
-
-export type EventTuiToastShow = {
-  id: string
-  type: "tui.toast.show"
-  properties: {
-    title?: string
-    message: string
-    variant: "info" | "success" | "warning" | "error"
-    duration?: number
-  }
-}
-
-export type EventTuiSessionSelect = {
-  id: string
-  type: "tui.session.select"
-  properties: {
-    /**
-     * Session ID to navigate to
-     */
-    sessionID: string
-  }
-}
-
 export type Project = {
   id: string
   worktree: string
@@ -389,6 +393,10 @@ export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
 export type UserMessage = {
   id: string
   sessionID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   role: "user"
   time: {
     created: number
@@ -414,6 +422,10 @@ export type UserMessage = {
 export type AssistantMessage = {
   id: string
   sessionID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   role: "assistant"
   time: {
     created: number
@@ -448,6 +460,32 @@ export type AssistantMessage = {
       write: number
     }
   }
+  inputChars?: number
+  inputTokens?: number
+  inputBreakdown?: {
+    system: number
+    instructions: number
+    skills: number
+    tools: number
+    messages: {
+      userText: number
+      assistantText: number
+      reasoning: number
+      toolInput: number
+      toolOutput: number
+      attachments: number
+      total: number
+    }
+    media?: {
+      rawChars: number
+      textChars: number
+      tokens: number
+      count: number
+      imageTokens: number
+      pdfTokens: number
+      otherTokens: number
+    }
+  }
   structured?: unknown
   variant?: string
   finish?: string
@@ -459,6 +497,10 @@ export type TextPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "text"
   text: string
   synthetic?: boolean
@@ -476,6 +518,10 @@ export type SubtaskPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "subtask"
   prompt: string
   description: string
@@ -491,6 +537,10 @@ export type ReasoningPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "reasoning"
   text: string
   metadata?: {
@@ -547,6 +597,10 @@ export type FilePart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "file"
   mime: string
   filename?: string
@@ -615,6 +669,10 @@ export type ToolPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "tool"
   callID: string
   tool: string
@@ -628,14 +686,48 @@ export type StepStartPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "step-start"
   snapshot?: string
+  inputChars?: number
+  inputTokens?: number
+  inputBreakdown?: {
+    system: number
+    instructions: number
+    skills: number
+    tools: number
+    messages: {
+      userText: number
+      assistantText: number
+      reasoning: number
+      toolInput: number
+      toolOutput: number
+      attachments: number
+      total: number
+    }
+    media?: {
+      rawChars: number
+      textChars: number
+      tokens: number
+      count: number
+      imageTokens: number
+      pdfTokens: number
+      otherTokens: number
+    }
+  }
 }
 
 export type StepFinishPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "step-finish"
   reason: string
   snapshot?: string
@@ -650,12 +742,41 @@ export type StepFinishPart = {
       write: number
     }
   }
+  inputChars?: number
+  inputBreakdown?: {
+    system: number
+    instructions: number
+    skills: number
+    tools: number
+    messages: {
+      userText: number
+      assistantText: number
+      reasoning: number
+      toolInput: number
+      toolOutput: number
+      attachments: number
+      total: number
+    }
+    media?: {
+      rawChars: number
+      textChars: number
+      tokens: number
+      count: number
+      imageTokens: number
+      pdfTokens: number
+      otherTokens: number
+    }
+  }
 }
 
 export type SnapshotPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "snapshot"
   snapshot: string
 }
@@ -664,6 +785,10 @@ export type PatchPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "patch"
   hash: string
   files: Array<string>
@@ -673,6 +798,10 @@ export type AgentPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "agent"
   name: string
   source?: {
@@ -686,6 +815,10 @@ export type RetryPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "retry"
   attempt: number
   error: ApiError
@@ -698,6 +831,10 @@ export type CompactionPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "compaction"
   auto: boolean
   overflow?: boolean
@@ -795,6 +932,12 @@ export type GlobalEvent = {
   project?: string
   workspace?: string
   payload:
+    | EventTuiPromptAppend
+    | EventTuiCommandExecute
+    | EventTuiToastShow
+    | EventTuiSessionSelect
+    | EventServerConnected
+    | EventGlobalDisposed
     | EventServerInstanceDisposed
     | EventFileEdited
     | EventFileWatcherUpdated
@@ -803,6 +946,10 @@ export type GlobalEvent = {
     | EventMessagePartDelta
     | EventPermissionAsked
     | EventPermissionReplied
+    | EventPermissionReviewCompleted
+    | EventPermissionReviewStarted
+    | EventPermissionReviewFailed
+    | EventPermissionReviewCircuitBroken
     | EventSessionDiff
     | EventSessionError
     | EventQuestionAsked
@@ -811,10 +958,6 @@ export type GlobalEvent = {
     | EventTodoUpdated
     | EventSessionStatus
     | EventSessionIdle
-    | EventTuiPromptAppend
-    | EventTuiCommandExecute
-    | EventTuiToastShow
-    | EventTuiSessionSelect
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
@@ -865,8 +1008,6 @@ export type GlobalEvent = {
     | EventSessionNextCompactionStarted
     | EventSessionNextCompactionDelta
     | EventSessionNextCompactionEnded
-    | EventServerConnected
-    | EventGlobalDisposed
     | EventCatalogModelUpdated
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
@@ -941,25 +1082,37 @@ export type ReferenceConfig = {
 
 export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
 
-export type ApprovalsReviewer = "user" | "auto_review"
-
-export type AutoReviewConfig = {
-  model?: string
-  timeout_ms?: number
-  policy_path?: string
-  policy?: string
-  fallback?: "deny" | "user"
-  strict?: boolean
-  max_consecutive_denials?: number
-  max_recent_denials?: number
-  recent_denial_window?: number
-}
-
 export type PermissionObjectConfig = {
   [key: string]: PermissionActionConfig
 }
 
 export type PermissionRuleConfig = PermissionActionConfig | PermissionObjectConfig
+
+export type ApprovalsReviewer = "user" | "auto_review"
+
+export type AutoReviewConfig = {
+  model?: string
+  /**
+   * Reviewer timeout in milliseconds. Defaults to 90000.
+   */
+  timeout_ms?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  policy_path?: string
+  policy?: string
+  fallback?: "deny" | "user"
+  strict?: boolean
+  /**
+   * Circuit breaker consecutive denial threshold.
+   */
+  max_consecutive_denials?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  /**
+   * Circuit breaker recent denial threshold.
+   */
+  max_recent_denials?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  /**
+   * Circuit breaker recent decision window.
+   */
+  recent_denial_window?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+}
 
 export type PermissionConfig =
   | PermissionActionConfig
@@ -983,7 +1136,15 @@ export type PermissionConfig =
       skill?: PermissionRuleConfig
       approvals_reviewer?: ApprovalsReviewer
       auto_review?: AutoReviewConfig
-      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
+      [key: string]:
+        | PermissionRuleConfig
+        | ApprovalsReviewer
+        | AutoReviewConfig
+        | PermissionRuleConfig
+        | PermissionActionConfig
+        | ApprovalsReviewer
+        | AutoReviewConfig
+        | undefined
     }
 
 export type AgentConfig = {
@@ -1042,11 +1203,17 @@ export type ProviderConfig = {
   env?: Array<string>
   id?: string
   npm?: string
+  extends?: string
   whitelist?: Array<string>
   blacklist?: Array<string>
   options?: {
     apiKey?: string
     baseURL?: string
+    headers?: {
+      [key: string]: string
+    }
+    "header-ua"?: string
+    version?: string
     enterpriseUrl?: string
     setCacheKey?: boolean
     /**
@@ -1054,7 +1221,17 @@ export type ProviderConfig = {
      */
     timeout?: number | false
     chunkTimeout?: number
-    [key: string]: unknown | string | boolean | number | false | number | undefined
+    [key: string]:
+      | unknown
+      | string
+      | {
+          [key: string]: string
+        }
+      | boolean
+      | number
+      | false
+      | number
+      | undefined
   }
   models?: {
     [key: string]: {
@@ -1176,6 +1353,8 @@ export type AttachmentConfig = {
   image?: ImageAttachmentConfig
 }
 
+export type ShellOutputEncoding = "auto" | "utf-8" | "gb18030" | "utf-16le" | "utf-16be"
+
 export type Config = {
   $schema?: string
   shell?: string
@@ -1296,14 +1475,9 @@ export type Config = {
   }
   tool_output?: {
     max_lines?: number
-    /**
-     * Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)
-     */
     max_bytes?: number
-    /**
-     * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.
-     */
     bash_compression?: boolean
+    shell_encoding?: ShellOutputEncoding
   }
   compaction?: {
     auto?: boolean
@@ -1763,6 +1937,67 @@ export type ProviderAuthError1 = {
     field?: string
     message?: string
     kind?: string
+  }
+}
+
+export type RequestUsageSource = "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+
+export type RequestUsageStatus = "running" | "completed" | "error" | "aborted"
+
+export type RequestUsageTokens = {
+  input: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  output: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  reasoning: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  cache: {
+    read: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    write: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+  total: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type SessionRequestUsage = {
+  sessionID: string
+  requestID: string
+  rootRequestID: string
+  source: RequestUsageSource
+  status: RequestUsageStatus
+  agent: string
+  model: {
+    providerID: string
+    modelID: string
+    variant?: string
+  }
+  assistantCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  stepCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  tokens: RequestUsageTokens
+  cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  error?: string
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    completed?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+}
+
+export type SessionRequestUsageAssistant = {
+  sessionID: string
+  requestID: string
+  assistantMessageID: string
+  rootRequestID: string
+  status: RequestUsageStatus
+  model: {
+    providerID: string
+    modelID: string
+    variant?: string
+  }
+  stepCount: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  tokens: RequestUsageTokens
+  cost: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  error?: string
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    completed?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   }
 }
 
@@ -2431,6 +2666,22 @@ export type SyncEventSessionNextCompactionEnded = {
   }
 }
 
+export type EventServerConnected = {
+  id: string
+  type: "server.connected"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventGlobalDisposed = {
+  id: string
+  type: "global.disposed"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
 export type EventServerInstanceDisposed = {
   id: string
   type: "server.instance.disposed"
@@ -2498,6 +2749,52 @@ export type EventPermissionReplied = {
     sessionID: string
     requestID: string
     reply: "once" | "always" | "reject"
+  }
+}
+
+export type EventPermissionReviewCompleted = {
+  id: string
+  type: "permission.review.completed"
+  properties: {
+    sessionID: string
+    reviewID: string
+    outcome: "allow" | "deny"
+    rationale: string
+  }
+}
+
+export type EventPermissionReviewStarted = {
+  id: string
+  type: "permission.review.started"
+  properties: {
+    sessionID: string
+    reviewID: string
+    permission: string
+    patterns: Array<string>
+    precheck: {
+      level: "safe" | "general" | "cautious" | "dangerous"
+      reason: string
+    }
+  }
+}
+
+export type EventPermissionReviewFailed = {
+  id: string
+  type: "permission.review.failed"
+  properties: {
+    sessionID: string
+    reviewID: string
+    reason: string
+  }
+}
+
+export type EventPermissionReviewCircuitBroken = {
+  id: string
+  type: "permission.review.circuit_broken"
+  properties: {
+    sessionID: string
+    consecutive: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    recent: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   }
 }
 
@@ -3157,22 +3454,6 @@ export type EventSessionNextCompactionEnded = {
   }
 }
 
-export type EventServerConnected = {
-  id: string
-  type: "server.connected"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventGlobalDisposed = {
-  id: string
-  type: "global.disposed"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
 export type ModelV2Info = {
   id: string
   apiID: string
@@ -3589,6 +3870,16 @@ export type EventTuiToastShow1 = {
     message: string
     variant: "info" | "success" | "warning" | "error"
     duration?: number
+  }
+}
+
+export type EventPermissionReviewCircuitBroken1 = {
+  id: string
+  type: "permission.review.circuit_broken"
+  properties: {
+    sessionID: string
+    consecutive: number | "NaN" | "Infinity" | "-Infinity"
+    recent: number | "NaN" | "Infinity" | "-Infinity"
   }
 }
 
@@ -4330,6 +4621,15 @@ export type FindTextData = {
   }
   url: "/find"
 }
+
+export type FindTextErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type FindTextError = FindTextErrors[keyof FindTextErrors]
 
 export type FindTextResponses = {
   /**
@@ -5793,6 +6093,108 @@ export type SessionTodoResponses = {
 
 export type SessionTodoResponse = SessionTodoResponses[keyof SessionTodoResponses]
 
+export type SessionRequestUsageListData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    limit?: string
+    before?: number
+    rootRequestID?: string
+    source?: RequestUsageSource
+  }
+  url: "/session/{sessionID}/request_usage"
+}
+
+export type SessionRequestUsageListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionRequestUsageListError = SessionRequestUsageListErrors[keyof SessionRequestUsageListErrors]
+
+export type SessionRequestUsageListResponses = {
+  /**
+   * Request usage list
+   */
+  200: Array<SessionRequestUsage>
+}
+
+export type SessionRequestUsageListResponse = SessionRequestUsageListResponses[keyof SessionRequestUsageListResponses]
+
+export type SessionRequestUsageGetData = {
+  body?: never
+  path: {
+    sessionID: string
+    requestID: string
+  }
+  query?: never
+  url: "/session/{sessionID}/request_usage/{requestID}"
+}
+
+export type SessionRequestUsageGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionRequestUsageGetError = SessionRequestUsageGetErrors[keyof SessionRequestUsageGetErrors]
+
+export type SessionRequestUsageGetResponses = {
+  /**
+   * Request usage detail
+   */
+  200: SessionRequestUsage
+}
+
+export type SessionRequestUsageGetResponse = SessionRequestUsageGetResponses[keyof SessionRequestUsageGetResponses]
+
+export type SessionRequestUsageAssistantsData = {
+  body?: never
+  path: {
+    sessionID: string
+    requestID: string
+  }
+  query?: never
+  url: "/session/{sessionID}/request_usage/{requestID}/assistant"
+}
+
+export type SessionRequestUsageAssistantsErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionRequestUsageAssistantsError =
+  SessionRequestUsageAssistantsErrors[keyof SessionRequestUsageAssistantsErrors]
+
+export type SessionRequestUsageAssistantsResponses = {
+  /**
+   * Assistant usage list
+   */
+  200: Array<SessionRequestUsageAssistant>
+}
+
+export type SessionRequestUsageAssistantsResponse =
+  SessionRequestUsageAssistantsResponses[keyof SessionRequestUsageAssistantsResponses]
+
 export type SessionDiffData = {
   body?: never
   path: {
@@ -5857,6 +6259,8 @@ export type SessionMessagesResponse = SessionMessagesResponses[keyof SessionMess
 export type SessionPromptData = {
   body?: {
     messageID?: string
+    rootRequestID?: string
+    source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
     model?: {
       providerID: string
       modelID: string
@@ -6192,6 +6596,8 @@ export type SessionSummarizeResponse = SessionSummarizeResponses[keyof SessionSu
 export type SessionPromptAsyncData = {
   body?: {
     messageID?: string
+    rootRequestID?: string
+    source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
     model?: {
       providerID: string
       modelID: string
@@ -7142,6 +7548,45 @@ export type TuiSelectSessionResponses = {
 }
 
 export type TuiSelectSessionResponse = TuiSelectSessionResponses[keyof TuiSelectSessionResponses]
+
+export type TuiProviderEndpointStatusData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    url: string
+  }
+  url: "/tui/provider-endpoint-status"
+}
+
+export type TuiProviderEndpointStatusErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type TuiProviderEndpointStatusError = TuiProviderEndpointStatusErrors[keyof TuiProviderEndpointStatusErrors]
+
+export type TuiProviderEndpointStatusResponses = {
+  /**
+   * Provider endpoint route and latency
+   */
+  200: {
+    url: string
+    status: "ok" | "down"
+    latency: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    route: {
+      type: "direct" | "proxy"
+      reason: string
+    }
+    checkedAt: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+}
+
+export type TuiProviderEndpointStatusResponse =
+  TuiProviderEndpointStatusResponses[keyof TuiProviderEndpointStatusResponses]
 
 export type TuiControlNextData = {
   body?: never

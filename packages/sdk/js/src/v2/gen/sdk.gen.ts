@@ -48,6 +48,7 @@ import type {
   FileStatusResponses,
   FindFilesResponses,
   FindSymbolsResponses,
+  FindTextErrors,
   FindTextResponses,
   FormatterStatusResponses,
   GlobalConfigGetResponses,
@@ -120,6 +121,7 @@ import type {
   QuestionRejectResponses,
   QuestionReplyErrors,
   QuestionReplyResponses,
+  RequestUsageSource,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -149,6 +151,12 @@ import type {
   SessionPromptAsyncResponses,
   SessionPromptErrors,
   SessionPromptResponses,
+  SessionRequestUsageAssistantsErrors,
+  SessionRequestUsageAssistantsResponses,
+  SessionRequestUsageGetErrors,
+  SessionRequestUsageGetResponses,
+  SessionRequestUsageListErrors,
+  SessionRequestUsageListResponses,
   SessionRevertErrors,
   SessionRevertResponses,
   SessionShareErrors,
@@ -191,6 +199,8 @@ import type {
   TuiOpenModelsResponses,
   TuiOpenSessionsResponses,
   TuiOpenThemesResponses,
+  TuiProviderEndpointStatusErrors,
+  TuiProviderEndpointStatusResponses,
   TuiPublishErrors,
   TuiPublishResponses,
   TuiSelectSessionErrors,
@@ -1369,7 +1379,7 @@ export class Find extends HeyApiClient {
         },
       ],
     )
-    return (options?.client ?? this.client).get<FindTextResponses, unknown, ThrowOnError>({
+    return (options?.client ?? this.client).get<FindTextResponses, FindTextErrors, ThrowOnError>({
       url: "/find",
       ...options,
       ...params,
@@ -2951,6 +2961,116 @@ export class Provider extends HeyApiClient {
   }
 }
 
+export class RequestUsage extends HeyApiClient {
+  /**
+   * List request usage
+   *
+   * List per-request token usage and cost for a session.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      limit?: string
+      before?: number
+      rootRequestID?: string
+      source?: RequestUsageSource
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "limit" },
+            { in: "query", key: "before" },
+            { in: "query", key: "rootRequestID" },
+            { in: "query", key: "source" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionRequestUsageListResponses,
+      SessionRequestUsageListErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/request_usage",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get request usage
+   *
+   * Get token usage and cost for a specific request.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      requestID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "requestID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionRequestUsageGetResponses,
+      SessionRequestUsageGetErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/request_usage/{requestID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List request assistant usage
+   *
+   * List assistant-round usage for a specific request.
+   */
+  public assistants<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      requestID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "requestID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionRequestUsageAssistantsResponses,
+      SessionRequestUsageAssistantsErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/request_usage/{requestID}/assistant",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Session2 extends HeyApiClient {
   /**
    * List sessions
@@ -3329,6 +3449,8 @@ export class Session2 extends HeyApiClient {
       directory?: string
       workspace?: string
       messageID?: string
+      rootRequestID?: string
+      source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
       model?: {
         providerID: string
         modelID: string
@@ -3354,6 +3476,8 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "messageID" },
+            { in: "body", key: "rootRequestID" },
+            { in: "body", key: "source" },
             { in: "body", key: "model" },
             { in: "body", key: "agent" },
             { in: "body", key: "noReply" },
@@ -3682,6 +3806,8 @@ export class Session2 extends HeyApiClient {
       directory?: string
       workspace?: string
       messageID?: string
+      rootRequestID?: string
+      source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
       model?: {
         providerID: string
         modelID: string
@@ -3707,6 +3833,8 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "messageID" },
+            { in: "body", key: "rootRequestID" },
+            { in: "body", key: "source" },
             { in: "body", key: "model" },
             { in: "body", key: "agent" },
             { in: "body", key: "noReply" },
@@ -3908,6 +4036,11 @@ export class Session2 extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _requestUsage?: RequestUsage
+  get requestUsage(): RequestUsage {
+    return (this._requestUsage ??= new RequestUsage({ client: this.client }))
   }
 }
 
@@ -4915,6 +5048,42 @@ export class Tui extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+
+  /**
+   * Get provider endpoint status
+   *
+   * Return daemon-owned proxy route and latency for a provider endpoint origin.
+   */
+  public providerEndpointStatus<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      url: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "url" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      TuiProviderEndpointStatusResponses,
+      TuiProviderEndpointStatusErrors,
+      ThrowOnError
+    >({
+      url: "/tui/provider-endpoint-status",
+      ...options,
+      ...params,
     })
   }
 
