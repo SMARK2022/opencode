@@ -33,6 +33,15 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     // #139：可变 base URL，重连后指向新端口
     let url = props.url
 
+    function fetchWithHeaders(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) {
+      const headers = new Headers(props.headers)
+      // #258：先拷贝 props.headers 再逐项覆盖 init.headers——调用方显式 header 优先级最高
+      new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+      // #258：raw daemon 请求必须携带与生成 SDK client 相同的 attach/auth headers；
+      // 否则受保护 TUI 连接能读常规 SDK 路由，但 sidebar/helper fetch 会被 Authorization 拒绝。
+      return (props.fetch ?? props.testTransport?.fetch ?? fetch)(input, { ...init, headers })
+    }
+
     function createSDK() {
       return createOpencodeClient({
         baseUrl: url,
@@ -206,7 +215,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       },
       directory: props.directory,
       event: emitter,
-      fetch: props.fetch ?? props.testTransport?.fetch ?? fetch,
+      fetch: fetchWithHeaders,
       get url() {
         return url
       },

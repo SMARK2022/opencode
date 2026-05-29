@@ -2,8 +2,8 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
-import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { useLocal } from "../../context/local"
+import { useSDK } from "../../context/sdk"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { getContextLimit } from "../../util/token-estimate"
 import { tokenAccounting } from "../../util/token-accounting"
@@ -20,6 +20,7 @@ const money = new Intl.NumberFormat("en-US", {
 
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
+  const sdk = useSDK()
   const local = useLocal()
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   const session = createMemo(() => props.api.state.session.get(props.session_id))
@@ -130,21 +131,21 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
       const ping = async () => {
         if (!active) return
-        const t0 = Date.now()
         // 从探测开始统一计三秒，后续请求沿同一信号，不因代理刷新重新开启超时窗口。
         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(3000)])
         try {
-          // provider 用途复用源系统代理策略，代理图标与所选路由保持一致。
-          const route = await NetworkProxy.resolveProxyRoute(url, "provider")
+          // 唯一探测owner归daemon，侧栏只订阅结果并保留现有清理与超时信号。
+          const target = new URL("/tui/provider-endpoint-status", sdk.url)
+          target.searchParams.set("url", url)
+          if (sdk.directory) target.searchParams.set("directory", sdk.directory)
+          const res = await sdk.fetch(target, { method: "GET", signal })
+          if (!res.ok) throw new Error(`endpoint status failed: ${res.status}`)
+          const status = (await res.json()) as { status: "ok" | "down"; latency: number | null; route: { type: "direct" | "proxy" } }
           if (!active) return
-          setIsProxy(route.type === "proxy")
-          // 普通 HTTP 探测调用统一路由入口，继续透传同一取消信号。
-          const res = await NetworkProxy.fetch(url, { method: "HEAD", signal, purpose: "provider" })
-          if (!active) return
-          // 认证拒绝仍证明网络可达；按源语义仅将三类网关故障记为离线。
-          const down = res.status === 502 || res.status === 503 || res.status === 504
-          setPingStatus(down ? "down" : "ok")
-          setLatency(down ? null : Date.now() - t0)
+          setIsProxy(status.route.type === "proxy")
+          // 网关故障判定沿daemon口径，不把业务认证状态另判为网络故障。
+          setPingStatus(status.status)
+          setLatency(status.status === "down" ? null : status.latency)
         } catch {
           if (!active) return
           setPingStatus("down")
