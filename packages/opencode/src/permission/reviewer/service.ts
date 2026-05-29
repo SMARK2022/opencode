@@ -6,6 +6,7 @@ import { ProviderTransform } from "@/provider/transform"
 import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { Auth } from "@/auth"
+import { Plugin } from "@/plugin"
 import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
 import { SessionRetry } from "@/session/retry"
 import { Database } from "@opencode-ai/core/database/database"
@@ -105,6 +106,7 @@ export const layer = Layer.effect(
     const config = yield* Config.Service
     // #250：auth.get(providerID) 判定凭据类型——只有 openai+oauth 才走 instructions 提升
     const auth = yield* Auth.Service
+    const plugin = yield* Plugin.Service
     const provider = yield* Provider.Service
     // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
     const database = yield* Database.Service
@@ -410,6 +412,32 @@ export const layer = Layer.effect(
               : undefined
             const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
             const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
+            // #261：Reviewer 复用主聊天 provider hook——Codex 清理不支持的 output caps、Copilot 禁用不兼容的 tool streaming
+            // 合成消息不暴露 reviewer prompt 文本或证据——这些仍在有界 reviewer prompt 内
+            const hookSessionID = persist?.sessionID ?? SessionID.descending()
+            const hookMessage = {
+              id: MessageID.ascending(),
+              sessionID: hookSessionID,
+              role: "user",
+              time: { created: Date.now() },
+              agent: "permission-reviewer",
+              model: { providerID: model.providerID, modelID: model.id },
+            } satisfies User
+            const hookInput = {
+              sessionID: hookSessionID,
+              agent: "permission-reviewer",
+              model,
+              provider: providerInfo,
+              message: hookMessage,
+            }
+            const params = yield* plugin.trigger("chat.params", hookInput, {
+              temperature: undefined,
+              topP: undefined,
+              topK: undefined,
+              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
+              options,
+            })
+            const headers = yield* plugin.trigger("chat.headers", hookInput, { headers: {} })
             // #209：wrapLanguageModel 注入 message 归一化中间件——reviewer 流与 SessionPrompt 共享同一 provider 适配层
             const result = streamText({
               model: wrapLanguageModel({
@@ -444,8 +472,10 @@ export const layer = Layer.effect(
               },
               // 部分兼容provider拒绝强制工具选择，缺失决策调用仍由下方拒绝。
               maxRetries: 0,
-              providerOptions: ProviderTransform.providerOptions(model, options),
-              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
+              // #261：providerOptions 和 maxOutputTokens 现由 plugin hook 修改后的 params 提供
+              providerOptions: ProviderTransform.providerOptions(model, params.options),
+              maxOutputTokens: params.maxOutputTokens,
+              headers: headers.headers,
               abortSignal: abort.signal,
             })
             // #209：assessment 可变——由 tool-call 事件设置，流结束时检查是否为空决定 fail-closed
@@ -826,6 +856,9 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
 // #235：suspend 延迟 Config/Provider 层实例化——保留 Session↔Permission 类型导入循环边界
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
+    // #261：Reviewer 复用主聊天路径的 provider 兼容 hook——Plugin 必须随 config/provider 进默认 wiring，
+    // 否则隐藏 reviewer 流在默认层下缺 Plugin.Service 依赖
+    Layer.provide(LayerNode.compile(Plugin.node)),
     Layer.provide(LayerNode.compile(Config.node)),
     Layer.provide(LayerNode.compile(Provider.node)),
   ),
@@ -918,6 +951,7 @@ function recordJsonFallbackDecision(
 // #206：deps 补 Database.node——layer 捕获 db 供 page 溢出探测，仍不泄漏进 review 类型
 // #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
 // node deps 显式加入 Auth.node，LayerNode 依赖图在编译期保持完整
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node] })
+// #261：Plugin.Service 加入 layer 依赖——node deps 同步加 Plugin.node，保持 LayerNode 编译期依赖图完整
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node, Plugin.node] })
 
 export * as PermissionReviewer from "./service"
