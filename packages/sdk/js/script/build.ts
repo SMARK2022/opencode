@@ -115,9 +115,29 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
+// cancel() 返回 Promise，同步 try/catch 接不到原生 fetch 取消响应体后的拒绝。
+// 修补生成入口，避免下次 SDK 再生成时丢失清理责任。
+const ssePath = "./src/v2/gen/core/serverSentEvents.gen.ts"
+const sseSource = await Bun.file(ssePath).text()
+const ssePatched = sseSource.replace(
+  /const abortHandler = \(\) => \{\s*try \{\s*reader\.cancel\(\);?\s*\} catch \{\s*\/\/ noop\s*\}\s*\};?/,
+  `const abortHandler = () => {
+    // 只消化当前请求的取消，真实清理失败仍交给既有 SSE 错误通道。
+    void reader.cancel().catch((error: unknown) => {
+      if (signal.aborted && error === signal.reason) return
+      onSseError?.(error)
+    })
+  }`,
+)
+if (ssePatched === sseSource) {
+  throw new Error(`SSE cancellation patch did not apply; generated transport may have changed (${ssePath})`)
+}
+await Bun.write(ssePath, ssePatched)
+
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`
-// TypeScript's CLI is a Node entrypoint; running it through Bun can leave the Windows CI SDK build alive.
+// TypeScript 的 CLI 是 Node 入口：经由 Bun 启动会在 Windows CI 上让 SDK 构建进程悬挂不退（#461）；
+// resolveSync 把 tsc 定位到本 workspace 依赖内的绝对路径，避免 PATH 上的同名二进制劫持。
 await $`node ${Bun.resolveSync("typescript/bin/tsc", dir)}`
 await $`rm openapi.json`
