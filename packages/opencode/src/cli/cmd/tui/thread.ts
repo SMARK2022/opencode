@@ -154,9 +154,26 @@ export const TuiThreadCommand = cmd({
           fork: args.fork,
         },
       })
+      await printDaemonExitHint()
     } finally {
       unguard?.()
     }
     process.exit(0)
   },
 })
+
+async function printDaemonExitHint() {
+  const status = await Daemon.status()
+  if (!status || (status.tuiClients === 0 && status.sessionActivity === 0)) return
+
+  UI.println(
+    UI.Style.TEXT_DIM + "Daemon still running: " + UI.Style.TEXT_NORMAL,
+    [count(status.tuiClients, "TUI connection"), count(status.sessionActivity, "active session")].join(", "),
+    UI.Style.TEXT_DIM + "- stop with",
+    UI.Style.TEXT_INFO_BOLD + "opencode daemon stop" + UI.Style.TEXT_NORMAL,
+  )
+}
+
+function count(value: number, label: string) {
+  return `${value} ${label}${value === 1 ? "" : "s"}`
+}

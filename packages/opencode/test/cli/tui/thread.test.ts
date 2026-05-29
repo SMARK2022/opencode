@@ -9,12 +9,14 @@ import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as ThreadModule from "../../../src/cli/cmd/tui/thread"
 import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
 import { Flock } from "@opencode-ai/core/util/flock"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 const stop = new Error("stop")
 const seen = {
   tui: [] as string[],
   tuiUrls: [] as string[],
   errors: [] as string[],
+  printlns: [] as string[],
 }
 type ThreadArgs = Parameters<NonNullable<typeof ThreadModule.TuiThreadCommand.handler>>[0]
 
@@ -22,6 +24,7 @@ function setup() {
   seen.tui.length = 0
   seen.tuiUrls.length = 0
   seen.errors.length = 0
+  seen.printlns.length = 0
   // Intentionally avoid mock.module() here: Bun keeps module overrides in cache
   // and mock.restore() does not reset mock.module values. If this switches back
   // to module mocks, later suites can see mocked @/config/tui and fail (e.g.
@@ -34,6 +37,9 @@ function setup() {
   })
   spyOn(UI, "error").mockImplementation((message) => {
     seen.errors.push(String(message))
+  })
+  spyOn(UI, "println").mockImplementation((...message) => {
+    seen.printlns.push(message.join(" "))
   })
   spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {})
   spyOn(Win32, "win32InstallCtrlCGuard").mockReturnValue(undefined)
@@ -337,6 +343,93 @@ describe("tui thread", () => {
       }
     })
 
+    test("prints daemon stop guidance when other clients or sessions keep the daemon alive after TUI exits", async () => {
+      setup()
+      mock.restore()
+      seen.printlns.length = 0
+      spyOn(App, "tui").mockImplementation(async () => undefined)
+      spyOn(UI, "error").mockImplementation(() => {})
+      spyOn(UI, "println").mockImplementation((...message) => {
+        seen.printlns.push(message.join(" "))
+      })
+      spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {})
+      spyOn(Win32, "win32InstallCtrlCGuard").mockReturnValue(undefined)
+      spyOn(DaemonModule, "status").mockResolvedValue({ tuiClients: 2, sessionActivity: 0 })
+      spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
+        throw new Error(`exit:${code}`)
+      }) as never)
+
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+      spyOn(ServerLockModule, "read").mockResolvedValue({
+        pid: process.pid,
+        port: 9999,
+        token: "test-token",
+        dbPath: "/tmp/test.db",
+        channel: "local" as const,
+        startedAt: new Date().toISOString(),
+      })
+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toThrow("exit:0")
+        const output = seen.printlns.join("\n")
+        expect(output).toContain("2 TUI connections")
+        expect(output).toContain("0 active sessions")
+        expect(output).toContain("opencode daemon stop")
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
+    test("does not print daemon stop guidance when daemon has no remaining clients or active sessions", async () => {
+      setup()
+      mock.restore()
+      seen.printlns.length = 0
+      spyOn(App, "tui").mockImplementation(async () => undefined)
+      spyOn(UI, "error").mockImplementation(() => {})
+      spyOn(UI, "println").mockImplementation((...message) => {
+        seen.printlns.push(message.join(" "))
+      })
+      spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {})
+      spyOn(Win32, "win32InstallCtrlCGuard").mockReturnValue(undefined)
+      spyOn(DaemonModule, "status").mockResolvedValue({ tuiClients: 0, sessionActivity: 0 })
+      spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
+        throw new Error(`exit:${code}`)
+      }) as never)
+
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+      spyOn(ServerLockModule, "read").mockResolvedValue({
+        pid: process.pid,
+        port: 9999,
+        token: "test-token",
+        dbPath: "/tmp/test.db",
+        channel: "local" as const,
+        startedAt: new Date().toISOString(),
+      })
+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+
+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
+      const cwd = process.cwd()
+      try {
+        await expect(call()).rejects.toThrow("exit:0")
+        expect(seen.printlns.join("\n")).not.toContain("opencode daemon stop")
+      } finally {
+        process.chdir(cwd)
+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
+        else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
     test("Windows Ctrl+C guard is active before any daemon spawn attempt", async () => {
       const order: string[] = []
       setup()
@@ -543,6 +636,45 @@ describe("tui thread", () => {
         process.chdir(cwd)
         if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
         else delete (process.stdin as { isTTY?: boolean }).isTTY
+      }
+    })
+
+    test("authenticates daemon health checks when server password is configured", async () => {
+      await using tmp = await tmpdir()
+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+      const previousPassword = Flag.OPENCODE_SERVER_PASSWORD
+      const previousUsername = Flag.OPENCODE_SERVER_USERNAME
+      Flag.OPENCODE_SERVER_PASSWORD = "daemon password with spaces"
+      Flag.OPENCODE_SERVER_USERNAME = "daemon-user"
+
+      try {
+        spyOn(ServerLockModule, "read").mockResolvedValue({
+          pid: process.pid,
+          port: 9999,
+          token: "test-token",
+          dbPath: "/tmp/test.db",
+          channel: "local" as const,
+          startedAt: new Date().toISOString(),
+        })
+        spyOn(ServerLockModule, "alive").mockReturnValue(true)
+        spyOn(ServerLockModule, "ping").mockImplementation(async (_port, init) => {
+          return init?.headers instanceof Headers
+            ? init.headers.get("Authorization") === "Basic ZGFlbW9uLXVzZXI6ZGFlbW9uIHBhc3N3b3JkIHdpdGggc3BhY2Vz"
+            : (init?.headers as Record<string, string> | undefined)?.Authorization ===
+                "Basic ZGFlbW9uLXVzZXI6ZGFlbW9uIHBhc3N3b3JkIHdpdGggc3BhY2Vz"
+        })
+
+        const url = await DaemonModule.ensure({
+          port: 0,
+          hostname: "127.0.0.1",
+          mdns: false,
+          "mdns-domain": "opencode.local",
+          cors: [],
+        })
+        expect(url).toBe("http://127.0.0.1:9999")
+      } finally {
+        Flag.OPENCODE_SERVER_PASSWORD = previousPassword
+        Flag.OPENCODE_SERVER_USERNAME = previousUsername
       }
     })
 

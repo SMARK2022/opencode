@@ -13,7 +13,14 @@ export type ServerLock = {
   channel: string
   startedAt: string
   externalUrl?: string
+  controlPort?: number
 }
+
+// daemon control 是本机私有通道：端口随机写入 lock，token 复用 lock token。
+// 它只服务 CLI/TUI 的 stop/status，不进入公共 HTTP API、OpenAPI 或 SDK。
+export const CONTROL_SHUTDOWN_PATH = "/shutdown"
+export const CONTROL_STATUS_PATH = "/status"
+export const CONTROL_TOKEN_HEADER = "x-opencode-daemon-token"
 
 export class ExistingLiveServerError extends Error {
   constructor(public readonly lock: ServerLock) {
@@ -36,7 +43,7 @@ function getLockPath() {
 // the caller can later use clearIfOwner() for safe deletion.
 //
 // Guards against overwriting a lock owned by a different live process.
-export async function write(port: number, externalUrl?: string): Promise<string> {
+export async function write(port: number, externalUrl?: string, controlPort?: number): Promise<string> {
   const existing = await read()
 
   if (existing && existing.pid !== process.pid && alive(existing.pid)) {
@@ -52,6 +59,9 @@ export async function write(port: number, externalUrl?: string): Promise<string>
     channel: InstallationChannel,
     startedAt: new Date().toISOString(),
     ...(externalUrl ? { externalUrl } : {}),
+    // controlPort 是 daemon stop 的本机私有入口，不进入公共 HTTP/OpenAPI；
+    // stop 命令必须同时持有 lock token 才能请求 daemon 自行 graceful shutdown。
+    ...(controlPort ? { controlPort } : {}),
   }
   const tmp = getLockPath() + ".tmp"
   await Bun.write(tmp, JSON.stringify(lock, null, 2))
@@ -94,9 +104,12 @@ export function alive(pid: number) {
   }
 }
 
-export async function ping(port: number) {
+export async function ping(port: number, init?: Pick<RequestInit, "headers">) {
   try {
     const resp = await fetch(`http://127.0.0.1:${port}/global/health`, {
+      // /global/health 受同一套 server auth 保护；允许调用方传入 header，避免启用
+      // OPENCODE_SERVER_PASSWORD 后把健康 daemon 误判成不可响应。
+      ...init,
       signal: AbortSignal.timeout(500),
     })
     return resp.ok

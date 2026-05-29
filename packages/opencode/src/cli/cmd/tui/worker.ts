@@ -88,21 +88,10 @@ if (externalPort !== undefined) {
   externalUrl = externalServer.url.toString()
 }
 
-// Write the lock file atomically (internal port + optional external URL).
-const lockToken = await ServerLock.write(internalServer.port, externalUrl)
-log.info("daemon lock written", {
-  pid: process.pid,
-  port: internalServer.port,
-  externalUrl,
-  launcherPID: process.env.OPENCODE_DAEMON_LAUNCHER_PID,
-})
-
-// Start the best-effort warm-up only after the lock is visible so a slow npm
-// registry or proxy cannot keep the launcher stuck waiting for daemon health.
-setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
-
 // ── Graceful shutdown ──────────────────────────────────────────────────────
 let shutdownInProgress = false
+let lockToken = ""
+let controlServer: ReturnType<typeof Bun.serve> | undefined
 
 async function gracefulShutdown(reason = "unknown") {
   if (shutdownInProgress) return
@@ -118,6 +107,7 @@ async function gracefulShutdown(reason = "unknown") {
   })
   await ServerLock.clearIfOwner(lockToken)
   await InstanceRuntime.disposeAllInstances()
+  controlServer?.stop(true)
   if (externalServer) await externalServer.stop(true)
   await internalServer.stop(true)
   Database.close()
@@ -170,6 +160,38 @@ let sseClients = 0
 let idleTimer: ReturnType<typeof setTimeout> | undefined
 let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
 let launcherTimer: ReturnType<typeof setInterval> | undefined
+
+// Write the lock file atomically (internal port + optional external URL).
+controlServer = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  fetch(request) {
+    const url = new URL(request.url)
+    if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
+      return new Response("unauthorized", { status: 401 })
+    if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH) {
+      return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
+    }
+    if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+      return new Response("not found", { status: 404 })
+    // 这是 daemon stop 的本机私有控制面：只有持有当前 lock token 的调用方
+    // 才能让 daemon 自己执行 gracefulShutdown，避免 CLI 直接杀 pid。
+    setTimeout(() => void gracefulShutdown("daemon-stop"), 0).unref?.()
+    return Response.json({ ok: true })
+  },
+})
+lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
+log.info("daemon lock written", {
+  pid: process.pid,
+  port: internalServer.port,
+  controlPort: controlServer.port,
+  externalUrl,
+  launcherPID: process.env.OPENCODE_DAEMON_LAUNCHER_PID,
+})
+
+// Start the best-effort warm-up only after the lock is visible so a slow npm
+// registry or proxy cannot keep the launcher stuck waiting for daemon health.
+setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
 
 function isActive() {
   return sseClients > 0 || SessionActivity.count() > 0

@@ -3,6 +3,7 @@ export * as Daemon from "./daemon"
 import { hasCliBooleanOption, hasCliOption, resolveNetworkOptionsNoConfig, type NetworkOptions } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
 import { ServerLock } from "@/cli/cmd/tui/server-lock"
+import { ServerAuth } from "@/server/auth"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "@opencode-ai/core/global"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
@@ -26,6 +27,7 @@ const SERVER_POLL_INTERVAL_MS = 200
 
 type Args = NetworkOptions
 type DaemonExit = { exitCode: number } | { error: unknown }
+export type Status = { tuiClients: number; sessionActivity: number }
 
 // Exposed for tests only.  Keep the daemon spawn path injectable without
 // forcing production code through a heavier process abstraction.
@@ -125,7 +127,7 @@ async function existingOwnerUrl(external: boolean) {
     return { type: "dead" as const, lock }
 
   // pid alive — whether or not HTTP ping succeeded, the owner still exists.
-  const responsive = await ServerLock.ping(lock.port)
+  const responsive = await ServerLock.ping(lock.port, { headers: ServerAuth.headers() })
   return {
     type: responsive ? "responsive" as const : "unresponsive" as const,
     url: lockUrl(lock, external),
@@ -222,7 +224,7 @@ export async function ensure(args: Args) {
       if (lock && ServerLock.alive(lock.pid)) {
         if (external) {
           if (lock.externalUrl) return lock.externalUrl
-        } else if (await ServerLock.ping(lock.port)) {
+        } else if (await ServerLock.ping(lock.port, { headers: ServerAuth.headers() })) {
           return internalUrl(lock.port)
         }
       }
@@ -240,6 +242,27 @@ export async function ensure(args: Args) {
   } finally {
     await electionLease?.release().catch(() => undefined)
   }
+}
+
+export async function status(): Promise<Status | undefined> {
+  const lock = await ServerLock.read()
+  if (!lock?.controlPort || !ServerLock.alive(lock.pid)) return
+
+  // status 走 lock token 保护的本机私有 control port；失败时保持静默，
+  // 因为它只用于 TUI 退出后的提示，不能影响主流程退出。
+  const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
+    headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
+    signal: AbortSignal.timeout(500),
+  }).catch(() => undefined)
+  if (!response?.ok) return
+  return parseStatus(await response.json().catch(() => undefined))
+}
+
+function parseStatus(input: unknown): Status | undefined {
+  if (!input || typeof input !== "object") return
+  if (!("tuiClients" in input) || !("sessionActivity" in input)) return
+  if (typeof input.tuiClients !== "number" || typeof input.sessionActivity !== "number") return
+  return { tuiClients: input.tuiClients, sessionActivity: input.sessionActivity }
 }
 
 function daemonExitMessage(exit: DaemonExit) {
