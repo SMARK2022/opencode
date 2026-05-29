@@ -1,5 +1,8 @@
 export * as NetworkProxy from "./network-proxy"
 
+import { Effect } from "effect"
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+
 // 本地 RPC 与远程 provider/安装请求必须分流，避免代理拦截 daemon 自己的健康通道。
 export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
 
@@ -196,6 +199,35 @@ export async function resolveProxyRoute(input: string | URL, purpose: Purpose = 
 export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
   return fetch(input, init)
 }
+
+// #268：Effect HttpClient 与 NetworkProxy 之间的桥——调用方依赖 HttpClient，真实传输回到 NetworkProxy fetch
+// #268：infrastructure 固定 purpose，仅用于 models.dev 等基础设施元数据请求
+export const infrastructureHttpClientLayer = HttpClient.layerMergedContext(
+  Effect.succeed(
+    HttpClient.make((request, _url, signal) =>
+      Effect.gen(function* () {
+        const web = yield* HttpClientRequest.toWeb(request, { signal }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({ request, cause }),
+  // #268：错误统一映射 TransportError——消费方拿到的是 Effect HttpClient 错误契约而非裸 fetch 异常
+              }),
+          ),
+        )
+        return yield* Effect.tryPromise({
+          try: () => fetch(web, { purpose: "infrastructure", signal }),
+          // #268：signal 由 HttpClient 调用方传入——外层超时的中断经此传播到传输层
+          catch: (cause) =>
+            new HttpClientError.HttpClientError({
+              reason: new HttpClientError.TransportError({ request, cause }),
+            }),
+        }).pipe(Effect.map((response) => HttpClientResponse.fromWeb(request, response)))
+      }),
+    ),
+  ),
+)
+
 
 // 统一入口在当前路由上发送一次，请求失败直接交给调用方处理。
 export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
