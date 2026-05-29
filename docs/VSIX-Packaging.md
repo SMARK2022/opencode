@@ -1,190 +1,179 @@
-# OpenCode IDE Bridge — VSIX Packaging Guide
+# OpenCode IDE Bridge VSIX Packaging Guide
 
 ## Overview
 
-Extension ID: `SMARK2022.opencode-ide-bridge`
+This document describes how to build, inspect, install, and publish the SMARK OpenCode VS Code extension.
 
-This VS Code extension provides an HTTP bridge server that connects the OpenCode CLI daemon to VS Code's notebook and workspace APIs. It runs on `127.0.0.1:<random port>` and requires Bearer token authentication for all tool endpoints except `/health`.
+| Field | Value |
+| --- | --- |
+| Extension ID | `SMARK2022.opencode-ide-bridge` |
+| Package path | `sdks/vscode` |
+| Source repository | `https://github.com/SMARK2022/opencode` |
+| Source branch | `dev-smark` |
+| CLI compatibility | `opencode 1.15.5-smark` or newer |
+| Version source | `sdks/vscode/package.json` |
+| VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
+
+The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code notebook and workspace APIs through authenticated localhost endpoints.
 
 ## Prerequisites
 
-- Node.js >= 20.x
-- Bun >= 1.3.0 (at `C:\Users\Lenovo\.bun\bin\bun.exe` on Windows, or on `PATH` for other platforms)
-- VS Code CLI (`code`) on PATH
-- Dependencies installed: `bun install` from `sdks/vscode/`
+- Node.js 20 or newer.
+- Bun matching the repository `packageManager` field.
+- VS Code CLI `code` on `PATH` if you want command-line install testing.
+- Dependencies installed from `sdks/vscode`, not only from the repository root.
+- Marketplace publish access for publisher `SMARK2022` if publishing.
+- Optional Open VSX token in `OPENVSX_TOKEN` if publishing to Open VSX.
 
-## Extension Metadata
+## Clean Build
 
-| Field | Value |
-|-------|-------|
-| `name` | `opencode-ide-bridge` |
-| `displayName` | `OpenCode IDE Bridge` |
-| `publisher` | `SMARK2022` |
-| `version` | `1.15.3` |
-| `engines.vscode` | `^1.94.0` |
-| `main` | `./dist/extension.js` |
-| `license` | `MIT` |
-| `categories` | `Other` |
-| `homepage` | `https://github.com/anomalyco/opencode` |
+Run all commands from `sdks/vscode`.
 
-## Build & Package
-
-All commands run from `sdks/vscode/`.
-
-### 1. Type Check
-
-```powershell
+```bash
+bun install
 bun run check-types
-```
-
-### 2. Lint
-
-```powershell
 bun run lint
-```
-
-### 3. Production Build (esbuild, minified, CJS, vscode external)
-
-```powershell
 bun run package
 ```
 
-This runs `check-types && lint && node esbuild.js --production`.
+`bun run package` runs typecheck, lint, and a production esbuild bundle into `dist/extension.js`.
 
-This project intentionally does not define `vscode:prepublish`. `vsce package` runs that hook through an internal `npm run vscode:prepublish` child process. In some Windows/Bun terminal environments that nested child process can lose `npm` from `PATH`, producing:
+## Create A VSIX
 
-```text
-Executing prepublish script 'npm run vscode:prepublish'...
-'npm' is not recognized as an internal or external command,
-operable program or batch file.
-ERROR  npm failed with exit code 1
-```
+Use the repository script:
 
-Instead, run the build explicitly first (`bun run package`), then call `vsce package` with `--no-dependencies`.
-
-### 4. List VSIX Contents (preview)
-
-```powershell
-npx @vscode/vsce ls
-```
-
-### 5. Package VSIX
-
-```powershell
-$env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix"
-```
-
-The output file is written under `sdks/vscode/dist/` together with the compiled extension bundle.
-
-### One-Command Shortcut
-
-```powershell
+```bash
 bun run vsix
 ```
 
-## VSIX Artifact Structure
+The script builds first, then runs `@vscode/vsce package --no-dependencies` and writes:
 
-```
-dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix
-├─ [Content_Types].xml
-├─ extension.vsixmanifest
-└─ extension/
-   ├─ LICENSE.txt
-   ├─ package.json
-   ├─ readme.md
-   ├─ dist/
-   │  └─ extension.js        (minified CJS bundle)
-   └─ images/
-      ├─ icon.png            (extension icon)
-      ├─ button-dark.svg     (toolbar button, dark theme)
-      └─ button-light.svg    (toolbar button, light theme)
+```text
+dist/SMARK2022.opencode-ide-bridge-<version>.vsix
 ```
 
-### Excluded from VSIX (`.vscodeignore`)
+The package intentionally avoids `vscode:prepublish`. `vsce` runs that hook through an internal `npm run vscode:prepublish` child process, which can fail in Windows/Bun environments when `npm` is not available in the nested process environment.
 
-- `.vscode/`, `.vscode-test/`, `out/`, `node_modules/`, `src/`, `script/`
-- `.gitignore`, `.yarnrc`, `.env`, `.env.*`, `*.log`, `*.vsix`
-- `bun.lock`, `esbuild.js`, `**/tsconfig.json`, `**/eslint.config.mjs`, `**/*.map`, `**/*.ts`
+## Inspect The VSIX
 
-## Installation
+List packaged files before publishing:
 
-### Local VSIX Install
-
-```powershell
-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.15.3.vsix --force
+```bash
+bun x @vscode/vsce ls
 ```
 
-### From VS Code UI
+The expected payload is compact:
 
-1. Open Extensions panel (`Ctrl+Shift+X`)
-2. Click `...` → `Install from VSIX...`
-3. Select the `.vsix` file
+```text
+extension/
+|-- LICENSE.txt
+|-- package.json
+|-- readme.md
+|-- dist/
+|   `-- extension.js
+`-- images/
+    |-- icon.png
+    |-- button-dark.svg
+    `-- button-light.svg
+```
 
-## Security Model
+Excluded files are controlled by `sdks/vscode/.vscodeignore`. Source files, test output, local dependencies, build scripts, TypeScript config, lint config, source maps, logs, and nested VSIX files are not packaged.
 
-| Check | Status |
-|-------|--------|
-| Listens only on `127.0.0.1` | Yes |
-| `/health` unauthenticated | Yes |
-| Notebook endpoints require `Bearer <token>` | Yes |
-| Rejects `Origin` header (blocks browser CORS) | Yes |
-| Token not printed to VS Code output log | Yes (redacted) |
-| Registry file mode `0o600` | Yes |
-| Registry directory mode `0o700` | Yes |
+## Install Locally
+
+After `bun run vsix`, install the generated file:
+
+```bash
+code --install-extension "dist/SMARK2022.opencode-ide-bridge-<version>.vsix" --force
+```
+
+From the VS Code UI:
+
+1. Open Extensions with `Ctrl+Shift+X`.
+2. Open the `...` menu.
+3. Choose `Install from VSIX...`.
+4. Select `dist/SMARK2022.opencode-ide-bridge-<version>.vsix`.
+
+## Functional Smoke Test
+
+After installing locally:
+
+1. Open a workspace in VS Code.
+2. Run `OpenCode: Show Bridge Log` and confirm the bridge is listening on `127.0.0.1`.
+3. Run `Open or Focus OpenCode Terminal` and confirm an `opencode` terminal starts.
+4. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
+5. If the notebook has executable cells, call `vscode_notebook_run` on one safe cell.
+6. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
+
+## Security Checks
+
+| Check | Expected result |
+| --- | --- |
+| Local binding | Bridge listens only on `127.0.0.1`. |
+| Health endpoint | `/health` is unauthenticated. |
+| Tool endpoints | Notebook endpoints and `/manifest` require `Bearer <token>`. |
+| Cross-origin requests | Requests with an `Origin` header are rejected. |
+| Token logging | Output logs redact the token. |
+| Registry directory | Uses `0o700` on non-Windows systems. |
+| Registry file | Uses `0o600` on non-Windows systems. |
+| Save/edit permissions | CLI plugin still asks through OpenCode permission gates. |
 
 ## Publishing
 
-### Marketplace (VS Code)
+The publish script packages from the current `package.json` version and publishes that exact VSIX.
 
-1. Create publisher at [https://marketplace.visualstudio.com/manage](https://marketplace.visualstudio.com/manage)
-2. Create Azure DevOps PAT with `Marketplace: Manage` scope
-3. Login and publish:
-
-```powershell
-npx @vscode/vsce login SMARK2022
-npx @vscode/vsce publish
+```bash
+bun run script/publish
 ```
 
-### Open VSX (optional, for VSCodium / Cursor / Gitpod)
+Marketplace-only manual flow:
 
-1. Create account at [https://open-vsx.org](https://open-vsx.org)
-2. Sign Publisher Agreement, generate access token
-3. Create namespace and publish:
-
-```powershell
-npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
-npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.15.3.vsix -p <OPENVSX_TOKEN>
+```bash
+bun x @vscode/vsce login SMARK2022
+bun run vsix
+bun x @vscode/vsce publish --packagePath "dist/SMARK2022.opencode-ide-bridge-<version>.vsix"
 ```
+
+Open VSX manual flow:
+
+```bash
+bun x ovsx create-namespace SMARK2022 -p "$OPENVSX_TOKEN"
+bun x ovsx publish "dist/SMARK2022.opencode-ide-bridge-<version>.vsix" -p "$OPENVSX_TOKEN"
+```
+
+Do not publish before the CLI release and README compatibility statement are aligned.
+
+## Versioning
+
+Use `sdks/vscode/package.json` as the source of truth for the extension version. The current extension version is ordinary semver (`1.15.5`) so Marketplace tooling accepts it, while the README documents compatibility with the SMARK CLI release (`1.15.5-smark`).
+
+The helper `script/release` prints the next `vscode-v<version>` tag suggestion. It does not create or push tags. Create tags manually after the package version, README, packaging guide, and changelog are updated.
 
 ## CLI Integration
 
-The OpenCode CLI auto-installs this extension via:
+The SMARK OpenCode CLI installs this extension ID when users choose IDE integration:
 
-`packages/opencode/src/ide/index.ts:54`
-
-```typescript
-const p = await Process.run([cmd, "--install-extension", "SMARK2022.opencode-ide-bridge"], { ... })
+```ts
+await Process.run([cmd, "--install-extension", "SMARK2022.opencode-ide-bridge"], { ... })
 ```
 
-Supported IDE commands: `code`, `code-insiders`, `windsurf`, `cursor`, `codium`.
+Supported IDE commands are `code`, `code-insiders`, `windsurf`, `cursor`, and `codium`.
 
-## Source Files (Not Packaged)
+## Source Layout
 
-```
+```text
 sdks/vscode/src/
-├── extension.ts           Entry point, lifecycle, terminal commands
-├── bridge.ts              HTTP server, routing, auth, file-locking
-├── bridge-registry.ts     File-based bridge registry (heartbeat + manifest)
-├── util.ts                Shared helpers (JSON, URI, text formatting)
-└── notebook/
-    ├── commands.ts        Interactive bridge testing command
-    ├── edit.ts            Cell insert/edit/delete
-    ├── env.ts             Kernel/environment operations (info/configure/restart/save)
-    ├── format.ts          Summary text formatting
-    ├── output.ts          Artifact-first cell output export
-    ├── resolve.ts         File-path to notebook resolution
-    ├── run.ts             Cell execution (single + range)
-    ├── source.ts          Paginated virtual source text
-    └── summary.ts         Notebook structure overview
+|-- extension.ts           Entry point, lifecycle, terminal commands
+|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
+|-- bridge-registry.ts     Registry heartbeat and manifest writer
+|-- util.ts                Shared JSON, URI, and formatting helpers
+`-- notebook/
+    |-- commands.ts        Interactive bridge testing command
+    |-- edit.ts            Cell insert/edit/delete and language changes
+    |-- env.ts             Kernel info/configure/restart/save
+    |-- format.ts          Summary text formatting
+    |-- output.ts          Artifact-first cell output export
+    |-- resolve.ts         File-path to notebook resolution
+    |-- run.ts             Cell execution through VS Code/Jupyter
+    `-- summary.ts         Notebook structure overview
 ```
