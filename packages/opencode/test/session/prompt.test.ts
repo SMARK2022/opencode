@@ -1960,7 +1960,7 @@ it.instance(
   "auto permission reviewer fails closed after one malformed protocol retry",
   () =>
     Effect.gen(function* () {
-      // 本用例锁定显式deny的协议耗尽路径，默认人工回退由权限集成测试覆盖。
+      // #269：显式deny锁定协议耗尽的拒绝路径，默认人工回退由权限集成测试覆盖。
       const { llm } = yield* useServerConfig((url) => ({
         ...providerCfg(url),
         permission: { auto_review: { fallback: "deny" } },

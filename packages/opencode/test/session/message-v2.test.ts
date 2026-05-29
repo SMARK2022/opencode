@@ -1871,7 +1871,7 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks).toEqual([])
   })
 
-  test("a fresh compaction-user newer than the latest summary surfaces in tasks", () => {
+  test("a fresh compaction-user newer than the latest summary is not replayed as a task", () => {
     const newCompactionUser: SessionV1.WithParts = {
       info: userInfo(NEW_COMPACTION_USER),
       parts: [
@@ -1894,8 +1894,8 @@ describe("session.message-v2.latest", () => {
 
     expect(state.finished?.id).toBe(SUMMARY_ASSISTANT)
     expect(state.user?.id).toBe(NEW_COMPACTION_USER)
-    expect(state.tasks).toHaveLength(1)
-    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: true })
+    // #269：compaction 不再是可重放 task（#242）——tasks 只剩 subtask，故期望空列表
+    expect(state.tasks).toEqual([])
   })
 
   test("selects compaction and subtask work after the finished boundary by creation time", () => {
