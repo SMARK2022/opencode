@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import path from "path"
 import { Effect, FileSystem, Layer } from "effect"
@@ -29,19 +29,21 @@ const it = testEffect(
   ]),
 )
 
-const configLayer = Layer.succeed(Config.Service, TestConfig.make())
-
-const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
+// #270：配置参数化，允许测试传入自定义 config
+const instructionLayer = (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config: Record<string, unknown> = {}) =>
   AppNodeBuilder.build(Instruction.node, [
-    [Config.node, configLayer],
+    // #270：覆盖 get 而非整个 service——TestConfig.make 的展开目标是服务方法，config 数据必须走 get 返回值
+    // #270：Info 类型未导出——Record + as any 与 code-mode.test.ts 先例一致
+    [Config.node, Layer.succeed(Config.Service, TestConfig.make({ get: () => Effect.succeed(config as any) }))],
     [Global.node, Global.layerWith(global)],
     [RuntimeFlags.node, RuntimeFlags.layer(flags)],
   ])
 
 const provideInstruction =
-  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
+  // #270：新增 config 参数供远程指令测试使用
+  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config: Partial<Config.Interface> = {}) =>
   <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    self.pipe(Effect.provide(instructionLayer(global, flags)))
+    self.pipe(Effect.provide(instructionLayer(global, flags, config)))
 
 const write = (filepath: string, content: string) =>
   Effect.gen(function* () {
@@ -205,7 +207,47 @@ describe("Instruction.resolve", () => {
     ),
   )
 
-  test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
+  // #270：远程指令 URL 通过 HttpClient 拉取并进入 system prompt
+  it.live("fetches remote instructions from config URLs via HttpClient", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        // #270：port 0 随机绑定——避免固定端口冲突；requests 记录实际请求路径供断言
+        const requests: string[] = []
+        const server = Bun.serve({
+          port: 0,
+          fetch(request) {
+            requests.push(new URL(request.url).pathname)
+            return new Response("# Remote Instructions\nUse the remote rule.")
+          },
+        })
+        return { requests, server }
+      }),
+      ({ requests, server }) =>
+        Effect.gen(function* () {
+          const globalTmp = yield* tmpWithFiles({})
+          const url = new URL("/instructions.md", server.url).toString()
+          // #270：config.instructions 携带远程 URL——远程拉取与本地文件发现共用同一 system 入口
+          const projectTmp = yield* tmpdirScoped()
+
+          yield* Effect.gen(function* () {
+            const svc = yield* Instruction.Service
+            const paths = yield* svc.systemPaths()
+            const rules = yield* svc.system()
+
+            // #270：远程 URL 不是文件路径，但必须通过 HttpClient 进入 system prompt
+            // #270：远程 URL 不产生文件路径
+            expect(paths.size).toBe(0)
+            expect(requests).toEqual(["/instructions.md"])
+            // #270：规则应包含远程指令内容
+            expect(rules).toEqual([`Instructions from: ${url}\n# Remote Instructions\nUse the remote rule.`])
+          }).pipe(
+            provideInstance(projectTmp),
+            provideInstruction({ home: globalTmp, config: globalTmp }, undefined, { instructions: [url] } as any),
+          )
+        }),
+      ({ server }) => Effect.sync(() => server.stop(true)),
+    ),
+  )
 })
 
 describe("Instruction.system", () => {
