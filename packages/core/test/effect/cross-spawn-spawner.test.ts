@@ -112,7 +112,10 @@ describe("cross-spawn spawner", () => {
             ChildProcess.make(process.execPath, ["-e", "process.stdout.write(process.cwd())"], { cwd: tmp.path }),
           ),
         )
-        expect(yield* Effect.promise(() => fs.realpath(out))).toBe(yield* Effect.promise(() => fs.realpath(tmp.path)))
+        // #269：macOS 可报 /private/var，Windows runner 可报 8.3 短路径：同时 realpath 两侧并 normalize
+        const expected = yield* Effect.promise(() => fs.realpath(tmp.path))
+        const actual = yield* Effect.promise(() => fs.realpath(out))
+        expect(path.normalize(actual)).toBe(path.normalize(expected))
       }),
     )
 
@@ -195,7 +198,8 @@ describe("cross-spawn spawner", () => {
     fx.effect(
       "captures stdout via .all when no stderr",
       Effect.gen(function* () {
-        const handle = yield* ChildProcess.make("echo", ["hello from stdout"])
+        // Windows内建echo会保留参数引号；复用Node夹具只验证stdout合并语义。
+        const handle = yield* js('process.stdout.write("hello from stdout")')
         const all = yield* decodeByteStream(handle.all)
         expect(all).toBe("hello from stdout")
       }),

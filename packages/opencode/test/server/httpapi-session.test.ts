@@ -429,8 +429,13 @@ describe("session HttpApi", () => {
           name: "NotFoundError",
           data: { message: `Request usage not found: ${missingID}` },
         })
-        // source 的明细接口对不存在请求返回空数组，与详情资源的 404 契约不同。
-        expect(yield* requestJson<unknown[]>(`${url}/${missingID}/assistant`, { headers })).toEqual([])
+        // 明细与详情共享父请求存在性；旧空数组断言必须随0269的404契约一同更新。
+        const missingAssistants = yield* request(`${url}/${missingID}/assistant`, { headers })
+        expect(missingAssistants.status).toBe(404)
+        expect(yield* responseJson(missingAssistants)).toEqual({
+          name: "NotFoundError",
+          data: { message: `Request usage not found: ${missingID}` },
+        })
       }),
     { git: false, config: { formatter: false, lsp: false } },
   )
@@ -1267,5 +1272,61 @@ describe("session HttpApi", () => {
         })
       }),
     { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  // #269：三个用例分别锁定空列表/单一 get 404/assistants 404——父请求存在性是各端点的前置契约
+  it.live("returns empty list for new session request_usage", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "Request usage session" }).pipe(
+        provideInstanceEffect(directory),
+      )
+      const headers = { "x-opencode-directory": directory }
+      // #269：列表端点返回裸数组——成功契约是 [] 而非 { data: [] } 包装
+      const body = yield* requestJson<unknown[]>(
+        pathFor("/session/:sessionID/request_usage", { sessionID: session.id }),
+        { headers },
+      )
+      expect(body.length).toBe(0)
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
+  // #269：缺失的 requestID 应返回 404，而非空成功
+  it.live("returns 404 for missing request_usage get", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "Missing request usage session" }).pipe(
+        provideInstanceEffect(directory),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const missingID = "msg_httpapi_missing"
+      const response = yield* request(
+        pathFor("/session/:sessionID/request_usage/:requestID", { sessionID: session.id, requestID: missingID }),
+        { headers },
+      )
+      // #269：断言 404 而非 200 空体——缺失资源必须与“存在但无数据”可区分
+      expect(response.status).toBe(404)
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
+  // #269：缺失父请求时 assistants 端点也应 404
+  it.live("returns 404 for missing request_usage assistants", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "Missing assistant usage session" }).pipe(
+        provideInstanceEffect(directory),
+      )
+      const headers = { "x-opencode-directory": directory }
+      const missingID = "msg_httpapi_missing"
+      const response = yield* request(
+        pathFor("/session/:sessionID/request_usage/:requestID/assistant", { sessionID: session.id, requestID: missingID }),
+        { headers },
+      )
+      // #269：assistants 端点与 get 端点共享同一父请求前置——两处都需锁定
+      expect(response.status).toBe(404)
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 })

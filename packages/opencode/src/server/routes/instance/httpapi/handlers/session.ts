@@ -480,9 +480,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
     return result
   })
-  // source 明细查询不存在的 request 返回空数组；仅 Session 缺失在权限读取边界报 404。
+  // assistant明细属于具体父请求，缺失请求不能被解释为空的成功列表。
     const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: { params: { sessionID: SessionID; requestID: MessageID } }) {
     yield* requireSession(ctx.params.sessionID)
+    const result = yield* usageSvc.get(ctx.params)
+    // 复用get端点的已声明JSON错误，不增加内建空错误的第二种wire格式。
+    if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
     return yield* usageSvc.assistants(ctx.params)
   })
 
