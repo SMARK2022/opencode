@@ -1829,12 +1829,29 @@ describe("SessionRunnerLLM", () => {
       expect(requests).toHaveLength(2)
       expect(userTexts(requests[1]).join("\n")).toContain("<summary>\nSummary\n</summary>")
       expect(executions).toHaveLength(0)
+      const events = yield* EventV2.Service
+      yield* events.publish(SessionEvent.MessagesHidden, {
+        sessionID, timestamp: yield* DateTime.now, messageIDs: [SessionMessage.ID.make(pending.id)],
+        hidden: { time: Date.now(), reason: "permission-reviewer-protocol-retry" },
+      })
+      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Synthetic context must not enter memento" })
+      requests.length = 0
+      response = fragmentFixture("text", "manual-summary-2", ["Second summary"]).completeEvents
+      yield* session.compact({ sessionID })
+      const second = yield* session.context(sessionID)
+      const checkpoint = second.find(message => message.type === "compaction")
+      if (!checkpoint || checkpoint.type !== "compaction") return yield* Effect.die("Missing second compaction")
+      // 第二次摘要故意不含旧原话；只能由真实raw-user查询跨越首次边界保存，hidden与synthetic不得混入。
+      expect(checkpoint.recent_user_messages?.map(message => message.text)).toEqual(["Earlier question", "Keep recent tool turn"])
+      yield* replaySessionProjection(sessionID)
+      expect(yield* session.context(sessionID)).toEqual(second)
+      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Continue after replay" })
       requests.length = 0
       const failure = providerUnavailable()
       streamFailure = failure
       expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBe(failure)
       expect(requests).toHaveLength(1)
-      expect((yield* session.context(sessionID)).some(message => message.type === "compaction" && message.summary === "Summary")).toBe(true)
+      expect((yield* session.context(sessionID)).some(message => message.type === "compaction" && message.summary === "Second summary")).toBe(true)
     }),
   )
 
