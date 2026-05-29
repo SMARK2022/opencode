@@ -1,13 +1,12 @@
 import path from "path"
 import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Global } from "./global"
 import { Flag } from "./flag/flag"
 import { Flock } from "./util/flock"
 import { Hash } from "./util/hash"
 import { AppFileSystem } from "./filesystem"
 import { InstallationChannel, InstallationVersion } from "./installation/version"
-// [local-smark] NetworkProxy for proxy-aware fetch routing
 import { NetworkProxy } from "./network-proxy"
 
 export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
@@ -114,10 +113,11 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
-export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.effect(
+export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClient.HttpClient> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* AppFileSystem.Service
+    const http = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
 
     const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
     const filepath = path.join(
@@ -134,17 +134,25 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
       return Date.now() - mtime < Duration.toMillis(ttl)
     })
 
-    // [local-smark] Use NetworkProxy.routedFetch for proxy-aware requests
     const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
-      const result = yield* Effect.promise(() =>
-        NetworkProxy.routedFetch(`${source}/api.json`, {
-          purpose: "infrastructure",
-          headers: { "User-Agent": USER_AGENT },
-          signal: AbortSignal.timeout(10000),
+      // models.dev 是基础设施元数据，不属于 provider SDK 请求；这里保留 HttpClient seam 只为
+      // 测试和 recorder 注入客户端。正式入口必须通过下面的 defaultLayer 接到 NetworkProxy，
+      // 不能改成裸 FetchHttpClient/global fetch，否则 Windows/macOS 系统代理不会被统一解析。
+      return yield* Effect.gen(function* () {
+        const result = yield* http.execute(
+          HttpClientRequest.get(`${source}/api.json`, {
+            headers: { "User-Agent": USER_AGENT },
+          }),
+        )
+        return yield* result.text
+      }).pipe(
+        // 保留旧实现 AbortSignal.timeout(10000) 的 10 秒边界；超时必须覆盖响应体读取，
+        // 否则只返回 headers 后卡住 body 的服务会绕过刷新保护并阻塞启动路径。
+        Effect.timeoutOrElse({
+          duration: Duration.seconds(10),
+          orElse: () => Effect.fail(new Error("Failed to fetch models.dev: timeout")),
         }),
       )
-      if (!result.ok) return yield* Effect.fail(new Error(`Failed to fetch models.dev: ${result.status}`))
-      return yield* Effect.promise(() => result.text())
     })
 
     const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
@@ -214,7 +222,10 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
 )
 
 export const defaultLayer: Layer.Layer<Service> = layer.pipe(
+  // 生产默认层只在边界处接入 NetworkProxy：业务逻辑仍面向 HttpClient，代理解析仍集中在
+  // core/network-proxy。这个 provider 是 models.dev 正式请求的非裸 fetch 保证，不要替换成 FetchHttpClient.layer。
   Layer.provide(AppFileSystem.defaultLayer),
+  Layer.provide(NetworkProxy.infrastructureHttpClientLayer),
 )
 
 export * as ModelsDev from "./models"

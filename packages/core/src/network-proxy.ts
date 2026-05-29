@@ -1,5 +1,8 @@
 export * as NetworkProxy from "./network-proxy"
 
+import { Effect } from "effect"
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+
 export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
 
 export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
@@ -200,6 +203,34 @@ export async function resolveProxyRoute(input: string | URL, purpose: Purpose = 
 export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
   return fetch(input, init)
 }
+
+export const infrastructureHttpClientLayer = HttpClient.layerMergedContext(
+  // 这个层是 Effect 世界和 NetworkProxy 世界之间唯一新增的桥：调用方继续依赖
+  // HttpClient.HttpClient 以保留测试、录制回放和重试包装能力；真实传输仍必须回到本文件的
+  // fetch()。名称中的 infrastructure 固定了预定义 purpose 字符串含义：仅用于 models.dev
+  // 这类基础设施元数据请求，避免 provider/npm/plugin 流量误用同一个分类。
+  Effect.succeed(
+    HttpClient.make((request, _url, signal) =>
+      Effect.gen(function* () {
+        const web = yield* HttpClientRequest.toWeb(request, { signal }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new HttpClientError.HttpClientError({
+                reason: new HttpClientError.TransportError({ request, cause }),
+              }),
+          ),
+        )
+        return yield* Effect.tryPromise({
+          try: () => fetch(web, { purpose: "infrastructure", signal }),
+          catch: (cause) =>
+            new HttpClientError.HttpClientError({
+              reason: new HttpClientError.TransportError({ request, cause }),
+            }),
+        }).pipe(Effect.map((response) => HttpClientResponse.fromWeb(request, response)))
+      }),
+    ),
+  ),
+)
 
 /**
  * Primary network fetch entry point.
