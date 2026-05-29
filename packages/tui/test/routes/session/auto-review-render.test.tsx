@@ -241,7 +241,7 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
           await app.mockMouse.click(lines[row].indexOf(command), row)
           expect(route.data).toMatchObject({ type: "session", sessionID })
           await app.renderOnce()
-          await app.mockMouse.click(lines[reviewRow].indexOf("auto review"), reviewRow)
+          await clickVisibleText(app, "auto review")
           expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
         }
         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
@@ -390,7 +390,7 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
       if (scenario === "running-output") expect(row).toBeLessThan(lines.findIndex((line) => line.includes(command)))
       if (scenario === "read" || scenario === "read-error") expect(row).toBe(lines.findIndex((line) => line.includes("config.ts")) + 1)
       if (scenario === "read" || scenario === "edit") {
-        await app.mockMouse.click(lines[row].indexOf("auto review"), row)
+        await clickVisibleText(app, "auto review")
         await waitForReviewFrame(app, async (frame) => {
           if (frame.includes("reviewer child visible")) return true
           await Bun.sleep(10)
@@ -402,6 +402,16 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
       parts: [{ id: "part_reviewer_shared", sessionID: childID, messageID: "msg_reviewer_shared", type: "text", text: "reviewer child visible" }] }] })
   },
 )
+
+async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+  const lines = app.captureCharFrame().split("\n")
+  const y = lines.findIndex((line) => line.includes(text))
+  expect(y).toBeGreaterThanOrEqual(0)
+  const x = lines[y].indexOf(text)
+  expect(x).toBeGreaterThanOrEqual(0)
+  // 文本锚点跟随布局变化；当前mockMouse使用零基行号，列坐标进入标签内部。
+  await app.mockMouse.click(x + 1, y)
+}
 
 // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
 async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {
