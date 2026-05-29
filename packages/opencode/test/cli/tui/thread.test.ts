@@ -28,7 +28,7 @@ function hangingExited() {
 describe("tui thread", () => {
   // #271：每次测试后重置退出码，避免检验分支设置的 exitCode 影响后续用例
   afterEach(() => {
-    process.exitCode = originalExitCode
+  restoreExitCode(originalExitCode)
   })
 
   test("loads the TUI integration lazily", async () => {
@@ -572,6 +572,12 @@ describe("tui thread", () => {
     }),
   )
 })
+
+function restoreExitCode(exitCode: typeof process.exitCode) {
+  // #462：Bun 对已置位的 exitCode 再赋 undefined 是 no-op；Linux 上会以退出码 1 误报失败，
+  // 统一重置为 0 而不是还原捕获值里的 undefined。
+  process.exitCode = exitCode ?? 0
+}
 
 
 // #179：单元覆盖启动前崩溃的快速失败路径
