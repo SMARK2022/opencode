@@ -200,8 +200,8 @@ for each requested pattern:
 +--------------------------------------------------------------------------------+
 |  cautious / strict                                                              |
 |  -> reviewer if available                                                       |
-|  -> ask only when reviewer disabled by config or fallback=user                  |
-|  -> deny when reviewer unavailable for native auto agent                        |
+|  -> ask when reviewer is unavailable or fails after retry                       |
+|  -> deny only for reviewer deny, contract guardrail, or fallback=deny           |
 +--------------------------------------------------------------------------------+
 ```
 
@@ -243,11 +243,10 @@ rationale: string
 
 硬约束：
 
-- reviewer 不调用 `permission_review_decision` 就 fail closed。
-- reviewer timeout 默认 fail closed。
-- provider/schema/stream error 默认 fail closed。
-- 只有显式 `fallback: "user"` 才回到人工审批。
-- reviewer allow 对 `critical` 或“非低风险且无用户授权证据”的矛盾结果会被代码层转成 deny。
+- reviewer 不调用 `permission_review_decision` 会先走一次隐藏 protocol retry；重试后仍失败才进入 fallback。
+- reviewer timeout、provider/schema/stream error 都必须先保留现有 retry 机会；重试耗尽后默认回到人工审批。
+- `fallback: "deny"` 是显式兼容/安全开关，用来把 reviewer 基础设施失败恢复为 terminal fail-closed。
+- reviewer allow 对 `critical` 或“非低风险且无用户授权证据”的矛盾结果会被代码层转成 deny，不能通过 fallback 变成人工 ask。
 
 这层适合判断“是否允许尝试执行”，但不应负责生成 OS sandbox policy。
 

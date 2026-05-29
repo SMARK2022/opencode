@@ -28,7 +28,7 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { createLLMEventPublisher } from "@opencode-ai/core/session/runner/publish-llm-event"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { location } from "./fixture/location"
 import { testEffect } from "./lib/effect"
 
@@ -479,6 +479,11 @@ describe("PermissionV2", () => {
     expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(5)
     malformed = true
+    // 默认基础设施失败留给人工审批，显式deny仍终止；两者都不能直接执行工具。
+    const defaultFallback = yield* service.ask({ ...edit, metadata: { diff: "malformed" } })
+    expect(defaultFallback.effect).toBe("ask")
+    yield* service.reply({ requestID: defaultFallback.id, reply: "reject" })
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
     expect(yield* service.ask({ ...edit, metadata: { diff: "malformed" } })).toMatchObject({ effect: "deny" })
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "user" }) })
     const fallback = yield* service.ask(edit)
@@ -615,12 +620,31 @@ describe("PermissionV2", () => {
     reviewArrivals = undefined
     reviewGate = undefined
     reviewStarted = undefined
+    // 只拒绝父工具展示更新，审查子会话和真实deny仍完整落库。
+    yield* publisher.publish(LLMEvent.toolCall({ id: "display-failure", name: "bash", input: { command: "git add display-failure" } }))
+    assessment = { ...assessment, outcome: "deny" }
+    yield* database.db.run(sql`CREATE TRIGGER reject_review_display BEFORE UPDATE ON session_message WHEN OLD.session_id = 'ses_test' BEGIN SELECT RAISE(ABORT, 'review display failure'); END`).pipe(Effect.orDie)
+    yield* Effect.gen(function* () {
+      const before = reviewRequests.length
+      // 展示故障不能把有效拒绝变成人工pending，也不能触发额外模型重试。
+      expect(yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add display-failure"], metadata: { command: "git add display-failure" }, source: { type: "tool", messageID: assistantMessageID, callID: "display-failure" } })).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(before + 1)
+      expect(yield* service.list()).toEqual([])
+    }).pipe(Effect.ensuring(
+      database.db.run(sql`DROP TRIGGER reject_review_display`).pipe(
+        Effect.orDie,
+        // 故障注入随本次检查释放，不污染后续协议和取消回归。
+        Effect.andThen(Effect.sync(() => { assessment = { ...assessment, outcome: "allow" } })),
+      ),
+    ))
+
     reviewSettings = new Config.Info({})
   }))
 
   it.effect("repairs native reviewer protocol once while preserving hidden audit and usage", () => Effect.gen(function* () {
     yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
+    // 本例锁定协议重试及终局失败，默认人工回退已由上一真实权限用例覆盖。
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
     yield* Effect.addFinalizer(() => Effect.sync(() => {
       reviewScript = undefined
       reviewSettings = new Config.Info({})

@@ -25,6 +25,8 @@ const env = AppNodeBuilder.build(
 // #199：带确定性 reviewer 和真实 session cache 的独立 env，在不启动 provider model 的情况下
 // #199：通过 Permission.ask 测试 auto 集成路径。
 let reviewedCalls = 0
+let failingReviewedCalls = 0
+// #264：独立计数器——验证失败路径恰好调用一次 reviewer，fallback 不触发重复探测
 let nonDenialCalls = 0
 const reviewedEnv = AppNodeBuilder.build(
   LayerNode.group([
@@ -77,8 +79,67 @@ const circuitEnv = AppNodeBuilder.build(
   LayerNode.group([PermissionCircuitBreaker.node, Config.node, CrossSpawnSpawner.node, InstanceStore.node]),
   [[InstanceStore.bootstrapNode, noopBootstrap]],
 )
+// #264：失败 reviewer 环境——无 Config，默认 fallback=user
+const failingReviewedEnv = AppNodeBuilder.build(
+  LayerNode.group([
+    Permission.node,
+    PermissionReviewer.node,
+    PermissionSessionCache.node,
+    EventV2Bridge.node,
+    CrossSpawnSpawner.node,
+    InstanceStore.node,
+  ]),
+  [
+    [InstanceStore.bootstrapNode, noopBootstrap],
+    [
+      PermissionReviewer.node,
+      Layer.succeed(
+        PermissionReviewer.Service,
+        PermissionReviewer.Service.of({
+          review: () =>
+            Effect.gen(function* () {
+              failingReviewedCalls++
+              // #264：模拟 provider 内部错误，验证权限回到用户审批
+              return yield* Effect.fail(new Error("internal server error"))
+            }),
+        }),
+      ),
+    ],
+  ],
+)
+// #264：失败 reviewer + Config 环境——测试 fallback=deny
+const failingReviewedConfigEnv = AppNodeBuilder.build(
+  LayerNode.group([
+    Permission.node,
+    PermissionReviewer.node,
+    PermissionSessionCache.node,
+    Config.node,
+    EventV2Bridge.node,
+    CrossSpawnSpawner.node,
+    InstanceStore.node,
+  ]),
+  [
+    [InstanceStore.bootstrapNode, noopBootstrap],
+    [
+      PermissionReviewer.node,
+      Layer.succeed(
+        PermissionReviewer.Service,
+        PermissionReviewer.Service.of({
+          review: () =>
+            Effect.gen(function* () {
+              failingReviewedCalls++
+              // #264：同上，fallback=deny 时应保持 fail-closed
+              return yield* Effect.fail(new Error("internal server error"))
+            }),
+        }),
+      ),
+    ],
+  ],
+)
 const it = testEffect(env)
 const reviewed = testEffect(reviewedEnv)
+const failingReviewed = testEffect(failingReviewedEnv)
+const failingReviewedConfig = testEffect(failingReviewedConfigEnv)
 const circuit = testEffect(circuitEnv)
 
 const rejectAll = (message?: string) =>
@@ -979,6 +1040,69 @@ reviewed.instance(
 
 // #199：验证 command 变化使缓存失效——不同命令的风险不同，不能复用旧裁决。
 // #199：验证 command 字段参与缓存键规范化，cwd/shell 相同但命令不同仍失效。
+// #264：验证 reviewer 失败后回到待审批用户请求
+failingReviewed.instance(
+  "ask - reviewer failures fall back to pending user approval",
+  () =>
+    Effect.gen(function* () {
+      failingReviewedCalls = 0
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["git add ."],
+        metadata: { command: "git add .", cwd: "/repo", shell: "bash" },
+        always: ["git add *"],
+        ruleset: [{ permission: "bash", pattern: "git *", action: "auto" as const }],
+      }).pipe(Effect.forkScoped)
+
+      const pending = yield* waitForPending(1)
+      expect(pending[0]).toMatchObject({
+        permission: "bash",
+        patterns: ["git add ."],
+      })
+      expect(failingReviewedCalls).toBe(1)
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+)
+
+// #264：验证 fallback=deny 保留 terminal fail-closed
+failingReviewedConfig.instance(
+  "ask - fallback deny preserves fail-closed reviewer failures",
+  () =>
+    Effect.gen(function* () {
+      // #264：计数归零隔离用例——上一用例的调用不参与本断言
+      failingReviewedCalls = 0
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["git add ."],
+          metadata: { command: "git add .", cwd: "/repo", shell: "bash" },
+          always: ["git add *"],
+          ruleset: [{ permission: "bash", pattern: "git *", action: "auto" as const }],
+        }),
+      )
+
+      // #264：fallback=deny 保留 fail-closed，reviewer 不可用时终竭拒绝
+      expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
+      expect(yield* list()).toHaveLength(0)
+      expect(failingReviewedCalls).toBe(1)
+    }),
+  // #264：与默认 ask 用例共享同一实例基建——唯一变量是 fallback 配置
+  {
+    git: true,
+    config: {
+      permission: {
+        // #264：显式 fallback=deny 配置
+        approvals_reviewer: "auto_review",
+        auto_review: { fallback: "deny" },
+      },
+    },
+  },
+)
+
 reviewed.instance(
   "ask - reviewer cache key includes command context",
   () =>

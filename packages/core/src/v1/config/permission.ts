@@ -25,7 +25,7 @@ export const AutoReview = Schema.Struct({
   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
   // #196：fallback 控制 reviewer 失败时的行为：deny（默认）或回退到用户审批。
   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
-    description: "On reviewer failure, either fail closed or fall back to user approval. Defaults to deny.",
+    description: "On reviewer failure after retry, either fail closed or fall back to user approval. Defaults to user.",
   }),
   // #196：strict 为 true 时即使 precheck 判定 allow 也强制经过 reviewer。
   strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),

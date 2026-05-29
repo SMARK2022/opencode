@@ -164,7 +164,7 @@ describe("permission auto routing", () => {
   })
 
   // #208：验证 reviewer 失败时保留已 minted 的 reviewID
-  test("keeps the started review id when reviewer execution fails closed", async () => {
+  test("falls back to user approval after reviewer execution fails", async () => {
     let started: string | undefined
 
     await expect(
@@ -183,7 +183,9 @@ describe("permission auto routing", () => {
             }),
         ),
       ),
-    ).resolves.toMatchObject({ action: "deny", source: "reviewer", reviewID: started })
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+    // #264：运营失败默认回到用户审批，非隐式 deny：review 仍会启动以便 UI/审计显示失败的隐藏 reviewer 尝试，但运营失败不应变成隐式 deny
+    expect(started).toBeDefined()
   })
 
   // #203：PowerShell 用户目录凭据读取走 cautious → reviewer，防止 $env:USERPROFILE 展开绕过敏感路径检测
@@ -502,7 +504,7 @@ describe("permission auto routing", () => {
 
   // #225：测试 metadata.agent 用小写 auto，与 agent key 对齐
   // #203：原生 auto reviewer 缺失时 fail closed——cautious 不降级为可点击 ask，防止点 Allow 暴露敏感 shell 输出
-  test("fails closed for native auto when reviewer is not wired", async () => {
+  test("falls back to existing approval path for native auto when reviewer is not wired", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
@@ -511,7 +513,7 @@ describe("permission auto routing", () => {
           metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
         }),
       ),
-    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
   })
 
   // #203：显式 user reviewer 配置强于原生 auto fail-closed——保留用户审批作为 review 边界
@@ -522,7 +524,9 @@ describe("permission auto routing", () => {
           permission: "bash",
           patterns: ["git add ."],
           metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
-          reviewerDisabled: true,
+          // #264：显式 user fallback——与源 reviewerDisabled=true 同语义的迁移形态
+          // #264：user fallback 与无 reviewer 同路由——ask 语义单一来源
+          reviewerFailureFallback: "user",
         }),
       ),
     ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
@@ -561,13 +565,22 @@ describe("permission auto routing", () => {
   })
 
   // #198：验证 reviewer 失败路由——TimedOut fail closed 为 deny，FallbackToUser 回退到 ask
-  test("reviewer failures fail closed unless they explicitly request user fallback", async () => {
+  // #264：默认翻转 deny→ask——reviewer 超时是基础设施故障而非策略拒绝
+  test("reviewer failures fall back to user approval by default", async () => {
     await expect(
       bash("git add .", {
         review: () => Effect.fail({ _tag: "PermissionReviewerTimedOut", message: "timed out" }),
       }),
-    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
 
+
+    // #264：SDK defect 应被视为 reviewer 不可用而非绕过权限边界
+    // #264：显式 FallbackToUser tag 在默认配置下照常回退 ask——tag 语义不受 fallback 重构影响
+    await expect(
+      bash("git add .", {
+        review: () => Effect.die(new Error("sdk defect")),
+      }),
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
     await expect(
       bash("git add .", {
         review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }),
@@ -576,6 +589,46 @@ describe("permission auto routing", () => {
   })
 
   // #198：验证合约校验——critical+allow 和非低风险+allow+unknown authorization 均转为 deny
+  // #264：fallback=deny 时 reviewer 失败仍为 terminal fail-closed
+  // #264：该用例与默认路径用例共享同一 reviewer 失败形态，仅配置不同——隔离配置维度的影响
+  test("reviewer failures fail closed when fallback deny is configured", async () => {
+    // #264：超时失败在 fallback=deny 下应拒绝
+    const reviewer = {
+      review: () => Effect.fail({ _tag: "PermissionReviewerTimedOut", message: "timed out" }),
+    }
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git add ."],
+            metadata: { command: "git add ." },
+            // #264：fallback=deny 是兼容/安全逃项，保留 terminal fail-closed
+            reviewerFailureFallback: "deny",
+          },
+          reviewer,
+        ),
+      ),
+  ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+
+    // #264：FallbackToUser tag 在 deny 配置下仍是传输信号——不得降级为用户放行
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git add ."],
+            metadata: { command: "git add ." },
+            // #264：fallback tag 是传输信号而非用户授权，fallback=deny 不应被降级
+            reviewerFailureFallback: "deny",
+          },
+          { review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }) },
+        ),
+      ),
+  ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+  })
+
   test("reviewer contract contradictions fail closed", async () => {
     await expect(
       bash("git add .", {

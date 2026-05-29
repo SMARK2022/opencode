@@ -119,6 +119,11 @@ const layer = Layer.effect(
         // #199：strict 模式禁用 precheck fast-path allow，强制所有 auto 请求经过
         // #199：reviewer；但 deny 仍由 precheck 保留，防止危险操作因 reviewer 缺失而放行。
         const strict = permissionConfig?.auto_review?.strict === true
+        const reviewerDisabled = permissionConfig?.approvals_reviewer === "user"
+        // #264：reviewer 旁路与失败 fallback 是两个独立维度——前者不调用 reviewer，后者只决定重试耗尽后的路由
+        // #264：reviewer 重试仍由 PermissionReviewer/SessionRetry 管理。此 flag 只决定重试耗尽后的行为：
+        // 默认回到人工 ask，fallback=deny 保留 fail-closed
+        const reviewerFailureFallback = reviewerDisabled ? "user" : (permissionConfig?.auto_review?.fallback ?? "user")
         // #199：autoRequest 只包含 auto 控制的 pattern。若缓存 ask 控制的 pattern，
         // #199：用户回复前规则变更会使原本被拒绝的混合请求变成静默 allow。
         const autoRequest = { ...request, patterns: autoPatterns }
@@ -131,8 +136,9 @@ const layer = Layer.effect(
           // #199：PermissionAuto.evaluate 按 precheck → fast-path allow → deny →
           // #199：reviewer → fail-closed 顺序裁决；strict 模式禁用 fast-path 但保留 deny。
           const decision = yield* PermissionAuto.evaluate(
-            { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
-            reviewer,
+            { ...autoRequest, strict, reviewerFailureFallback },
+            // #264：reviewerDisabled 时不传 reviewer，避免无效调用
+            reviewerDisabled ? undefined : reviewer,
             // #208：onReviewStart 发布 ReviewStarted 事件——确定性 precheck 到模型审查的可见边界
             // #208：events.publish 而非 bus.publish——复用 EventV2Bridge 统一事件发布路径
             // #208：事件仅携带 auto patterns 和 precheck rationale——不泄露隐藏 reviewer prompt
