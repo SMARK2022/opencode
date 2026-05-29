@@ -16,6 +16,9 @@ import { Global } from "@opencode-ai/core/global"
 import { cliIt } from "../../lib/cli-process"
 import { UI } from "../../../src/cli/ui"
 
+// #271：保护测试进程的退出码，避免 TuiThreadCommand 设置的 exitCode 在测试间泄漏
+const originalExitCode = process.exitCode
+
 // 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
 // #179：幸福路径 mock 使用永不 resolve 的 exited
 function hangingExited() {
@@ -23,6 +26,11 @@ function hangingExited() {
 }
 
 describe("tui thread", () => {
+  // #271：每次测试后重置退出码，避免检验分支设置的 exitCode 影响后续用例
+  afterEach(() => {
+    process.exitCode = originalExitCode
+  })
+
   test("loads the TUI integration lazily", async () => {
     const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
 
