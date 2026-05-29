@@ -26,6 +26,7 @@ import { WebCommand } from "./cli/cmd/web"
 import { PrCommand } from "./cli/cmd/pr"
 import { SessionCommand } from "./cli/cmd/session"
 import { DbCommand } from "./cli/cmd/db"
+import { DaemonCommand } from "./cli/cmd/daemon"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
@@ -87,6 +88,9 @@ const cli = yargs(args)
   .completion("completion", "generate shell completion script")
   .command(AcpCommand)
   .command(McpCommand)
+  // #259：daemon 管理的是 TUI 共享后台进程；必须早于默认 $0 [project] 入口注册
+  // 否则 opencode daemon stop 会被解释成“打开名为 daemon 的项目并把 stop 当参数”
+  .command(DaemonCommand)
   .command(TuiThreadCommand)
   .command(AttachCommand)
   .command(RunCommand)

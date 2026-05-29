@@ -16,6 +16,8 @@ export type ServerLock = {
   startedAt: string
   externalUrl?: string
   network?: ReturnType<typeof resolveNetworkOptionsNoConfig>
+  // #259：daemon control 私有端口——随机分配写入 lock，stop/status 通过 token 鉴权
+  controlPort?: number
 }
 import type { resolveNetworkOptionsNoConfig } from "@/cli/network"
 
@@ -32,6 +34,12 @@ export function headers(credentials: ServerAuth.Credentials = {
 }) {
   return ServerAuth.headers(credentials)
 }
+
+// #259：daemon control 是本机私有通道——端口随机写入 lock，token 复用 lock token
+// 只服务 CLI/TUI 的 stop/status，不进入公共 HTTP API、OpenAPI 或 SDK
+export const CONTROL_SHUTDOWN_PATH = "/shutdown"
+export const CONTROL_STATUS_PATH = "/status"
+export const CONTROL_TOKEN_HEADER = "x-opencode-daemon-token"
 
 // #152：写锁前若已有存活 pid，拒绝覆盖
 export class ExistingLiveServerError extends Error {
@@ -59,7 +67,13 @@ export function placement() {
   return path.join(Global.Path.state, `tui-server-${key}.json`)
 }
 
-export async function write(port: number, externalUrl?: string, network?: ServerLock["network"]): Promise<string> {
+export async function write(
+  port: number,
+  externalUrl?: string,
+  network?: ServerLock["network"],
+  controlPort?: number,
+): Promise<string> {
+  // network 保持第三参数和既有身份语义，私有 controlPort 只追加为第四参数。
   // #152：已有存活 owner 时拒绝写锁，防止双 daemon
   const existing = await read()
   if (existing && alive(existing.pid) && existing.pid !== process.pid) {
@@ -75,6 +89,8 @@ export async function write(port: number, externalUrl?: string, network?: Server
     startedAt: new Date().toISOString(),
     ...(externalUrl ? { externalUrl } : {}),
     ...(network ? { network } : {}),
+    // #259：controlPort 是 daemon stop 的本机私有入口，不进入公共 HTTP/OpenAPI
+    ...(controlPort ? { controlPort } : {}),
   }
   const tmp = getLockPath() + ".tmp"
   await Bun.write(tmp, JSON.stringify(lock, null, 2))

@@ -10,12 +10,15 @@
  * 隔离：OPENCODE_LOCK_PATH 设置为临时目录，测试不会触碰真实 XDG state 目录。
  */
 import { afterEach, describe, expect, test } from "bun:test"
+import { mkdir } from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import { ServerLock } from "../../../src/cli/tui/server-lock"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
+// stop 的命令注册和参数解析必须通过真实 CLI 入口保留回归覆盖。
+const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
 const credentials = { username: "daemon-test", password: "daemon-test-password" }
 
 const DAEMON_START_TIMEOUT_MS = 15_000
@@ -25,6 +28,48 @@ afterEach(() => {
   ServerLock._setLockPath(undefined)
 })
 
+// 显式覆盖角色和 launcher，避免 CLI 走 worker 旁路或被宿主存活 PID 保活。
+// lock、数据库与 XDG 全部落在同一临时目录，stop 只能找到本用例的服务。
+function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
+  const root = path.dirname(lockPath)
+  return {
+    ...process.env,
+    OPENCODE_DAEMON_LAUNCHER_PID: "",
+    OPENCODE_PROCESS_ROLE: "main",
+    OPENCODE_SERVER_USERNAME: credentials.username,
+    OPENCODE_SERVER_PASSWORD: credentials.password,
+    ...env,
+    OPENCODE_LOCK_PATH: lockPath,
+    OPENCODE_EXTERNAL_NETWORK: "",
+    OPENCODE_DB: path.join(root, "opencode.db"),
+    OPENCODE_TEST_HOME: path.join(root, "home"),
+    XDG_DATA_HOME: path.join(root, "share"),
+    XDG_CACHE_HOME: path.join(root, "cache"),
+    XDG_CONFIG_HOME: path.join(root, "config"),
+    XDG_STATE_HOME: path.join(root, "state"),
+  }
+}
+
+async function prepareCliData(lockPath: string) {
+  const dataDir = path.join(path.dirname(lockPath), "share", "opencode")
+  await mkdir(dataDir, { recursive: true })
+  // 预置迁移 marker，避免首次数据迁移阻塞 stop 命令的生命周期断言。
+  await Bun.write(path.join(dataDir, "opencode.db"), "")
+}
+
+async function runDaemonStop(lockPath: string, env: Record<string, string> = {}) {
+  await prepareCliData(lockPath)
+  // 用 argv 数组保留路径和密码中的空格，并从真实入口验证命令注册。
+  const proc = Bun.spawn([process.execPath, INDEX_TS, "daemon", "stop"], {
+    env: isolatedDaemonEnv(lockPath, env),
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  })
+  const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+  return { exitCode, stderr }
+}
+
 /**
  * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
  * 返回运行中的进程和锁文件内容。
@@ -32,14 +77,8 @@ afterEach(() => {
 async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
   const proc = Bun.spawn([process.execPath, WORKER_TS], {
     env: {
-      ...process.env,
-      ...env,
+      ...isolatedDaemonEnv(lockPath, env),
       OPENCODE_PROCESS_ROLE: "worker",
-      OPENCODE_LOCK_PATH: lockPath,
-      // 真实生命周期 fixture 保持健康路由受保护，显式使用与客户端相同的认证。
-      OPENCODE_SERVER_USERNAME: credentials.username,
-      OPENCODE_SERVER_PASSWORD: credentials.password,
-      OPENCODE_EXTERNAL_NETWORK: "",
     },
     stdin: "ignore",
     stdout: "ignore",
@@ -52,7 +91,11 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
     const lock = await ServerLock.read(lockPath)
 
     if (lock && lock.pid === proc.pid && ServerLock.alive(lock.pid)) {
-      const ok = await ServerLock.ping(lock.port, credentials)
+      // 与 worker 使用同一显式凭证，覆盖自定义用户名和含空格密码。
+      const ok = await ServerLock.ping(lock.port, {
+        username: env.OPENCODE_SERVER_USERNAME ?? credentials.username,
+        password: env.OPENCODE_SERVER_PASSWORD ?? credentials.password,
+      })
       if (ok) return { proc, lock }
     }
     await Bun.sleep(POLL_INTERVAL_MS)
@@ -64,6 +107,210 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
 }
 
 describe("daemon lifecycle", () => {
+  // 这些用例启动真实 worker/CLI，保留完整 stop 契约，仅作静态审查。
+  test(
+    "daemon stop command gracefully stops daemon and clears the lock file",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
+
+      try {
+        const result = await runDaemonStop(lockPath)
+        expect(result.exitCode).toBe(0)
+        expect(result.stderr).toContain("Stopped opencode daemon.")
+
+        const daemonExit = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(daemonExit).not.toBe("timeout")
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "daemon stop command authenticates the health check when server password is configured",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const env = {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+        OPENCODE_SERVER_USERNAME: "daemon-user",
+        OPENCODE_SERVER_PASSWORD: "daemon password with spaces",
+      }
+      const { proc } = await spawnDaemon(lockPath, env)
+
+      try {
+        const result = await runDaemonStop(lockPath, env)
+        expect(result.exitCode).toBe(0)
+        expect(result.stderr).toContain("Stopped opencode daemon.")
+        const daemonExit = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(daemonExit).not.toBe("timeout")
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test("daemon stop command is a no-op when no daemon lock exists", async () => {
+    await using tmp = await tmpdir()
+    const lockPath = path.join(tmp.path, "path with spaces", "tui-server.json")
+
+    const result = await runDaemonStop(lockPath)
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toContain("No opencode daemon is running.")
+  })
+
+  test("daemon stop command removes a stale lock without signalling a missing process", async () => {
+    await using tmp = await tmpdir()
+    const lockPath = path.join(tmp.path, "tui-server.json")
+    const exited = Bun.spawn([process.execPath, "-e", ""], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    await exited.exited
+
+    await Bun.write(
+      lockPath,
+      JSON.stringify({
+        pid: exited.pid,
+        port: 4096,
+        token: "stale-test-token",
+        dbPath: path.join(tmp.path, "opencode.db"),
+        channel: "test",
+        startedAt: new Date().toISOString(),
+      }),
+    )
+
+    const result = await runDaemonStop(lockPath)
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toContain("Removed stale opencode daemon lock.")
+    expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+  })
+
+  test("daemon stop command refuses a live lock without a safe control port", async () => {
+    await using tmp = await tmpdir()
+    const lockPath = path.join(tmp.path, "tui-server.json")
+    const nonDaemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+
+    // 没有 controlPort 的旧锁不能授权 process.kill；真实存活进程覆盖 PID 复用风险。
+    await Bun.write(
+      lockPath,
+      JSON.stringify({
+        pid: nonDaemon.pid,
+        port: 1,
+        token: "wrong-owner-token",
+        dbPath: path.join(tmp.path, "opencode.db"),
+        channel: "test",
+        startedAt: new Date().toISOString(),
+      }),
+    )
+
+    try {
+      const result = await runDaemonStop(lockPath)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain("does not support safe stop")
+      expect(ServerLock.alive(nonDaemon.pid)).toBe(true)
+      expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeDefined()
+    } finally {
+      if (ServerLock.alive(nonDaemon.pid)) nonDaemon.kill("SIGTERM")
+      await nonDaemon.exited.catch(() => undefined)
+    }
+  })
+
+  test(
+    "daemon stop command refuses a mismatched control token without signalling the lock pid",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
+      const nonDaemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+
+      try {
+        // 可达的控制端口不证明 PID 属于 daemon，错误 token 必须同时保护两个存活进程。
+        await Bun.write(
+          lockPath,
+          JSON.stringify({
+            ...lock,
+            pid: nonDaemon.pid,
+            token: "wrong-owner-token",
+          }),
+        )
+
+        const result = await runDaemonStop(lockPath)
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain("control endpoint returned 401")
+        expect(ServerLock.alive(nonDaemon.pid)).toBe(true)
+        expect(ServerLock.alive(proc.pid)).toBe(true)
+      } finally {
+        if (ServerLock.alive(nonDaemon.pid)) nonDaemon.kill("SIGTERM")
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await Promise.all([nonDaemon.exited.catch(() => undefined), proc.exited.catch(() => undefined)])
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "daemon private status reports current TUI client count",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
+
+      try {
+        if (!lock.controlPort) throw new Error("missing control port")
+        const statusBefore = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
+          headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
+        }).then((x) => x.json() as Promise<{ tuiClients: number; sessionActivity: number }>)
+        expect(statusBefore.tuiClients).toBe(0)
+        expect(statusBefore.sessionActivity).toBe(0)
+
+        const ctrl = new AbortController()
+        // SSE 与健康 fixture 共用显式认证，401 不能伪装成客户端计数没有增加。
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, {
+          signal: ctrl.signal,
+          headers: ServerLock.headers(credentials),
+        })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+
+        try {
+          const first = await reader.read()
+          expect(first.value).toContain("server.connected")
+          const statusDuring = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
+            headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
+          }).then((x) => x.json() as Promise<{ tuiClients: number; sessionActivity: number }>)
+          expect(statusDuring.tuiClients).toBe(1)
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
   test(
     "daemon writes lock file and responds to HTTP health check",
     async () => {
@@ -219,15 +466,13 @@ describe("daemon lifecycle", () => {
       // 修复：src/index.ts 在 yargs 之前检查 processRole === "worker"。
       // 这里通过启动 src/index.ts（CLI 入口）并设置 OPENCODE_PROCESS_ROLE=worker
       // 来模拟编译后的二进制——它必须启动守护进程而非 TUI。
-      const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
 
       const proc = Bun.spawn([process.execPath, INDEX_TS, "src/cli/tui/worker.ts"], {
         env: {
-          ...process.env,
+          ...isolatedDaemonEnv(lockPath),
           OPENCODE_PROCESS_ROLE: "worker",
-          OPENCODE_LOCK_PATH: lockPath,
         },
         stdin: "ignore",
         stdout: "ignore",
@@ -240,7 +485,7 @@ describe("daemon lifecycle", () => {
       let lock: ServerLock.ServerLock | undefined
       while (Date.now() < deadline) {
         lock = await ServerLock.read(lockPath)
-        if (lock && lock.pid === proc.pid && (await ServerLock.ping(lock.port))) break
+        if (lock && lock.pid === proc.pid && (await ServerLock.ping(lock.port, credentials))) break
         lock = undefined
         await Bun.sleep(POLL_INTERVAL_MS)
       }

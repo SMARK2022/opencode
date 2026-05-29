@@ -1,18 +1,20 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect } from "effect"
 import fs from "fs/promises"
 import path from "path"
 import yargs from "yargs"
 import { tmpdir } from "../../fixture/fixture"
 import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
-  DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS } from "../../../src/cli/cmd/tui"
+  DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS, status, printDaemonExitHint } from "../../../src/cli/cmd/tui"
 import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
 import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
 import { ServerLock } from "../../../src/cli/tui/server-lock"
 import { EventClients } from "@opencode-ai/server/event-clients"
 import { Global } from "@opencode-ai/core/global"
 import { cliIt } from "../../lib/cli-process"
+import { UI } from "../../../src/cli/ui"
 
 // 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
 // #179：幸福路径 mock 使用永不 resolve 的 exited
@@ -438,6 +440,118 @@ describe("tui thread", () => {
       const failedClients = EventClients.make((count) => { failedCounts.push(count); if (count > 0) throw new Error("callback failed") })
       await Effect.runPromise(Effect.exit(Effect.scoped(failedClients.acquire)))
       expect(failedCounts).toEqual([1, 0])
+    })
+
+    // 认证走真实 ping/header 构造，仅替换 fetch 与发现 I/O，复用和启动路径都必须携带凭证。
+    test("authenticates daemon health checks when server password is configured", async () => {
+      const keys = ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME"] as const
+      const previous = keys.map((key) => process.env[key])
+      Object.assign(process.env, { OPENCODE_SERVER_PASSWORD: "daemon password with spaces", OPENCODE_SERVER_USERNAME: "daemon-user" })
+      const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        expect(String(input)).toBe("http://127.0.0.1:9999/global/health")
+        expect(new Headers(init?.headers).get("Authorization")).toBe(
+          "Basic ZGFlbW9uLXVzZXI6ZGFlbW9uIHBhc3N3b3JkIHdpdGggc3BhY2Vz",
+        )
+        return Response.json({ healthy: true, version: InstallationVersion })
+      }, { preconnect() {} }))
+
+      try {
+        for (const mode of ["reuse", "spawn"]) {
+          let reads = 0
+          let spawns = 0
+          const calls = fetchSpy.mock.calls.length
+          const result = await discoverOrSpawnDaemon({ ...localNet, "mdns-domain": "opencode.local" }, baseDeps({
+            read: async () => mode === "spawn" && ++reads <= 2 ? undefined : fakeLock,
+            ping: ServerLock.ping,
+            spawn: (() => {
+              spawns++
+              return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+            }) as DiscoverDaemonDeps["spawn"],
+            // 凭证错误时让零间隔轮询立即失败，不能用长超时掩盖健康检查回归。
+            sleep: async (ms) => { if (ms === 0) throw new Error("authenticated health check failed") },
+          }))
+          expect(spawns).toBe(mode === "spawn" ? 1 : 0)
+          expect(result.url).toBe("http://127.0.0.1:9999")
+          expect(fetchSpy.mock.calls.length).toBeGreaterThan(calls)
+        }
+      } finally {
+        fetchSpy.mockRestore()
+        keys.forEach((key, index) => {
+          if (previous[index] === undefined) delete process.env[key]
+          if (previous[index] !== undefined) process.env[key] = previous[index]
+        })
+      }
+    })
+
+    // 无 owner 时不能发出控制面请求；直接注入读取结果，避免泄漏锁路径覆盖。
+    test("status returns undefined when no daemon lock exists", async () => {
+      const readSpy = spyOn(ServerLock, "read").mockResolvedValue(undefined)
+      const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected control request"))
+      try {
+        expect(await status("/tmp/test-daemon.json")).toBeUndefined()
+        expect(readSpy).toHaveBeenCalledWith("/tmp/test-daemon.json")
+        expect(fetchSpy).not.toHaveBeenCalled()
+      } finally {
+        fetchSpy.mockRestore()
+        readSpy.mockRestore()
+      }
+    })
+
+    // 提示沿用发现的锁路径，调用真实 status；只替换锁、存活探测、HTTP 与输出。
+    test("printDaemonExitHint shows stop guidance when daemon has active clients", async () => {
+      const printlns: string[] = []
+      const readSpy = spyOn(ServerLock, "read").mockResolvedValue({ ...fakeLock, controlPort: 9998 })
+      const aliveSpy = spyOn(ServerLock, "alive").mockReturnValue(true)
+      const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        expect(String(input)).toBe(`http://127.0.0.1:9998${ServerLock.CONTROL_STATUS_PATH}`)
+        expect(new Headers(init?.headers).get(ServerLock.CONTROL_TOKEN_HEADER)).toBe(fakeLock.token)
+        return Response.json({ tuiClients: 2, sessionActivity: 0 })
+      }, { preconnect() {} }))
+      const printlnSpy = spyOn(UI, "println").mockImplementation((...msg) => {
+        printlns.push(msg.join(" "))
+      })
+
+      try {
+        await printDaemonExitHint("/tmp/test-daemon.json")
+        const output = printlns.join("\n")
+        expect(output).toContain("2 TUI connections")
+        expect(output).toContain("0 active sessions")
+        expect(output).toContain("opencode daemon stop")
+        expect(readSpy).toHaveBeenCalledWith("/tmp/test-daemon.json")
+        expect(fetchSpy).toHaveBeenCalled()
+      } finally {
+        printlnSpy.mockRestore()
+        fetchSpy.mockRestore()
+        aliveSpy.mockRestore()
+        readSpy.mockRestore()
+      }
+    })
+
+    test("printDaemonExitHint does not show guidance when daemon has no active clients", async () => {
+      const printlns: string[] = []
+      const readSpy = spyOn(ServerLock, "read").mockResolvedValue({ ...fakeLock, controlPort: 9998 })
+      const aliveSpy = spyOn(ServerLock, "alive").mockReturnValue(true)
+      const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        expect(String(input)).toBe(`http://127.0.0.1:9998${ServerLock.CONTROL_STATUS_PATH}`)
+        expect(new Headers(init?.headers).get(ServerLock.CONTROL_TOKEN_HEADER)).toBe(fakeLock.token)
+        return Response.json({ tuiClients: 0, sessionActivity: 0 })
+      }, { preconnect() {} }))
+      const printlnSpy = spyOn(UI, "println").mockImplementation((...msg) => {
+        printlns.push(msg.join(" "))
+      })
+
+      try {
+        await printDaemonExitHint("/tmp/test-daemon.json")
+        expect(printlns.join("\n")).not.toContain("opencode daemon stop")
+        expect(printlnSpy).not.toHaveBeenCalled()
+        expect(readSpy).toHaveBeenCalledWith("/tmp/test-daemon.json")
+        expect(fetchSpy).toHaveBeenCalled()
+      } finally {
+        printlnSpy.mockRestore()
+        fetchSpy.mockRestore()
+        aliveSpy.mockRestore()
+        readSpy.mockRestore()
+      }
     })
   })
 
