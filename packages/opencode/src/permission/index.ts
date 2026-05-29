@@ -252,6 +252,12 @@ export const layer = Layer.effect(
         // or explicit fallback returns to the normal pending permission path.
         const permissionConfig = config ? (yield* config.get()).permission : undefined
         const strict = permissionConfig?.auto_review?.strict === true
+        const reviewerDisabled = permissionConfig?.approvals_reviewer === "user"
+        // Reviewer retry remains owned by PermissionReviewer/SessionRetry. This
+        // flag only decides what happens after retry is exhausted or the reviewer
+        // is unavailable: default back to the existing human ask boundary, while
+        // explicit fallback=deny keeps the legacy fail-closed behavior.
+        const reviewerFailureFallback = reviewerDisabled ? "user" : (permissionConfig?.auto_review?.fallback ?? "user")
         // Auto review/cache must operate only on the patterns that matched an
         // `auto` rule. The original request may also contain ask-controlled
         // patterns; caching those before the user replies would turn a rejected
@@ -266,8 +272,8 @@ export const layer = Layer.effect(
           if (!needsAsk) return
         } else {
           const decision = yield* PermissionAuto.evaluate(
-            { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
-            reviewer,
+            { ...autoRequest, strict, reviewerFailureFallback },
+            reviewerDisabled ? undefined : reviewer,
             (review) =>
               // This event is the user's visible boundary between deterministic
               // precheck and model review. It intentionally carries only the

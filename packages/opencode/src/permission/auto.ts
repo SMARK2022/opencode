@@ -38,8 +38,8 @@ export interface ReviewInput {
 }
 
 // The reviewer is injected rather than constructed here so the deterministic
-// router can be tested without provider/session layers and can fail closed when
-// the optional service is absent in smaller runtimes.
+// router can be tested without provider/session layers. Missing reviewer wiring
+// follows the same explicit fallback policy as runtime reviewer failures.
 export interface Reviewer {
   readonly review: (input: ReviewInput) => Effect.Effect<ReviewDecision, unknown>
 }
@@ -51,7 +51,7 @@ export function evaluate(
     metadata: Readonly<Record<string, unknown>>
     tool?: { readonly messageID: MessageID; readonly callID: string }
     strict?: boolean
-    reviewerDisabled?: boolean
+    reviewerFailureFallback?: "deny" | "user"
   },
   reviewer?: Reviewer,
   onReviewStart?: (input: {
@@ -61,7 +61,6 @@ export function evaluate(
 ) {
   return Effect.gen(function* () {
     const precheck = PermissionPrecheck.evaluate(input)
-    const isShell = input.permission === "bash"
     // [local-smark] auto 四级预审路由开始
     // safe/general/cautious/dangerous 是 LLM 负载边界：safe 和 general 默认
     // 直接允许；只有 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。
@@ -80,19 +79,14 @@ export function evaluate(
 
     // Cautious is the default auto review boundary: deterministic precheck found
     // a visible risk that is neither harmless nor immediately forbidden, so a
-    // reviewer must explicitly return allow/deny. Native auto must not degrade
-    // back to a clickable user ask if reviewer wiring is missing; fail closed so
-    // sensitive shell output cannot be exposed by pressing Allow.
+    // healthy reviewer must explicitly return allow/deny. Reviewer infrastructure
+    // failure is different from a policy denial: by default it returns to the
+    // existing user approval boundary, while fallback=deny preserves the stricter
+    // fail-closed deployment mode for callers that require reviewer availability.
+    const fallbackToUser = input.reviewerFailureFallback !== "deny"
     if (!reviewer) {
-      // Explicit user-review configuration is stronger than the native auto
-      // fail-closed default. This preserves small/custom runtimes that construct
-      // Permission.layer without a reviewer service but intentionally keep user
-      // approval as the review boundary.
-      if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
-      if (input.metadata.agent === "auto") {
-        return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
-      }
-      return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+      if (fallbackToUser) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+      return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
     }
 
     const reviewID = crypto.randomUUID()
@@ -114,13 +108,17 @@ export function evaluate(
         reason: input.strict && precheck.level !== "cautious" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
       },
     }).pipe(
+      // Some provider/SDK failures surface as Effect defects instead of typed
+      // failures. Treat them as reviewer unavailability so the permission path can
+      // still reach the normal user ask fallback after retry has been exhausted.
+      Effect.catchDefect((defect) => Effect.fail(defect)),
       Effect.match({
         onFailure: (error) => {
-          const tag = errorTag(error)
-          // Disabled/fallback are explicit service signals that return to the
-          // existing user approval path. All other failures, including provider
-          // errors, schema errors, and timeouts, fail closed below.
-          if (tag === "PermissionReviewerDisabled" || tag === "PermissionReviewerFallbackToUser") {
+          // Reviewer service tags and provider failures are all infrastructure
+          // outcomes here. They can ask only under the default/user fallback;
+          // fallback=deny keeps them terminal even if a custom reviewer emits the
+          // explicit fallback tag by mistake.
+          if (fallbackToUser) {
             return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
           }
           return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision

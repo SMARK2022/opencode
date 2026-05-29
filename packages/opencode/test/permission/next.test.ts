@@ -24,6 +24,7 @@ const env = Layer.mergeAll(
   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
 )
 let reviewedCalls = 0
+let failingReviewedCalls = 0
 let nonDenialCalls = 0
 const reviewerLayer = Layer.succeed(
   PermissionReviewer.Service,
@@ -38,6 +39,19 @@ const reviewerLayer = Layer.succeed(
           risk_level: "medium" as const,
           user_authorization: "medium" as const,
         }
+    }),
+  }),
+)
+const failingReviewerLayer = Layer.succeed(
+  PermissionReviewer.Service,
+  PermissionReviewer.Service.of({
+    review: () =>
+      Effect.gen(function* () {
+        failingReviewedCalls++
+        // This models a provider/server failure after any existing reviewer retry
+        // policy has had its chance. The permission boundary should become the
+        // normal pending user approval request, not an uncaught failure or auto deny.
+        return yield* Effect.fail(new Error("internal server error"))
       }),
   }),
 )
@@ -62,6 +76,27 @@ const reviewedEnv = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
 )
+const failingReviewedEnv = Layer.mergeAll(
+  Permission.layer.pipe(
+    Layer.provide(bus),
+    Layer.provide(PermissionSessionCache.layer),
+    Layer.provide(failingReviewerLayer),
+  ),
+  bus,
+  CrossSpawnSpawner.defaultLayer,
+  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
+)
+const failingReviewedConfigEnv = Layer.mergeAll(
+  Permission.layer.pipe(
+    Layer.provide(bus),
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(PermissionSessionCache.layer),
+    Layer.provide(failingReviewerLayer),
+  ),
+  bus,
+  CrossSpawnSpawner.defaultLayer,
+  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
+)
 // Circuit tests need Config.defaultLayer because thresholds are read at decision
 // time from the active project config, not captured when the service is created.
 const circuitEnv = Layer.mergeAll(
@@ -72,6 +107,8 @@ const circuitEnv = Layer.mergeAll(
 )
 const it = testEffect(env)
 const reviewed = testEffect(reviewedEnv)
+const failingReviewed = testEffect(failingReviewedEnv)
+const failingReviewedConfig = testEffect(failingReviewedConfigEnv)
 const circuit = testEffect(circuitEnv)
 
 const rejectAll = (message?: string) =>
@@ -919,6 +956,65 @@ reviewed.instance(
       expect(reviewedCalls).toBe(1)
     }),
   { git: true },
+)
+
+failingReviewed.instance(
+  "ask - reviewer failures fall back to pending user approval",
+  () =>
+    Effect.gen(function* () {
+      failingReviewedCalls = 0
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["git add ."],
+        metadata: { command: "git add .", cwd: "/repo", shell: "bash" },
+        always: ["git add *"],
+        ruleset: [{ permission: "bash", pattern: "git *", action: "auto" as const }],
+      }).pipe(Effect.forkScoped)
+
+      const pending = yield* waitForPending(1)
+      expect(pending[0]).toMatchObject({
+        permission: "bash",
+        patterns: ["git add ."],
+      })
+      expect(failingReviewedCalls).toBe(1)
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+)
+
+failingReviewedConfig.instance(
+  "ask - fallback deny preserves fail-closed reviewer failures",
+  () =>
+    Effect.gen(function* () {
+      failingReviewedCalls = 0
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["git add ."],
+          metadata: { command: "git add .", cwd: "/repo", shell: "bash" },
+          always: ["git add *"],
+          ruleset: [{ permission: "bash", pattern: "git *", action: "auto" as const }],
+        }),
+      )
+
+      // Explicit fallback=deny keeps the pre-existing fail-closed contract for
+      // environments where reviewer availability is required before execution.
+      expect(err).toBeInstanceOf(Permission.AutoDeniedError)
+      expect(yield* list()).toHaveLength(0)
+      expect(failingReviewedCalls).toBe(1)
+    }),
+  {
+    git: true,
+    config: {
+      permission: {
+        approvals_reviewer: "auto_review",
+        auto_review: { fallback: "deny" },
+      },
+    },
+  },
 )
 
 reviewed.instance(

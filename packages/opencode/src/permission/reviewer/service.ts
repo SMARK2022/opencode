@@ -100,6 +100,7 @@ export const layer = Layer.effect(
         const permission = cfg.permission
         if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
         const autoReview = permission?.auto_review
+        const fallbackToUser = autoReview?.fallback !== "deny"
 
         const run = Effect.gen(function* () {
           const request = new ReviewerRequest({
@@ -111,7 +112,8 @@ export const layer = Layer.effect(
           const model = autoReview?.model
             ? // User-specified reviewer models use the same provider/model parser as
               // normal agent config so aliases and provider validation stay in one
-              // place. A bad model fails closed unless fallback=user is configured.
+              // place. A bad model follows the same reviewer-failure fallback as
+              // provider/runtime errors instead of inventing a separate config path.
               yield* provider.getModel(
                 Provider.parseModel(autoReview.model).providerID,
                 Provider.parseModel(autoReview.model).modelID,
@@ -177,9 +179,10 @@ export const layer = Layer.effect(
               runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
             ),
             Effect.timeoutOrElse({
-              // Timeout is a security boundary: if the reviewer cannot complete in
-              // time, the tool call must not execute unless explicit user fallback
-              // is configured below.
+              // Timeout covers reviewer execution including its existing provider
+              // retry loop. The tool still never executes from a timeout alone:
+              // default fallback returns to user ask, while fallback=deny preserves
+              // a terminal fail-closed result for stricter deployments.
               duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
               orElse: () => Effect.fail(new ReviewerTimedOut()),
             }),
@@ -198,27 +201,39 @@ export const layer = Layer.effect(
           } satisfies PermissionAuto.ReviewDecision
         })
 
+        const handleReviewerFailure = (error: unknown) =>
+          Effect.gen(function* () {
+            yield* markToolReviewFailed(
+              input,
+              fallbackToUser && !(error instanceof ReviewerDisabled)
+                ? "fallback_user"
+                : error instanceof ReviewerTimedOut
+                  ? "timed_out"
+                  : "failed",
+              errorMessage(error),
+            ).pipe(
+              // Parent tool metadata is audit/UI state only. If that write fails
+              // while handling an already-failed reviewer, it must not create a
+              // second failure mode that bypasses ask/fallback=deny resolution.
+              Effect.catch(() => Effect.void),
+              Effect.catchDefect(() => Effect.void),
+            )
+            // Reviewer failures reach this point only after the stream-level retry
+            // policy has completed. Converting the default case to the explicit
+            // fallback signal lets PermissionAuto reuse the ordinary ask path
+            // without treating infrastructure errors as reviewer policy denials.
+            if (fallbackToUser && !(error instanceof ReviewerDisabled)) {
+              return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
+            }
+            return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
+          })
+
         return yield* run.pipe(
-          Effect.catch((error: unknown) =>
-            Effect.gen(function* () {
-              yield* markToolReviewFailed(
-                input,
-                autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
-                  ? "fallback_user"
-                  : error instanceof ReviewerTimedOut
-                    ? "timed_out"
-                    : "failed",
-                errorMessage(error),
-              )
-              // `fallback: "user"` is deliberately narrow: disabled reviewer already
-              // means normal user routing, while all other failures become an explicit
-              // fallback signal for PermissionAuto. Default behavior is fail-closed.
-              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
-                return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
-              }
-              return yield* Effect.fail(error)
-            }),
-          ),
+          // Defects from provider SDKs or persistence callbacks should not bypass
+          // the permission boundary. Convert them to the same post-retry failure
+          // channel so fallback=user can ask and fallback=deny can fail closed.
+          Effect.catchDefect((defect) => Effect.fail(defect)),
+          Effect.catch(handleReviewerFailure),
         )
       })
 
@@ -703,8 +718,10 @@ export const layer = Layer.effect(
       }).pipe(
         // Review display is best-effort: stale tool references can happen after
         // cancellation, repair, or compaction, but losing that UI update must not
-        // convert an otherwise valid reviewer decision into a fail-closed deny.
+        // convert an otherwise valid reviewer decision into deny or ask. Defects
+        // are caught too because this path updates display metadata, not policy.
         Effect.catch(() => Effect.void),
+        Effect.catchDefect(() => Effect.void),
       )
     }
   }),

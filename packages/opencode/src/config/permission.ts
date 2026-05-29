@@ -23,7 +23,7 @@ export const AutoReview = Schema.Struct({
   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
-    description: "On reviewer failure, either fail closed or fall back to user approval. Defaults to deny.",
+    description: "On reviewer failure after retry, either fail closed or fall back to user approval. Defaults to user.",
   }),
   strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
   max_consecutive_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker consecutive denial threshold." }),

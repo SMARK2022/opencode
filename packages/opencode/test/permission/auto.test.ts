@@ -125,7 +125,7 @@ describe("permission auto routing", () => {
     expect(starts[0].precheck).toMatchObject({ level: "cautious" })
   })
 
-  test("keeps the started review id when reviewer execution fails closed", async () => {
+  test("falls back to user approval after reviewer execution fails", async () => {
     let started: string | undefined
 
     await expect(
@@ -143,7 +143,11 @@ describe("permission auto routing", () => {
             }),
         ),
       ),
-    ).resolves.toMatchObject({ action: "deny", source: "reviewer", reviewID: started })
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+    // The review still starts before the provider call so UI/audit metadata can
+    // show the failed hidden reviewer attempt, but operational failure must not
+    // become an implicit deny unless the user explicitly configures that policy.
+    expect(started).toBeDefined()
   })
 
   test("routes PowerShell user-profile credential reads to reviewer", async () => {
@@ -481,7 +485,7 @@ describe("permission auto routing", () => {
     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
   })
 
-  test("fails closed for native auto when reviewer is not wired", async () => {
+  test("falls back to existing approval path for native auto when reviewer is not wired", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
@@ -490,17 +494,17 @@ describe("permission auto routing", () => {
           metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
         }),
       ),
-    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
   })
 
-  test("honors explicit user reviewer configuration for native auto", async () => {
+  test("honors explicit user fallback for native auto", async () => {
     await expect(
       Effect.runPromise(
         PermissionAuto.evaluate({
           permission: "bash",
           patterns: ["git add ."],
           metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
-          reviewerDisabled: true,
+          reviewerFailureFallback: "user",
         }),
       ),
     ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
@@ -537,18 +541,63 @@ describe("permission auto routing", () => {
     expect(called).toBe(true)
   })
 
-  test("reviewer failures fail closed unless they explicitly request user fallback", async () => {
+  test("reviewer failures fall back to user approval by default", async () => {
     await expect(
       bash("git add .", {
         review: () => Effect.fail({ _tag: "PermissionReviewerTimedOut", message: "timed out" }),
       }),
-    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+
+    await expect(
+      bash("git add .", {
+        review: () => Effect.die(new Error("sdk defect")),
+      }),
+    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
 
     await expect(
       bash("git add .", {
         review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }),
       }),
     ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+  })
+
+  test("reviewer failures fail closed when fallback deny is configured", async () => {
+    const reviewer = {
+      review: () => Effect.fail({ _tag: "PermissionReviewerTimedOut", message: "timed out" }),
+    }
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git add ."],
+            metadata: { command: "git add ." },
+            // fallback=deny is the compatibility/safety escape hatch for users
+            // who want reviewer infrastructure failures to remain terminal.
+            reviewerFailureFallback: "deny",
+          },
+          reviewer,
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+
+    await expect(
+      Effect.runPromise(
+        PermissionAuto.evaluate(
+          {
+            permission: "bash",
+            patterns: ["git add ."],
+            metadata: { command: "git add ." },
+            // The fallback tag is a transport signal, not user authorization. An
+            // explicit fallback=deny caller must not be downgraded to ask by a
+            // stale or custom reviewer implementation returning that tag.
+            reviewerFailureFallback: "deny",
+          },
+          { review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }) },
+        ),
+      ),
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
   test("reviewer contract contradictions fail closed", async () => {
