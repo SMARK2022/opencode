@@ -12,5 +12,7 @@
     // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
     // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
     // "noUnusedParameters": true,  /* Report errors on unused parameters. */
-  }
+  },
+  // #267：限定 src/**——打包入口不因样例脚本或临时文件漂移
+  "include": ["src/**/*.ts"]
 }
