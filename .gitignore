@@ -29,6 +29,6 @@ opencode-dev
 UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
+**/.artifacts/
 tsconfig.tsbuildinfo
-archived/
 .temp/
