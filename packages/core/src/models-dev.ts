@@ -179,6 +179,7 @@ const layer = Layer.effect(
 
     const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
       // 原 client 仍负责 transient 重试及非 2xx typed failure，refresh 可继续吞掉可恢复失败。
+      // HttpClient seam 已由目标承载，保留可注入客户端和下层 infrastructure 路由，不重复装配 owner。
       return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
         HttpClientRequest.setHeader("User-Agent", USER_AGENT),
         http.execute,
