@@ -235,6 +235,19 @@ export const CompactionPart = Schema.Struct({
   auto: Schema.Boolean,
   overflow: Schema.optional(Schema.Boolean),
   tail_start_id: Schema.optional(MessageID),
+  // Recent-user mementos are stored on the completed compaction boundary instead of
+  // as synthetic user messages. Keeping them structural prevents the agent loop from
+  // treating the preserved instructions as a fresh user turn while still replaying
+  // them whenever the compacted context is converted for a provider request.
+  recent_user_messages: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: MessageID,
+        text: Schema.String,
+        truncated: Schema.optional(Schema.Boolean),
+      }),
+    ),
+  ),
 }).annotate({ identifier: "CompactionPart" })
 export type CompactionPart = Types.DeepMutable<Schema.Schema.Type<typeof CompactionPart>>
 
@@ -666,6 +679,26 @@ export type WithParts = {
   parts: Part[]
 }
 
+const RECENT_USER_MEMENTO_INTRO =
+  "Recent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail."
+
+export function formatRecentUserMemento(messages: NonNullable<CompactionPart["recent_user_messages"]>) {
+  if (messages.length === 0) return ""
+  // The XML-ish envelope is intentionally stable because it gives the next model
+  // a bounded, role-neutral handoff section before the normal compaction prompt.
+  // The ids are diagnostic anchors only; the preserved text remains the contract.
+  return [
+    "<recent-user-messages>",
+    RECENT_USER_MEMENTO_INTRO,
+    ...messages.flatMap((message, index) => [
+      `<message index="${index + 1}" id="${message.id}"${message.truncated ? ' truncated="true"' : ""}>`,
+      message.text,
+      "</message>",
+    ]),
+    "</recent-user-messages>",
+  ].join("\n")
+}
+
 const Cursor = Schema.Struct({
   id: MessageID,
   time: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -829,6 +862,16 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         }
 
         if (part.type === "compaction") {
+          const recentUserMemento = formatRecentUserMemento(part.recent_user_messages ?? [])
+          if (recentUserMemento) {
+            userMessage.parts.push({
+              type: "text",
+              text: recentUserMemento,
+            })
+          }
+          // Keep the historical compaction prompt after the memento so existing
+          // compacted summaries remain paired with the same user boundary, while
+          // newer models see the latest preserved user intent first.
           userMessage.parts.push({
             type: "text",
             text: "What did we do so far?",

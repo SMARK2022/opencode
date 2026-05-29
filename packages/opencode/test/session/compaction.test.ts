@@ -1164,6 +1164,175 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "preserves recent user instructions in compacted context when the full tail is not retained",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        const latest = yield* createUserMessage(session.id, "latest user instruction to preserve")
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: latest.id,
+          time: { created: Date.now() },
+        })
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(filtered, createModel({ context: 100_000, output: 32_000 }))
+        const compactedContext = JSON.stringify(modelMessages)
+
+        expect(compactedContext).toContain("<recent-user-messages>")
+        expect(compactedContext).toContain("latest user instruction to preserve")
+        expect(compactedContext).toContain("What did we do so far?")
+        expect(compactedContext.indexOf("latest user instruction to preserve")).toBeLessThan(
+          compactedContext.indexOf("What did we do so far?"),
+        )
+      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "bounds overlong recent user instructions in compacted context",
+    () => {
+      const stub = llm()
+      const mementoModel = createModel({ context: 10_000, output: 8_000 })
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const latest = yield* createUserMessage(
+          session.id,
+          `start of oversized instruction ${"x".repeat(100_000)} end of oversized instruction`,
+        )
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: latest.id,
+          time: { created: Date.now() },
+        })
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(
+          MessageV2.filterCompacted(MessageV2.stream(session.id)),
+          mementoModel,
+        )
+        const compactedContext = JSON.stringify(modelMessages)
+        const compactionPart = yield* readCompactionPart(session.id)
+        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
+
+        expect(compactedContext).toContain("start of oversized instruction")
+        expect(compactedContext).toContain("truncated for compaction memento")
+        expect(compactedContext).not.toContain("end of oversized instruction")
+        // The memento cap must follow 20% of the active model window, not just
+        // the absolute 20k ceiling, or small-context models would immediately
+        // re-overflow after compaction replay.
+        expect(TokenEstimate.estimateText(recentUserMemento)).toBeLessThanOrEqual(400)
+      }).pipe(
+        withCompaction({
+          llm: stub.layer,
+          provider: ProviderTest.fake({ model: mementoModel }),
+          config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps synthetic and ignored user text out of recent user mementos",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const latest = yield* createUserMessage(session.id, "real instruction")
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: latest.id,
+          sessionID: session.id,
+          type: "text",
+          text: "synthetic editor context should not be preserved",
+          synthetic: true,
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: latest.id,
+          sessionID: session.id,
+          type: "text",
+          text: "ignored text should not be preserved",
+          ignored: true,
+        })
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: latest.id,
+          time: { created: Date.now() },
+        })
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(
+          MessageV2.filterCompacted(MessageV2.stream(session.id)),
+          createModel({ context: 100_000, output: 32_000 }),
+        )
+        const compactedContext = JSON.stringify(modelMessages)
+
+        expect(compactedContext).toContain("real instruction")
+        expect(compactedContext).not.toContain("synthetic editor context should not be preserved")
+        expect(compactedContext).not.toContain("ignored text should not be preserved")
+      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "falls back to full summary when retained tail media exceeds preserve token budget",
     () => {
       const stub = llm()

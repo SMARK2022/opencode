@@ -702,6 +702,11 @@ export type CompactionPart = {
   auto: boolean
   overflow?: boolean
   tail_start_id?: string
+  recent_user_messages?: Array<{
+    id: string
+    text: string
+    truncated?: boolean
+  }>
 }
 
 export type Part =

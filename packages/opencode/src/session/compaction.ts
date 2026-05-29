@@ -41,9 +41,24 @@ export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
+// Whole-turn tail retention keeps exact assistant/tool continuity when it fits.
+// The defaults deliberately preserve four recent user turns with a 4k-16k token
+// adaptive budget: enough for normal coding turns, still bounded so compaction
+// does not recreate the same oversized context it is trying to replace.
 const DEFAULT_TAIL_TURNS = 4
 const MIN_PRESERVE_RECENT_TOKENS = 4_000
 const MAX_PRESERVE_RECENT_TOKENS = 16_000
+// Separate from full-turn tail retention: a large tool-heavy recent turn can be
+// too expensive to keep verbatim, but the user's latest instructions still need
+// a bounded handoff lane. 20k mirrors Codex's memento budget as an absolute cap;
+// preserveRecentUserBudget still clamps it to 20% of the active model's usable
+// window so a 100k-token usable window can spend at most 20k on the memento.
+const DEFAULT_PRESERVE_RECENT_USER_TOKENS = 20_000
+const PRESERVE_RECENT_USER_RATIO = 0.2
+// The truncation marker is part of the model-visible handoff so the next model
+// knows missing text was intentionally omitted by the memento budget, not by the
+// user. Keep it short because it can appear inside an already tight context.
+const RECENT_USER_MEMENTO_TRUNCATED = "...[truncated for compaction memento]"
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Goal
@@ -150,6 +165,71 @@ function preserveRecentBudget(input: { cfg: Config.Info; model: Provider.Model }
     input.cfg.compaction?.preserve_recent_tokens ??
     Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable(input) * 0.25)))
   )
+}
+
+function preserveRecentUserBudget(input: { cfg: Config.Info; model: Provider.Model; outputTokenMax?: number }) {
+  // No minimum floor here: unlike the whole-turn tail, this memento is additive
+  // to the summary and retained tail, so small-context models must be allowed to
+  // shrink it all the way to zero instead of immediately overflowing again.
+  return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
+}
+
+function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; maxTokens: number }) {
+  if (input.maxTokens <= 0) return []
+  const result: NonNullable<MessageV2.CompactionPart["recent_user_messages"]> = []
+  for (const msg of input.messages.toReversed()) {
+    if (msg.info.role !== "user") continue
+    if (msg.parts.some((part) => part.type === "compaction")) continue
+    // Preserve only explicit user-authored text. Synthetic editor/file context
+    // and ignored repair text are already represented elsewhere and replaying
+    // them here would turn the memento into another unbounded context source.
+    const text = msg.parts
+      .flatMap((part) => {
+        if (part.type !== "text") return []
+        if (part.synthetic || part.ignored) return []
+        const text = part.text.trim()
+        return text ? [text] : []
+      })
+      .join("\n\n")
+    if (!text) continue
+
+    const next = [{ id: msg.info.id, text }, ...result]
+    if (TokenEstimate.estimateText(MessageV2.formatRecentUserMemento(next)) <= input.maxTokens) {
+      result.unshift({ id: msg.info.id, text })
+      continue
+    }
+
+    const truncated = truncateRecentUserMessage({ id: msg.info.id, text, result, maxTokens: input.maxTokens })
+    if (truncated) result.unshift({ id: msg.info.id, text: truncated, truncated: true })
+    break
+  }
+  return result
+}
+
+function truncateRecentUserMessage(input: {
+  id: MessageID
+  text: string
+  result: NonNullable<MessageV2.CompactionPart["recent_user_messages"]>
+  maxTokens: number
+}) {
+  // Binary search against the same formatted envelope that will be replayed to
+  // the provider. This keeps the budget guard tied to observable model context
+  // rather than a second, drift-prone character-count approximation.
+  let low = 0
+  let high = input.text.length
+  let best = ""
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2)
+    const text = [input.text.slice(0, mid).trimEnd(), RECENT_USER_MEMENTO_TRUNCATED].filter(Boolean).join("\n")
+    const next = [{ id: input.id, text, truncated: true }, ...input.result]
+    if (TokenEstimate.estimateText(MessageV2.formatRecentUserMemento(next)) <= input.maxTokens) {
+      best = text
+      low = mid + 1
+      continue
+    }
+    high = mid - 1
+  }
+  return best
 }
 
 function turns(messages: MessageV2.WithParts[]) {
@@ -441,8 +521,13 @@ export const layer = Layer.effect(
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
+      const visibleHistory = history.filter((_, index) => !hidden.has(index))
+      const recentUserMessages = collectRecentUserMessages({
+        messages: visibleHistory,
+        maxTokens: preserveRecentUserBudget({ cfg, model, outputTokenMax: flags.outputTokenMax }),
+      })
       const selected = yield* select({
-        messages: history.filter((_, index) => !hidden.has(index)),
+        messages: visibleHistory,
         cfg,
         model,
       })
@@ -562,10 +647,19 @@ export const layer = Layer.effect(
         return "stop"
       }
 
-      if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
+      const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
+      if (
+        compactionPart &&
+        (compactionPart.tail_start_id !== selected.tail_start_id ||
+          JSON.stringify(compactionPart.recent_user_messages ?? []) !== JSON.stringify(nextRecentUserMessages ?? []))
+      ) {
+        // Store both replay anchors on the same compaction boundary. tail_start_id
+        // keeps whole recent turns when they fit, while recent_user_messages keeps
+        // the latest user intent available even when a tool-heavy tail is too big.
         yield* session.updatePart({
           ...compactionPart,
           tail_start_id: selected.tail_start_id,
+          recent_user_messages: nextRecentUserMessages,
         })
       }
 
