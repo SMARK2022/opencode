@@ -148,12 +148,16 @@ function collectRecentUserMessages(input: { messages: SessionV1.WithParts[]; max
   // #256：从最新到最旧反向收集——预算有限时先保住最新指令；压缩标记消息本身不是用户指令。
   for (const msg of input.messages.toReversed()) {
     if (msg.info.role !== "user") continue
+    // #257：撤销/隐藏产生的消息一律不进 memento——它们不是有效的用户意图
+    if (msg.info.hidden) continue
     if (msg.parts.some((part) => part.type === "compaction")) continue
     // #256：只保留用户手写文本——synthetic 编辑器/文件上下文与 ignored 修复文本
     // 已由其他通道表示，再进 memento 会把记忆变成又一个无界上下文源。
     const text = msg.parts
       .flatMap((part) => {
         if (part.type !== "text") return []
+        // #257：hidden part 同样排除——撤销粒度可到 part 级
+        if (part.hidden) return []
         if (part.synthetic || part.ignored) return []
         const text = part.text.trim()
         return text ? [text] : []
@@ -484,8 +488,11 @@ const layer = Layer.effect(
       // #256：visibleHistory 与 select 共用——memento 从可见窗口收集，避免把 hidden 的
       // 压缩标记/summary 对当作用户指令回放。
       const visibleHistory = history.filter((_, index) => !hidden.has(index))
+      // #257：memento 从 rawHistory 采集——filterCompacted 会移除已压缩 head，但那些
+      // 原始最近用户指令仍应有一次有界截断机会进入下次交接；hidden/synthetic/ignored/
+      // 压缩标记内容由 collectRecentUserMessages 内部排除。
       const recentUserMessages = collectRecentUserMessages({
-        messages: visibleHistory,
+        messages: rawHistory,
         maxTokens: preserveRecentUserBudget({ cfg, model, outputTokenMax: flags.outputTokenMax }),
       })
       const selected = yield* select({

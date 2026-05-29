@@ -16,6 +16,7 @@ import { ModelV2 } from "../model"
 import { ProviderV2 } from "../provider"
 import { SessionRunnerModel } from "./runner/model"
 import { SessionMemento } from "./compaction-memento"
+import { SessionHistory } from "./history"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_BUFFER_MIN = 5_000
@@ -230,8 +231,10 @@ export const make = (dependencies: Dependencies) => {
     const usable = inputLimit
       ? inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, (context ?? 0) - inputLimit)))
       : (context ?? 0) - output
+    // 普通模型仍只读活动窗；原话单独读取真实历史，截止本次快照以免吞入并发新输入。
+    const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0))
     const recentUserMessages = SessionMemento.collect(
-      input.entries.flatMap(entry => entry.message.type === "user" ? [{ id: entry.message.id, text: entry.message.text }] : []), Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
+      rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),

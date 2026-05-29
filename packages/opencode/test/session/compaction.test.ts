@@ -1261,7 +1261,62 @@ describe("session.compaction.process", () => {
 
   itCompaction.instance(
     // #256：synthetic/ignored 文本不得污染 memento——过滤按 part 粒度生效
-    "keeps synthetic and ignored user text out of recent user mementos",
+    "preserves raw recent user instructions across repeated compactions",
+    () => {
+      const stub = llm()
+      const mementoModel = createModel({ context: 10_000, output: 8_000 })
+      stub.push(reply("first summary"))
+      stub.push(reply("second summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(
+          session.id,
+          `raw instruction before prior compaction ${"x".repeat(100_000)} end of raw instruction`,
+        )
+        yield* createSummaryCompaction(session.id)
+        // #257：第一次压缩后 raw 指令被 summary 覆盖——第二次压缩仍从 rawHistory 找回它
+
+        let msgs = yield* ssn.messages({ sessionID: session.id })
+        let parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        // #257：第二次压缩基于第一次压缩后的尾部——memento 只携带尚未被压缩边界覆盖的原始指令
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const latest = yield* createUserMessage(session.id, "latest request after prior compaction")
+        yield* createAssistantMessage(session.id, latest.id, test.directory)
+        yield* createSummaryCompaction(session.id)
+
+        msgs = yield* ssn.messages({ sessionID: session.id })
+        parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const compactionPart = yield* readCompactionPart(session.id)
+        // #257：readCompactionPart 读最近一次压缩边界——两次压缩后取第二次的 memento
+        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
+
+        // #257：核心不变量——首次压缩前的 raw 指令在第二次压缩后仍须完整出现在 memento 中
+        expect(recentUserMemento).toContain("latest request after prior compaction")
+        expect(recentUserMemento).toContain("raw instruction before prior compaction")
+        expect(recentUserMemento).toContain("truncated for compaction memento")
+        expect(recentUserMemento).not.toContain("end of raw instruction")
+        expect(TokenEstimate.estimateText(recentUserMemento)).toBeLessThanOrEqual(400)
+        // #257：10K 窗口 20% 预算——跨压缩截断仍须保持同一上限
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          provider: ProviderTest.fake({ model: mementoModel }),
+          config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps synthetic, ignored, and hidden user text out of recent user mementos",
     () => {
       const stub = llm()
       stub.push(reply("summary"))
@@ -1285,6 +1340,21 @@ describe("session.compaction.process", () => {
           type: "text",
           text: "ignored text should not be preserved",
           ignored: true,
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: latest.id,
+          sessionID: session.id,
+          type: "text",
+          text: "hidden text part should not be preserved",
+          hidden: { time: Date.now(), reason: "undo" },
+        // #257：hidden 结构为 {time, reason}——撤销标记必须同时排除 part 与整条消息
+        })
+        const hiddenMsg = yield* createUserMessage(session.id, "hidden message should not be preserved")
+        yield* ssn.updateMessage({
+          ...hiddenMsg,
+        // #257：对已创建消息二次更新打 hidden 标记——比创建时传参更接近真实撤销路径
+          hidden: { time: Date.now(), reason: "undo" },
         })
         yield* ssn.updateMessage({
           id: MessageID.ascending(),
@@ -1314,10 +1384,11 @@ describe("session.compaction.process", () => {
         const compactedContext = JSON.stringify(modelMessages)
 
         expect(compactedContext).toContain("real instruction")
-        // #256：synthetic/ignored part 附加在同一消息上——过滤按 part 粒度生效
-        // #256：synthetic/ignored 文本绝不能进入 memento——它们已被其他通道表示
+        // #257：synthetic/ignored/hidden 都按 part 粒度排除——hidden 消息整体跳过
         expect(compactedContext).not.toContain("synthetic editor context should not be preserved")
         expect(compactedContext).not.toContain("ignored text should not be preserved")
+        expect(compactedContext).not.toContain("hidden text part should not be preserved")
+        expect(compactedContext).not.toContain("hidden message should not be preserved")
       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
     },
     { git: true },

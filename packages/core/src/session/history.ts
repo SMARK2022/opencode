@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, ne, or } from "drizzle-orm"
+import { and, asc, desc, eq, gt, gte, lte, ne, or } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { Database } from "../database/database"
 import { MessageDecodeError } from "./error"
@@ -98,6 +98,20 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   return (yield* Effect.forEach(rows, (row) =>
     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
   )).filter((entry) => !hidden(entry.message.metadata?.hidden))
+})
+
+// memento只读本次边界内的原始user行，不经过latestCompaction，也不从旧摘要反推原话。
+export const rawUserMessages = Effect.fn("SessionHistory.rawUserMessages")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  throughSeq: number,
+) {
+  const rows = yield* db.select().from(SessionMessageTable).where(and(
+    eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "user"), lte(SessionMessageTable.seq, throughSeq),
+  )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
+  const messages = yield* Effect.forEach(rows, decodeMessageRow)
+  // 使用同一合法hidden合同；synthetic、助手和未promote的inbox本来就不属于user行。
+  return messages.flatMap(message => message.type === "user" && !hidden(message.metadata?.hidden) ? [message] : [])
 })
 
 export * as SessionHistory from "./history"
