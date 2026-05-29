@@ -462,6 +462,8 @@ export namespace Compaction {
       reason: Started.data.fields.reason,
       text: Schema.String,
       recent: Schema.String,
+      // 与持久消息使用同一optional合同，重放时不重新采集或改写原话。
+      recent_user_messages: SessionMessage.Compaction.fields.recent_user_messages,
       usage: Usage.pipe(optional),
     },
   })

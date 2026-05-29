@@ -36,6 +36,14 @@ const PRUNE_PROTECTED_TOOLS = ["skill"]
 // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
 const MIN_PRESERVE_RECENT_TOKENS = 4_000
 const MAX_PRESERVE_RECENT_TOKENS = 16_000
+// #256：整轮尾部保留之外，还需要一条独立的最近用户指令通道（memento）：工具密集的
+// 最近一轮可能因预算限制整轮被压缩，但用户最新意图必须原样交给后续模型。
+// #256：20K 对齐 Codex memento 的绝对上限；ratio 0.2 使预算始终随模型窗口伸缩。
+const DEFAULT_PRESERVE_RECENT_USER_TOKENS = 20_000
+const PRESERVE_RECENT_USER_RATIO = 0.2
+// #256：截断标记是模型可见交接的一部分——后续模型据此知道缺失文本是 memento 预算
+// 主动省略而非用户删除。保持短小，因为它会出现在本就紧张的上下文中。
+const RECENT_USER_MEMENTO_TRUNCATED = "...[truncated for compaction memento]"
 type Turn = {
   start: number
   end: number
@@ -122,6 +130,73 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
     input.cfg.compaction?.preserve_recent_tokens ??
     Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable(input) * 0.25)))
   )
+}
+
+// #256：memento 预算没有下限——与整轮尾部不同，它是 summary+tail 之上的增量，
+// 小窗口模型必须允许把它缩到 0，否则压缩重放后立刻再次溢出。
+function preserveRecentUserBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
+  return Math.min(
+    DEFAULT_PRESERVE_RECENT_USER_TOKENS,
+    Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
+  )
+}
+
+function collectRecentUserMessages(input: { messages: SessionV1.WithParts[]; maxTokens: number }) {
+  // #256：预算归零直接返回空——memento 是增量通道，不允许倒逼上下文溢出
+  if (input.maxTokens <= 0) return []
+  const result: NonNullable<SessionV1.CompactionPart["recent_user_messages"]> = []
+  // #256：从最新到最旧反向收集——预算有限时先保住最新指令；压缩标记消息本身不是用户指令。
+  for (const msg of input.messages.toReversed()) {
+    if (msg.info.role !== "user") continue
+    if (msg.parts.some((part) => part.type === "compaction")) continue
+    // #256：只保留用户手写文本——synthetic 编辑器/文件上下文与 ignored 修复文本
+    // 已由其他通道表示，再进 memento 会把记忆变成又一个无界上下文源。
+    const text = msg.parts
+      .flatMap((part) => {
+        if (part.type !== "text") return []
+        if (part.synthetic || part.ignored) return []
+        const text = part.text.trim()
+        return text ? [text] : []
+      })
+      .join("\n\n")
+    if (!text) continue
+
+    const next = [{ id: msg.info.id, text }, ...result]
+    if (TokenEstimate.estimateText(MessageV2.formatRecentUserMemento(next)) <= input.maxTokens) {
+      result.unshift({ id: msg.info.id, text })
+      continue
+    }
+
+    const truncated = truncateRecentUserMessage({ id: msg.info.id, text, result, maxTokens: input.maxTokens })
+    if (truncated) result.unshift({ id: msg.info.id, text: truncated, truncated: true })
+    break
+  }
+  return result
+}
+
+function truncateRecentUserMessage(input: {
+  id: MessageID
+  text: string
+  result: NonNullable<SessionV1.CompactionPart["recent_user_messages"]>
+  maxTokens: number
+}) {
+  // #256：二分搜索对同一个将被重放的格式化信封做 token 估算——预算守卫绑定的是
+  // 模型可见上下文，而不是会漂移的字符数近似。
+  let low = 0
+  let high = input.text.length
+  let best = ""
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2)
+    const text = [input.text.slice(0, mid).trimEnd(), RECENT_USER_MEMENTO_TRUNCATED].filter(Boolean).join("\n")
+    const next = [{ id: input.id, text, truncated: true }, ...input.result]
+    if (TokenEstimate.estimateText(MessageV2.formatRecentUserMemento(next)) <= input.maxTokens) {
+      best = text
+      low = mid + 1
+      continue
+    }
+    high = mid - 1
+  }
+  return best
 }
 
 function turns(messages: SessionV1.WithParts[]) {
@@ -406,8 +481,15 @@ const layer = Layer.effect(
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
+      // #256：visibleHistory 与 select 共用——memento 从可见窗口收集，避免把 hidden 的
+      // 压缩标记/summary 对当作用户指令回放。
+      const visibleHistory = history.filter((_, index) => !hidden.has(index))
+      const recentUserMessages = collectRecentUserMessages({
+        messages: visibleHistory,
+        maxTokens: preserveRecentUserBudget({ cfg, model, outputTokenMax: flags.outputTokenMax }),
+      })
       const selected = yield* select({
-        messages: history.filter((_, index) => !hidden.has(index)),
+        messages: visibleHistory,
         cfg,
         model,
       })
@@ -504,10 +586,18 @@ const layer = Layer.effect(
         return "stop"
       }
 
-      if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
+      // #256：双锚点更新——tail_start_id 保留整轮尾部，recent_user_messages 保留最新用户意图；
+      // 任一变化都触发持久化，保证 memento 与尾部边界在同一压缩边界上对齐。
+      const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
+      if (
+        compactionPart &&
+        (compactionPart.tail_start_id !== selected.tail_start_id ||
+          JSON.stringify(compactionPart.recent_user_messages ?? []) !== JSON.stringify(nextRecentUserMessages ?? []))
+      ) {
         yield* session.updatePart({
           ...compactionPart,
           tail_start_id: selected.tail_start_id,
+          recent_user_messages: nextRecentUserMessages,
         })
       }
 

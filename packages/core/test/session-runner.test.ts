@@ -1785,6 +1785,7 @@ describe("SessionRunnerLLM", () => {
   it.live("manual compaction stops after summarizing retained tool tail", () =>
     Effect.gen(function* () {
       yield* setup
+      currentModel = Model.make({ id: model.id, provider: model.provider, route: OpenAIChat.route.with({ limits: { context: 100_000, output: 4_096 } }) })
       const session = yield* SessionV2.Service
       response = fragmentFixture("text", "manual-earlier", ["Earlier answer"]).completeEvents
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
@@ -1813,6 +1814,8 @@ describe("SessionRunnerLLM", () => {
       expect(context[0]).toMatchObject({ type: "compaction", summary: "Summary" })
       if (context[0].type !== "compaction") return yield* Effect.die("Missing manual summary")
       expect(context[0].recent).toContain("[User]: Keep recent tool turn")
+      // 原话通过真实Ended与SQL投影保存；排队但尚未promote的用户输入不进入交接。
+      expect(context[0].recent_user_messages?.map(message => message.text)).toEqual(["Earlier question", "Keep recent tool turn"])
       expect(context[0].recent).toContain("[Tool result]: tail output")
       expect(executions).toHaveLength(0)
       const db = (yield* Database.Service).db
@@ -1820,7 +1823,7 @@ describe("SessionRunnerLLM", () => {
       yield* replaySessionProjection(sessionID)
       expect(yield* session.context(sessionID)).toEqual(context)
       const history = yield* session.history({ sessionID, limit: 100 })
-      expect(history.events.filter(event => event.type === SessionEvent.Compaction.Ended.type).map(event => event.data)).toMatchObject([{ reason: "manual", text: "Summary" }])
+      expect(history.events.filter(event => event.type === SessionEvent.Compaction.Ended.type).map(event => event.data)).toMatchObject([{ reason: "manual", text: "Summary", recent_user_messages: context[0].recent_user_messages }])
       response = fragmentFixture("text", "manual-later", ["Later answer"]).completeEvents
       yield* session.resume(sessionID)
       expect(requests).toHaveLength(2)
@@ -2178,7 +2181,11 @@ describe("SessionRunnerLLM", () => {
       const continuation = userTexts(requests[1])[0]
       expect(summary.match(/OVERSIZED_BOUNDARY/g)).toHaveLength(1)
       expect(summary).toContain(oversized)
-      expect(continuation).not.toContain("OVERSIZED_BOUNDARY")
+      // 整段recent仍不留片段；独立memento按source预算保留用户原话前缀。
+      expect(continuation).toContain("OVERSIZED_BOUNDARY")
+      expect(continuation).toContain("...[truncated for compaction memento]")
+      expect(continuation.indexOf("<recent-user-messages>")).toBeLessThan(continuation.indexOf("<conversation-checkpoint>"))
+      expect(continuation.match(/OVERSIZED_BOUNDARY/g)).toHaveLength(1)
       expect(continuation).not.toContain("OVERSIZED_END")
       expect(continuation).toContain("<recent-context>\n\n</recent-context>")
     }),

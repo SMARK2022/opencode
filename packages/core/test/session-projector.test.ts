@@ -660,6 +660,7 @@ describe("SessionProjector", () => {
         reason: "manual",
         text: "summary",
         recent: "recent context",
+        recent_user_messages: [{ id: SessionMessage.ID.make("msg_instruction"), text: "Exact instruction", truncated: true }],
       })
 
       const rows = yield* db
@@ -687,7 +688,9 @@ describe("SessionProjector", () => {
       expect(messages.find((message) => message.type === "compaction")).toMatchObject({
         summary: "summary",
         recent: "recent context",
+        recent_user_messages: [{ id: "msg_instruction", text: "Exact instruction", truncated: true }],
       })
+      expect(rows.find(row => row.type === "compaction")?.data).toMatchObject({ recent_user_messages: [{ id: "msg_instruction", text: "Exact instruction", truncated: true }] })
       expect(
         yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
       ).toMatchObject({

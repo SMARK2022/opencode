@@ -432,6 +432,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             reason: event.data.reason,
             summary: event.data.text,
             recent: event.data.recent,
+            // 持久投影传递原事件字段，进程重放不能从当前历史重新构造memento。
+            recent_user_messages: event.data.recent_user_messages,
             time: { created: event.data.timestamp },
           }),
         )
