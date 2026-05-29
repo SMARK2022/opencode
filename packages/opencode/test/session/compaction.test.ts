@@ -1272,7 +1272,57 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "keeps synthetic and ignored user text out of recent user mementos",
+    "preserves raw recent user instructions across repeated compactions",
+    () => {
+      const stub = llm()
+      const mementoModel = createModel({ context: 10_000, output: 8_000 })
+      stub.push(reply("first summary"))
+      stub.push(reply("second summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(
+          session.id,
+          `raw instruction before prior compaction ${"x".repeat(100_000)} end of raw instruction`,
+        )
+        yield* createSummaryCompaction(session.id)
+
+        let msgs = yield* ssn.messages({ sessionID: session.id })
+        let parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const latest = yield* createUserMessage(session.id, "latest request after prior compaction")
+        yield* createAssistantMessage(session.id, latest.id, test.directory)
+        yield* createSummaryCompaction(session.id)
+
+        msgs = yield* ssn.messages({ sessionID: session.id })
+        parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const compactionPart = yield* readCompactionPart(session.id)
+        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
+
+        expect(recentUserMemento).toContain("latest request after prior compaction")
+        expect(recentUserMemento).toContain("raw instruction before prior compaction")
+        expect(recentUserMemento).toContain("truncated for compaction memento")
+        expect(recentUserMemento).not.toContain("end of raw instruction")
+        expect(TokenEstimate.estimateText(recentUserMemento)).toBeLessThanOrEqual(400)
+      }).pipe(
+        withCompaction({
+          llm: stub.layer,
+          provider: ProviderTest.fake({ model: mementoModel }),
+          config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps synthetic, ignored, and hidden user text out of recent user mementos",
     () => {
       const stub = llm()
       stub.push(reply("summary"))
@@ -1296,6 +1346,19 @@ describe("session.compaction.process", () => {
           type: "text",
           text: "ignored text should not be preserved",
           ignored: true,
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: latest.id,
+          sessionID: latest.sessionID,
+          type: "text",
+          text: "hidden text part should not be preserved",
+          hidden: { time: Date.now(), reason: "undo" },
+        })
+        const hidden = yield* createUserMessage(session.id, "hidden message should not be preserved")
+        yield* ssn.updateMessage({
+          ...hidden,
+          hidden: { time: Date.now(), reason: "undo" },
         })
         yield* ssn.updateMessage({
           id: MessageID.ascending(),
@@ -1327,6 +1390,8 @@ describe("session.compaction.process", () => {
         expect(compactedContext).toContain("real instruction")
         expect(compactedContext).not.toContain("synthetic editor context should not be preserved")
         expect(compactedContext).not.toContain("ignored text should not be preserved")
+        expect(compactedContext).not.toContain("hidden text part should not be preserved")
+        expect(compactedContext).not.toContain("hidden message should not be preserved")
       }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
     },
     { git: true },

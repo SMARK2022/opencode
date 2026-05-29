@@ -179,6 +179,7 @@ function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; max
   const result: NonNullable<MessageV2.CompactionPart["recent_user_messages"]> = []
   for (const msg of input.messages.toReversed()) {
     if (msg.info.role !== "user") continue
+    if (msg.info.hidden) continue
     if (msg.parts.some((part) => part.type === "compaction")) continue
     // Preserve only explicit user-authored text. Synthetic editor/file context
     // and ignored repair text are already represented elsewhere and replaying
@@ -186,6 +187,7 @@ function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; max
     const text = msg.parts
       .flatMap((part) => {
         if (part.type !== "text") return []
+        if (part.hidden) return []
         if (part.synthetic || part.ignored) return []
         const text = part.text.trim()
         return text ? [text] : []
@@ -523,7 +525,12 @@ export const layer = Layer.effect(
       const previousSummary = prior.at(-1)?.summary
       const visibleHistory = history.filter((_, index) => !hidden.has(index))
       const recentUserMessages = collectRecentUserMessages({
-        messages: visibleHistory,
+        // Use raw history for the memento lane: filterCompacted intentionally
+        // removes the summarized head after a completed compaction, but those raw
+        // recent user instructions still need one bounded chance to be truncated
+        // into the next handoff. collectRecentUserMessages keeps hidden,
+        // synthetic, ignored, and compaction-marker content out of this replay.
+        messages: rawHistory,
         maxTokens: preserveRecentUserBudget({ cfg, model, outputTokenMax: flags.outputTokenMax }),
       })
       const selected = yield* select({
