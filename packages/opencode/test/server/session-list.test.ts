@@ -1,13 +1,19 @@
 import { afterEach, describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Session as SessionNs } from "@/session/session"
+import { MessageV2 } from "@/session/message-v2"
+import { MessageID, PartID, type SessionID } from "@/session/schema"
+import { ModelID, ProviderID } from "@/provider/schema"
 import * as Log from "@opencode-ai/core/util/log"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { SessionMessage } from "@opencode-ai/core/session-message"
 import { disposeAllInstances, provideInstance, TestInstance } from "../fixture/fixture"
 import { mkdir, mkdtemp, realpath, rm } from "fs/promises"
 import path from "path"
 import os from "os"
 import { Database } from "@/storage/db"
-import { SessionTable } from "@/session/session.sql"
+import { SessionMessageTable, SessionTable } from "@/session/session.sql"
 import { ProjectTable } from "@/project/project.sql"
 import { ProjectID } from "@/project/schema"
 import { eq } from "drizzle-orm"
@@ -37,6 +43,56 @@ const withSession = (input?: Parameters<SessionNs.Interface["create"]>[0]) =>
     SessionNs.Service.use((session) => session.create(input)),
     (created) => SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
   )
+
+// 搜索回归测试只通过 Session service 写入 v1 消息，再通过 list({ search })
+// 观察公开行为；helper 固定最小可用消息壳，避免每个断言都复制与搜索无关的
+// agent/model/token 字段，同时保持持久化形状与真实 session 投影一致。
+const createSearchUserMessage = Effect.fn("SessionListTest.createSearchUserMessage")(function* (sessionID: SessionID) {
+  const messageID = MessageID.ascending()
+  const message: MessageV2.User = {
+    id: messageID,
+    sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: "test",
+    model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+    tools: {},
+  }
+  yield* SessionNs.Service.use((session) => session.updateMessage(message))
+  return messageID
+})
+
+// Assistant 行需要真实 parent 和 token 外壳，因为搜索面对的是持久化历史而非
+// 内存 fixture。这里刻意使用普通值，让 "reasoning"/"output" 这类词只会在
+// 搜索逻辑错误索引 JSON 键名或排除字段时命中。
+const createSearchAssistantMessage = Effect.fn("SessionListTest.createSearchAssistantMessage")(function* (
+  sessionID: SessionID,
+  parentID: MessageID,
+) {
+  const messageID = MessageID.ascending()
+  const message: MessageV2.Assistant = {
+    id: messageID,
+    sessionID,
+    role: "assistant",
+    time: { created: Date.now() },
+    parentID,
+    modelID: ModelID.make("test"),
+    providerID: ProviderID.make("test"),
+    mode: "",
+    agent: "test",
+    path: { cwd: "/", root: "/" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  yield* SessionNs.Service.use((session) => session.updateMessage(message))
+  return messageID
+})
+
+// 保持断言入口等同 TUI/API 的真实路径：所有期望都从 session.list(search)
+// 得到 session id 集合，而不是读取 SQL 或具体 JSON 字段实现。
+const searchIDs = Effect.fn("SessionListTest.searchIDs")(function* (search: string) {
+  return (yield* SessionNs.Service.use((session) => session.list({ search }))).map((session) => session.id)
+})
 
 const initGitRepo = (directory: string) =>
   Effect.gen(function* () {
@@ -566,6 +622,337 @@ describe("session.list", () => {
 
         expect(titles).toContain("unique-search-term-abc")
         expect(titles).not.toContain("other-session-xyz")
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "searches v1 visible text and tool input without indexing thinking or tool results",
+    () =>
+      Effect.gen(function* () {
+        const title = yield* withSession({ title: "search-title-v1-needle" })
+        const visible = yield* withSession({ title: "v1 visible holder" })
+        const visibleMessage = yield* createSearchUserMessage(visible.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: visible.id,
+            messageID: visibleMessage,
+            type: "text",
+            text: "visible-text-v1-needle",
+          }),
+        )
+
+        const tool = yield* withSession({ title: "v1 tool holder" })
+        const toolParent = yield* createSearchUserMessage(tool.id)
+        const toolMessage = yield* createSearchAssistantMessage(tool.id, toolParent)
+        const command = `TARGET="space path"; printf "$TARGET" | grep "safe phrase" > "out file"; echo $(pwd); rm -rf "./danger zone"`
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: tool.id,
+            messageID: toolMessage,
+            type: "tool",
+            callID: "v1-tool-call",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: {
+                command,
+                empty: "",
+                nested: { path: "folder with spaces/file.ts" },
+              },
+              output: "secret-result-v1-needle",
+              title: "visible-tool-title-v1-needle",
+              metadata: {
+                autoReview: { outcome: "deny", note: "approval-hidden-v1-needle" },
+                secret: "metadata-hidden-v1-needle",
+              },
+              time: { start: 1, end: 2 },
+            },
+            metadata: { secret: "part-metadata-hidden-v1-needle" },
+          } satisfies MessageV2.ToolPart),
+        )
+
+        const thinking = yield* withSession({ title: "v1 private holder" })
+        const thinkingParent = yield* createSearchUserMessage(thinking.id)
+        const thinkingMessage = yield* createSearchAssistantMessage(thinking.id, thinkingParent)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: thinking.id,
+            messageID: thinkingMessage,
+            type: "reasoning",
+            text: "private-thinking-v1-needle",
+            time: { start: 1, end: 2 },
+          }),
+        )
+
+        const ignored = yield* withSession({ title: "v1 ignored holder" })
+        const ignoredMessage = yield* createSearchUserMessage(ignored.id)
+        yield* SessionNs.Service.use((session) =>
+          Effect.all([
+            session.updatePart({
+              id: PartID.ascending(),
+              sessionID: ignored.id,
+              messageID: ignoredMessage,
+              type: "text",
+              text: "synthetic-hidden-v1-needle",
+              synthetic: true,
+            }),
+            session.updatePart({
+              id: PartID.ascending(),
+              sessionID: ignored.id,
+              messageID: ignoredMessage,
+              type: "text",
+              text: "ignored-hidden-v1-needle",
+              ignored: true,
+            }),
+          ]),
+        )
+
+        const failedTool = yield* withSession({ title: "v1 failed tool holder" })
+        const failedToolParent = yield* createSearchUserMessage(failedTool.id)
+        const failedToolMessage = yield* createSearchAssistantMessage(failedTool.id, failedToolParent)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: failedTool.id,
+            messageID: failedToolMessage,
+            type: "tool",
+            callID: "v1-failed-tool-call",
+            tool: "bash",
+            state: {
+              status: "error",
+              input: { command: "false" },
+              error: "secret-error-v1-needle",
+              metadata: { secret: "error-metadata-hidden-v1-needle" },
+              time: { start: 1, end: 2 },
+            },
+          } satisfies MessageV2.ToolPart),
+        )
+
+        const pendingTool = yield* withSession({ title: "v1 pending tool holder" })
+        const pendingToolParent = yield* createSearchUserMessage(pendingTool.id)
+        const pendingToolMessage = yield* createSearchAssistantMessage(pendingTool.id, pendingToolParent)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: pendingTool.id,
+            messageID: pendingToolMessage,
+            type: "tool",
+            callID: "v1-pending-tool-call",
+            tool: "bash",
+            state: {
+              status: "pending",
+              input: {},
+              raw: JSON.stringify({ command: "pending raw v1 value", path: "pending folder/file.ts" }),
+            },
+          } satisfies MessageV2.ToolPart),
+        )
+
+        // 这些搜索词覆盖 TUI session 搜索应该保留的 v1 语义面：标题、可见文本、
+        // 工具名、工具标题，以及 shell 命令值中的引号、环境变量、管道、重定向、
+        // 子命令、空格路径和危险命令字面量。搜索只负责定位历史，不做权限判断。
+        for (const [term, sessionID] of [
+          ["search-title-v1-needle", title.id],
+          ["visible-text-v1-needle", visible.id],
+          ["bash", tool.id],
+          ["visible-tool-title-v1-needle", tool.id],
+          ["space path", tool.id],
+          ['$TARGET', tool.id],
+          ['grep "safe phrase"', tool.id],
+          ['> "out file"', tool.id],
+          ["$(pwd)", tool.id],
+          ['rm -rf "./danger zone"', tool.id],
+          ["folder with spaces/file.ts", tool.id],
+          ["false", failedTool.id],
+          ["pending raw v1 value", pendingTool.id],
+          ["pending folder/file.ts", pendingTool.id],
+        ] as const) {
+          expect(yield* searchIDs(term)).toContain(sessionID)
+        }
+
+        // 这些词只存在于 thinking、tool result、metadata、synthetic/ignored 文本或
+        // JSON 键名中；若命中说明 session 搜索又退回了“整段 JSON 搜索”。
+        for (const [term, sessionID] of [
+          ["private-thinking-v1-needle", thinking.id],
+          ["secret-result-v1-needle", tool.id],
+          ["metadata-hidden-v1-needle", tool.id],
+          ["approval-hidden-v1-needle", tool.id],
+          ["part-metadata-hidden-v1-needle", tool.id],
+          ["synthetic-hidden-v1-needle", ignored.id],
+          ["ignored-hidden-v1-needle", ignored.id],
+          ["secret-error-v1-needle", failedTool.id],
+          ["error-metadata-hidden-v1-needle", failedTool.id],
+          ["command", pendingTool.id],
+          ["path", pendingTool.id],
+          ["command", tool.id],
+          ["output", tool.id],
+          ["reasoning", thinking.id],
+        ] as const) {
+          expect(yield* searchIDs(term)).not.toContain(sessionID)
+        }
+
+        const blank = yield* searchIDs("   ")
+        expect(blank).toContain(title.id)
+        expect(blank).toContain(visible.id)
+        expect(blank).toContain(tool.id)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "searches v2 visible text and tool input without indexing thinking or tool results",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* withSession({ title: "v2 search holder" })
+        const toolCommand = `TARGET="quoted v2 path"; printf "$TARGET" | grep "v2 safe phrase" > "v2 out file"; echo $(pwd); rm -rf "./v2 danger"`
+        const shellCommand = `printf "$HOME" | sed 's/home/HOME/' > "shell out file"`
+
+        // v2 session_message 是 event-system 提供给 v2 session list 的投影。
+        // 这里直接插入投影行，是为了只验证公开 list(search) 行为，并覆盖已经
+        // 落库的历史投影数据；不启动 streaming/event pipeline，避免测试变成
+        // 对消息生成流程的集成测试。
+        yield* Effect.sync(() =>
+          Database.use((db) =>
+            db
+              .insert(SessionMessageTable)
+              .values([
+                {
+                  id: SessionMessage.ID.create(),
+                  session_id: session.id,
+                  type: "user",
+                  time_created: 1,
+                  data: {
+                    text: "v2-user-visible-needle",
+                    files: [
+                      {
+                        uri: "file:///tmp/v2-visible-file.ts",
+                        mime: "text/plain",
+                        name: "v2-file-visible-needle",
+                        description: "v2-file-description-needle",
+                      },
+                      {
+                        uri: "data:text/plain,v2-data-uri-hidden-needle",
+                        mime: "text/plain",
+                        name: "v2-data-name-visible-needle",
+                      },
+                    ],
+                    agents: [{ name: "v2-agent-visible-needle" }],
+                    references: [
+                      {
+                        name: "v2-reference-visible-needle",
+                        kind: "local",
+                        uri: "file:///tmp/v2-reference.ts",
+                        repository: "v2-repository-visible-needle",
+                        branch: "v2-branch-visible-needle",
+                        target: "v2-target-visible-needle",
+                        targetUri: "file:///tmp/v2-target-visible.ts",
+                      },
+                    ],
+                    time: { created: 1 },
+                  } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+                },
+                {
+                  id: SessionMessage.ID.create(),
+                  session_id: session.id,
+                  type: "assistant",
+                  time_created: 2,
+                  data: {
+                    agent: "build",
+                    model: {
+                      id: ModelV2.ID.make("model"),
+                      providerID: ProviderV2.ID.make("provider"),
+                      variant: ModelV2.VariantID.make("default"),
+                    },
+                    content: [
+                      { type: "text", text: "v2-assistant-visible-needle" },
+                      { type: "reasoning", id: "v2-reasoning", text: "v2-thinking-hidden-needle" },
+                      {
+                        type: "tool",
+                        id: "v2-tool-call",
+                        name: "bash",
+                        provider: {
+                          executed: false,
+                          metadata: { secret: "v2-provider-hidden-needle" },
+                        },
+                        state: {
+                          status: "completed",
+                          input: { command: toolCommand, nested: { path: "v2 folder/file.ts" }, empty: "" },
+                          content: [{ type: "text", text: "v2-tool-result-hidden-needle" }],
+                          structured: { secret: "v2-structured-hidden-needle" },
+                        },
+                        time: { created: 3, completed: 4 },
+                      },
+                    ],
+                    time: { created: 2 },
+                  } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+                },
+                {
+                  id: SessionMessage.ID.create(),
+                  session_id: session.id,
+                  type: "shell",
+                  time_created: 5,
+                  data: {
+                    callID: "v2-shell-call",
+                    command: shellCommand,
+                    output: "v2-shell-result-hidden-needle",
+                    time: { created: 5, completed: 6 },
+                  } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+                },
+              ])
+              .run(),
+          ),
+        )
+
+        // v2 保留与 v1 一致的用户可见语义：user/assistant 文本、工具名、工具输入
+        // 以及 shell command；复杂命令字符必须按原值参与搜索，不能被 JSON 键名替代。
+        for (const term of [
+          "v2-user-visible-needle",
+          "v2-file-visible-needle",
+          "v2-file-description-needle",
+          "file:///tmp/v2-visible-file.ts",
+          "v2-data-name-visible-needle",
+          "v2-agent-visible-needle",
+          "v2-reference-visible-needle",
+          "v2-repository-visible-needle",
+          "v2-branch-visible-needle",
+          "v2-target-visible-needle",
+          "file:///tmp/v2-target-visible.ts",
+          "v2-assistant-visible-needle",
+          "bash",
+          "quoted v2 path",
+          '$TARGET',
+          'grep "v2 safe phrase"',
+          '> "v2 out file"',
+          "$(pwd)",
+          'rm -rf "./v2 danger"',
+          "v2 folder/file.ts",
+          "$HOME",
+          "sed 's/home/HOME/'",
+          '> "shell out file"',
+        ]) {
+          expect(yield* searchIDs(term)).toContain(session.id)
+        }
+
+        // v2 excluded fields mirror v1: assistant reasoning, tool result content,
+        // structured/provider metadata, shell output, and raw JSON key names must
+        // not make a session searchable.
+        for (const term of [
+          "v2-thinking-hidden-needle",
+          "v2-tool-result-hidden-needle",
+          "v2-structured-hidden-needle",
+          "v2-provider-hidden-needle",
+          "v2-shell-result-hidden-needle",
+          "v2-data-uri-hidden-needle",
+          "text/plain",
+          "command",
+          "output",
+          "reasoning",
+        ]) {
+          expect(yield* searchIDs(term)).not.toContain(session.id)
+        }
       }),
     { git: true },
   )
