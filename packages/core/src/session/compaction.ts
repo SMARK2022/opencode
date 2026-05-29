@@ -82,7 +82,7 @@ type Settings = {
   readonly auto: boolean
   // 保留缺省与显式零的区别，provider reserve 只抵消缺省输入缓冲。
   readonly buffer?: number
-  readonly tokens: number
+  readonly tokens?: number
 }
 
 type Dependencies = {
@@ -155,7 +155,7 @@ const settings = (documents: readonly Config.Entry[]) => {
       buffer: current.buffer ?? result.buffer,
       tokens: current.keep?.tokens ?? result.tokens,
     }),
-    { auto: true, tokens: DEFAULT_KEEP_TOKENS },
+    { auto: true },
   )
 }
 
@@ -204,11 +204,24 @@ export const buildPrompt = (input: { readonly previousSummary?: string; readonly
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
+  const inputBudget = (input: Input) => {
+    const context = input.model.route.defaults.limits?.context ?? 0
+    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+    // 默认尾部扩大与触发压缩共用真实输入预算，不能越过input限制或重复扣输出。
+    const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
+    const inputLimit = input.model.route.defaults.limits?.input
+    const inputUsable = inputLimit
+      ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
+      : usable
+    return Math.min(usable, inputUsable)
+  }
   const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input, reason: "auto" | "manual" = "auto") {
     const context = input.model.route.defaults.limits?.context
     if (reason === "auto" && (context === undefined || context <= 0)) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    const selected = select(input.entries, config.tokens, reason === "manual")
+    // 保留Native既有8K基线并承接source的16K长窗口收益；显式零仍关闭tail保留。
+    const keep = config.tokens ?? Math.max(DEFAULT_KEEP_TOKENS, Math.min(16_000, Math.floor(Math.max(0, inputBudget(input)) / 4)))
+    const selected = select(input.entries, keep, reason === "manual")
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
     if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
     const summaryPrompt = buildPrompt({
@@ -309,19 +322,11 @@ export const make = (dependencies: Dependencies) => {
     if (!config.auto) return false
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
-    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    // 总窗口仍完整预留实际输出与 Core buffer，不能用较小 input 改写 context 后再次扣输出。
-    const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
-    const inputLimit = input.model.route.defaults.limits?.input
-    // 输入增长只扣显式 buffer 或抵消 provider 差额后的缺省 floor，与总窗口预算取交集。
-    const inputUsable = inputLimit
-      ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
-      : usable
     if (
       // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
       Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools },
         Token.inputHistory(input.entries.map((entry) => entry.message), input.model)).input <=
-      Math.min(usable, inputUsable)
+      inputBudget(input)
     )
       return false
     return yield* compactAfterOverflow(input)

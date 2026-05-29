@@ -2129,6 +2129,29 @@ describe("SessionRunnerLLM", () => {
         }
         yield* registration.dispose
       }
+      // 实际summary上传与持久recent证明缺省扩大；显式8K/零不能被新缺省覆盖。
+      const expanded = Model.make({ id: "expanded", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 204_800, output: 4096 } }) })
+      const head = "OLD_HEAD " + "h".repeat(80_000)
+      const retained = "RECENT_FULL " + "r".repeat(40_000) + " RECENT_END"
+      const history = [head, retained, "Newest exact request"].map((text, index) => ({ seq: index + 1, message: SessionMessage.User.make({ type: "user", id: SessionMessage.ID.create(), text, time: { created: DateTime.makeUnsafe(index) } }) }))
+      for (const keep of [undefined, 8_000, 0]) {
+        let upload = ""
+        const compaction = SessionCompaction.make({ db: database.db, events,
+          config: keep === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({ compaction: new ConfigCompaction.Info({ keep: new ConfigCompaction.Keep({ tokens: keep }) }) }) })],
+          llm: { stream: request => {
+            upload = userTexts(request)[0] ?? ""
+            return Stream.fromIterable(fragmentFixture("text", "tail-budget", ["Budget summary"]).completeEvents)
+          } },
+        })
+        expect(yield* compaction.compact({ sessionID, entries: history, model: expanded, pricing: [], request: LLM.request({ model: expanded, prompt: "Summarize" }) })).toBe(true)
+        const latest = (yield* store.context(sessionID)).find(message => message.type === "compaction")
+        if (!latest || latest.type !== "compaction") return yield* Effect.die("Missing real compaction projection")
+        expect(upload).toContain("OLD_HEAD")
+        expect(upload.includes("RECENT_FULL")).toBe(keep !== undefined)
+        expect(latest.recent.includes(retained)).toBe(keep === undefined)
+        expect(latest.recent.includes("Newest exact request")).toBe(keep !== 0)
+        if (keep === 0) expect(latest.recent).toBe("")
+      }
     }),
   )
 

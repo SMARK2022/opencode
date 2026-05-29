@@ -1630,6 +1630,9 @@ describe("session.compaction.process", () => {
         yield* createUserMessage(session.id, "older context")
         yield* createUserMessage(session.id, "keep this turn")
         yield* createUserMessage(session.id, "and this one too")
+        // #255：tail 轮数翻倍后原三轮会吞掉 head——补两轮保证压缩输入仍含非空 head
+        yield* createUserMessage(session.id, "third retained turn")
+        yield* createUserMessage(session.id, "fourth retained turn")
         yield* createCompactionMarker(session.id)
 
         const msgs = yield* ssn.messages({ sessionID: session.id })
@@ -1653,11 +1656,15 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("[User]: older context")
         expect(captured).not.toContain("keep this turn")
         expect(captured).not.toContain("and this one too")
+        // #255：tail 轮数翻倍（config tail_turns:4）后第三/四轮也进入保留窗——压缩输入不得包含它们
+        expect(captured).not.toContain("third retained turn")
+        expect(captured).not.toContain("fourth retained turn")
         expect(captured).not.toContain("What did we do so far?")
       }).pipe(
         withCompaction({
           llm: stub.llmLayer,
-          config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }),
+          // #255：窗口翻倍——tail_turns 2→4 与 source DEFAULT_TAIL_TURNS 2→4 对齐，四轮保留窗
+          config: cfg({ tail_turns: 4, preserve_recent_tokens: 10_000 }),
         }),
       )
     },

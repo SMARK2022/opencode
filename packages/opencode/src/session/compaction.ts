@@ -33,8 +33,9 @@ export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
-const MIN_PRESERVE_RECENT_TOKENS = 2_000
-const MAX_PRESERVE_RECENT_TOKENS = 15_000
+// #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
+const MIN_PRESERVE_RECENT_TOKENS = 4_000
+const MAX_PRESERVE_RECENT_TOKENS = 16_000
 type Turn = {
   start: number
   end: number
