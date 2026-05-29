@@ -118,6 +118,7 @@ await Bun.write(sseTypesPath, sseTypesPatched)
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`
-// TypeScript's CLI is a Node entrypoint; running it through Bun can leave the Windows CI SDK build alive.
+// TypeScript 的 CLI 是 Node 入口：经由 Bun 启动会在 Windows CI 上让 SDK 构建进程悬挂不退（#461）；
+// resolveSync 把 tsc 定位到本 workspace 依赖内的绝对路径，避免 PATH 上的同名二进制劫持。
 await $`node ${Bun.resolveSync("typescript/bin/tsc", dir)}`
 await $`rm openapi.json`
