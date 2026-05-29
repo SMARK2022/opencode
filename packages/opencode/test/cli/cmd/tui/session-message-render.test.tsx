@@ -1589,11 +1589,7 @@ test("non-shell auto review status opens the reviewer child session", async () =
     },
     async (app) => {
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-      const raw = app.captureCharFrame().split("\n")
-      const y = raw.findIndex((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
-      expect(y).toBeGreaterThanOrEqual(0)
-
-      await app.mockMouse.click(35, y + 1)
+      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
     },
@@ -1642,10 +1638,7 @@ test("block auto review click opens reviewer without toggling the tool card", as
     },
     async (app) => {
       let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
-      const y = app.captureCharFrame().split("\n").findIndex((line) => line.includes("✓ auto review · allowed · auth high"))
-      expect(y).toBeGreaterThanOrEqual(0)
-
-      await app.mockMouse.click(35, y + 1)
+      await clickVisibleText(app, "✓ auto review · allowed · auth high")
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
       frame = rows(app.captureCharFrame())
@@ -1934,6 +1927,18 @@ function findRow(frame: string[], text: string) {
   const index = frame.findIndex((line) => line.includes(text))
   if (index < 0) throw new Error(`missing row ${JSON.stringify(text)}:\n${frame.join("\n")}`)
   return index
+}
+
+async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+  const raw = app.captureCharFrame().split("\n")
+  const y = raw.findIndex((line) => line.includes(text))
+  expect(y).toBeGreaterThanOrEqual(0)
+  const x = raw[y].indexOf(text)
+  expect(x).toBeGreaterThanOrEqual(0)
+  // Click inside the rendered label rather than at a fixed column. The exact
+  // gutter can shift between OpenTUI renderers in the same process on Linux, but
+  // the user-visible label is the stable behaviour this test cares about.
+  await app.mockMouse.click(x + 1, y + 1)
 }
 
 function sessionInfo(extra: Partial<SessionInfo> = {}) {
