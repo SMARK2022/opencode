@@ -19,6 +19,64 @@ import { testEffect } from "../lib/effect"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { $ } from "bun"
 import { InstanceRef } from "@/effect/instance-ref"
+// #265：User 契约来自 core/v1/session——与 v2 投影行同源，保证测试数据形状与生产一致
+import type { User } from "@opencode-ai/core/v1/session"
+import { MessageID, PartID, type SessionID } from "@/session/schema"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+// #265：SessionMessageTable 直插 v2 投影行——Database 导入复用文件顶部既有绑定，不重复声明
+import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+
+// #265：搜索回归测试 helper——通过 Session service 写入消息，再通过 list({ search }) 观察公开行为
+const createSearchUserMessage = Effect.fn("SessionListTest.createSearchUserMessage")(function* (sessionID: SessionID) {
+  const messageID = MessageID.ascending()
+  const message: User = {
+    id: messageID,
+    sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: "test",
+    // #265：模型三元组满足 User 契约必填——搜索断言不读模型字段
+    model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+    // #265：tools 空表满足 User 契约——搜索断言不依赖工具授权位
+    tools: {},
+  }
+  yield* SessionNs.Service.use((session) => session.updateMessage(message))
+  return messageID
+})
+
+// #265：统一搜索断言入口——needle 原样传给 list，大小写归一由生产侧 instr(lower) 完成
+const searchIDs = Effect.fn("SessionListTest.searchIDs")(function* (search: string) {
+  return (yield* SessionNs.Service.use((session) => session.list({ search }))).map((session) => session.id)
+})
+
+// #265：v2 投影行直插——只验证公开 list(search) 的读侧行为，不启动 streaming/event pipeline；
+// #265：投影行与 v1 侧 updatePart 写入互为独立数据源——两路都必须各有测试覆盖
+const insertSessionMessageRow = Effect.fn("SessionListTest.insertSessionMessageRow")(function* (input: {
+  sessionID: SessionID
+  type: "user" | "assistant" | "shell"
+  seq: number
+  // #265：type 三值对应 sessionMessageMatches 的 user/shell/assistant 分支
+  // #265：data 形状按 type 不同（user 带 files/agents/references，assistant 带 content，shell 顶层 command）
+  data: NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>
+}) {
+  const { db } = yield* Database.Service
+  yield* db
+    .insert(SessionMessageTable)
+    .values({
+      // #265：ID 由 SessionMessage 工厂生成——与投影读取侧的前缀契约一致
+      id: SessionMessage.ID.create(),
+      session_id: input.sessionID,
+      type: input.type,
+      seq: input.seq,
+      // #265：time_created 是列表排序键——与 data 内的 time.created 语义独立
+      time_created: Date.now(),
+      data: input.data,
+    })
+    .run()
+    .pipe(Effect.orDie)
+})
 
 const layer = (experimentalWorkspaces: boolean) =>
   AppNodeBuilder.build(LayerNode.group([Database.node, SessionNs.node, SessionProjector.node]), [
@@ -692,6 +750,304 @@ describe("session.list", () => {
         expect(ids).toContain(current.id)
       }),
     { git: false },
+  )
+
+  // #265：搜索面从持久化 JSON 全文改为字段白名单——以下用例逐个锚定白名单分支与主要排除面
+  it.instance(
+    "searches v1 visible text without indexing synthetic parts",
+    () =>
+      Effect.gen(function* () {
+        const visible = yield* withSession({ title: "v1 visible holder" })
+        const visibleMessage = yield* createSearchUserMessage(visible.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: visible.id,
+            messageID: visibleMessage,
+            type: "text",
+            text: "visible-text-v1-needle",
+            time: { start: Date.now() },
+          }),
+        )
+        // #265：可见文本命中是白名单的正向主路径——它退化即意味着搜索整条失效
+        const visibleHits = yield* searchIDs("visible-text-v1-needle")
+        expect(visibleHits).toContain(visible.id)
+
+        // #265：synthetic text 不应被搜索到——生成的辅助材料不是用户可见内容
+        const hidden = yield* withSession({ title: "synthetic holder" })
+        const hiddenMsg = yield* createSearchUserMessage(hidden.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: hidden.id,
+            messageID: hiddenMsg,
+            type: "text",
+            text: "secret-synthetic-needle",
+            time: { start: Date.now() },
+            synthetic: true,
+          }),
+        )
+        const syntheticHits = yield* searchIDs("secret-synthetic-needle")
+        expect(syntheticHits).not.toContain(hidden.id)
+      }),
+    { git: true },
+  )
+
+  // #265：标题命中走 searchCondition 的第一路——锚定 textMatches 改造后标题语义不回退
+  it.instance(
+    "searches session title",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* withSession({ title: "unique-title-search-needle" })
+        const hits = yield* searchIDs("unique-title-search-needle")
+        expect(hits).toContain(session.id)
+      }),
+    { git: true },
+  )
+
+  // #265：reasoning 分支锚定——白名单（text/tool）之外的 content 类型必须静默不命中
+  it.instance(
+    "does not search reasoning parts",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* withSession({ title: "reasoning holder" })
+        const userMsg = yield* createSearchUserMessage(session.id)
+        yield* SessionNs.Service.use((s) =>
+          s.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: userMsg,
+            type: "reasoning",
+            text: "secret-reasoning-needle",
+            time: { start: Date.now() },
+          }),
+        )
+        // #265：排除是静默的——不是报错也不是降级到标题搜索，直接不出现
+        const hits = yield* searchIDs("secret-reasoning-needle")
+        expect(hits).not.toContain(session.id)
+      }),
+    { git: true },
+  )
+
+  // #265：ignored 与 synthetic 同属生成辅助材料——排除理由相同但触发字段不同，需分别锚定
+  it.instance(
+    "does not search ignored text parts",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* withSession({ title: "ignored holder" })
+        const userMsg = yield* createSearchUserMessage(session.id)
+        yield* SessionNs.Service.use((s) =>
+          s.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: userMsg,
+            type: "text",
+            text: "ignored-text-needle",
+            time: { start: Date.now() },
+            ignored: true,
+          }),
+        )
+        // #265：与 synthetic 用例共用结构但字段不同——防复制粘贴时互换来错
+        const hits = yield* searchIDs("ignored-text-needle")
+        expect(hits).not.toContain(session.id)
+      }),
+    { git: true },
+  )
+
+  // #265：v2 投影行直插绕过 streaming pipeline——只测 list(search) 读侧行为；
+  // #265：user files/agents/references、assistant text/tool input、shell command 可搜索；隐藏内容与键名不可
+  it.instance(
+    "searches v2 session_message visible fields without indexing hidden content",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* withSession({ title: "v2 search holder" })
+        const toolCommand = `TARGET="quoted v2 path"; grep "v2 safe phrase" > "v2 out file"; rm -rf "./v2 danger"`
+        yield* insertSessionMessageRow({
+          sessionID: session.id,
+          type: "user",
+          seq: 1,
+          // #265：seq 递增保证 session_message 的 (session_id, seq) 唯一索引
+          data: {
+            text: "v2-user-visible-needle",
+            files: [
+              {
+                uri: "file:///tmp/v2-visible-file.ts",
+                mime: "text/plain",
+                name: "v2-file-visible-needle",
+                description: "v2-file-description-needle",
+              },
+              {
+                // #265：data: URI 的内嵌内容不可搜索，但 name 仍是定位字段
+                uri: "data:text/plain,v2-data-uri-hidden-needle",
+                mime: "text/plain",
+                name: "v2-data-name-visible-needle",
+              },
+            ],
+            agents: [{ name: "v2-agent-visible-needle" }],
+            references: [
+              {
+                name: "v2-reference-visible-needle",
+                kind: "local",
+                uri: "file:///tmp/v2-reference.ts",
+                repository: "v2-repository-visible-needle",
+                branch: "v2-branch-visible-needle",
+                target: "v2-target-visible-needle",
+                targetUri: "file:///tmp/v2-target-visible.ts",
+              },
+            ],
+            time: { created: Date.now() },
+          } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+        })
+        // #265：assistant 投影——content 混合数组同时覆盖 text/reasoning/tool 三分支
+        yield* insertSessionMessageRow({
+          sessionID: session.id,
+          type: "assistant",
+          seq: 2,
+          data: {
+            agent: "build",
+            model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider"), variant: ModelV2.VariantID.make("default") },
+            content: [
+              { type: "text", text: "v2-assistant-visible-needle" },
+              { type: "reasoning", id: "v2-reasoning", text: "v2-thinking-hidden-needle" },
+              {
+                type: "tool",
+                id: "v2-tool-call",
+                name: "bash",
+                provider: { executed: false, metadata: { secret: "v2-provider-hidden-needle" } },
+                // #265：state.input 叶子值可搜索；content（工具结果）不可
+                state: {
+                  status: "completed",
+                  input: { command: toolCommand, nested: { path: "v2 folder/file.ts" } },
+                  content: [{ type: "text", text: "v2-tool-result-hidden-needle" }],
+                  structured: { secret: "v2-structured-hidden-needle" },
+                },
+                time: { created: Date.now(), completed: Date.now() },
+              },
+            ],
+            time: { created: Date.now() },
+          } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+        })
+        // #265：shell 投影——仅 command 可搜索，output 属执行结果面
+        yield* insertSessionMessageRow({
+          sessionID: session.id,
+          type: "shell",
+          seq: 3,
+          data: {
+            callID: "v2-shell-call",
+            command: `printf "$HOME" | grep "v2-shell-pipe-needle"`,
+            output: "v2-shell-output-hidden-needle",
+            time: { created: Date.now(), completed: Date.now() },
+          } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+        })
+
+        // #265：正向项覆盖全部白名单 arm——text、files 三字段、agents、references 七字段、
+        // #265：assistant text/tool 身份与 input 叶子、shell command、data: URI 行的 name
+        // #265：逐项断言保证每个 arm 都有独立回归锚——一处退化立即定位到具体字段
+        for (const term of [
+          "v2-user-visible-needle",
+          "v2-file-visible-needle",
+          "v2-file-description-needle",
+          "file:///tmp/v2-visible-file.ts",
+          "v2-data-name-visible-needle",
+          "v2-agent-visible-needle",
+          "v2-reference-visible-needle",
+          "v2-repository-visible-needle",
+          "v2-branch-visible-needle",
+          "v2-target-visible-needle",
+          "file:///tmp/v2-target-visible.ts",
+          "v2-assistant-visible-needle",
+          "bash",
+          "quoted v2 path",
+          "v2 folder/file.ts",
+          "v2-shell-pipe-needle",
+        ]) {
+          expect(yield* searchIDs(term)).toContain(session.id)
+        }
+
+        // #265：负向项与 SQL 分支的映射——reasoning：无分支；tool result/structured：state 白名单外；
+        // #265：provider metadata：白名单外；shell output：仅搜 command；data: URI：uriMatches 前缀排除；
+        // #265：mime 与键名 command/output：叶子值匹配天然不命中键
+        for (const term of [
+          "v2-thinking-hidden-needle",
+          "v2-tool-result-hidden-needle",
+          "v2-structured-hidden-needle",
+          "v2-provider-hidden-needle",
+          "v2-shell-output-hidden-needle",
+          "v2-data-uri-hidden-needle",
+          "text/plain",
+          "command",
+          "output",
+          "reasoning",
+        ]) {
+          expect(yield* searchIDs(term)).not.toContain(session.id)
+        }
+      }),
+    { git: true },
+  )
+
+  // #265：v1 工具分支锚定——pending raw 的 json_valid 守卫与 input 叶子路径需要独立用例覆盖
+  it.instance(
+    "searches v1 tool input leaves without indexing tool output or key names",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* withSession({ title: "v1 tool holder" })
+        const userMsg = yield* createSearchUserMessage(session.id)
+        yield* SessionNs.Service.use((s) =>
+          s.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: userMsg,
+            type: "tool",
+            callID: "v1-pending-call",
+            tool: "bash",
+            state: {
+              status: "pending",
+              input: { command: "v1-tool-input-needle" },
+              raw: '{"cmd":"v1-pending-raw-needle"}',
+              // #265：raw 是流式未完成 JSON 的字符串快照——json_valid 守卫只放行可解析形态
+            },
+            time: { start: Date.now() },
+            // #265：part 级 time 与 state 内 time 分离——前者属 partBase，后者属工具快照
+          }),
+        )
+        yield* SessionNs.Service.use((s) =>
+          s.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: userMsg,
+            type: "tool",
+            callID: "v1-done-call",
+            tool: "bash",
+            // #265：tool 字段名（"bash"）在断言侧独立锚定——v2 的 bash 正向走 SessionMessageTable 路径，不覆盖本 arm
+            state: {
+              status: "completed",
+              input: { command: "v1-done-input-needle" },
+              output: "v1-output-hidden-needle",
+              title: "visible-tool-title-v1-needle",
+              metadata: { secret: "v1-metadata-hidden-needle" },
+              time: { start: Date.now(), end: Date.now() },
+            },
+            time: { start: Date.now() },
+          }),
+        )
+        // #265：input 值与 pending raw 的叶子值命中；output/metadata/键名不命中
+        expect(yield* searchIDs("v1-tool-input-needle")).toContain(session.id)
+        expect(yield* searchIDs("v1-pending-raw-needle")).toContain(session.id)
+        expect(yield* searchIDs("v1-done-input-needle")).toContain(session.id)
+        // #265：state.title 是白名单身份字段——工具标题命中必须独立锚定
+        expect(yield* searchIDs("visible-tool-title-v1-needle")).toContain(session.id)
+        // #265：tool 名正向断言锚定 messageToolPartMatches 的 $.tool arm——与 v2 侧 $.name 分支路径不同，缺一不可
+        expect(yield* searchIDs("bash")).toContain(session.id)
+        // #265：命中/排除交错断言——防止白名单被放宽成全字段搜索后负向项静默通过
+        expect(yield* searchIDs("v1-output-hidden-needle")).not.toContain(session.id)
+        expect(yield* searchIDs("v1-metadata-hidden-needle")).not.toContain(session.id)
+        expect(yield* searchIDs("command")).not.toContain(session.id)
+        expect(yield* searchIDs("output")).not.toContain(session.id)
+        // #265：空白 search 走 undefined 直通——list 不过滤，等价于无搜索调用
+        const blank = yield* searchIDs("   ")
+        expect(blank).toContain(session.id)
+      }),
+    { git: true },
   )
 })
 
