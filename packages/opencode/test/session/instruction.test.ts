@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect } from "bun:test"
 import path from "path"
 import { Effect, FileSystem, Layer } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
@@ -17,11 +17,9 @@ import { TestConfig } from "../fixture/config"
 
 const it = testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, NodeFileSystem.layer))
 
-const configLayer = TestConfig.layer()
-
-const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
+const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}, config = {}) =>
   Instruction.layer.pipe(
-    Layer.provide(configLayer),
+    Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config) })),
     Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(Global.layerWith(global)),
@@ -29,9 +27,9 @@ const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<Runt
   )
 
 const provideInstruction =
-  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
+  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config = {}) =>
   <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    self.pipe(Effect.provide(instructionLayer(global, flags)))
+    self.pipe(Effect.provide(instructionLayer(global, flags, config)))
 
 const write = (filepath: string, content: string) =>
   Effect.gen(function* () {
@@ -195,7 +193,43 @@ describe("Instruction.resolve", () => {
     ),
   )
 
-  test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
+  it.live("fetches remote instructions from config URLs via HttpClient", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const requests: string[] = []
+        const server = Bun.serve({
+          port: 0,
+          fetch(request) {
+            requests.push(new URL(request.url).pathname)
+            return new Response("# Remote Instructions\nUse the remote rule.")
+          },
+        })
+        return { requests, server }
+      }),
+      ({ requests, server }) =>
+        Effect.gen(function* () {
+          const globalTmp = yield* tmpWithFiles({})
+          const projectTmp = yield* tmpdirScoped()
+          const url = new URL("/instructions.md", server.url).toString()
+
+          yield* Effect.gen(function* () {
+            const svc = yield* Instruction.Service
+            const paths = yield* svc.systemPaths()
+            const rules = yield* svc.system()
+
+            // Remote config entries are not filesystem paths, but they must still
+            // enter the system prompt through the HttpClient seam used by production.
+            expect(paths.size).toBe(0)
+            expect(requests).toEqual(["/instructions.md"])
+            expect(rules).toEqual([`Instructions from: ${url}\n# Remote Instructions\nUse the remote rule.`])
+          }).pipe(
+            provideInstance(projectTmp),
+            provideInstruction({ home: globalTmp, config: globalTmp }, undefined, { instructions: [url] }),
+          )
+        }),
+      ({ server }) => Effect.sync(() => server.stop(true)),
+    ),
+  )
 })
 
 describe("Instruction.system", () => {
