@@ -69,7 +69,7 @@ jobs:
       run:
         shell: bash
     env:
-      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ matrix.runner == 'windows-latest' && 'true' || 'false' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -266,7 +266,7 @@ jobs:
       run:
         shell: bash
     env:
-      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ matrix.runner == 'windows-latest' && 'true' || 'false' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -380,9 +380,9 @@ jobs:
         run: |
           mkdir -p "${{ matrix.path }}/.artifacts/upstream"
           if [ -n "${{ matrix.target }}" ]; then
-            bun --cwd "${{ matrix.path }}" test "${{ matrix.target }}" --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
+            bun test --cwd "${{ matrix.path }}" "${{ matrix.target }}" --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
           else
-            bun --cwd "${{ matrix.path }}" test --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
+            bun test --cwd "${{ matrix.path }}" --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
           fi
 
       - name: Warn on upstream extra failures
