@@ -1,5 +1,6 @@
 import { SessionID, MessageID } from "./schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import {
   APIError,
@@ -267,6 +268,15 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         }
 
         if (part.type === "compaction") {
+          const recentUserMemento = formatRecentUserMemento(part.recent_user_messages ?? [])
+          if (recentUserMemento) {
+            userMessage.parts.push({
+              type: "text",
+              text: recentUserMemento,
+            })
+          }
+          // #256：历史压缩提示保持在 memento 之后——既有摘要仍与同一用户边界配对，
+          // 而更新的模型先看到最新保留的用户意图。
           userMessage.parts.push({
             type: "text",
             text: "What did we do so far?",
@@ -667,6 +677,9 @@ function visibleCompactions(items: SessionV1.WithParts[]) {
     return true
   })
 }
+
+// 两代与预算估算共用同一信封，保留原话、顺序和截断标记，不复制提示词。
+export const formatRecentUserMemento = SessionMemento.format
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
   // #205：压缩恢复需要 hidden 结构锚点作为边界；visible() 会从返回的 prompt 窗口剔除它们

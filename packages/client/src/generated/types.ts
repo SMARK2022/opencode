@@ -833,6 +833,11 @@ export type SessionsContextOutput = {
         readonly reason: "auto" | "manual"
         readonly summary: string
         readonly recent: string
+        readonly recent_user_messages?: ReadonlyArray<{
+          readonly id: string
+          readonly text: string
+          readonly truncated?: boolean
+        }>
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
@@ -1374,6 +1379,11 @@ export type SessionsHistoryOutput = {
           readonly reason: "auto" | "manual"
           readonly text: string
           readonly recent: string
+          readonly recent_user_messages?: ReadonlyArray<{
+            readonly id: string
+            readonly text: string
+            readonly truncated?: boolean
+          }>
           readonly usage?: {
             readonly tokens: {
               readonly input: number
@@ -1986,6 +1996,11 @@ export type SessionsEventsOutput =
         readonly reason: "auto" | "manual"
         readonly text: string
         readonly recent: string
+        readonly recent_user_messages?: ReadonlyArray<{
+          readonly id: string
+          readonly text: string
+          readonly truncated?: boolean
+        }>
         readonly usage?: {
           readonly tokens: {
             readonly input: number
@@ -2251,6 +2266,11 @@ export type SessionsMessageOutput = {
         readonly reason: "auto" | "manual"
         readonly summary: string
         readonly recent: string
+        readonly recent_user_messages?: ReadonlyArray<{
+          readonly id: string
+          readonly text: string
+          readonly truncated?: boolean
+        }>
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
@@ -2455,6 +2475,11 @@ export type MessagesListOutput = {
         readonly reason: "auto" | "manual"
         readonly summary: string
         readonly recent: string
+        readonly recent_user_messages?: ReadonlyArray<{
+          readonly id: string
+          readonly text: string
+          readonly truncated?: boolean
+        }>
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }

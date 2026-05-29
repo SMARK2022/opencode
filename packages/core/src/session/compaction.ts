@@ -15,6 +15,7 @@ import { tokens } from "./runner/publish-llm-event"
 import { ModelV2 } from "../model"
 import { ProviderV2 } from "../provider"
 import { SessionRunnerModel } from "./runner/model"
+import { SessionMemento } from "./compaction-memento"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_BUFFER_MIN = 5_000
@@ -224,6 +225,13 @@ export const make = (dependencies: Dependencies) => {
     const selected = select(input.entries, keep, reason === "manual")
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
     if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
+    // 原话是额外交接通道：无input限制时按context-output，不能误扣自动压缩缓冲。
+    const inputLimit = input.model.route.defaults.limits?.input
+    const usable = inputLimit
+      ? inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, (context ?? 0) - inputLimit)))
+      : (context ?? 0) - output
+    const recentUserMessages = SessionMemento.collect(
+      input.entries.flatMap(entry => entry.message.type === "user" ? [{ id: entry.message.id, text: entry.message.text }] : []), Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
@@ -313,6 +321,8 @@ export const make = (dependencies: Dependencies) => {
       reason,
       text: summary,
       recent: selected.recent,
+      // 只有成功Ended携带本次快照，失败与取消继续保留旧压缩边界。
+      recent_user_messages: recentUserMessages.length ? recentUserMessages : undefined,
       usage,
     }, { id: terminalEventID })
     return true

@@ -1143,6 +1143,187 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    // #256：小 tail 预算（20 token）强制 memento 承载最新指令——验证完整交接链
+    "preserves recent user instructions in compacted context when the full tail is not retained",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        const latest = yield* createUserMessage(session.id, "latest user instruction to preserve")
+        // #256：older context 先于最新指令写入——collect 从最新反向遍历，预算内两条都保留
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: latest.id,
+          time: { created: Date.now() },
+        })
+        yield* createSummaryCompaction(session.id)
+        // #256：create 只建立压缩标记边界——memento 采集发生在 process 内
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        // #256：auto:false 手动驱动 process——memento 在 select 之后写入 part
+
+        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(filtered, createModel({ context: 100_000, output: 32_000 }))
+        const compactedContext = JSON.stringify(modelMessages)
+
+        expect(compactedContext).toContain("<recent-user-messages>")
+        expect(compactedContext).toContain("latest user instruction to preserve")
+        expect(compactedContext).toContain("What did we do so far?")
+        // #256：memento 必须在历史压缩提示之前出现——模型先看到最新用户意图
+        expect(compactedContext.indexOf("latest user instruction to preserve")).toBeLessThan(
+          compactedContext.indexOf("What did we do so far?"),
+        )
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
+        // #256：tail_turns:1 + 20 token 预算使整轮尾部无法保留——强制 memento 成为唯一交接通道
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    // #256：超长指令走二分截断——上限遵循模型窗口而非绝对 20K
+    "bounds overlong recent user instructions in compacted context",
+    () => {
+      const stub = llm()
+      const mementoModel = createModel({ context: 10_000, output: 8_000 })
+        // #256：10K 小窗口——memento 预算按 usable 的 20% 收缩，远低于 20K 绝对上限
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const latest = yield* createUserMessage(
+          session.id,
+          `start of oversized instruction ${"x".repeat(100_000)} end of oversized instruction`,
+        // #256：100K 字符远超任何预算——强制走到 truncateRecentUserMessage 二分路径
+        )
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: latest.id,
+          time: { created: Date.now() },
+        })
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(
+          MessageV2.filterCompacted(yield* MessageV2.stream(session.id)),
+          mementoModel,
+        )
+        const compactedContext = JSON.stringify(modelMessages)
+        const compactionPart = yield* readCompactionPart(session.id)
+        // #256：从持久化 part 读回 memento——验证截断结果已随压缩边界落库
+        const recentUserMemento = MessageV2.formatRecentUserMemento(compactionPart?.recent_user_messages ?? [])
+
+        expect(compactedContext).toContain("start of oversized instruction")
+        expect(compactedContext).toContain("truncated for compaction memento")
+        expect(compactedContext).not.toContain("end of oversized instruction")
+        // #256：memento 上限必须跟随模型窗口的 20%，而不是绝对 20K——小窗口模型
+        // 否则压缩重放后会立刻再次溢出（10K 窗口 → 20% = 2K 内的 400 估算）
+        expect(TokenEstimate.estimateText(recentUserMemento)).toBeLessThanOrEqual(400)
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          provider: ProviderTest.fake({ model: mementoModel }),
+          config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    // #256：synthetic/ignored 文本不得污染 memento——过滤按 part 粒度生效
+    "keeps synthetic and ignored user text out of recent user mementos",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const latest = yield* createUserMessage(session.id, "real instruction")
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: latest.id,
+          sessionID: session.id,
+          type: "text",
+          text: "synthetic editor context should not be preserved",
+          synthetic: true,
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: latest.id,
+          sessionID: session.id,
+          type: "text",
+          text: "ignored text should not be preserved",
+          ignored: true,
+        })
+        yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: test.directory, root: test.directory },
+          cost: 0,
+          tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          parentID: latest.id,
+          time: { created: Date.now() },
+        })
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(
+          MessageV2.filterCompacted(yield* MessageV2.stream(session.id)),
+          createModel({ context: 100_000, output: 32_000 }),
+        )
+        const compactedContext = JSON.stringify(modelMessages)
+
+        expect(compactedContext).toContain("real instruction")
+        // #256：synthetic/ignored part 附加在同一消息上——过滤按 part 粒度生效
+        // #256：synthetic/ignored 文本绝不能进入 memento——它们已被其他通道表示
+        expect(compactedContext).not.toContain("synthetic editor context should not be preserved")
+        expect(compactedContext).not.toContain("ignored text should not be preserved")
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "falls back to full summary when retained tail media exceeds preserve token budget",
     () => {
       const stub = llm()

@@ -630,6 +630,12 @@ export type CompactionPart = {
   auto: boolean
   overflow?: boolean
   tail_start_id?: string
+  recent_user_messages?: Array<{
+  // #256：生成文件与 schema 同步——SDK 消费者可类型化读取 memento
+    id: string
+    text: string
+    truncated?: boolean
+  }>
 }
 
 export type Part =
