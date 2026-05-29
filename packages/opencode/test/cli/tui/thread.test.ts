@@ -12,6 +12,7 @@ import { Flock } from "@opencode-ai/core/util/flock"
 import { Flag } from "@opencode-ai/core/flag/flag"
 
 const stop = new Error("stop")
+const originalExitCode = process.exitCode
 const seen = {
   tui: [] as string[],
   tuiUrls: [] as string[],
@@ -50,6 +51,11 @@ describe("tui thread", () => {
     ThreadModule._setSpawn(undefined)
     mock.restore()
     ServerLockModule._setLockPath(undefined)
+    // TuiThreadCommand intentionally sets process.exitCode for user-facing CLI
+    // validation errors. Tests assert those branches directly, so reset the
+    // process-global value after each case; otherwise Bun can report 0 failed
+    // tests but still exit 1 on Linux when the final process exitCode leaks.
+    process.exitCode = originalExitCode
   })
 
   async function call(project?: string, overrides?: Partial<ThreadArgs>) {
