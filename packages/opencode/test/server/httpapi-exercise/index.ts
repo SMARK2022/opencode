@@ -1710,6 +1710,24 @@ const scenarios: Scenario[] = [
     .at((ctx) => ({ path: "/tui/select-session", headers: ctx.headers(), body: { sessionID: ctx.state.id } }))
     .json(200, boolean, "status"),
   http.protected
+    .get("/tui/provider-endpoint-status", "tui.providerEndpointStatus")
+    // #258：覆盖 daemon 侧统一探测入口即可；这里使用 loopback 未监听端口，避免
+    // exerciser 依赖外部网络，同时仍能验证路由解码、BadRequest 之外的正常
+    // JSON 响应，以及 TUI 读取失败 endpoint 时不应让 HTTP 请求失败的不变量。
+    .at((ctx) => ({ path: "/tui/provider-endpoint-status?url=http://127.0.0.1:1", headers: ctx.headers() }))
+    .json(
+      200,
+      (body) => {
+        object(body)
+        check(body.url === "http://127.0.0.1:1", "endpoint status should preserve the normalized origin")
+        check(body.status === "down", "unreachable loopback endpoint should be reported as down")
+        object(body.route)
+        check(body.route.type === "direct", "loopback endpoint should never be routed through a proxy")
+        // #258：loopback 强制 direct——本地地址不允许经过代理，与 NetworkProxy 路由语义一致
+      },
+      "status",
+    ),
+  http.protected
     .post("/tui/control/response", "tui.control.response")
     .at((ctx) => ({ path: "/tui/control/response", headers: ctx.headers(), body: { ok: true } }))
     .json(200, boolean, "status"),

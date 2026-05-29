@@ -4,8 +4,9 @@ import { Session } from "@/session/session"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { nextTuiRequest, submitTuiResponse } from "@/server/shared/tui-control"
+import { getEndpointStatus } from "@/server/shared/tui-endpoint-status"
 import { InstanceHttpApi } from "../api"
-import { CommandPayload, TuiPublishPayload } from "../groups/tui"
+import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload } from "../groups/tui"
 import * as SessionError from "./session-errors"
 
 const commandAliases = {
@@ -104,6 +105,18 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       return true
     })
 
+    const providerEndpointStatus = Effect.fn("TuiHttpApi.providerEndpointStatus")(function* (ctx: {
+      query: typeof ProviderEndpointStatusQuery.Type
+    }) {
+      // #258：这里刻意只接受可规范化的 HTTP(S) origin。TUI 传入的是当前模型的
+      // provider endpoint；daemon 返回自身网络环境下的 route/latency，避免
+      // 多 TUI 进程各自读取 env proxy 后出现显示和真实请求不一致。
+      const status = yield* Effect.promise(() => getEndpointStatus(ctx.query.url))
+      if (!status) return yield* new HttpApiError.BadRequest({})
+      // #258：normalizeEndpoint 返回 undefined（非 http/https URL）时统一 400——不泄漏内部解析细节
+      return status
+    })
+
     const controlNext = Effect.fn("TuiHttpApi.controlNext")(function* () {
       return yield* Effect.promise(() => nextTuiRequest())
     })
@@ -125,6 +138,7 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       .handle("showToast", showToast)
       .handle("publish", publish)
       .handle("selectSession", selectSession)
+      .handle("providerEndpointStatus", providerEndpointStatus)
       .handle("controlNext", controlNext)
       .handle("controlResponse", controlResponse)
   }),
