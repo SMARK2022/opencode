@@ -4,6 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai"
 import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
 import { PermissionReviewer } from "../../src/permission/reviewer/service"
+import { Plugin } from "../../src/plugin"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session/session"
 import { testEffect } from "../lib/effect"
@@ -27,11 +28,22 @@ const REVIEWER_ASSESSMENT = {
 
 type ReviewerRequestBody = {
   instructions?: unknown
+  max_output_tokens?: unknown
   input: Array<{ role?: unknown; content?: unknown }>
+}
+
+type CapturedReviewerRequest = {
+  body: ReviewerRequestBody
+  headers: Headers
 }
 
 const OPENAI_PROVIDER_ID = ProviderID.make("openai")
 const CUSTOM_PROVIDER_ID = ProviderID.make("custom-openai")
+// This header is a test sentinel, not a production contract. It proves the
+// reviewer path sends its provider request through the existing chat.headers
+// compatibility seam without asserting on implementation structure or hook names
+// outside the observable HTTP request produced by the provider SDK.
+const REVIEWER_HOOK_HEADER = "x-reviewer-hook"
 const sessionLayer = Layer.mock(Session.Service)({})
 
 describe("permission reviewer service", () => {
@@ -40,9 +52,15 @@ describe("permission reviewer service", () => {
   // OAuth 凭据本身不是 Codex 契约；这个 fixture 防止未来把条件误放宽成
   // “任意 OAuth provider 都移除 system message 并写 instructions”。
   const customOauthFixture = reviewerFixture(oauthAuth(), { requireInstructions: false, providerID: CUSTOM_PROVIDER_ID })
+  const oauthHookFixture = reviewerFixture(oauthAuth(), {
+    requireInstructions: true,
+    rejectMaxOutputTokens: true,
+    plugin: pluginLayer({ clearMaxOutputTokens: true, header: REVIEWER_HOOK_HEADER }),
+  })
   const oauth = testEffect(oauthFixture.layer)
   const apiKey = testEffect(apiKeyFixture.layer)
   const customOauth = testEffect(customOauthFixture.layer)
+  const oauthHook = testEffect(oauthHookFixture.layer)
 
   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
     Effect.gen(function* () {
@@ -90,13 +108,33 @@ describe("permission reviewer service", () => {
       expectPreservedShellEvidence(inputText(body))
     }),
   )
+
+  oauthHook.effect("applies chat provider hooks before sending OpenAI OAuth reviewer requests", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(reviewInput("review_openai_oauth_hooks"))
+      const request = oauthHookFixture.requests[0]
+
+      expect(decision.action).toBe("allow")
+      expect(request.body.max_output_tokens).toBeUndefined()
+      expect(request.headers.get(REVIEWER_HOOK_HEADER)).toBe("applied")
+      expect(typeof request.body.instructions).toBe("string")
+      expectPreservedShellEvidence(inputText(request.body))
+    }),
+  )
 })
 
 function reviewerFixture(
   authInfo: Auth.Info | undefined,
-  options: { requireInstructions: boolean; providerID?: ProviderID } = { requireInstructions: false },
+  options: {
+    requireInstructions: boolean
+    providerID?: ProviderID
+    rejectMaxOutputTokens?: boolean
+    plugin?: Layer.Layer<Plugin.Service>
+  } = { requireInstructions: false },
 ) {
   const bodies: ReviewerRequestBody[] = []
+  const requests: CapturedReviewerRequest[] = []
   const model = reviewerModel(options.providerID ?? OPENAI_PROVIDER_ID)
   // Bun 的 fetch 类型带 preconnect；测试只需要拦截真实请求体，因此用空实现满足
   // provider SDK 类型契约，不改变请求/响应行为，也不引入额外网络能力。
@@ -104,11 +142,22 @@ function reviewerFixture(
     async (_input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? "{}")) as ReviewerRequestBody
       bodies.push(body)
+      requests.push({ body, headers: new Headers(init?.headers) })
 
       // Codex OAuth 后端的 observable 契约是顶层 instructions 必填；这里用同样的
       // 400 形态复现生产问题，确保修复不是靠放宽 reviewer 错误处理而是改变请求形状。
       if (options.requireInstructions && typeof body.instructions !== "string") {
         return new Response(JSON.stringify({ detail: "Instructions are required" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      // Codex's ChatGPT-backed Responses endpoint rejects `max_output_tokens` even
+      // though the public OpenAI Responses API accepts it. This fixture fails at
+      // the same HTTP boundary as production so the regression test proves the
+      // reviewer request shape, not a private helper or source-code branch.
+      if (options.rejectMaxOutputTokens && body.max_output_tokens !== undefined) {
+        return new Response(JSON.stringify({ detail: "Unsupported parameter: max_output_tokens" }), {
           status: 400,
           headers: { "content-type": "application/json" },
         })
@@ -131,13 +180,41 @@ function reviewerFixture(
 
   return {
     bodies,
+    requests,
     layer: PermissionReviewer.layer.pipe(
       Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
       Layer.provide(provider.layer),
       Layer.provide(authLayer(authInfo)),
+      Layer.provide(options.plugin ?? pluginLayer()),
       Layer.provide(sessionLayer),
     ),
   }
+}
+
+function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string } = {}) {
+  return Layer.succeed(
+    Plugin.Service,
+    Plugin.Service.of({
+      trigger: (name, _input, output) =>
+        Effect.sync(() => {
+          // The reviewer should reuse the same provider-compatibility hooks that
+          // main chat uses, but this test hook deliberately changes only request
+          // transport shape. It must not inspect or mutate reviewer prompt evidence,
+          // because command details are a permission-boundary input rather than a
+          // plugin contract.
+          if (name === "chat.params" && options.clearMaxOutputTokens && output && typeof output === "object") {
+            ;(output as { maxOutputTokens?: number }).maxOutputTokens = undefined
+          }
+          if (name === "chat.headers" && options.header && output && typeof output === "object" && "headers" in output) {
+            const headers = (output as { headers: Record<string, string> }).headers
+            headers[options.header] = "applied"
+          }
+          return output
+        }),
+      list: () => Effect.succeed([]),
+      init: () => Effect.void,
+    }),
+  )
 }
 
 function reviewerModel(providerID: ProviderID) {

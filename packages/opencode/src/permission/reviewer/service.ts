@@ -1,5 +1,6 @@
 import { Config } from "@/config/config"
 import { Auth } from "@/auth"
+import { Plugin } from "@/plugin"
 import { Provider } from "@/provider/provider"
 import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
 import { ProviderTransform } from "@/provider/transform"
@@ -88,6 +89,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const auth = yield* Auth.Service
+    const plugin = yield* Plugin.Service
     const provider = yield* Provider.Service
     const sessions = yield* Session.Service
     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
@@ -364,6 +366,43 @@ export const layer = Layer.effect(
               : undefined
             const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
             const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
+            // Reviewer requests intentionally stay outside the main SessionProcessor
+            // pipeline, but provider compatibility still lives in the existing chat
+            // hooks: Codex clears unsupported output caps there, GitHub Copilot
+            // disables incompatible tool streaming there, and provider plugins may
+            // add transport headers there. The synthetic message below satisfies the
+            // hook shape without exposing reviewer prompt text, transcript evidence,
+            // or planned tool arguments as plugin input; those remain inside the
+            // bounded reviewer prompt because they are part of the permission
+            // boundary, not general chat-extension data. The message id is also
+            // deliberately fresh instead of a persisted child-session message id:
+            // provider hooks may use the normal chat contract shape, but they must
+            // not be handed a stable pointer that lets a general chat plugin fetch
+            // or reinterpret the hidden reviewer prompt as user-authored context.
+            const hookSessionID = persist?.sessionID ?? SessionID.descending()
+            const hookMessage = {
+              id: MessageID.ascending(),
+              sessionID: hookSessionID,
+              role: "user",
+              time: { created: Date.now() },
+              agent: "permission-reviewer",
+              model: { providerID: model.providerID, modelID: model.id },
+            } satisfies MessageV2.User
+            const hookInput = {
+              sessionID: hookSessionID,
+              agent: "permission-reviewer",
+              model,
+              provider: providerInfo,
+              message: hookMessage,
+            }
+            const params = yield* plugin.trigger("chat.params", hookInput, {
+              temperature: undefined,
+              topP: undefined,
+              topK: undefined,
+              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
+              options,
+            })
+            const headers = yield* plugin.trigger("chat.headers", hookInput, { headers: {} })
             const result = streamText({
               model: wrapLanguageModel({
                 model: language,
@@ -399,8 +438,9 @@ export const layer = Layer.effect(
               // though they can emit tool calls. The reviewer prompt requires this
               // tool, and absence of the call still fails closed below.
               maxRetries: 0,
-              providerOptions: ProviderTransform.providerOptions(model, options),
-              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
+              providerOptions: ProviderTransform.providerOptions(model, params.options),
+              maxOutputTokens: params.maxOutputTokens,
+              headers: headers.headers,
               abortSignal: abort.signal,
             })
             let assessment: Schema.Schema.Type<typeof Assessment> | undefined
@@ -742,9 +782,12 @@ export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     // reviewer 请求落点现在需要读取 auth，才能只在 OpenAI OAuth/Codex 路径把同一份
     // 可信策略放进 Responses `instructions`；默认层必须随现有 config/provider 一起
-    // 提供 Auth，否则生产默认 wiring 会缺少这个 provider 判定边界。
+    // 提供 Auth。Reviewer 还要读取 Plugin，以便复用主聊天路径已有的 provider
+    // 兼容 hook；这保持 Codex/GitHub/Cloudflare 等请求形状修正在一个既有入口，
+    // 避免隐藏 reviewer 流另起一套 provider 特例。
     Layer.provide(Auth.defaultLayer),
     Layer.provide(Config.defaultLayer),
+    Layer.provide(Plugin.defaultLayer),
     Layer.provide(Provider.defaultLayer),
   ),
 )
