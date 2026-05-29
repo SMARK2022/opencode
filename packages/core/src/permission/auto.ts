@@ -39,7 +39,8 @@ export interface ReviewInput {
   readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
 }
 
-// #198：reviewer 通过注入而非构造——确定性路由可在无 provider/session 层时测试，且在小型运行时无 reviewer 时 fail closed
+// #198：reviewer 通过注入而非构造——确定性路由可在无 provider/session 层时测试。
+  // #264：缺失 reviewer wiring 时遵循与运行时 reviewer 失败相同的显式 fallback 策略
 export interface Reviewer {
   readonly review: (input: ReviewInput) => Effect.Effect<ReviewDecision, unknown>
 }
@@ -51,7 +52,8 @@ export function evaluate(
     metadata: Readonly<Record<string, unknown>>
     tool?: { readonly messageID: string; readonly callID: string }
     strict?: boolean
-    reviewerDisabled?: boolean
+    // #264：布尔 reviewerDisabled 改为显式枚举——策略语义（deny/user）由调用方声明而非隐含在布尔里
+    reviewerFailureFallback?: "deny" | "user"
   },
   reviewer?: Reviewer,
   // #208：onReviewStart 在 reviewer 调用前回调——发布 ReviewStarted 事件供 UI 展示进度
@@ -81,15 +83,12 @@ export function evaluate(
 
     // #203：cautious 是 review 边界——确定性 precheck 发现可见风险但非立即禁止，reviewer 必须显式返回 allow/deny
     // #203：原生 auto 不能在 reviewer 缺失时降级回可点击的用户 ask；fail closed 防止敏感 shell 输出因点 Allow 暴露
+    // #264：reviewer 基础设施失败不同于策略 deny：默认回到用户审批边界
+    const fallbackToUser = input.reviewerFailureFallback !== "deny"
     if (!reviewer) {
-      // #203：显式 user reviewer 配置强于原生 auto fail-closed 默认——保留小型/自定义运行时
-      // #203：无 reviewer service 但有意保留用户审批作为 review 边界的场景
-      if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
-      // #225：metadata.agent 与 agent key 同为小写 auto——大小写敏感比较在此对齐
-      if (input.metadata.agent === "auto") {
-        return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
-      }
-      return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+      // #264：无 reviewer 时默认回到用户 ask；fallback=deny 保留 terminal fail-closed
+      if (fallbackToUser) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+      return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
     }
 
     // #208：reviewID 在模型调用前 mint——进度 UI 和最终审计事件可引用同一逻辑审查即使模型超时或失败
@@ -109,15 +108,15 @@ export function evaluate(
         reason: input.strict && precheck.level !== "cautious" ? `strict auto review required: ${precheck.reason}` : precheck.reason,
       },
     }).pipe(
+      // #264：defect 不应绕过权限边界，视为 reviewer 不可用以达到 ask fallback
+      Effect.catchDefect((defect) => Effect.fail(defect)),
       Effect.match({
         onFailure: (error) => {
-          const tag = errorTag(error)
-          // #198：Disabled/FallbackToUser 是显式服务信号，回退到用户审批；其他失败（provider 错误、schema 错误、超时）fail closed
-          // #198：Disabled 表示服务未启用，FallbackToUser 表示配置了 fallback=user——两者都不代表危险，回退到用户审批
-          if (tag === "PermissionReviewerDisabled" || tag === "PermissionReviewerFallbackToUser") {
+          // #264：所有 reviewer 服务和 provider 失败都是基础设施问题，非策略 deny
+          if (fallbackToUser) {
             return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
           }
-          // #198：其他失败 fail closed——超时/provider 错误/schema 错误时拒绝而非放行，防止不透明的 reviewer 故障打开安全缺口
+          // #264：fallback=deny 下重试耗尽仍终竭拒绝——基础设施工具故障不得放行
           return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
         },
         onSuccess: (reviewed) => {

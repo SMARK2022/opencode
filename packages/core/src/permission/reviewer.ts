@@ -240,7 +240,11 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         } },
         content: part.state.content,
       }, { finalizer })
-    })
+    }).pipe(
+      // 父工具展示是附属状态，写入失败不得覆盖已获得的裁决；中断继续传播。
+      Effect.catch(() => Effect.void),
+      Effect.catchDefect(() => Effect.void),
+    )
   }
 }))
 

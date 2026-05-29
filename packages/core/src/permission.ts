@@ -207,7 +207,9 @@ const layer = Layer.effect(
         record(false)
         return { effect, rules: all }
       }
-      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, tool: input.source, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
+      // 显式人工模式不调用reviewer；其余基础设施失败按同一fallback配置处理。
+      const reviewerDisabled = Config.latest(entries, "approvals_reviewer") === "user"
+      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, tool: input.source, strict: options.strict, reviewerFailureFallback: reviewerDisabled ? "user" : options.fallback ?? "user" }, reviewerDisabled ? undefined : {
         review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
       }, (review) => events.publish(PermissionV1.Event.ReviewStarted, {
         sessionID: input.sessionID,

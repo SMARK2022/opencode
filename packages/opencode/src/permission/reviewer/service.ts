@@ -123,6 +123,8 @@ export const layer = Layer.effect(
         // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 auto 隐式启用
         if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
         const autoReview = permission?.auto_review
+        // #264：默认 fallback=user，fallback=deny 保留 fail-closed
+        const fallbackToUser = autoReview?.fallback !== "deny"
 
         const run = Effect.gen(function* () {
           const request = new ReviewerRequest({
@@ -243,22 +245,29 @@ export const layer = Layer.effect(
 
         // #209：错误时标记工具审查失败——fallback=user 标记 fallback_user，超时标记 timed_out，其他标记 failed，使 UI 能展示失败原因
         return yield* run.pipe(
+          // #264：defect 不应绕过权限边界，转为同一 post-retry 失败通道
+          Effect.catchDefect((defect) => Effect.fail(defect)),
           Effect.catch((error: unknown) =>
             Effect.gen(function* () {
               yield* markToolReviewFailed(
                 input,
-                autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
+                fallbackToUser && !(error instanceof ReviewerDisabled)
                   ? "fallback_user"
                   : error instanceof ReviewerTimedOut
                     ? "timed_out"
                     : "failed",
                 errorMessage(error),
+              ).pipe(
+                // #264：父 tool metadata 是审计/UI 状态，写入失败不应创建第二个失败模式
+                Effect.catch(() => Effect.void),
+                Effect.catchDefect(() => Effect.void),
               )
-              // 显式禁用沿用人工路由，其余失败仅按用户配置回退，默认仍拒绝执行。
-              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
+              // #264：reviewer 失败默认转为显式 fallback 信号，让 PermissionAuto 复用普通 ask 路径
+              if (fallbackToUser && !(error instanceof ReviewerDisabled)) {
                 return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
               }
-              return yield* Effect.fail(error)
+              // #264：非 ReviewerError 的未知错误包成 ReviewerRunError——类型化错误契约不因 fallback 改造而破裂
+              return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
             }),
           ),
         )
@@ -778,6 +787,8 @@ export const layer = Layer.effect(
       }).pipe(
         // #208：review 展示是 best-effort——过期工具引用不应将有效 reviewer 决策转为 fail-closed deny
         Effect.catch(() => Effect.void),
+        // #264：显示路径 defect 也应被捕获——避免 UI 更新失败降级有效 reviewer 决策
+        Effect.catchDefect(() => Effect.void),
       )
     }
   }),
