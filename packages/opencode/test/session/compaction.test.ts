@@ -1527,6 +1527,8 @@ describe("session.compaction.process", () => {
         yield* createUserMessage(session.id, "older context")
         yield* createUserMessage(session.id, "keep this turn")
         yield* createUserMessage(session.id, "and this one too")
+        yield* createUserMessage(session.id, "third retained turn")
+        yield* createUserMessage(session.id, "fourth retained turn")
         yield* createCompactionMarker(session.id)
 
         const msgs = yield* ssn.messages({ sessionID: session.id })
@@ -1542,6 +1544,8 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("older context")
         expect(captured).not.toContain("keep this turn")
         expect(captured).not.toContain("and this one too")
+        expect(captured).not.toContain("third retained turn")
+        expect(captured).not.toContain("fourth retained turn")
         expect(captured).not.toContain("What did we do so far?")
       }).pipe(withCompaction({ llm: stub.layer }))
     },
