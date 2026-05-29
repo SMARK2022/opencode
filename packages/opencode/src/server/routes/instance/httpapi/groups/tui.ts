@@ -4,7 +4,11 @@ import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
-import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
+import {
+  WorkspaceRoutingMiddleware,
+  WorkspaceRoutingQuery,
+  WorkspaceRoutingQueryFields,
+} from "../middleware/workspace-routing"
 import { ApiNotFoundError } from "../errors"
 import { described } from "./metadata"
 
@@ -32,6 +36,28 @@ export const TuiPublishPayload = Schema.Union([
   EventTuiToastShow,
   EventTuiSessionSelect,
 ])
+export const ProviderEndpointStatusQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  // TUI 传入 provider baseURL 的 origin。使用 query 而不是 body 是为了保持
+  // sidebar 轮询为幂等 GET；WorkspaceRoutingQueryFields 继续允许远端 workspace
+  // 中间件识别 directory/workspace 参数，不破坏既有 TUI 路由行为。
+  url: Schema.String,
+})
+export const ProviderEndpointStatus = Schema.Struct({
+  url: Schema.String,
+  // HTTP 响应只暴露 ok/down：首次探测由 handler 等待完成，TUI 自己保留本地
+  // init 显示态。wire schema 不包含 init，避免外部调用方误以为 daemon 会返回
+  // 一个需要再次轮询解释的未完成状态。
+  status: Schema.Literals(["ok", "down"]),
+  latency: Schema.NullOr(Schema.Number),
+  route: Schema.Struct({
+    // 只暴露 direct/proxy，不返回具体 proxy URL，避免把可能包含凭据的代理
+    // 地址通过 TUI/plugin API 泄漏出去。
+    type: Schema.Literals(["direct", "proxy"]),
+    reason: Schema.String,
+  }),
+  checkedAt: Schema.Number,
+})
 
 export const TuiPaths = {
   appendPrompt: `${root}/append-prompt`,
@@ -45,6 +71,7 @@ export const TuiPaths = {
   showToast: `${root}/show-toast`,
   publish: `${root}/publish`,
   selectSession: `${root}/select-session`,
+  providerEndpointStatus: `${root}/provider-endpoint-status`,
   controlNext: `${root}/control/next`,
   controlResponse: `${root}/control/response`,
 } as const
@@ -170,6 +197,20 @@ export const TuiApi = HttpApi.make("tui")
             identifier: "tui.selectSession",
             summary: "Select session",
             description: "Navigate the TUI to display the specified session.",
+          }),
+        ),
+        HttpApiEndpoint.get("providerEndpointStatus", TuiPaths.providerEndpointStatus, {
+          query: ProviderEndpointStatusQuery,
+          success: described(ProviderEndpointStatus, "Provider endpoint route and latency"),
+          error: HttpApiError.BadRequest,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "tui.providerEndpointStatus",
+            summary: "Get provider endpoint status",
+            // TUI 只上报当前 provider origin；daemon 在自己的进程环境里解析
+            // proxy 并执行 HEAD 探测，保证多 TUI 复用同一 daemon 时显示和真实
+            // provider 请求使用同一个网络来源。
+            description: "Return daemon-owned proxy route and latency for a provider endpoint origin.",
           }),
         ),
         HttpApiEndpoint.get("controlNext", TuiPaths.controlNext, {

@@ -6,8 +6,8 @@ import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
 import { tokenAccounting } from "@/token/accounting"
-import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { useLocal } from "@tui/context/local"
+import { useSDK } from "@tui/context/sdk"
 
 const id = "internal:sidebar-context"
 
@@ -20,6 +20,7 @@ const PING_INTERVAL = 1_000
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   const local = useLocal()
+  const sdk = useSDK()
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   // [local-smark] Detailed token accounting state
   const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
@@ -109,28 +110,34 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const ping = async () => {
       if (!active) return
 
-      const t0 = Date.now()
       try {
-        const route = await NetworkProxy.resolveProxyRoute(url, "provider")
-        if (!active) return
-        setIsProxy(route.type === "proxy")
-
-        const res = await NetworkProxy.routedFetch(url, {
-          method: "HEAD",
+        const target = new URL("/tui/provider-endpoint-status", sdk.url)
+        target.searchParams.set("url", url)
+        if (sdk.directory) target.searchParams.set("directory", sdk.directory)
+        // proxy/latency 必须由 daemon 统一计算：多个 TUI 可以复用同一个
+        // daemon，而真实 provider 请求也从 daemon 发出。这里仅订阅 daemon 的
+        // 缓存结果，避免每个 TUI 用自己的 env/system proxy 重复探测。
+        const res = await sdk.fetch(target, {
+          method: "GET",
           signal: AbortSignal.timeout(3000),
-          purpose: "provider",
-        } as RequestInit)
-        const elapsed = Date.now() - t0
+        })
+        if (!res.ok) throw new Error(`endpoint status failed: ${res.status}`)
+        const status = await res.json() as {
+          status: "ok" | "down"
+          latency: number | null
+          route: { type: "direct" | "proxy" }
+        }
         if (!active) return
 
-        if (res.status === 502 || res.status === 503 || res.status === 504) {
+        setIsProxy(status.route.type === "proxy")
+        if (status.status === "down") {
           setPingStatus("down")
           setLatency(null)
         } else {
-          setPingStatus("ok")
-          setLatency(elapsed)
+          setPingStatus(status.status)
+          setLatency(status.latency)
         }
-      } catch (err: any) {
+      } catch {
         if (active) {
           setPingStatus("down")
           setLatency(null)

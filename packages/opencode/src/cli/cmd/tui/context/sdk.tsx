@@ -40,6 +40,15 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       })
     }
 
+    function fetchWithHeaders(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) {
+      const headers = new Headers(props.headers)
+      new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+      // Raw daemon fetches must carry the same attach/auth headers as the
+      // generated SDK client. Otherwise protected TUI connections can read normal
+      // SDK routes but sidebar/helper fetches would be rejected by Authorization.
+      return (props.testTransport?.fetch ?? fetch)(input, { ...init, headers })
+    }
+
     let sdk = createSDK()
 
     const emitter = createGlobalEmitter<{
@@ -207,7 +216,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       },
       directory: props.directory,
       event: emitter,
-      fetch: props.testTransport?.fetch ?? fetch,
+      fetch: fetchWithHeaders,
       get url() {
         return url
       },
