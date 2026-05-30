@@ -3,9 +3,13 @@ import { AsyncQueue } from "@/util/queue"
 import { Schema } from "effect"
 import type { Context } from "hono"
 
+export const DisposedReason = {
+  DaemonStop: "daemon-stop",
+} as const
+
 export const Event = {
   Connected: BusEvent.define("server.connected", Schema.Struct({})),
-  Disposed: BusEvent.define("global.disposed", Schema.Struct({})),
+  Disposed: BusEvent.define("global.disposed", Schema.Struct({ reason: Schema.optional(Schema.String) })),
 }
 
 const encoder = new TextEncoder()

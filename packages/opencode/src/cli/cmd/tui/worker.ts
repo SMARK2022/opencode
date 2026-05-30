@@ -15,6 +15,8 @@ import { Global } from "@opencode-ai/core/global"
 import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { SessionActivity } from "@/session/activity"
+import { GlobalBus } from "@/bus/global"
+import { DisposedReason, Event as ServerEvent } from "@/server/event"
 
 ensureProcessMetadata("worker")
 NetworkProxy.installGlobalFetch()
@@ -105,13 +107,26 @@ async function gracefulShutdown(reason = "unknown") {
     sseClients,
     sessionActivity: SessionActivity.count(),
   })
-  await ServerLock.clearIfOwner(lockToken)
+  if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
   await InstanceRuntime.disposeAllInstances()
   controlServer?.stop(true)
   if (externalServer) await externalServer.stop(true)
   await internalServer.stop(true)
   Database.close()
+  // Keep the lock until after disposers and Database.close() finish. Otherwise a
+  // reconnecting TUI can spawn a replacement daemon while this process still owns SQLite.
+  await ServerLock.clearIfOwner(lockToken)
   process.exit(0)
+}
+
+function notifyDaemonStop() {
+  GlobalBus.emit("event", {
+    directory: "global",
+    payload: {
+      type: ServerEvent.Disposed.type,
+      properties: { reason: DisposedReason.DaemonStop },
+    },
+  })
 }
 
 process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
@@ -176,7 +191,7 @@ controlServer = Bun.serve({
       return new Response("not found", { status: 404 })
     // 这是 daemon stop 的本机私有控制面：只有持有当前 lock token 的调用方
     // 才能让 daemon 自己执行 gracefulShutdown，避免 CLI 直接杀 pid。
-    setTimeout(() => void gracefulShutdown("daemon-stop"), 0).unref?.()
+    setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
     return Response.json({ ok: true })
   },
 })

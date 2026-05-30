@@ -139,6 +139,16 @@ async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
   throw new Error("timed out waiting for child pid")
 }
 
+async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
+  let seen = ""
+  while (!seen.includes(text)) {
+    const next = await reader.read()
+    if (next.done) break
+    seen += next.value
+  }
+  return seen
+}
+
 describe("daemon lifecycle", () => {
   test(
     "daemon stop command gracefully stops daemon and clears the lock file",
@@ -155,6 +165,43 @@ describe("daemon lifecycle", () => {
         const daemonExit = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
         expect(daemonExit).not.toBe("timeout")
         expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "daemon stop announces shutdown to connected TUI event streams before exit",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
+
+      try {
+        const ctrl = new AbortController()
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+
+        try {
+          const first = await reader.read()
+          expect(first.value).toContain("server.connected")
+
+          const stop = runDaemonStop(lockPath)
+          const shutdownEvent = await Promise.race([readUntil(reader, "daemon-stop"), Bun.sleep(5_000).then(() => "timeout")])
+          expect(shutdownEvent).not.toBe("timeout")
+          expect(String(shutdownEvent)).toContain("global.disposed")
+          expect(String(shutdownEvent)).toContain("daemon-stop")
+          await stop
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
       } finally {
         if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
         await proc.exited.catch(() => undefined)

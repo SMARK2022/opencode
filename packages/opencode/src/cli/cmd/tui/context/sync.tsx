@@ -36,6 +36,7 @@ import { useKV } from "./kv"
 import { SessionPath } from "@/session/path"
 import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
+import { DisposedReason } from "@/server/event"
 
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
@@ -386,9 +387,18 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       setStore("session_status", reconcile(x.data ?? {}))
     }
 
+    const exit = useExit()
+    let daemonStopSeen = false
+
     event.subscribe((event, { workspace }) => {
       if (event.type !== "message.part.delta") flushPartDeltas()
       switch (event.type) {
+        case "global.disposed":
+          if (daemonStopReason(event) !== DisposedReason.DaemonStop) break
+          daemonStopSeen = true
+          exit.message.set("opencode daemon stopped.")
+          void exit()
+          break
         case "server.connected":
           loggedPartDeltaApplications.clear()
           if (!connectedOnce) {
@@ -401,6 +411,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           void bootstrap({ fatal: false }).catch(() => undefined)
           break
         case "server.instance.disposed":
+          if (daemonStopSeen) break
           void bootstrap()
           break
         case "permission.replied": {
@@ -667,7 +678,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       loggedPartDeltaApplications.clear()
     })
 
-    const exit = useExit()
     const args = useArgs()
 
     async function bootstrap(input: { fatal?: boolean } = {}) {
@@ -851,3 +861,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     return result
   },
 })
+
+function daemonStopReason(event: { properties: unknown }) {
+  const properties = event.properties
+  if (!properties || typeof properties !== "object") return
+  return typeof (properties as { reason?: unknown }).reason === "string"
+    ? (properties as { reason: string }).reason
+    : undefined
+}

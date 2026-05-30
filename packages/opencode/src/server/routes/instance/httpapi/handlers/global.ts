@@ -2,7 +2,6 @@ import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
-import { BusEvent } from "@/bus/bus-event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -15,9 +14,6 @@ import { GlobalUpgradeInput } from "../groups/global"
 import { PassThrough } from "node:stream"
 
 const log = Log.create({ service: "server" })
-
-// [local-smark] SSE client count tracking for daemon idle-timeout
-export const GlobalDisposedEvent = BusEvent.define("global.disposed", Schema.Struct({}))
 
 let sseClientCount = 0
 let onSseCountChange: ((n: number) => void) | undefined
