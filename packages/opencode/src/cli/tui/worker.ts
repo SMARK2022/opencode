@@ -12,6 +12,8 @@ import { ServerLock } from "@/cli/tui/server-lock"
 import { EventClients } from "@opencode-ai/server/event-clients"
 import { SessionActivity } from "@/session/activity"
 import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
+import { GlobalBus } from "@/bus/global"
+import { DisposedReason, Event } from "@/server/event"
 
 Heap.start()
 
@@ -66,6 +68,17 @@ if (isDaemon) {
     const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
     shutdownTimer.unref?.()
     if (upgradeTimer) clearTimeout(upgradeTimer)
+    // 主动停机先通知全局订阅；广播失败也计入退出码，不跳过后续清理。
+    const notified = await Promise.allSettled([Promise.resolve().then(() => {
+      if (reason !== DisposedReason.DaemonStop) return
+      GlobalBus.emit("event", {
+        directory: "global",
+        payload: {
+          type: Event.Disposed.type,
+          properties: { reason: DisposedReason.DaemonStop },
+        },
+      })
+    })])
     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
@@ -74,12 +87,12 @@ if (isDaemon) {
       Promise.resolve().then(() => externalServer?.stop(true)),
       Promise.resolve().then(() => internalServer?.stop(true)),
     ])
-    // 停止监听后才释放发现锁，避免另一个启动方在旧端口尚被占用时替换 owner。
-    const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
     const runtime = await Promise.allSettled([AppRuntime.dispose()])
     // Database Layer 的 finalizer 在 native close 前 checkpoint，监听 scope 与 runtime 均照常释放。
+    // 数据库 scope 关闭后才释放锁，避免替换 owner 过早打开仍被旧进程持有的 SQLite。
+    const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
     clearTimeout(shutdownTimer)
-    process.exit(exitCode || ([...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
+    process.exit(exitCode || ([...notified, ...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
   }
 
   // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
@@ -297,7 +310,7 @@ if (isDaemon) {
         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
           return new Response("not found", { status: 404 })
         // 先返回停止响应，再进入既有关闭闭包，避免在 handler 内中断响应。
-        setTimeout(() => void gracefulShutdown(0, "daemon-stop"), 0).unref?.()
+        setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
         return Response.json({ ok: true })
       },
     })

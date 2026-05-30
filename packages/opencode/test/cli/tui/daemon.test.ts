@@ -106,6 +106,17 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
   throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
 }
 
+// 累积 SSE 分块，避免关闭事件被分帧后漏检；五秒上限由调用方负责。
+async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
+  let seen = ""
+  while (!seen.includes(text)) {
+    const next = await reader.read()
+    if (next.done) break
+    seen += next.value
+  }
+  return seen
+}
+
 describe("daemon lifecycle", () => {
   // 这些用例启动真实 worker/CLI，保留完整 stop 契约，仅作静态审查。
   test(
@@ -123,6 +134,49 @@ describe("daemon lifecycle", () => {
         const daemonExit = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
         expect(daemonExit).not.toBe("timeout")
         expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  // 先等待 connected 再调用 stop，确保观察到主动关闭广播；真实启动用例仅作静态审查。
+  test(
+    "daemon stop announces shutdown to connected TUI event streams before exit",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
+
+      try {
+        const ctrl = new AbortController()
+        // 与 fixture 共用显式认证，401 不能被误判为关闭广播缺失。
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, {
+          signal: ctrl.signal,
+          headers: ServerLock.headers(credentials),
+        })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+
+        try {
+          const first = await reader.read()
+          expect(first.value).toContain("server.connected")
+
+          const stop = runDaemonStop(lockPath)
+          // 同一订阅必须收到 global.disposed 及 daemon-stop 原因，五秒内未收到就失败。
+          const shutdownEvent = await Promise.race([readUntil(reader, "daemon-stop"), Bun.sleep(5_000).then(() => "timeout")])
+          expect(shutdownEvent).not.toBe("timeout")
+          expect(String(shutdownEvent)).toContain("global.disposed")
+          expect(String(shutdownEvent)).toContain("daemon-stop")
+          await stop
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
       } finally {
         if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
         await proc.exited.catch(() => undefined)
