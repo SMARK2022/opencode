@@ -7532,7 +7532,7 @@ export type EventGlobalDisposed = {
   id: string
   type: "global.disposed"
   properties: {
-    [key: string]: unknown
+    reason?: string
   }
 }
 

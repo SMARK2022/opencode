@@ -28,6 +28,7 @@ import { useSDK } from "./sdk"
 import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
+import { useEpilogue } from "./epilogue"
 import { useArgs } from "./args"
 import { batch, onCleanup, onMount } from "solid-js"
 import path from "path"
@@ -394,12 +395,29 @@ export const {
         .finally(() => listingSessions.delete(tracker))
     }
 
+    const exit = useExit()
+    const setEpilogue = useEpilogue()
+    // 主动停机先锁定退出状态，后续实例释放通知不能再次 bootstrap。
+    let daemonStopSeen = false
+
     event.subscribe((event, { directory, workspace }) => {
       // #186：非 delta 事件前强制 flush，保证 part.updated / vcs 等看到完整文本
       // #186：delta 自身不 flush，继续积攒同一 16ms 窗口
       if (event.type !== "message.part.delta") flushPartDeltas()
       switch (event.type) {
+        case "global.disposed": {
+          // 原始SSE载荷仍按运行时字段识别，普通dispose不触发主动停机路径。
+          const properties: unknown = event.properties
+          if (!properties || typeof properties !== "object" ||
+            !("reason" in properties) || properties.reason !== "daemon-stop") break
+          daemonStopSeen = true
+          // 提示走 epilogue；exit 的 reason 参数会被现有退出 owner 判作错误。
+          setEpilogue("opencode daemon stopped.")
+          exit()
+          break
+        }
         case "server.instance.disposed":
+          if (daemonStopSeen) break
           void bootstrap()
           break
         case "server.connected":
@@ -725,7 +743,6 @@ export const {
       loggedPartDeltaApplications.clear()
     })
 
-    const exit = useExit()
     const args = useArgs()
 
     // #153：session_status 独立刷新，force sync 与 bootstrap 共用同一入口
