@@ -55,7 +55,7 @@ describe("tui thread", () => {
     // validation errors. Tests assert those branches directly, so reset the
     // process-global value after each case; otherwise Bun can report 0 failed
     // tests but still exit 1 on Linux when the final process exitCode leaks.
-    process.exitCode = originalExitCode
+    restoreExitCode(originalExitCode)
   })
 
   async function call(project?: string, overrides?: Partial<ThreadArgs>) {
@@ -211,7 +211,7 @@ describe("tui thread", () => {
         expect(seen.errors[0]).toContain("https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge")
         expect(seen.tuiUrls).toHaveLength(0)
       } finally {
-        process.exitCode = exitCode
+        restoreExitCode(exitCode)
       }
     })
 
@@ -226,7 +226,7 @@ describe("tui thread", () => {
         expect(seen.tuiUrls).toHaveLength(0)
       } finally {
         process.argv = argv
-        process.exitCode = exitCode
+        restoreExitCode(exitCode)
       }
     })
 
@@ -727,3 +727,8 @@ describe("tui thread", () => {
     })
   })
 })
+
+function restoreExitCode(exitCode: typeof process.exitCode) {
+  // Bun treats assigning undefined as a no-op once exitCode has been set.
+  process.exitCode = exitCode ?? 0
+}
