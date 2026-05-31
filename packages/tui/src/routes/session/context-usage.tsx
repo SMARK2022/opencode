@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createResource, For, onCleanup, Show } from "solid-js"
+import { createEffect, createMemo, createResource, For, onCleanup, Show, untrack } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
 import type { Binding, Keymap, KeymapEvent } from "@opentui/keymap"
 import { useTuiConfig } from "../../config"
@@ -11,6 +11,17 @@ import { useTheme } from "../../context/theme"
 import { createThrottledSignal } from "../../util/signal"
 import { TextAttributes } from "@opentui/core"
 import { Locale } from "../../util/locale"
+import type {
+  Agent,
+  Config,
+  Message,
+  Part,
+  Provider,
+  Session,
+  SessionMessageInputEstimate,
+  VcsInfo,
+} from "@opencode-ai/sdk/v2"
+import type { InputBreakdown } from "@opencode-ai/schema/session-message"
 import {
   computeContextData,
   type ComputeContextDataInput,
@@ -19,9 +30,194 @@ import {
   type GridSquare,
 } from "../../util/context-usage"
 
-// 深读 Solid 嵌套字段使 raw 增量参与依赖追踪；节流继续作用于完整快照。
+// 完整快照保留全部 wire 字段；resource 仅在节流后深拷贝，避免订阅绕过节流。
 export function contextUsageSnapshot<T,>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+export function contextUsageRefreshKey(input: {
+  messages: readonly Message[]
+  getParts: (id: string) => readonly Part[]
+  providers: readonly Provider[]
+  config?: Config
+  agents?: readonly Agent[]
+  session?: Session
+  lastUserModel?: { providerID: string; modelID: string }
+  vcs?: VcsInfo
+  paths: ComputeContextDataInput["paths"]
+  columns?: number
+  instructionFiles?: ComputeContextDataInput["instructionFiles"]
+  skills?: ComputeContextDataInput["skills"]
+  toolDefinitions?: ComputeContextDataInput["toolDefinitions"]
+}) {
+  const request = input.session?.request
+  // 轻量字段订阅 streaming；流式正文只取长度，完整快照留到节流发布后。
+  return [
+    input.columns ?? "",
+    input.paths.cwd,
+    input.paths.worktree ?? "",
+    input.paths.shell ?? "",
+    input.paths.home ?? "",
+    input.paths.config ?? "",
+    input.lastUserModel ? `${input.lastUserModel.providerID}/${input.lastUserModel.modelID}` : "",
+    configRefreshKey(input.config),
+    input.vcs ? refreshJson(input.vcs) : "",
+    input.providers.map(providerRefreshKey).join("|"),
+    (input.agents ?? [])
+      .map((agent) => `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${agent.prompt?.length ?? 0}:${refreshJson(agent.permission)}`)
+      .join("|"),
+    input.session?.id ?? "",
+    refreshJson(input.session?.permission),
+    input.session?.tokens ? tokenRefreshKey(input.session.tokens) : "",
+    input.session?.cost ?? "",
+    // 本轮投影包括零预算与首包前估算，不能退回旧消息的估算 owner。
+    request
+      ? [
+          request.messageID,
+          request.assistantID ?? "",
+          request.input,
+          request.output,
+          request.cost,
+          request.stepInput,
+          request.stepOutput,
+          request.pendingInput ?? "",
+          request.estimatedInput ?? "",
+          request.model?.providerID ?? "",
+          request.model?.modelID ?? "",
+          request.model?.contextLimit ?? "",
+          inputEstimateRefreshKey(request.inputEstimate),
+        ].join("/")
+      : "",
+    // 显式空列表覆盖扫描或目录默认，和未提供列表不同。
+    input.instructionFiles ? input.instructionFiles.map((item) => `${item.path}:${item.content.length}`).join("|") : "-",
+    input.skills ? input.skills.map((item) => `${item.name}:${item.description}:${item.path}`).join("|") : "-",
+    input.toolDefinitions ? input.toolDefinitions.map((item) => `${item.name}:${item.text.length}`).join("|") : "-",
+    input.messages
+      .map((message) => [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("="))
+      .join("\n"),
+  ].join("\n")
+}
+
+// 只累计结构和字符串长度，不序列化工具参数；这个信号不参与 token 估算。
+function refreshJsonLength(value: unknown): number {
+  if (typeof value === "string") return value.length + 2
+  if (value === null || typeof value !== "object") return String(value).length
+  if (Array.isArray(value)) return value.reduce<number>((length, item) => length + 1 + refreshJsonLength(item), 2)
+  return Object.entries(value).reduce((length, [key, item]) => length + key.length + 4 + refreshJsonLength(item), 2)
+}
+
+function refreshJson(value: unknown) {
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return String(value)
+  }
+}
+
+function providerRefreshKey(provider: Provider) {
+  return [
+    provider.id,
+    Object.entries(provider.models)
+      .map(([id, model]) => `${id}:${model.id}:${model.providerID}:${model.api.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`)
+      .join(","),
+  ].join(":")
+}
+
+function configRefreshKey(config: Config | undefined) {
+  if (!config) return ""
+  // 只观察计算实际使用的预留和扫描路径，流式更新不复制整份 config。
+  return [
+    config.compaction?.reserved ?? "",
+    Array.isArray(config.instructions) ? config.instructions.join("\0") : "",
+    Array.isArray(config.skills?.paths) ? config.skills.paths.join("\0") : "",
+  ].join("|")
+}
+
+function messageRefreshKey(message: Message) {
+  const extra = message.role === "assistant" ? message.inputEstimate : undefined
+  return [
+    message.id,
+    message.role,
+    "parentID" in message ? message.parentID : "",
+    "providerID" in message ? message.providerID : "",
+    "modelID" in message ? message.modelID : "",
+    message.time && "completed" in message.time ? message.time.completed : "",
+    "tokens" in message && message.tokens ? tokenRefreshKey(message.tokens) : "",
+    message.agent,
+    message.role === "user" ? `${message.model.providerID}/${message.model.modelID}` : "",
+    message.role === "user" ? message.system?.length ?? 0 : "",
+    message.role === "user" ? refreshJson(message.tools) : "",
+    message.role === "assistant" ? `${message.summary ? 1 : 0}:${message.finish ?? ""}:${message.error ? 1 : 0}` : "",
+    message.role === "assistant" ? message.cost : "",
+    inputEstimateRefreshKey(extra),
+  ].join(":")
+}
+
+function partRefreshKey(part: Part): string {
+  const base = `${part.id ?? ""}:${part.type}`
+  if (part.type === "text") return `${base}:${part.text?.length ?? 0}:${part.ignored ? 1 : 0}`
+  if (part.type === "reasoning") return `${base}:${part.text?.length ?? 0}`
+  if (part.type === "tool") {
+    const state = part.state
+    if (state.status === "pending") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.raw?.length ?? 0}`
+    // 压缩标记、read 规则路径和附件各自改变分类，不能只观察工具输出长度。
+    if (state.status === "completed")
+      return [
+        base,
+        part.tool,
+        state.status,
+        refreshJsonLength(state.input),
+        state.output?.length ?? 0,
+        state.time.compacted ?? "",
+        Array.isArray(state.metadata.loaded) ? state.metadata.loaded.filter((item) => typeof item === "string").join("\0") : "",
+        state.attachments?.map(partRefreshKey).join(",") ?? "",
+      ].join(":")
+    if (state.status === "error")
+      return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.error?.length ?? 0}`
+    return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}`
+  }
+  // 目标只有 step-finish 携带确认细分；step-start 不再承担上传估算。
+  if (part.type === "step-finish")
+    return `${base}:${part.cost ?? 0}:${tokenRefreshKey(part.tokens)}:${part.inputChars ?? ""}:${part.inputBreakdown ? inputBreakdownRefreshKey(part.inputBreakdown) : ""}`
+  if (part.type === "file") return `${base}:${part.filename ?? ""}:${part.mime}:${part.url?.length ?? 0}`
+  if (part.type === "compaction") return `${base}:${part.tail_start_id ?? ""}`
+  if (part.type === "subtask") return `${base}:${part.prompt.length}:${part.description.length}`
+  return base
+}
+
+function tokenRefreshKey(tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) {
+  return `${tokens.input}/${tokens.output}/${tokens.reasoning}/${tokens.cache.read}/${tokens.cache.write}`
+}
+
+function inputEstimateRefreshKey(input: SessionMessageInputEstimate | undefined) {
+  if (!input) return ""
+  return [
+    input.input,
+    input.bodyChars,
+    input.confirmed ? 1 : 0,
+    input.charsPerToken ?? "",
+    input.afterPartID ?? "",
+    input.contextLimit ?? "",
+    input.inputBreakdown ? inputBreakdownRefreshKey(input.inputBreakdown) : "",
+  ].join("/")
+}
+
+// 数值逐字段展开，100→200这类等长变化也要刷新；共享Schema保留可选媒体测量。
+function inputBreakdownRefreshKey(input: InputBreakdown) {
+  return [
+    input.system,
+    input.instructions,
+    input.skills,
+    input.tools,
+    input.messages.userText,
+    input.messages.assistantText,
+    input.messages.reasoning,
+    input.messages.toolInput,
+    input.messages.toolOutput,
+    input.messages.attachments,
+    input.messages.total,
+    input.media ? `${input.media.rawChars}/${input.media.textChars}/${input.media.tokens}/${input.media.count}` : "",
+  ].join("/")
 }
 
 
@@ -243,14 +439,21 @@ function Details(props: { data: ContextUsageData; columns: number }) {
   )
 }
 
-// SDK 输入只有 wire 数据；在 tracked memo 内序列化才能订阅嵌套字段，unwrap 不会建立订阅。
+// 先订阅轻量字段，完整输入只在节流发布后形成脱离 store proxy 的快照。
 export function contextUsageResource(input: () => ComputeContextDataInput) {
-  const snapshot = createMemo<ComputeContextDataInput>(() => contextUsageSnapshot(input()))
-  // 深层快照先追踪原位变更，再首尾节流，避免连续 delta 让异步计算持续失效。
-  const [throttled, setThrottled] = createThrottledSignal(snapshot(), 500)
-  createEffect(() => setThrottled(snapshot()))
-  // fetcher 被 Solid untrack；传入脱离 store proxy 的快照，异步 await 后也不会读到另一版本。
-  return createResource(throttled, computeContextData)
+  const inputSource = createMemo(() => {
+    const value = input()
+    return contextUsageRefreshKey({ ...value, getParts: (id) => value.parts[id] ?? [] })
+  })
+  // 首值立即发布，持续 delta 只覆盖尾值，沿用现有 500ms 首尾节流。
+  const [throttled, setThrottled] = createThrottledSignal(inputSource(), 500)
+  createEffect(() => setThrottled(inputSource()))
+  const snapshot = createMemo<ComputeContextDataInput>(() => {
+    throttled()
+    // 深拷贝不再订阅 store，异步计算也只读取这一轮完整快照。
+    return untrack(() => contextUsageSnapshot(input()))
+  })
+  return createResource(snapshot, computeContextData)
 }
 
 // 此注册入口由面板与真实 keymap harness 共用，关闭键不经过另一个 matcher 或全局退出命令。
@@ -276,7 +479,7 @@ export function registerContextUsageKeys<TTarget extends object, TEvent extends 
   })
 }
 
-// 面板仍使用唯一 resource；消息追加与部件原位更新都经同一 tracked 快照触发。
+// 面板与 headless 调用共用唯一 resource，流式更新只发布节流后的完整快照。
 export function ContextUsagePanel(props: { sessionID: string; onClose: () => void }) {
   const sync = useSync()
   const local = useLocal()
@@ -287,9 +490,9 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   const keymap = useOpencodeKeymap()
   const tuiConfig = useTuiConfig()
 
-  // 外层只选择会话输入；深层字段由 contextUsageResource 的 tracked 序列化订阅，不能在 fetcher 里读 proxy。
+  // 保留全部计算输入；原位 streaming 依赖由 resource 的轻量 key 订阅。
   const input = createMemo(() => {
-    // 消息追加时更新成员集合，text/raw/tokens 的原位修改仍由内层快照单独追踪。
+    // 这里只复制成员集合，消息与部件的完整深快照仍在节流后构建。
     const messages = [...(sync.data.message[props.sessionID] ?? [])]
     // 只取当前会话消息关联的部件，其他会话的 delta 不应刷新本窗口的估算。
     const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
@@ -300,7 +503,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
       providers: [...sync.data.provider],
       config: sync.data.config,
       agents: [...sync.data.agent],
-      // 保留 store proxy 到现有 tracked 序列化边界，嵌套 permission 更新也能刷新同一 resource。
+      // 持久权限与本轮 request 一起进入同一 key 和快照，保持服务端投影优先级。
       session: sync.session.get(props.sessionID),
       lastUserModel: local.model.current(),
       vcs: sync.data.vcs,

@@ -6,13 +6,14 @@ import { createBindingLookup } from "@opentui/keymap/extras"
 import { registerCommaBindings, registerTimedLeader } from "@opentui/keymap/addons"
 import { createTestKeymap, type TestKeymapEvent, type TestKeymapTarget } from "@opentui/keymap/testing"
 import { estimate } from "@opencode-ai/core/util/token"
+import type { InputBreakdown } from "@opencode-ai/schema/session-message"
 import { TuiKeybind } from "../src/config/keybind"
 import { tmpdir } from "./fixture/fixture"
 import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
 import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
 import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
 import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
-import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
+import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
 
 // 窗口/输入/输出故意不相等，才能让测试区分模型预留与压缩缓冲而非只验证零差额。
 const provider: Provider = {
@@ -123,6 +124,131 @@ test("snapshot tracks streaming tool input deltas", () => {
   })
 })
 describe("context usage", () => {
+  test("refresh key follows streaming tool deltas without serializing raw payloads", () => {
+    const raw = new String('{"filePath"')
+    const payload = new String("short")
+    let serializations = 0
+    // 同时拦截 raw/text；即使实现吞掉序列化异常，调用次数也必须暴露回归。
+    for (const value of [raw, payload]) {
+      Object.defineProperty(value, "toJSON", {
+        value() {
+          serializations++
+          throw new Error("streaming payload should not be JSON-serialized while building the refresh key")
+        },
+      })
+    }
+    createRoot((dispose) => {
+      const [store, setStore] = createStore({
+        messages: [user("1"), assistant("2", "1")],
+        parts: {
+          "1": [text("1", payload as unknown as string)],
+          "2": [{
+            id: "tool",
+            sessionID: "s",
+            messageID: "2",
+            type: "tool" as const,
+            tool: "bash",
+            callID: "call",
+            state: { status: "pending" as const, input: {}, raw: raw as unknown as string },
+          }],
+        },
+      })
+      const input = {
+        messages: store.messages,
+        parts: store.parts,
+        getParts: (id: string) => id === "2" ? store.parts["2"] : id === "1" ? store.parts["1"] : [],
+        providers: [provider],
+        paths: { cwd: process.cwd(), worktree: process.cwd() },
+        columns: 100,
+      }
+      let runs = 0
+      const key = createMemo(() => {
+        runs++
+        return contextUsageRefreshKey(input)
+      })
+      try {
+        const first = key()
+        expect(runs).toBe(1)
+        // 保持消息和部件数组身份，只修改嵌套 raw/text，验证生产 key 的响应式依赖。
+        setStore("parts", "2", 0, "state", "raw", '{"filePath":"src/index.ts"')
+        const second = key()
+        expect(first).not.toBe(second)
+        expect(runs).toBe(2)
+        setStore("parts", "1", 0, "text", "streaming text grows")
+        expect(key()).not.toBe(second)
+        expect(runs).toBe(3)
+        expect(serializations).toBe(0)
+      } finally {
+        dispose()
+      }
+    })
+  })
+
+  test("refresh key tracks inputBreakdown value changes even when string length is unchanged", () => {
+    // 媒体 fixture 使用共享 Schema 的完整字段，不能用 Part 强转隐藏缺失的分类 token。
+    const media = { rawChars: 1000, textChars: 10, tokens: 100, count: 1, imageTokens: 100, pdfTokens: 0, otherTokens: 0 }
+    const inputBreakdown: InputBreakdown = {
+      system: 100,
+      instructions: 0,
+      skills: 0,
+      tools: 0,
+      messages: { total: 0, userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0 },
+      media,
+    }
+    const common = {
+      messages: [user("1"), assistant("2", "1")],
+      providers: [provider],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+    }
+    const step = (inputBreakdown: InputBreakdown): Part => ({
+      id: "step",
+      sessionID: "s",
+      messageID: "2",
+      type: "step-finish",
+      cost: 0,
+      reason: "stop",
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      inputBreakdown,
+    })
+    const firstParts = [step(inputBreakdown)]
+    const secondParts = [step({ ...inputBreakdown, system: 200 })]
+    const firstInput = { ...common, parts: { "2": firstParts }, getParts: (id: string) => id === "2" ? firstParts : [] }
+    const secondInput = { ...common, parts: { "2": secondParts }, getParts: (id: string) => id === "2" ? secondParts : [] }
+    const first = contextUsageRefreshKey(firstInput)
+    const second = contextUsageRefreshKey(secondInput)
+
+    // 旧 V1 确认部件仍要区分同长度数值，不能用 JSON 长度代替字段值。
+    expect(String(100)).toHaveLength(String(200).length)
+    expect(first).not.toBe(second)
+
+    const session = {
+      id: "s", slug: "s", projectID: "p", directory: ".", title: "s", version: "1", time: { created: 0, updated: 0 },
+      request: {
+        messageID: "1", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0,
+        model: { providerID: "test", modelID: "model", contextLimit: 20000 },
+        inputEstimate: { input: 128, bodyChars: 1100, confirmed: false, charsPerToken: 4, inputBreakdown },
+      },
+    } satisfies Session
+    createRoot((dispose) => {
+      const [store, setStore] = createStore({ session })
+      // native 首包前没有可见消息；必须订阅 computeContextData 实际消费的 Session 请求投影。
+      const input = { ...common, messages: [], parts: {}, getParts: () => [], session: store.session }
+      const key = createMemo(() => contextUsageRefreshKey(input))
+      try {
+        const initial = key()
+        setStore("session", "request", "inputEstimate", "inputBreakdown", { ...inputBreakdown, system: 200 })
+        const changed = key()
+        expect(changed).not.toBe(initial)
+        const serialized = JSON.stringify(store.session.request.inputEstimate.inputBreakdown)
+        setStore("session", "request", "inputEstimate", "inputBreakdown", { ...inputBreakdown, system: 200, media: { ...media, tokens: 200, imageTokens: 200 } })
+        expect(JSON.stringify(store.session.request.inputEstimate.inputBreakdown)).toHaveLength(serialized.length)
+        expect(key()).not.toBe(changed)
+      } finally {
+        dispose()
+      }
+    })
+  })
   test("confirmed allocation composes input history and live output on the panel path", async () => {
     const inputBreakdown = {
       system: 300, instructions: 100, skills: 0, tools: 100,
