@@ -1,17 +1,20 @@
 import { Config } from "@/config/config"
 import type { MessageV2 } from "@/session/message-v2"
 import * as Log from "@opencode-ai/core/util/log"
-import photonWasm from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" }
 import { Context, Effect, Layer, Schema } from "effect"
-import path from "node:path"
-import { fileURLToPath } from "node:url"
 
 const MAX_BASE64_BYTES = 5 * 1024 * 1024
 const MAX_WIDTH = 2000
 const MAX_HEIGHT = 2000
 const AUTO_RESIZE = true
-const JPEG_QUALITIES = [80, 85, 70, 55, 40]
+// Keep this in sync with token/estimate.ts: image payload budget is estimated from base64 characters.
+const TOKEN_ESTIMATE_BASE64_CHARS = 750
+const RESIZE_STEPS = 32
+const RESIZE_STEP_RATIO = 0.75
+const JPEG_QUALITIES = [85, 70, 55, 40]
 const log = Log.create({ service: "image" })
+type Sharp = typeof import("sharp")
+type SharpMetadata = import("sharp").Metadata
 
 export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
   "ImageResizerUnavailableError",
@@ -52,7 +55,12 @@ export class SizeError extends Schema.TaggedErrorClass<SizeError>()("ImageSizeEr
 export type Error = ResizerUnavailableError | InvalidDataUrlError | DecodeError | SizeError
 
 export interface Interface {
-  readonly normalize: (input: MessageV2.FilePart) => Effect.Effect<MessageV2.FilePart, Error>
+  readonly normalize: (
+    input: MessageV2.FilePart,
+    options?: {
+      readonly tokenBudget?: number
+    },
+  ) => Effect.Effect<MessageV2.FilePart, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
@@ -61,99 +69,52 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
-    const loadPhoton = yield* Effect.cached(
-      Effect.sync(() => {
-        // Patched photon-node reads this during module init so Bun compiled binaries use the embedded wasm path.
-        ;(globalThis as typeof globalThis & { __OPENCODE_PHOTON_WASM_PATH?: string }).__OPENCODE_PHOTON_WASM_PATH =
-          path.isAbsolute(photonWasm) ? photonWasm : fileURLToPath(new URL(photonWasm, import.meta.url))
-      }).pipe(
-        Effect.andThen(() => Effect.tryPromise(() => import("@silvia-odwyer/photon-node"))),
-        Effect.tapError((error) => Effect.sync(() => log.warn("failed to load photon", { error }))),
-        Effect.mapError(() => new ResizerUnavailableError()),
-      ),
+    const loadSharp = yield* Effect.cached(
+      Effect.tryPromise({
+        try: async () => {
+          const mod = await import("sharp")
+          const value: unknown = Reflect.get(mod, "default")
+          if (isSharp(value)) return value
+          if (isSharp(mod)) return mod
+          throw new Error("sharp module did not expose a callable export")
+        },
+        catch: (error) => {
+          log.warn("failed to load sharp", { error })
+          return new ResizerUnavailableError()
+        },
+      }),
     )
 
-    const normalize = Effect.fn("Image.normalize")(function* (input: MessageV2.FilePart) {
+    const normalize = Effect.fn("Image.normalize")(function* (
+      input: MessageV2.FilePart,
+      options?: {
+        readonly tokenBudget?: number
+      },
+    ) {
       const image = (yield* config.get()).attachment?.image
       const info = {
         autoResize: image?.auto_resize ?? AUTO_RESIZE,
         maxWidth: image?.max_width ?? MAX_WIDTH,
         maxHeight: image?.max_height ?? MAX_HEIGHT,
-        maxBase64Bytes: image?.max_base64_bytes ?? MAX_BASE64_BYTES,
+        maxBase64Bytes: targetMaxBase64Bytes(image?.max_base64_bytes ?? MAX_BASE64_BYTES, options),
       }
       if (!input.url.startsWith("data:") || !input.url.includes(";base64,"))
         return yield* new InvalidDataUrlError({ url: input.url })
 
       const base64 = input.url.slice(input.url.indexOf(";base64,") + ";base64,".length)
       const bytes = Buffer.byteLength(base64, "utf8")
+      const buffer = Buffer.from(base64, "base64")
+      if (buffer.length === 0) return yield* new DecodeError()
 
-      const photon = yield* loadPhoton
+      const sharp = yield* loadSharp
+      const metadata = yield* readMetadata(sharp, buffer)
+      if (!metadata.width || !metadata.height) return yield* new DecodeError()
 
-      const decoded = yield* Effect.try({
-        try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
-        catch: (error) => {
-          log.warn("failed to decode image", { error })
-          return new DecodeError()
-        },
-      })
-
-      try {
-        const originalWidth = decoded.get_width()
-        const originalHeight = decoded.get_height()
-        if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes)
-          return input
-        if (!info.autoResize)
-          return yield* new SizeError({
-            bytes,
-            max: info.maxBase64Bytes,
-            width: originalWidth,
-            height: originalHeight,
-            max_width: info.maxWidth,
-            max_height: info.maxHeight,
-          })
-
-        const scale = Math.min(1, info.maxWidth / originalWidth, info.maxHeight / originalHeight)
-        for (const size of Array.from({ length: 32 }).reduce<Array<{ width: number; height: number }>>((acc) => {
-          const previous = acc.at(-1) ?? {
-            width: Math.max(1, Math.round(originalWidth * scale)),
-            height: Math.max(1, Math.round(originalHeight * scale)),
-          }
-          const next =
-            acc.length === 0
-              ? previous
-              : {
-                  width: previous.width === 1 ? 1 : Math.max(1, Math.floor(previous.width * 0.75)),
-                  height: previous.height === 1 ? 1 : Math.max(1, Math.floor(previous.height * 0.75)),
-                }
-          return acc.some((item) => item.width === next.width && item.height === next.height) ? acc : [...acc, next]
-        }, [])) {
-          const resized = photon.resize(decoded, size.width, size.height, photon.SamplingFilter.Lanczos3)
-          const candidate = [
-            { data: Buffer.from(resized.get_bytes()).toString("base64"), mime: "image/png" },
-            ...JPEG_QUALITIES.map((quality) => ({
-              data: Buffer.from(resized.get_bytes_jpeg(quality)).toString("base64"),
-              mime: "image/jpeg",
-            })),
-          ]
-            .map((item) => ({ ...item, bytes: Buffer.byteLength(item.data, "utf8") }))
-            .find((item) => item.bytes <= info.maxBase64Bytes)
-          resized.free()
-
-          if (candidate) {
-            log.info("using resized image", {
-              from_mime: input.mime,
-              to_mime: candidate.mime,
-              from: `${originalWidth}x${originalHeight}`,
-              to: `${size.width}x${size.height}`,
-            })
-            return {
-              ...input,
-              mime: candidate.mime,
-              url: `data:${candidate.mime};base64,${candidate.data}`,
-            }
-          }
-        }
-
+      const originalWidth = metadata.width
+      const originalHeight = metadata.height
+      // Historical session images may be normalized again during replay; metadata-only pass-through avoids lossy rewrites.
+      if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes) return input
+      if (!info.autoResize)
         return yield* new SizeError({
           bytes,
           max: info.maxBase64Bytes,
@@ -162,14 +123,119 @@ export const layer = Layer.effect(
           max_width: info.maxWidth,
           max_height: info.maxHeight,
         })
-      } finally {
-        decoded.free()
+
+      const hasAlpha = Boolean(metadata.hasAlpha)
+      const preserveAlpha = hasAlpha && options?.tokenBudget === undefined
+      for (const size of resizeSizes(originalWidth, originalHeight, info.maxWidth, info.maxHeight)) {
+        const candidate = yield* encodeCandidate(sharp, buffer, size, hasAlpha, preserveAlpha, info.maxBase64Bytes)
+        if (candidate) {
+          log.info("using resized image", {
+            from_mime: input.mime,
+            to_mime: candidate.mime,
+            from: `${originalWidth}x${originalHeight}`,
+            to: `${size.width}x${size.height}`,
+          })
+          return {
+            ...input,
+            mime: candidate.mime,
+            url: `data:${candidate.mime};base64,${candidate.data}`,
+          }
+        }
       }
+
+      return yield* new SizeError({
+        bytes,
+        max: info.maxBase64Bytes,
+        width: originalWidth,
+        height: originalHeight,
+        max_width: info.maxWidth,
+        max_height: info.maxHeight,
+      })
     })
 
     return Service.of({ normalize })
   }),
 )
+
+function targetMaxBase64Bytes(
+  configuredMax: number,
+  options?: {
+    readonly tokenBudget?: number
+  },
+) {
+  if (options?.tokenBudget === undefined) return configuredMax
+  return Math.min(configuredMax, Math.max(0, Math.floor(options.tokenBudget * TOKEN_ESTIMATE_BASE64_CHARS)))
+}
+
+function isSharp(value: unknown): value is Sharp {
+  return typeof value === "function"
+}
+
+function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata, DecodeError> {
+  return Effect.tryPromise({
+    try: () => sharp(buffer).metadata(),
+    catch: (error) => {
+      log.warn("failed to decode image metadata", { error })
+      return new DecodeError()
+    },
+  })
+}
+
+function resizeSizes(originalWidth: number, originalHeight: number, maxWidth: number, maxHeight: number) {
+  const scale = Math.min(1, maxWidth / originalWidth, maxHeight / originalHeight)
+  return Array.from({ length: RESIZE_STEPS }).reduce<Array<{ width: number; height: number }>>((acc) => {
+    const previous = acc.at(-1) ?? {
+      width: Math.max(1, Math.round(originalWidth * scale)),
+      height: Math.max(1, Math.round(originalHeight * scale)),
+    }
+    const next =
+      acc.length === 0
+        ? previous
+        : {
+            width: previous.width === 1 ? 1 : Math.max(1, Math.floor(previous.width * RESIZE_STEP_RATIO)),
+            height: previous.height === 1 ? 1 : Math.max(1, Math.floor(previous.height * RESIZE_STEP_RATIO)),
+          }
+    return acc.some((item) => item.width === next.width && item.height === next.height) ? acc : [...acc, next]
+  }, [])
+}
+
+function encodeCandidate(
+  sharp: Sharp,
+  buffer: Buffer,
+  size: { width: number; height: number },
+  hasAlpha: boolean,
+  preserveAlpha: boolean,
+  maxBase64Bytes: number,
+) {
+  return Effect.tryPromise({
+    try: async () => {
+      const resized = sharp(buffer).rotate().resize(size.width, size.height, {
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      if (preserveAlpha) {
+        const encoded = (await resized.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer()).toString(
+          "base64",
+        )
+        if (Buffer.byteLength(encoded, "utf8") <= maxBase64Bytes) return { data: encoded, mime: "image/png" }
+      }
+
+      for (const quality of JPEG_QUALITIES) {
+        // Transparent inputs prefer PNG above unless a strict token budget makes bounded latency more important.
+        const encoded = (await (hasAlpha ? resized.clone().flatten({ background: "#ffffff" }) : resized.clone())
+          .jpeg({ quality })
+          .toBuffer()).toString("base64")
+        if (Buffer.byteLength(encoded, "utf8") <= maxBase64Bytes) return { data: encoded, mime: "image/jpeg" }
+      }
+
+      return undefined
+    },
+    catch: (error) => {
+      log.warn("failed to resize image", { error })
+      return new DecodeError()
+    },
+  })
+}
 
 export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer))
 

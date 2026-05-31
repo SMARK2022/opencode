@@ -11,10 +11,12 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 // [local-smark] read tool enhancements: image processing, outline
-import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
+import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
 import { readOutline, type Outline } from "./read-outline"
 import { Reference } from "@/reference/reference"
+import { Image } from "@/image/image"
+import { PartID } from "@/session/schema"
 
 const DEFAULT_READ_LIMIT = 200
 const MAX_BYTES = 16 * 1024
@@ -337,6 +339,7 @@ export const ReadTool = Tool.define(
     const instruction = yield* Instruction.Service
     const lsp = yield* LSP.Service
     const reference = yield* Reference.Service
+    const image = yield* Image.Service
     const scope = yield* Scope.Scope
 
     const miss = Effect.fn("ReadTool.miss")(function* (filepath: string) {
@@ -528,10 +531,28 @@ export const ReadTool = Tool.define(
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
 
-        // 图片使用三级压缩策略
+        // 图片走 Image.Service，确保 read、粘贴和 tool-result 共享同一套尺寸与预算边界。
         if (isImageAttachment(mime)) {
-          const processed = yield* Effect.promise(() => processImageWithTokenBudget(bytes, mime))
-          const msg = `Image read successfully (${formatSize(processed.originalSize)} → compressed for model)`
+          const input = {
+            id: PartID.ascending(),
+            messageID: ctx.messageID,
+            sessionID: ctx.sessionID,
+            type: "file" as const,
+            mime,
+            url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+          }
+          const attachment = yield* image.normalize(
+            input,
+            // `read` results enter the model immediately, so keep its payload near the existing image token cap.
+            { tokenBudget: 1600 },
+          ).pipe(
+            // If the native resizer cannot load, preserve the old read behavior: attach the original bytes instead of failing.
+            Effect.catchIf(
+              (error) => error instanceof Image.ResizerUnavailableError,
+              () => Effect.succeed(input),
+            ),
+          )
+          const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
           return {
             title,
             output: msg,
@@ -543,8 +564,8 @@ export const ReadTool = Tool.define(
             attachments: [
               {
                 type: "file" as const,
-                mime: processed.mime,
-                url: `data:${processed.mime};base64,${processed.data}`,
+                mime: attachment.mime,
+                url: attachment.url,
               },
             ],
           }

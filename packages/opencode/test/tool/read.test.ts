@@ -49,7 +49,7 @@ const referenceLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
     Layer.provide(RuntimeFlags.layer(flags)),
   )
 
-const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+const readLayer = (flags: Partial<RuntimeFlags.Info> = {}, imageLayer = Image.defaultLayer) =>
   Layer.mergeAll(
     Agent.defaultLayer,
     AppFileSystem.defaultLayer,
@@ -58,11 +58,22 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
     LSP.defaultLayer,
     referenceLayer(flags),
     Truncate.defaultLayer,
-    Image.defaultLayer,
+    imageLayer,
   )
 
 const it = testEffect(readLayer())
 const scout = testEffect(readLayer({ experimentalScout: true }))
+const noResizer = testEffect(
+  readLayer(
+    {},
+    Layer.succeed(
+      Image.Service,
+      Image.Service.of({
+        normalize: () => Effect.fail(new Image.ResizerUnavailableError()),
+      }),
+    ),
+  ),
+)
 
 const init = Effect.fn("ReadToolTest.init")(function* () {
   const info = yield* ReadTool
@@ -620,13 +631,36 @@ describe("tool.read truncation", () => {
   it.live("large image files are properly attached without error", () =>
     Effect.gen(function* () {
       const result = yield* exec(FIXTURES_DIR, { filePath: path.join(FIXTURES_DIR, "large-image.png") })
+      const attachment = result.attachments?.[0]
       expect(result.metadata.truncated).toBe(false)
       expect(result.attachments).toBeDefined()
       expect(result.attachments?.length).toBe(1)
-      expect(result.attachments?.[0].type).toBe("file")
-      expect(result.attachments?.[0]).not.toHaveProperty("id")
-      expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
-      expect(result.attachments?.[0]).not.toHaveProperty("messageID")
+      expect(attachment?.type).toBe("file")
+      if (!attachment) return
+      const base64 = attachment.url.slice(attachment.url.indexOf(";base64,") + ";base64,".length)
+      expect(base64.length).toBeLessThanOrEqual(1_600 * 750)
+      expect(attachment).not.toHaveProperty("id")
+      expect(attachment).not.toHaveProperty("sessionID")
+      expect(attachment).not.toHaveProperty("messageID")
+    }),
+  )
+
+  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      yield* put(path.join(dir, "image.png"), png)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+      expect(result.output).toStartWith("Image read successfully")
+      expect(result.attachments?.[0]).toMatchObject({
+        type: "file",
+        mime: "image/png",
+        url: `data:image/png;base64,${png.toString("base64")}`,
+      })
     }),
   )
 

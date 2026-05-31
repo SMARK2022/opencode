@@ -69,7 +69,7 @@ sharp metadata fast path
         ↓
 需要处理时 sharp resize/compress
         ↓
-photon fallback 或 typed error
+typed error；read 工具仅在 resizer 不可用时兼容返回原始图片
 ```
 
 实现原则：

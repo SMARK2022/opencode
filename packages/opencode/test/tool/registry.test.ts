@@ -33,11 +33,19 @@ import { ProviderID, ModelID } from "@/provider/schema"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { MessageID, SessionID } from "@/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Image } from "@/image/image"
 
 const node = CrossSpawnSpawner.defaultLayer
 const configLayer = TestConfig.layer({
   directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".opencode")])),
 })
+// Registry tests only enumerate tool definitions; real image resizing is covered in image/read tests.
+const registryImage = Layer.succeed(
+  Image.Service,
+  Image.Service.of({
+    normalize: (input) => Effect.succeed(input),
+  }),
+)
 
 const registryLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   ToolRegistry.layer
@@ -49,7 +57,7 @@ const registryLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),
+      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, registryImage)),
       Layer.provide(Provider.defaultLayer),
       Layer.provide(Git.defaultLayer),
       Layer.provide(Reference.defaultLayer),

@@ -55,6 +55,7 @@ import { BackgroundJob } from "@/background/job"
 import { SessionStatus } from "@/session/status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EffectBridge } from "@/effect/bridge"
+import { Image } from "@/image/image"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -99,6 +100,7 @@ export const layer: Layer.Layer<
   | LSP.Service
   | Instruction.Service
   | AppFileSystem.Service
+  | Image.Service
   | Bus.Service
   | HttpClient.HttpClient
   | ChildProcessSpawner
@@ -400,7 +402,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),
+      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, Image.defaultLayer)),
       Layer.provide(Provider.defaultLayer),
       Layer.provide(Git.defaultLayer),
       Layer.provide(Reference.defaultLayer),

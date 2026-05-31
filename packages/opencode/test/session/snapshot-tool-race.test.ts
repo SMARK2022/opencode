@@ -111,6 +111,13 @@ const lsp = Layer.succeed(
 const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
 const run = SessionRunState.layer.pipe(Layer.provide(status))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
+// This race test does not read images; a pass-through Image service keeps the registry dependency lightweight.
+const registryImage = Layer.succeed(
+  Image.Service,
+  Image.Service.of({
+    normalize: (input) => Effect.succeed(input),
+  }),
+)
 
 function makeHttp() {
   const deps = Layer.mergeAll(
@@ -143,6 +150,7 @@ function makeHttp() {
     Layer.provide(Ripgrep.defaultLayer),
     Layer.provide(Format.defaultLayer),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+    Layer.provide(registryImage),
     Layer.provideMerge(todo),
     Layer.provideMerge(question),
     Layer.provideMerge(deps),
