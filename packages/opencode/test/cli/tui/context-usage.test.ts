@@ -3,7 +3,7 @@ import { createMemo, createRoot } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
 import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
-import { contextUsageDetailLines, contextUsageFooter, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
+import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
 
 const provider: Provider = {
   id: "test",
@@ -79,6 +79,53 @@ function text(messageID: string, value: string): Part {
 }
 
 describe("context usage", () => {
+  test("refresh key follows streaming tool deltas without serializing raw payloads", () => {
+    const raw = new String('{"filePath"')
+    Object.defineProperty(raw, "toJSON", {
+      value() {
+        throw new Error("raw payload should not be JSON-serialized while building the refresh key")
+      },
+    })
+    const messages = [user("1"), assistant("2", "1")]
+    const common = {
+      messages,
+      providers: [provider],
+      config: {},
+      agents: [],
+      lastUserModel: undefined,
+      vcs: undefined,
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+    }
+
+    const first = contextUsageRefreshKey({
+      ...common,
+      getParts: (id) => id === "2" ? [{
+        id: "tool",
+        sessionID: "s",
+        messageID: "2",
+        type: "tool",
+        tool: "bash",
+        callID: "call",
+        state: { status: "pending", input: {}, raw: raw as unknown as string },
+      } as Part] : [],
+    })
+    const second = contextUsageRefreshKey({
+      ...common,
+      getParts: (id) => id === "2" ? [{
+        id: "tool",
+        sessionID: "s",
+        messageID: "2",
+        type: "tool",
+        tool: "bash",
+        callID: "call",
+        state: { status: "pending", input: {}, raw: '{"filePath":"src/index.ts"' },
+      } as Part] : [],
+    })
+
+    expect(first).not.toBe(second)
+  })
+
   test("snapshot tracks streaming tool input deltas", () => {
     createRoot((dispose) => {
       const [store, setStore] = createStore<{ parts: Record<string, Part[]> }>({

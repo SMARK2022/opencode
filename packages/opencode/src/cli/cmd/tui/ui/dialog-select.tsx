@@ -45,9 +45,16 @@ export interface DialogSelectProps<T> {
   }[]
   bindings?: readonly Binding<Renderable, KeyEvent>[]
   current?: T
+  currentKey?: string
 }
 
 export interface DialogSelectOption<T = any> {
+  /**
+   * 对象 value 的稳定业务 identity。DialogSelect 会承载模型、会话、工作区
+   * 等较大列表；调用方已知业务 key 时，active/current 热路径不应再依赖
+   * 深比较或 JSON 序列化。
+   */
+  key?: string
   title: string
   value: T
   description?: string
@@ -67,6 +74,29 @@ export type DialogSelectRef<T> = {
   filtered: DialogSelectOption<T>[]
 }
 
+type DialogSelectRow<T> = {
+  option: DialogSelectOption<T>
+  index: number
+  identityKey: string | undefined
+  renderID: string
+}
+
+function primitiveKey(value: unknown) {
+  if (value === undefined) return
+  if (value === null) return "null:null"
+  const type = typeof value
+  if (type === "string" || type === "number" || type === "boolean") return `${type}:${String(value)}`
+  return
+}
+
+function optionIdentityKey<T>(option: DialogSelectOption<T>) {
+  return option.key ?? primitiveKey(option.value)
+}
+
+function currentIdentityKey(value: unknown, key: string | undefined) {
+  return key ?? primitiveKey(value)
+}
+
 export function DialogSelect<T>(props: DialogSelectProps<T>) {
   const dialog = useDialog()
   const { theme } = useTheme()
@@ -78,20 +108,6 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     filter: "",
     input: "keyboard" as "keyboard" | "mouse",
   })
-
-  createEffect(
-    on(
-      () => props.current,
-      (current) => {
-        if (current) {
-          const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
-          if (currentIndex >= 0) {
-            setStore("selected", currentIndex)
-          }
-        }
-      },
-    ),
-  )
 
   let input: InputRenderable
 
@@ -176,17 +192,56 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   const height = createMemo(() => Math.min(rows(), Math.floor(dimensions().height / 2) - 6))
 
   const selected = createMemo(() => flat()[store.selected])
+  const flatRows = createMemo<DialogSelectRow<T>[]>(() =>
+    flat().map((option, index) => {
+      const identityKey = optionIdentityKey(option)
+      return {
+        option,
+        index,
+        identityKey,
+        // renderID 必须在当前渲染列表内唯一；identityKey 可能由业务 key 或
+        // primitive value 得到，存在重复值，所以附加 index。renderID 只用于
+        // scrollbox child lookup，不能作为 current 判断的业务 identity。
+        renderID: `${identityKey ?? "object"}:${index}`,
+      }
+    }),
+  )
+  const rowsByOption = createMemo(() => {
+    const result = new WeakMap<DialogSelectOption<T>, DialogSelectRow<T>>()
+    for (const row of flatRows()) result.set(row.option, row)
+    return result
+  })
+  const selectedRow = createMemo(() => flatRows()[store.selected])
+  const currentIndex = createMemo(() => {
+    const key = currentIdentityKey(props.current, props.currentKey)
+    if (key !== undefined) return flatRows().findIndex((row) => row.identityKey === key)
+    if (props.current === undefined) return -1
+    return flatRows().findIndex((row) => isDeepEqual(row.option.value, props.current))
+  })
 
   createEffect(
-    on([() => store.filter, () => props.current], ([filter, current]) => {
+    on(
+      () => currentIndex(),
+      (index) => {
+        if (index >= 0) setStore("selected", index)
+      },
+    ),
+  )
+
+  createEffect(
+    on([() => store.filter, () => currentIndex()], () => {
       setTimeout(() => {
-        if (filter.length > 0) {
+        // TUI 布局更新会延后一 tick，滚动目标也必须在 callback 执行时
+        // 重新解析。这里不能捕获旧 index，否则 filter/options/current 在
+        // timeout 前变化时会滚到错误行。
+        if (store.filter.length > 0) {
           moveTo(0, true)
-        } else if (current) {
-          const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
-          if (currentIndex >= 0) {
-            moveTo(currentIndex, true)
-          }
+          return
+        }
+
+        const index = currentIndex()
+        if (index >= 0) {
+          moveTo(index, true)
         }
       }, 0)
     }),
@@ -206,7 +261,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     if (option) props.onMove?.(option)
     if (!scroll) return
     const target = scroll.getChildren().find((child: { id?: string }) => {
-      return child.id === JSON.stringify(selected()?.value)
+      return child.id === selectedRow()?.renderID
     })
     if (!target) return
     const y = target.y - scroll.y
@@ -219,7 +274,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       }
       if (y < 0) {
         scroll.scrollBy(y)
-        if (isDeepEqual(flat()[0].value, selected()?.value)) {
+        if (store.selected === 0) {
           scroll.scrollTo(0)
         }
       }
@@ -423,11 +478,19 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                 </Show>
                 <For each={options}>
                   {(option) => {
-                    const active = createMemo(() => isDeepEqual(option.value, selected()?.value))
-                    const current = createMemo(() => isDeepEqual(option.value, props.current))
+                    const row = createMemo(() => rowsByOption().get(option))
+                    const active = createMemo(() => row()?.index === store.selected)
+                    const current = createMemo(() => {
+                      const value = row()
+                      if (!value) return false
+                      const key = currentIdentityKey(props.current, props.currentKey)
+                      if (key !== undefined) return value.identityKey === key
+                      if (props.current === undefined) return false
+                      return isDeepEqual(option.value, props.current)
+                    })
                     return (
                       <box
-                        id={JSON.stringify(option.value)}
+                        id={row()?.renderID}
                         flexDirection="row"
                         position="relative"
                         onMouseMove={() => {
@@ -439,13 +502,13 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                         }}
                         onMouseOver={() => {
                           if (store.input !== "mouse") return
-                          const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
-                          if (index === -1) return
+                          const index = row()?.index
+                          if (index === undefined) return
                           moveTo(index)
                         }}
                         onMouseDown={() => {
-                          const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
-                          if (index === -1) return
+                          const index = row()?.index
+                          if (index === undefined) return
                           moveTo(index)
                         }}
                         backgroundColor={active() ? (option.bg ?? theme.primary) : RGBA.fromInts(0, 0, 0, 0)}

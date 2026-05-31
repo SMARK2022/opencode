@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createResource, For, Show } from "solid-js"
+import { createEffect, createMemo, createResource, For, Show, untrack } from "solid-js"
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { useDialog } from "@tui/ui/dialog"
 import { useBindings } from "../../keymap"
@@ -8,13 +8,14 @@ import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
 import { useTuiConfig } from "@tui/context/tui-config"
 import { TextAttributes } from "@opentui/core"
-import type { Message, Part } from "@opencode-ai/sdk/v2"
+import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util"
 import { createThrottledSignal } from "../../util/signal"
 import {
   computeContextData,
   type ContextCategoryColor,
   type ContextUsageData,
+  type ComputeContextDataInput,
   type GridSquare,
 } from "../../util/context-usage"
 
@@ -28,6 +29,126 @@ export function contextUsageSnapshot<T extends Message[] | Part[]>(value: T): T 
   // The JSON roundtrip deliberately reads nested Solid store fields. A shallow
   // array copy misses tool/text deltas and only refreshes on whole-part updates.
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+export function contextUsageRefreshKey(input: {
+  messages: readonly Message[]
+  getParts: (id: string) => readonly Part[]
+  providers: readonly Provider[]
+  config?: Config
+  agents?: readonly Agent[]
+  lastUserModel?: { providerID: string; modelID: string }
+  vcs?: VcsInfo
+  paths: { cwd: string; worktree?: string }
+  columns?: number
+}) {
+  // 这个 key 是 `/context` 面板的低成本刷新信号：它必须读取 streaming
+  // part 的 nested 字段来保持响应式依赖，但不能像真正输入快照那样深拷贝
+  // message/part 全量内容。否则高频 tool raw/text delta 会在 throttle 之前
+  // 先触发 JSON roundtrip，正是本次修复要移除的热路径。
+  return [
+    input.columns ?? "",
+    input.paths.cwd,
+    input.paths.worktree ?? "",
+    input.lastUserModel ? `${input.lastUserModel.providerID}/${input.lastUserModel.modelID}` : "",
+    configRefreshKey(input.config),
+    input.vcs ? refreshJson(input.vcs) : "",
+    input.providers.map(providerRefreshKey).join("|"),
+    (input.agents ?? []).map((agent) => `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${refreshJson(agent.permission)}`).join("|"),
+    input.messages.map((message) => [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("=")).join("\n"),
+  ].join("\n")
+}
+
+function refreshJsonLength(value: unknown) {
+  try {
+    return JSON.stringify(value)?.length ?? 0
+  } catch {
+    return 0
+  }
+}
+
+function refreshJson(value: unknown) {
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return String(value)
+  }
+}
+
+function providerRefreshKey(provider: Provider) {
+  return [
+    provider.id,
+    Object.values(provider.models)
+      .map((model) => `${model.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`)
+      .join(","),
+  ].join(":")
+}
+
+function configRefreshKey(config: Config | undefined) {
+  if (!config) return ""
+  // computeContextData 只读取 compaction reserve、额外 instruction 路径和
+  // skill 路径；这里刻意不序列化完整 config，避免把无关配置变更接入
+  // `/context` 面板的 streaming 热路径。
+  return [
+    config.compaction?.reserved ?? "",
+    Array.isArray(config.instructions) ? config.instructions.join("\0") : "",
+    Array.isArray(config.skills?.paths) ? config.skills.paths.join("\0") : "",
+  ].join("|")
+}
+
+function messageRefreshKey(message: Message) {
+  return [
+    message.id,
+    message.role,
+    "parentID" in message ? message.parentID : "",
+    "providerID" in message ? message.providerID : "",
+    "modelID" in message ? message.modelID : "",
+    message.time && "completed" in message.time ? message.time.completed : "",
+    "tokens" in message && message.tokens ? tokenRefreshKey(message.tokens) : "",
+    "inputChars" in message ? message.inputChars : "",
+    "inputTokens" in message ? message.inputTokens : "",
+    "inputBreakdown" in message && message.inputBreakdown ? inputBreakdownRefreshKey(message.inputBreakdown) : "",
+  ].join(":")
+}
+
+function partRefreshKey(part: Part) {
+  const base = `${part.id ?? ""}:${part.type}`
+  if (part.type === "text") return `${base}:${part.text?.length ?? 0}:${part.ignored ? 1 : 0}`
+  if (part.type === "reasoning") return `${base}:${part.text?.length ?? 0}`
+  if (part.type === "tool") {
+    const state = part.state
+    if (state.status === "pending") return `${base}:${part.tool}:${state.status}:${state.raw?.length ?? 0}`
+    if (state.status === "completed") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.output?.length ?? 0}:${refreshJson(state.attachments)}`
+    if (state.status === "error") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.error?.length ?? 0}`
+    return `${base}:${part.tool}:${state.status}`
+  }
+  if (part.type === "step-start") return `${base}:${part.inputTokens ?? ""}:${part.inputChars ?? ""}:${part.inputBreakdown ? inputBreakdownRefreshKey(part.inputBreakdown) : ""}`
+  if (part.type === "step-finish") return `${base}:${part.cost ?? 0}:${tokenRefreshKey(part.tokens)}:${part.inputChars ?? ""}:${part.inputBreakdown ? inputBreakdownRefreshKey(part.inputBreakdown) : ""}`
+  if (part.type === "file") return `${base}:${part.filename}:${part.mime}:${part.url?.length ?? 0}`
+  return base
+}
+
+function tokenRefreshKey(tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) {
+  return `${tokens.input}/${tokens.output}/${tokens.reasoning}/${tokens.cache.read}/${tokens.cache.write}`
+}
+
+type InputBreakdown = NonNullable<Extract<Message, { inputBreakdown?: unknown }>["inputBreakdown"]>
+
+function inputBreakdownRefreshKey(input: InputBreakdown) {
+  return [
+    input.system,
+    input.instructions,
+    input.skills,
+    input.tools,
+    input.messages.userText,
+    input.messages.assistantText,
+    input.messages.reasoning,
+    input.messages.toolInput,
+    input.messages.toolOutput,
+    input.messages.attachments,
+    input.messages.total,
+    input.media ? `${input.media.rawChars}/${input.media.textChars}/${input.media.tokens}/${input.media.count}` : "",
+  ].join("/")
 }
 
 function percent(tokens: number, max: number) {
@@ -233,7 +354,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   const { theme } = useTheme()
   useRenderer()
 
-  const inputRaw = createMemo(() => {
+  function buildInput(): ComputeContextDataInput {
     const messages = contextUsageSnapshot([...(sync.data.message[props.sessionID] ?? [])])
     const parts = Object.fromEntries(
       messages.map((msg) => [msg.id, contextUsageSnapshot([...(sync.data.part[msg.id] ?? [])])]),
@@ -250,12 +371,33 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
       paths: { cwd: paths.directory, worktree: paths.worktree },
       columns: dimensions().width,
     }
+  }
+
+  const inputSource = createMemo(() => {
+    const paths = project.instance.path()
+    return contextUsageRefreshKey({
+      messages: sync.data.message[props.sessionID] ?? [],
+      getParts: (id) => sync.data.part[id] ?? [],
+      providers: sync.data.provider,
+      config: sync.data.config,
+      agents: sync.data.agent,
+      lastUserModel: local.model.current(),
+      vcs: sync.data.vcs,
+      paths: { cwd: paths.directory, worktree: paths.worktree },
+      columns: dimensions().width,
+    })
   })
 
-  // Throttle the resource source so streaming deltas don't starve computeContextData.
-  // leadingAndTrailing ensures the first update is immediate and the last one always flushes.
-  const [input, setInput] = createThrottledSignal(inputRaw(), 500)
-  createEffect(() => setInput(inputRaw()))
+  // 这里只 throttle 轻量 refresh key；真正的 message/part snapshot 放在
+  // untrack(buildInput) 内执行，保证 JSON roundtrip 不会重新订阅 nested
+  // streaming 字段并绕过 throttle。leading/trailing 语义仍保持首次立即刷新、
+  // 流式更新结束后补最后一次刷新，这是面板读数必须保持的不变量。
+  const [inputKey, setInputKey] = createThrottledSignal(inputSource(), 500)
+  createEffect(() => setInputKey(inputSource()))
+  const input = createMemo(() => {
+    inputKey()
+    return untrack(buildInput)
+  })
 
   const [data] = createResource(input, computeContextData)
 

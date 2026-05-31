@@ -19,6 +19,14 @@ export function DialogModel(props: { providerID?: string }) {
   const providers = createDialogProviderOptions()
 
   const showExtra = createMemo(() => connected() && !props.providerID)
+  // 模型选项仍保留对象 value 供选择回调使用；current 高亮只需要稳定的
+  // provider/model identity。这里传入与 option.key 相同的 key 形状，避免
+  // DialogSelect 在大模型列表中为了高亮当前模型反复做对象深比较。
+  const currentModelKey = createMemo(() => {
+    const current = local.model.current()
+    if (!current) return
+    return `${current.providerID}/${current.modelID}`
+  })
 
   const options = createMemo(() => {
     const needle = query().trim()
@@ -35,7 +43,7 @@ export function DialogModel(props: { providerID?: string }) {
         if (!model) return []
         return [
           {
-            key: item,
+            key: `${provider.id}/${model.id}`,
             value: { providerID: provider.id, modelID: model.id },
             title: model.name ?? item.modelID,
             description: provider.name,
@@ -71,6 +79,7 @@ export function DialogModel(props: { providerID?: string }) {
           filter(([_, info]) => info.status !== "deprecated"),
           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
           map(([model, info]) => ({
+            key: `${provider.id}/${model}`,
             value: { providerID: provider.id, modelID: model },
             title: info.name ?? model,
             description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
@@ -170,6 +179,7 @@ export function DialogModel(props: { providerID?: string }) {
       skipFilter={true}
       title={title()}
       current={local.model.current()}
+      currentKey={currentModelKey()}
     />
   )
 }
