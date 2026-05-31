@@ -2,7 +2,25 @@
   "$schema": "https://opencode.ai/config.json",
   "provider": {},
   "permission": {},
-  "mcp": {},
+  "mcp": {
+    "chatgpt": {
+      "type": "local",
+      "command": [
+        "node",
+        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\chatgpt-browser-agent\\mcp-server.js"
+      ],
+      "environment": {
+        "CHATGPT_BROWSER_PATH": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        "CHATGPT_PROJECT_URL": "https://chatgpt.com/g/g-p-6a1b384bc3688191b5e2c522d45fbe20/project",
+        "CHATGPT_STATE_DIR": "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\chatgpt-browser-agent\\.chatgpt-poc",
+        "CHATGPT_RESPONSE_TIMEOUT_MS": "300000",
+        "CHATGPT_CLI_TIMEOUT_MS": "310000",
+        "CHATGPT_DAEMON_START_TIMEOUT_MS": "60000"
+      },
+      "enabled": true,
+      "timeout": 320000
+    }
+  },
   "tools": {
     "github-triage": false,
     "github-pr-search": false,
