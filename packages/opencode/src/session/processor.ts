@@ -537,7 +537,7 @@ const layer = Layer.effect(
             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
               attachment.mime.startsWith("image/")
                 // 沿用唯一附件归一化分支，只有实际 Read 调用携带源预算。
-                ? image.normalize(attachment, toolCall?.part.tool === "read" ? 1600 * 750 : undefined).pipe(
+                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(
                     Effect.catchIf(
                       (error) => error instanceof Image.ResizerUnavailableError,
                       () => Effect.succeed(attachment),

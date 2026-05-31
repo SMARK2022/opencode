@@ -11,6 +11,9 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+// #277：复用 Image.Service；media 已仅有 MIME 辅助函数，不恢复旧压缩路径。
+import { Image } from "@/image/image"
+import { PartID } from "@/session/schema"
 
 // 只降低缺省页大小，显式 limit 与既有安全、附件分支不随默认值收紧。
 // #142：默认 200 行，配合 range/outline 做定点读取
@@ -213,13 +216,15 @@ type Metadata = {
 export const ReadTool = Tool.define<
   typeof Parameters,
   Metadata,
-  FSUtil.Service | Instruction.Service | LSP.Service | Scope.Scope
+  FSUtil.Service | Instruction.Service | LSP.Service | Image.Service | Scope.Scope
 >(
   "read",
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
     const instruction = yield* Instruction.Service
     const lsp = yield* LSP.Service
+    // #277：Image.Service 承担图片附件的尺寸与 token 预算边界
+    const image = yield* Image.Service
     const scope = yield* Scope.Scope
 
     const miss = Effect.fn("ReadTool.miss")(function* (filepath: string) {
@@ -481,6 +486,32 @@ export const ReadTool = Tool.define<
 
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
+        // #277：仅图片走统一规整与预算；PDF 保持原始字节及既有成功文案。
+        const input = {
+          type: "file" as const,
+          mime,
+          url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+        }
+        const attachment = isImage
+          ? yield* image
+              .normalize(
+                {
+                  ...input,
+                  // #277：内部规整使用本次请求身份，不能借用缓存或其他会话的 ID。
+                  id: PartID.ascending(),
+                  messageID: ctx.messageID,
+                  sessionID: ctx.sessionID,
+                },
+                { tokenBudget: 1600 },
+              )
+              .pipe(
+                // #277：只有 resizer 不可用才回退；DecodeError 与尺寸错误继续失败。
+                Effect.catchIf(
+                  (error) => error instanceof Image.ResizerUnavailableError,
+                  () => Effect.succeed(input),
+                ),
+              )
+          : input
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
         return {
           title,
@@ -490,11 +521,12 @@ export const ReadTool = Tool.define<
             truncated: false,
             loaded: loaded.map((item) => item.filepath),
           },
+          // #277：工具附件仅投影 MIME 与 URL，内部 ID 不进入返回契约。
           attachments: [
             {
               type: "file" as const,
-              mime,
-              url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+              mime: attachment.mime,
+              url: attachment.url,
             },
           ],
         }

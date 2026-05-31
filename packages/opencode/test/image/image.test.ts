@@ -60,9 +60,10 @@ describe("Image", () => {
       const results = yield* Effect.all([
         image.normalize(part("image/png", png.toString("base64"))),
         image.normalize(part("image/jpeg", Buffer.from(source.get_bytes_jpeg(90)).toString("base64"))),
-        image.normalize(part("image/bmp", bmp.toString("base64")), 1600 * 750),
-        image.normalize(part("image/tiff", tiff.toString("base64")), 1600 * 750),
-        image.normalize(part("image/avif", avif.toString("base64")), 1600 * 750),
+        // 不支持的格式仍走同一归一化服务，调用预算按新的 token 选项传递。
+        image.normalize(part("image/bmp", bmp.toString("base64")), { tokenBudget: 1600 }),
+        image.normalize(part("image/tiff", tiff.toString("base64")), { tokenBudget: 1600 }),
+        image.normalize(part("image/avif", avif.toString("base64")), { tokenBudget: 1600 }),
       ])
 
       source.free()
@@ -156,7 +157,7 @@ describe("Image", () => {
       const input = part("image/png", data.toString("base64"))
       const image = yield* Image.Service
       // 此预算仅模拟 Read 调用；默认 normalize 仍保持上传附件的配置语义。
-      const result = yield* image.normalize(input, 1600 * 750)
+      const result = yield* image.normalize(input, { tokenBudget: 1600 })
       const base64 = result.url.slice(result.url.indexOf(";base64,") + ";base64,".length)
       const resized = photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64"))
 
@@ -179,7 +180,7 @@ describe("Image", () => {
       const image = yield* Image.Service
       // 同一真实图片在上传调用中必须保持原样，不能悄悄继承 Read 的 1.2 MB。
       expect(yield* image.normalize(input)).toEqual(input)
-      const exit = yield* image.normalize(input, 1600 * 750).pipe(Effect.exit)
+      const exit = yield* image.normalize(input, { tokenBudget: 1600 }).pipe(Effect.exit)
       // Read 禁用缩放时仍由同一个 typed SizeError 报告预算，不返回伪装压缩的原图。
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) {

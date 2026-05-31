@@ -55,6 +55,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
+// #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖
+import { Image } from "@/image/image"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
@@ -449,6 +451,8 @@ export const node = LayerNode.make({
     Skill.node,
     Session.node,
     BackgroundJob.node,
+    // #277：Image.node 供 ReadTool 归一化图片附件；LayerNode 会传递解析其 Config 依赖
+    Image.node,
     Provider.node,
     LSP.node,
     Instruction.node,

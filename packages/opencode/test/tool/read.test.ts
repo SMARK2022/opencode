@@ -48,14 +48,15 @@ const ctx = {
   ask: () => Effect.void,
 }
 
-const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+const readLayer = (flags: Partial<RuntimeFlags.Info> = {}, imageNode = Image.node) =>
   LayerNode.compile(
     LayerNode.group([
       Agent.node,
       FSUtil.node,
       CrossSpawnSpawner.node,
       Instruction.node,
-      Image.node,
+      // 可注入失败的 Image.Service，默认仍使用真实 Photon resizer。
+      imageNode,
       LSP.node,
       Ripgrep.node,
       Truncate.node,
@@ -63,6 +64,19 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   )
 
 const it = testEffect(Layer.mergeAll(readLayer(), testInstanceStoreLayer))
+
+// 只模拟 resizer 无法加载，解码与预算用例继续走真实实现。
+const noResizerImageNode = LayerNode.make({
+  service: Image.Service,
+  layer: Layer.succeed(
+    Image.Service,
+    Image.Service.of({
+      normalize: () => Effect.fail(new Image.ResizerUnavailableError()),
+    }),
+  ),
+  deps: [],
+})
+const noResizer = testEffect(Layer.mergeAll(readLayer({}, noResizerImageNode), testInstanceStoreLayer))
 
 const init = Effect.fn("ReadToolTest.init")(function* () {
   const info = yield* ReadTool
@@ -618,7 +632,7 @@ describe("tool.read truncation", () => {
       const { default: sharp } = yield* Effect.promise(() => import("sharp"))
       const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
       const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
-      for (const [name, mime, data] of [
+      for (const [name, , data] of [
         ["image.png", "image/png", png],
         ["image.bmp", "image/bmp", bmp],
         ["image.tiff", "image/tiff", tiff],
@@ -633,14 +647,15 @@ describe("tool.read truncation", () => {
         expect(result.attachments?.length).toBe(1)
         const attachment = result.attachments?.[0]
         if (!attachment) throw new Error("expected image attachment")
-        expect(attachment.mime).toBe(mime)
+        // Read已完成归一化，不支持的源格式在工具边界即转为模型可用的PNG。
+        expect(attachment.mime).toBe("image/png")
         expect(attachment).not.toHaveProperty("id")
         expect(attachment).not.toHaveProperty("sessionID")
         expect(attachment).not.toHaveProperty("messageID")
         const normalized = yield* provideInstance(dir)(
           image.normalize(
             { ...attachment, id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.messageID },
-            1600 * 750,
+            { tokenBudget: 1600 },
           ),
         )
         expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(normalized.mime)
@@ -661,11 +676,20 @@ describe("tool.read truncation", () => {
   it.live("detects attachment media from file contents", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
-      // #276：使用可解码的有效 JPEG base64 替代裸字节头部
-      const jpeg = Buffer.from(
-        "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z",
-        "base64",
+      // 用真实 Photon 生成 JPEG，覆盖按内容识别 MIME，而不是只伪造字节头。
+      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+      const source = new photon.PhotonImage(
+        new Uint8Array(
+          Array.from(
+            { length: 8 * 8 * 4 },
+            (_, index) => (index % 4 === 3 ? 255 : ((index >> 2) * (index % 4 === 0 ? 1 : index % 4 === 1 ? 7 : 13)) % 251),
+          ),
+        ),
+        8,
+        8,
       )
+      const jpeg = Buffer.from(source.get_bytes_jpeg(90))
+      source.free()
       yield* put(path.join(dir, "image.bin"), jpeg)
 
       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
@@ -690,13 +714,38 @@ describe("tool.read truncation", () => {
   it.live("large image files are properly attached without error", () =>
     Effect.gen(function* () {
       const result = yield* exec(FIXTURES_DIR, { filePath: path.join(FIXTURES_DIR, "large-image.png") })
+      const attachment = result.attachments?.[0]
       expect(result.metadata.truncated).toBe(false)
       expect(result.attachments).toBeDefined()
       expect(result.attachments?.length).toBe(1)
-      expect(result.attachments?.[0].type).toBe("file")
-      expect(result.attachments?.[0]).not.toHaveProperty("id")
-      expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
-      expect(result.attachments?.[0]).not.toHaveProperty("messageID")
+      expect(attachment?.type).toBe("file")
+      if (!attachment) throw new Error("expected image attachment")
+      const base64 = attachment.url.slice(attachment.url.indexOf(";base64,") + ";base64,".length)
+      // read 的 1_600 token 预算必须约束真实附件的 base64 长度。
+      expect(base64.length).toBeLessThanOrEqual(1_600 * 750)
+      expect(attachment).not.toHaveProperty("id")
+      expect(attachment).not.toHaveProperty("sessionID")
+      expect(attachment).not.toHaveProperty("messageID")
+    }),
+  )
+
+  // resizer 不可用时，附件必须保留原始 MIME 和逐字节相同的内容。
+  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      yield* put(path.join(dir, "image.png"), png)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+      expect(result.output).toStartWith("Image read successfully")
+      expect(result.attachments?.[0]).toMatchObject({
+        type: "file",
+        mime: "image/png",
+        url: `data:image/png;base64,${png.toString("base64")}`,
+      })
     }),
   )
 
