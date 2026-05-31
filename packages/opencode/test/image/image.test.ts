@@ -58,6 +58,32 @@ describe("Image", () => {
     }),
   )
 
+  it.effect("shrinks images that fit default limits when a caller supplies a smaller token budget", () =>
+    Effect.gen(function* () {
+      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+      const source = new photon.PhotonImage(
+        new Uint8Array(
+          Array.from({ length: 1_200 * 900 * 4 }, (_, index) => {
+            if (index % 4 === 3) return 255
+            return (Math.floor(index / 4) * (index % 4 === 0 ? 1 : index % 4 === 1 ? 7 : 13)) % 251
+          }),
+        ),
+        1_200,
+        900,
+      )
+      const input = part("image/jpeg", Buffer.from(source.get_bytes_jpeg(95)).toString("base64"))
+      const image = yield* Image.Service
+      const result = yield* image.normalize(input, { tokenBudget: 1_600 })
+      const base64 = result.url.slice(result.url.indexOf(";base64,") + ";base64,".length)
+
+      source.free()
+      expect(input.url.slice(input.url.indexOf(";base64,") + ";base64,".length).length).toBeGreaterThan(1_600 * 750)
+      expect(result.url).not.toBe(input.url)
+      expect(base64.length).toBeLessThanOrEqual(1_600 * 750)
+      expect(result.url.startsWith(`data:${result.mime};base64,`)).toBe(true)
+    }),
+  )
+
   it.effect("resizes images that fit the byte limit but exceed dimension limits", () =>
     Effect.gen(function* () {
       const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
