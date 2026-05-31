@@ -19,9 +19,18 @@ export function DialogModel(props: { providerID?: string }) {
   const providers = createDialogProviderOptions()
 
   const showExtra = createMemo(() => connected() && !props.providerID)
+  // #279：模型选项仍保留对象 value 供选择回调使用；current 高亮只需要稳定的
+  // provider/model identity。这里传入与 option.key 相同的 key 形状，避免
+  // DialogSelect 在大模型列表中为了高亮当前模型反复做对象深比较。
+  const currentModelKey = createMemo(() => {
+    const current = local.model.current()
+    if (!current) return
+    return `${current.providerID}/${current.modelID}`
+  })
 
   const options = createMemo(() => {
     const needle = query().trim()
+    // #279：搜索路径产出的选项也带 key 形状，current 高亮在过滤后仍能命中
     const showSections = showExtra() && needle.length === 0
     const favorites = connected() ? local.model.favorite() : []
     const recents = local.model.recent()
@@ -35,7 +44,8 @@ export function DialogModel(props: { providerID?: string }) {
         if (!model) return []
         return [
           {
-            key: item,
+            // #279：字符串 key 与 providerOptions 的 key 形状一致，替换掉原来的对象 key
+            key: `${provider.id}/${model.id}`,
             value: { providerID: provider.id, modelID: model.id },
             title: model.name ?? item.modelID,
             description: provider.name,
@@ -71,6 +81,8 @@ export function DialogModel(props: { providerID?: string }) {
           filter(([_, info]) => info.status !== "deprecated"),
           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
           map(([model, info]) => ({
+            // #279：provider/model 组合是稳定业务 identity，供 current 高亮的 key 比较使用
+            key: `${provider.id}/${model}`,
             value: { providerID: provider.id, modelID: model },
             title: info.name ?? model,
             releaseDate: info.release_date,
@@ -86,6 +98,7 @@ export function DialogModel(props: { providerID?: string }) {
           })),
           filter((option) => {
             if (!showSections) return true
+            // #279：收藏/最近去重保证同一 provider/model 的 key 不在列表中重复出现
             if (
               favorites.some(
                 (item) => item.providerID === option.value.providerID && item.modelID === option.value.modelID,
@@ -108,6 +121,7 @@ export function DialogModel(props: { providerID?: string }) {
     const popularProviders = !connected()
       ? pipe(
           providers(),
+          // #279：popular 分组仅未连接时出现，key 沿用 createDialogProviderOptions 的形状
           map((option) => ({
             ...option,
             category: "Popular providers",
@@ -179,6 +193,7 @@ export function DialogModel(props: { providerID?: string }) {
       skipFilter={true}
       title={title()}
       current={local.model.current()}
+      currentKey={currentModelKey()}
     />
   )
 }

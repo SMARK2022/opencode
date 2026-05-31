@@ -13,6 +13,7 @@ import { batch, createEffect, createMemo, createSignal, For, Show, type JSX, on,
 import { createStore } from "solid-js/store"
 import { useTerminalDimensions } from "@opentui/solid"
 import * as fuzzysort from "fuzzysort"
+// #279：isDeepEqual 仍服务于无 key 回退与 preserveSelection，非死导入
 import { isDeepEqual } from "remeda"
 import { useDialog, type DialogContext } from "./dialog"
 import { Locale } from "../util/locale"
@@ -51,9 +52,17 @@ export interface DialogSelectProps<T> {
   }[]
   bindings?: readonly Binding<Renderable, KeyEvent>[]
   current?: T
+  // #279：与 option.key 同形的稳定业务 identity；提供后 current 高亮不再依赖深比较
+  currentKey?: string
 }
 
 export interface DialogSelectOption<T = any> {
+  /**
+   * #279：对象 value 的稳定业务 identity。DialogSelect 会承载模型、会话、工作区
+   * 等较大列表；调用方已知业务 key 时，active/current 热路径不应再依赖
+   * 深比较或 JSON 序列化。
+   */
+  key?: string
   title: string
   titleView?: JSX.Element
   value: T
@@ -79,6 +88,34 @@ export type DialogSelectRef<T> = {
   moveTo(value: T): void
 }
 
+type DialogSelectRow<T> = {
+  option: DialogSelectOption<T>
+  index: number
+  // #279：undefined 表示对象 value 未提供 key，current 匹配时走深比较回退
+  identityKey: string | undefined
+}
+
+// #279：只有原始值能安全转成字符串 identity；对象 value 必须由调用方提供 key，
+// 否则回退深比较——这是无 key 调用方（会话列表等）的兼容路径，不是热路径。
+function primitiveKey(value: unknown) {
+  if (value === undefined) return
+  // #279：null 有稳定 identity（与 undefined 区分），可作为合法 key
+  if (value === null) return "null:null"
+  const type = typeof value
+  // #279：类型前缀避免 string "1" 与 number 1 撞 key
+  if (type === "string" || type === "number" || type === "boolean") return `${type}:${String(value)}`
+  return
+}
+
+// #279：调用方业务 key 优先，原始值仅作无 key 时的回退
+function optionIdentityKey<T>(option: DialogSelectOption<T>) {
+  return option.key ?? primitiveKey(option.value)
+}
+
+function currentIdentityKey(value: unknown, key: string | undefined) {
+  return key ?? primitiveKey(value)
+}
+
 export function DialogSelect<T>(props: DialogSelectProps<T>) {
   type Action = NonNullable<DialogSelectProps<T>["actions"]>[number]
   type FooterHint = NonNullable<DialogSelectProps<T>["footerHints"]>[number]
@@ -96,24 +133,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   })
   const [focusedAction, setFocusedAction] = createSignal<number>()
   const actionFocused = createMemo(() => focusedAction() !== undefined)
-  let selection: { value: T; category?: string } | undefined
+  let selection: DialogSelectOption<T> | undefined
   let resetSelection = false
   let visibilityGeneration = 0
-
-  createEffect(
-    on(
-      () => props.current,
-      (current) => {
-        if (current) {
-          const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
-          if (currentIndex >= 0) {
-            setStore("selected", currentIndex)
-            selection = flat()[currentIndex]
-          }
-        }
-      },
-    ),
-  )
 
   let input: InputRenderable
 
@@ -220,6 +242,47 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
 
   const selected = createMemo(() => flat()[store.selected])
 
+  // #279：flatRows 把 identity 计算从每次 active/current 深比较收敛为一次 map：
+  // 大列表下 O(n) key 构建替代 O(n) 深比较，key 缺失时保留 undefined 走回退。
+  // #279：依赖 flat() 重算，过滤后 index 与渲染列表保持一致
+  const flatRows = createMemo<DialogSelectRow<T>[]>(() =>
+    // #279：map 顺序即渲染顺序，index 直接可用无需二次查找
+    flat().map((option, index) => ({
+      option,
+      index,
+      identityKey: optionIdentityKey(option),
+    })),
+  )
+  const rowsByOption = createMemo(() => {
+    // #279：WeakMap 不延长 option 生命周期，options 换代后旧条目可被 GC
+    const result = new WeakMap<DialogSelectOption<T>, DialogSelectRow<T>>()
+    for (const row of flatRows()) result.set(row.option, row)
+    return result
+  })
+  const currentIndex = createMemo(() => {
+    const key = currentIdentityKey(props.current, props.currentKey)
+    // #279：O(n) 扫描但只做字符串比较；命中即返回，不做冗余遍历
+    if (key !== undefined) return flatRows().findIndex((row) => row.identityKey === key)
+    // #279：未提供 current 时返回 -1，保持无高亮状态而非误选第一行
+    if (props.current === undefined) return -1
+    return flatRows().findIndex((row) => isDeepEqual(row.option.value, props.current))
+  })
+
+  // #279：仅 current/currentKey 变化时同步选择；options 更新继续由 preserveSelection 保持锚点。
+  createEffect(
+    on(
+      [() => props.current, () => props.currentKey],
+      () => {
+        const index = currentIndex()
+        if (index >= 0) {
+          setStore("selected", index)
+          selection = flat()[index]
+        }
+        // #279：index<0（current 不在列表中）时不动 selected，避免高亮抖动
+      },
+    ),
+  )
+
   createEffect(
     on(
       () => props.options,
@@ -233,13 +296,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           return
         }
         if (!selection) {
-          if (props.current !== undefined) {
-            const index = flat().findIndex((option) => isDeepEqual(option.value, props.current))
-            if (index >= 0) {
-              setStore("selected", index)
-              selection = flat()[index]
-              return
-            }
+          // #279：初次锚定复用 currentKey 匹配，与高亮和延迟滚动保持同一身份语义。
+          const index = currentIndex()
+          if (index >= 0) {
+            setStore("selected", index)
+            selection = flat()[index]
+            return
           }
           const option = selected()
           if (!option) return
@@ -247,7 +309,11 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           return
         }
         const previous = selection
-        const index = flat().findIndex((option) => isDeepEqual(option.value, previous.value))
+        // #279：重建选项时沿用 option.key；无 key 的对象仍按 value 深比较。
+        const key = optionIdentityKey(previous)
+        const index = flatRows().findIndex((row) =>
+          key !== undefined ? row.identityKey === key : isDeepEqual(row.option.value, previous.value),
+        )
         if (index >= 0) {
           const option = flat()[index]
           const moved = index !== store.selected || option.category !== previous.category
@@ -260,7 +326,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
             requestAnimationFrame(() => {
               if (generation !== visibilityGeneration) return
               if (!props.preserveSelection || store.filter.length > 0) return
-              if (!isDeepEqual(selected()?.value, value)) return
+              const current = selected()
+              if (!current) return
+              if (key !== undefined ? optionIdentityKey(current) !== key : !isDeepEqual(current.value, value)) return
               scrollToSelection(false)
             })
           })
@@ -278,16 +346,23 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   })
 
   createEffect(
-    on([() => store.filter, () => props.current], ([filter, current]) => {
+    // #279：filter/current 变化后延迟滚动，回调再读取最新 key 与列表。
+    on([() => store.filter, () => props.current, () => props.currentKey], ([filter]) => {
       if (filter.length > 0) resetSelection = true
       setTimeout(() => {
-        if (filter.length > 0) {
+        // #279：TUI 布局更新会延后一 tick，滚动目标也必须在 callback 执行时
+        // 重新解析。这里不能捕获旧 index，否则 filter/options/current 在
+        // timeout 前变化时会滚到错误行。
+        if (store.filter.length > 0) {
+          // #279：过滤态优先回第一行，current 高亮让位于用户搜索意图；
+          // preserve=false 同步重置 selection 锚点，保留锚点逻辑不被搜索残留污染
           moveTo(0, true, false)
-        } else if (current) {
-          const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
-          if (currentIndex >= 0) {
-            moveTo(currentIndex, true)
-          }
+          return
+        }
+
+        const index = currentIndex()
+        if (index >= 0) {
+          moveTo(index, true)
         }
       }, 0)
     }),
@@ -340,7 +415,8 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       }
       if (y < 0) {
         scroll.scrollBy(y)
-        if (isDeepEqual(flat()[0].value, selected()?.value)) {
+        // #279：selected index 为 0 即顶部行，避免为边界判断再做一次深比较
+        if (store.selected === 0) {
           scroll.scrollTo(0)
         }
       }
@@ -640,14 +716,26 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                   </Show>
                   <For each={options}>
                     {(option) => {
-                      const active = createMemo(() => !props.locked && isDeepEqual(option.value, selected()?.value))
-                      const current = createMemo(() => isDeepEqual(option.value, props.current))
+                      // #279：row() 从 rowsByOption 取预建 identity，active/current 判定零深比较
+                      const row = createMemo(() => rowsByOption().get(option))
+                      const active = createMemo(() => !props.locked && row()?.index === store.selected)
+                      const current = createMemo(() => {
+                        const value = row()
+                        if (!value) return false
+                        const key = currentIdentityKey(props.current, props.currentKey)
+                        // #279：有 key 走 identity 比较；无 key 的对象 value 保留深比较回退，
+                        // 兼容会话列表等未提供 key 的调用方
+                        if (key !== undefined) return value.identityKey === key
+                        if (props.current === undefined) return false
+                        return isDeepEqual(option.value, props.current)
+                      })
                       return (
                         <box
                           flexDirection="column"
                           position="relative"
                           onMouseMove={() => {
                             if (props.locked) return
+                            // #279：mousemove 仅切输入模式，不移动选中，避免 hover 抢焦点
                             setStore("input", "mouse")
                             setFocusedAction(undefined)
                           }}
@@ -659,14 +747,15 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                           onMouseOver={() => {
                             if (props.locked) return
                             if (store.input !== "mouse") return
-                            const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
-                            if (index === -1) return
+                            // #279：row 索引 O(1) 取代 findIndex+isDeepEqual 扫描
+                            const index = row()?.index
+                            if (index === undefined) return
                             moveTo(index)
                           }}
                           onMouseDown={() => {
                             if (props.locked) return
-                            const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
-                            if (index === -1) return
+                            const index = row()?.index
+                            if (index === undefined) return
                             moveTo(index)
                           }}
                         >
