@@ -12,6 +12,8 @@ const MAX_WIDTH = 2000
 const MAX_HEIGHT = 2000
 const AUTO_RESIZE = true
 const JPEG_QUALITIES = [80, 85, 70, 55, 40]
+// #277：token 估算以 base64 字符为单位，常数必须与 token/estimate.ts 的图片估算保持一致
+const TOKEN_ESTIMATE_BASE64_CHARS = 750
 export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
   "ImageResizerUnavailableError",
   {},
@@ -51,8 +53,13 @@ export class SizeError extends Schema.TaggedErrorClass<SizeError>()("ImageSizeEr
 export type Error = ResizerUnavailableError | InvalidDataUrlError | DecodeError | SizeError
 
 export interface Interface {
-  // 预算由 Read 调用传入，用户上传与其他工具仍只受既有配置约束。
-  readonly normalize: (input: SessionV1.FilePart, maxBase64Bytes?: number) => Effect.Effect<SessionV1.FilePart, Error>
+  readonly normalize: (
+    input: SessionV1.FilePart,
+    // #277：调用方可传入更小的 token budget，在不放宽配置上限的前提下收紧单图 base64 上限
+    options?: {
+      readonly tokenBudget?: number
+    },
+  ) => Effect.Effect<SessionV1.FilePart, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
@@ -79,14 +86,19 @@ const layer = Layer.effect(
       ),
     )
 
-    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart, maxBase64Bytes = Infinity) {
+    const normalize = Effect.fn("Image.normalize")(function* (
+      input: SessionV1.FilePart,
+      options?: {
+        readonly tokenBudget?: number
+      },
+    ) {
       const image = (yield* config.get()).attachment?.image
       const info = {
         autoResize: image?.auto_resize ?? AUTO_RESIZE,
         maxWidth: image?.max_width ?? MAX_WIDTH,
         maxHeight: image?.max_height ?? MAX_HEIGHT,
-        // 无调用预算时保持 5 MiB/配置原义；Read 的预算与更严格配置取交集。
-        maxBase64Bytes: Math.min(image?.max_base64_bytes ?? MAX_BASE64_BYTES, maxBase64Bytes),
+        // #277：默认尺寸内的大图在调用方收紧预算后仍会进入压缩，避免绕过模型 token 上限
+        maxBase64Bytes: targetMaxBase64Bytes(image?.max_base64_bytes ?? MAX_BASE64_BYTES, options),
       }
       if (!input.url.startsWith("data:") || !input.url.includes(";base64,"))
         return yield* new InvalidDataUrlError({ url: input.url })
@@ -211,5 +223,16 @@ const layer = Layer.effect(
 )
 
 export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node] })
+
+// #277：配置上限与调用方预算取小值，budget 未提供时保持既有配置语义
+function targetMaxBase64Bytes(
+  configuredMax: number,
+  options?: {
+    readonly tokenBudget?: number
+  },
+) {
+  if (options?.tokenBudget === undefined) return configuredMax
+  return Math.min(configuredMax, Math.max(0, Math.floor(options.tokenBudget * TOKEN_ESTIMATE_BASE64_CHARS)))
+}
 
 export * as Image from "./image"
