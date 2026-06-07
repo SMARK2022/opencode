@@ -773,10 +773,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           permission
             .ask({
               ...req,
-              // Permission reviewers use metadata.agent as the stable signal that
-              // a request came from the native auto agent. Centralizing it here
-              // keeps every tool, including apply_patch/write/edit and plugins,
-              // on the same security path instead of relying on per-tool metadata.
+              // metadata.agent is audit evidence for the actual executing agent;
+              // reviewer routing is decided by the evaluated permission action,
+              // so tools and plugins should not each invent their own agent marker.
               metadata: { ...req.metadata, agent: input.agent.name },
               sessionID: input.session.id,
               tool: { messageID: input.processor.message.id, callID: options.toolCallId },
@@ -1030,10 +1029,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               .ask({
                 ...req,
                 // Internally materialized task execution bypasses the main tool
-                // adapter above, so it must attach the same agent evidence here.
-                // Keep this aligned with the primary ctx.ask wrapper: reviewer
-                // enablement must depend on the executing agent, not on each tool
-                // remembering to pass metadata.agent itself.
+                // adapter above, so it must attach the same audit evidence here.
+                // Keep this aligned with the primary ctx.ask wrapper: tools should
+                // not decide reviewer routing by mutating metadata.agent.
                 metadata: { ...req.metadata, agent: task.agent },
                 sessionID,
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),

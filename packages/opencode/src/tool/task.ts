@@ -15,6 +15,7 @@ import { TuiEvent } from "@/cli/cmd/tui/event"
 import { Cause, Effect, Exit, Option, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Permission } from "@/permission"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -158,27 +159,45 @@ export const TaskTool = Tool.define(
         ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
       const parent = yield* sessions.get(ctx.sessionID)
-      const parentAgent = parent.agent
-        ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+      // The current tool context is the actual delegation source. Persisted
+      // session.agent can be absent or stale on resumed sessions, so it is only a
+      // fallback and must not override this turn's parent permission ceilings.
+      const parentAgentName = ctx.agent || parent.agent
+      const parentAgent = parentAgentName
+        ? yield* agent.get(parentAgentName).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
-      const nextSession =
-        session ??
-        (yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: params.description + ` (@${next.name} subagent)`,
-          permission: [
-            ...deriveSubagentSessionPermission({
-              parentSessionPermission: parent.permission ?? [],
-              parentAgent,
-              subagent: next,
-            }),
-            ...(cfg.experimental?.primary_tools?.map((item) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: item,
-            })) ?? []),
-          ],
-        }))
+      const primaryToolPermission = cfg.experimental?.primary_tools?.map((item) => ({
+        pattern: "*",
+        action: "allow" as const,
+        permission: item,
+      })) ?? []
+      const nextPermission = Permission.compact([
+        // primary_tools may grant a subagent additional tool capability, but any
+        // parent/session ceiling derived below must remain last-match-wins.
+        ...primaryToolPermission,
+        ...deriveSubagentSessionPermission({
+          parentSessionPermission: parent.permission ?? [],
+          parentAgent,
+          subagent: next,
+        }),
+      ])
+      const nextSession = session
+        ? { ...session, agent: next.name, permission: nextPermission }
+        : yield* sessions.create({
+            parentID: ctx.sessionID,
+            title: params.description + ` (@${next.name} subagent)`,
+            // Store the real executing subagent for audit and later prompt
+            // defaults; permission derivation still uses ctx.agent for the
+            // current delegation source.
+            agent: next.name,
+            permission: nextPermission,
+          })
+      if (session) {
+        // Resuming a task_id is a fresh delegation from the current parent. Do
+        // not keep stale child permission rules; recompute the overlay from the
+        // current parent agent/session and the requested subagent.
+        yield* sessions.setPermission({ sessionID: session.id, permission: nextPermission })
+      }
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))

@@ -57,10 +57,23 @@ describe("permission reviewer service", () => {
     rejectMaxOutputTokens: true,
     plugin: pluginLayer({ clearMaxOutputTokens: true, header: REVIEWER_HOOK_HEADER }),
   })
+  const implicitAutoFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    {
+      requireInstructions: false,
+      permission: {
+        auto_review: {
+          model: `${OPENAI_PROVIDER_ID}/gpt-5`,
+          policy: "Reviewer service test policy: allow only bounded auto requests.",
+        },
+      },
+    },
+  )
   const oauth = testEffect(oauthFixture.layer)
   const apiKey = testEffect(apiKeyFixture.layer)
   const customOauth = testEffect(customOauthFixture.layer)
   const oauthHook = testEffect(oauthHookFixture.layer)
+  const implicitAuto = testEffect(implicitAutoFixture.layer)
 
   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
     Effect.gen(function* () {
@@ -122,6 +135,22 @@ describe("permission reviewer service", () => {
       expectPreservedShellEvidence(inputText(request.body))
     }),
   )
+
+  implicitAuto.effect("enables reviewer for auto requests without depending on the executing agent name", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(
+        reviewInput("review_general_agent_auto", {
+          agent: "general",
+        }),
+      )
+      const body = implicitAutoFixture.bodies[0]
+
+      expect(decision.action).toBe("allow")
+      expect(inputText(body)).toContain("general")
+      expectPreservedShellEvidence(inputText(body))
+    }),
+  )
 })
 
 function reviewerFixture(
@@ -131,6 +160,7 @@ function reviewerFixture(
     providerID?: ProviderID
     rejectMaxOutputTokens?: boolean
     plugin?: Layer.Layer<Plugin.Service>
+    permission?: Config.Info["permission"]
   } = { requireInstructions: false },
 ) {
   const bodies: ReviewerRequestBody[] = []
@@ -182,7 +212,7 @@ function reviewerFixture(
     bodies,
     requests,
     layer: PermissionReviewer.layer.pipe(
-      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
+      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID, options.permission)) })),
       Layer.provide(provider.layer),
       Layer.provide(authLayer(authInfo)),
       Layer.provide(options.plugin ?? pluginLayer()),
@@ -251,19 +281,19 @@ function expectPreservedShellEvidence(text: string) {
   expect(text).toContain("$(pwd)/danger")
 }
 
-function reviewInput(reviewID: string) {
+function reviewInput(reviewID: string, metadata?: Readonly<Record<string, unknown>>) {
   return {
     reviewID,
     permission: "bash",
     patterns: [COMMAND_EVIDENCE],
-    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash" },
+    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash", ...metadata },
     precheck: { level: "cautious" as const, reason: "shell command combines redirection and deletion-like behavior" },
   }
 }
 
-function config(providerID: ProviderID): Config.Info {
+function config(providerID: ProviderID, permission?: Config.Info["permission"]): Config.Info {
   return {
-    permission: {
+    permission: permission ?? {
       approvals_reviewer: "auto_review",
       auto_review: {
         model: `${providerID}/gpt-5`,

@@ -761,13 +761,11 @@ function isReviewerDecisionProtocolError(error: unknown) {
   return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
 }
 
-function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
-  // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
-  // 没有全局配置时，原生 auto agent 仍应隐式启用 reviewer；否则选择 auto
-  // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
+function reviewerEnabled(permission: Config.Info["permission"], _metadata: Readonly<Record<string, unknown>>) {
+  // reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
+  // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
   if (permission?.approvals_reviewer === "user") return false
-  if (permission?.approvals_reviewer === "auto_review") return true
-  return metadata.agent === "auto"
+  return true
 }
 
 function errorMessage(error: unknown) {

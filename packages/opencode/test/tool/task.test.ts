@@ -456,6 +456,136 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("execute records the subagent and tightens permissions from the executing parent agent", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const agent = yield* Agent.Service
+      const general = yield* agent.get("general")
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "auto",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const child = yield* sessions.get(result.metadata.sessionId)
+      const effective = Permission.merge(general.permission, child.permission ?? [])
+
+      // ctx.agent 是本轮真实委派来源；child session 记录真实执行 subagent。
+      expect(child.agent).toBe("general")
+      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
+      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
+      expect(seen?.agent).toBe("general")
+    }),
+  )
+
+  it.instance("execute recomputes an existing task session permission when resumed", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const agent = yield* Agent.Service
+      const general = yield* agent.get("general")
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({
+        parentID: chat.id,
+        title: "Existing child",
+        permission: [{ permission: "external_directory", pattern: "/outside/project/*", action: "allow" }],
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          task_id: child.id,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "auto",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const resumed = yield* sessions.get(result.metadata.sessionId)
+      const effective = Permission.merge(general.permission, resumed.permission ?? [])
+
+      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
+      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
+    }),
+  )
+
+  it.instance(
+    "execute keeps primary tool allowances below parent permission ceilings",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "auto",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+
+        // primary_tools 给 subagent 临时补工具能力，但它不能排在 parent auto ceiling
+        // 后面把 reviewer 边界改回 allow。
+        expect(Permission.evaluate("bash", "git add .", child.permission ?? []).action).toBe("auto")
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+        experimental: {
+          primary_tools: ["bash"],
+        },
+      },
+    },
+  )
+
   it.instance(
     "execute shapes child permissions for task, todowrite, and primary tools",
     () =>
