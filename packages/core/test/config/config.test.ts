@@ -59,11 +59,13 @@ describe("Config", () => {
       for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
         const legacy = Schema.decodeUnknownSync(ConfigV1.Info)({
           model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
+          experimental: { primary_tools: ["write", "bash"] },
         })
         const info = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate(legacy))
         expect(info.model).toBe("test/model")
         expect(info.approvals_reviewer).toBe("auto_review")
         expect(info.auto_review).toMatchObject({ strict: true, fallback: "user" })
+        expect(info.experimental?.primary_tools).toEqual(["edit", "bash"])
         for (const rules of [info.permissions, info.agents?.build.permissions]) {
           expect(rules).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
           expect(rules?.find(rule => rule.action === "bash")?.effect).toBe("auto")

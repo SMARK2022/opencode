@@ -8,6 +8,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Location } from "@opencode-ai/core/location"
 import { PermissionV2 } from "@opencode-ai/core/permission"
+import { SubagentPermissions } from "@opencode-ai/core/permission/subagent"
 import { Config } from "@opencode-ai/core/config"
 import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
@@ -200,6 +201,38 @@ describe("PermissionV2", () => {
       )
       expect(yield* service.ask(assertion({ agent: AgentV2.ID.make("reviewer") }))).toMatchObject({ effect: "ask" })
       expect(yield* service.get(PermissionV2.ID.create("per_test"))).not.toHaveProperty("agent")
+      // 通过真实Native转换和求值核对共享算法，不在测试内复制权限推导。
+      const child: PermissionV2.Ruleset = [
+        { action: "bash", resource: "*", effect: "allow" },
+        { action: "bash", resource: "git push *", effect: "deny" },
+        { action: "edit", resource: "*", effect: "deny" },
+        { action: "external_directory", resource: "*", effect: "ask" },
+        { action: "external_directory", resource: "/shared/*", effect: "allow" },
+      ]
+      const parent: PermissionV2.Ruleset = [
+        { action: "bash", resource: "*", effect: "auto" },
+        { action: "edit", resource: "*", effect: "auto" },
+        { action: "external_directory", resource: "*", effect: "auto" },
+        { action: "external_directory", resource: "/shared/*", effect: "allow" },
+      ]
+      const overlay = SubagentPermissions.derive({ parentAgentPermission: parent, parentSessionPermission: [], subagentPermission: child })
+      expect(PermissionV2.evaluate("bash", "git status", child, overlay).effect).toBe("auto")
+      expect(PermissionV2.evaluate("bash", "git push origin dev", child, overlay).effect).toBe("deny")
+      expect(PermissionV2.evaluate("edit", "src/a.ts", child, overlay).effect).toBe("deny")
+      expect(PermissionV2.evaluate("external_directory", "/shared/a", child, overlay).effect).toBe("allow")
+      expect(PermissionV2.evaluate("external_directory", "/outside/a", child, overlay).effect).toBe("auto")
+      const nested = SubagentPermissions.derive({ parentAgentPermission: child, parentSessionPermission: overlay, subagentPermission: child })
+      expect(PermissionV2.evaluate("bash", "git status", child, nested).effect).toBe("auto")
+      expect(PermissionV2.evaluate("bash", "git push origin dev", child, nested).effect).toBe("deny")
+      // 通配关闭后的窄allow只被收紧；父会话grant不能反向放宽子ask。
+      const narrow: PermissionV2.Ruleset = [{ action: "*", resource: "*", effect: "deny" }, { action: "bash", resource: "git status", effect: "allow" }]
+      const narrowed = SubagentPermissions.derive({ parentAgentPermission: parent, parentSessionPermission: [], subagentPermission: narrow })
+      expect(PermissionV2.evaluate("bash", "git status", narrow, narrowed).effect).toBe("auto")
+      expect(PermissionV2.evaluate("bash", "git push origin dev", narrow, narrowed).effect).toBe("deny")
+      const manual: PermissionV2.Ruleset = [{ action: "read", resource: "*", effect: "ask" }]
+      const grants = SubagentPermissions.derive({ parentAgentPermission: [], parentSessionPermission: [{ action: "read", resource: "*", effect: "allow" }], subagentPermission: manual })
+      expect(PermissionV2.evaluate("read", "a", manual, grants).effect).toBe("ask")
+      expect(PermissionV2.evaluate("task", "general", child, overlay).effect).toBe("deny")
     }),
   )
 
@@ -404,7 +437,7 @@ describe("PermissionV2", () => {
     ]
     yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
     const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
-    // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
+    // auto准入进入同一隔离审查，显式user与已知只读快速路径仍分别保留。
     const agents = yield* AgentV2.Service
     yield* agents.transform((draft) => draft.update(AgentV2.ID.make("auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
     const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
@@ -440,10 +473,17 @@ describe("PermissionV2", () => {
     reviewRequests.length = 0
     reviewSettings = new Config.Info({})
     expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
-    const pending = yield* service.ask(assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." } }))
-    expect(pending.effect).toBe("ask")
-    yield* service.reply({ requestID: pending.id, reply: "once" })
-    expect(reviewRequests).toHaveLength(0)
+    // 普通edit有general快速路径；strict使本断言真实到达reviewer而非仅得到allow。
+    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ strict: true }) })
+    yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer_parent"), item => { item.permissions = [{ action: "edit", resource: "*", effect: "auto" }] }))
+    const implicit = yield* service.ask(assertion({ agent: AgentV2.ID.make("reviewer_parent"), action: "edit", resources: ["src/implicit.ts"], metadata: { filepath: "/project/src/implicit.ts", diff: "-before\n+after" } }))
+    expect(implicit.effect).toBe("allow")
+    expect(yield* service.list()).toEqual([])
+    expect(reviewRequests).toHaveLength(1)
+    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("reviewer_parent")
+    expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
+    // 普通代理的实际auto请求已完成；后续严格/失败回归仍从独立计数开始。
+    reviewRequests.length = 0
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
     // 危险组合不等待模型，也不会产生可被用户误批准的 pending。
     const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)

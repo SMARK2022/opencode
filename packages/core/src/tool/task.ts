@@ -8,6 +8,7 @@ import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
 import type { LocationNode } from "../effect/app-node"
 import { PermissionV2 } from "../permission"
+import { SubagentPermissions } from "../permission/subagent"
 import { SessionV2 } from "../session"
 import { SessionStore } from "../session/store"
 import { Location } from "../location"
@@ -91,11 +92,14 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
       const parentPermission = yield* store.permissions(parent.id)
       const parentAgent = yield* agents.get(context.agent)
       if (!parentAgent) return yield* new ToolFailure({ message: `Unknown parent agent: ${context.agent}` })
+      // 原生调用只做字段适配，父子交集及具体deny由共享source算法承担。
       const childPermission: PermissionV2.Ruleset = [
-        // 执行代理可以不同于持久父身份；父non-allow按原序后写，不能被会话grant覆盖。
-        ...parentPermission.filter(rule => rule.action === "external_directory" || rule.effect === "deny"),
-        ...parentAgent.permissions.filter(rule => rule.effect !== "allow"),
-        ...["todowrite", "task"].flatMap(action => agent.permissions.some(rule => rule.action === action) ? [] : [{ action, resource: "*", effect: "deny" as const }]),
+        ...SubagentPermissions.derive({
+          parentAgentPermission: parentAgent.permissions,
+          parentSessionPermission: parentPermission,
+          subagentPermission: agent.permissions,
+        }),
+        ...(cfg.flatMap(entry => entry.type === "document" && entry.info.experimental?.primary_tools !== undefined ? [entry.info.experimental.primary_tools] : []).at(-1) ?? []).map(action => ({ action: action === "write" || action === "apply_patch" ? "edit" : action, resource: "*", effect: "deny" as const })),
       ]
       const child = existing ?? (yield* sessions.create({
         parentID: parent.id, title: `${input.description} (@${agent.id} subagent)`,
@@ -106,6 +110,8 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
         // extension在旧段结束后才执行；本次审批身份不能提前改变仍活跃的旧provider轮。
         if (existing) {
+          // extension真正开始后才替换旧权限；入队时不能改掉仍运行的上一段。
+          yield* sessions.setPermissions({ sessionID: child.id, permissions: childPermission })
           const current = yield* sessions.get(child.id)
           if (current.agent !== agent.id) yield* sessions.switchAgent({ sessionID: child.id, agent: agent.id })
           if (model) yield* sessions.switchModel({ sessionID: child.id, model })

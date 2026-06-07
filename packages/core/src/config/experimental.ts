@@ -15,4 +15,6 @@ export class Policy extends Schema.Class<Policy>("ConfigV2.Experimental.Policy")
 
 export class Experimental extends Schema.Class<Experimental>("ConfigV2.Experimental")({
   policies: Policy.pipe(Schema.Array, Schema.optional),
+  // 子代理配置禁令在派生上限后生效，两代不能只在工具展示中隐藏。
+  primary_tools: Schema.Array(Schema.String).pipe(Schema.optional),
 }) {}

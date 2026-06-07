@@ -122,6 +122,7 @@ export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
   readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
+  readonly setPermissions: (input: { sessionID: SessionSchema.ID; permissions: PermissionV2.Ruleset }) => Effect.Effect<void, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
     limit?: number
@@ -275,6 +276,19 @@ const layer = Layer.effect(
         const session = yield* store.get(sessionID)
         if (!session) return yield* new NotFoundError({ sessionID })
         return session
+      }),
+      setPermissions: Effect.fn("V2Session.setPermissions")(function* (input) {
+        const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
+        if (!row) return yield* new NotFoundError({ sessionID: input.sessionID })
+        const info = SessionV1.fromRow(row)
+        // 复用完整旧事件及存储wire；只改权限/更新时间，不能擦掉模型、用量或扩展元数据。
+        yield* events.publish(SessionV1.Event.Updated, {
+          sessionID: input.sessionID,
+          info: SessionV1.SessionInfo.make({
+            ...info, permission: input.permissions.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect })),
+            time: { ...info.time, updated: Date.now() },
+          }),
+        })
       }),
       list: Effect.fn("V2Session.list")(function* (input = {}) {
         const direction = input.anchor?.direction ?? "next"
