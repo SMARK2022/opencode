@@ -3422,7 +3422,7 @@ unixNoLLMServer(
           expect(exit.value.info.role).toBe("assistant")
           const tool = completedTool(exit.value.parts)
           if (tool) {
-            expect(tool.state.output).toContain("User aborted the command")
+            expect(tool.state.output).toContain('reason="user_abort"')
           }
         }
       }),
@@ -3466,7 +3466,7 @@ unixNoLLMServer(
           expect(exit.value.info.role).toBe("assistant")
           const tool = completedTool(exit.value.parts)
           if (tool) {
-            expect(tool.state.output).toContain("User aborted the command")
+            expect(tool.state.output).toContain('reason="user_abort"')
           }
         }
       }),
@@ -3523,8 +3523,8 @@ unix(
 
       expect(tool.state.metadata.truncated).toBe(true)
       expect(typeof tool.state.metadata.outputPath).toBe("string")
-      expect(tool.state.output).toMatch(/\.\.\.output truncated\.\.\./)
-      expect(tool.state.output).toMatch(/Full output saved to:\s+\S+/)
+      expect(tool.state.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+      expect(tool.state.output).toContain(`path="${tool.state.metadata.outputPath}`)
       expect(tool.state.output).not.toContain("Tool execution aborted")
     }),
   { git: true },
@@ -3549,7 +3549,7 @@ unixNoLLMServer(
       expect(Exit.isSuccess(exit)).toBe(true)
       if (Exit.isSuccess(exit)) {
         const tool = completedTool(exit.value.parts)
-        expect(tool?.state.output).toContain("User aborted the command")
+        expect(tool?.state.output).toContain('reason="user_abort"')
       }
 
       yield* Fiber.await(sh)

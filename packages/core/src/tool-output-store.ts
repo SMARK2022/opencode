@@ -9,6 +9,7 @@ import { makeGlobalNode, makeLocationNode } from "./effect/app-node"
 import { SessionSchema } from "./session/schema"
 import { Identifier } from "./util/identifier"
 import { sanitizeVisibleText } from "./util/terminal-text"
+import { formatOutputTruncatedNotice, outputStats } from "./util/output-notice"
 import type { ToolOutput } from "@opencode-ai/llm"
 
 // 通用投影默认与 V1 对齐，不把它当作 Read 参数 schema 的硬上限。
@@ -108,11 +109,14 @@ const preview = (text: string, maxLines: number, maxBytes: number) => {
   return { head: takePrefix(sampled, headBytes), tail: takeSuffix(sampled, tailBytes) }
 }
 
-const boundedPreview = (text: string, marker: string, maxLines: number, maxBytes: number) => {
-  const markerOnly = takePrefix(marker, maxBytes).split("\n").slice(0, maxLines).join("\n")
-  const markerBytes = Buffer.byteLength(marker, "utf-8")
-  if (maxLines <= 4 || maxBytes <= markerBytes + 4) return markerOnly
-  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 4)
+const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") => string, maxLines: number, maxBytes: number) => {
+  const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, "head+tail"), "utf-8")
+  // 极小预算优先保住完整恢复路径；不能裁断标签后声称原文仍可恢复。
+  if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), "head")
+  // 八字节覆盖分隔换行和KB/MB边界处的显示长度变化，不改变原head/tail选择。
+  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8)
+  const shown = bounded.tail ? `${bounded.head}\n${bounded.tail}` : bounded.head
+  const marker = format(outputStats(shown), bounded.tail ? "head+tail" : "head")
   return bounded.tail ? `${bounded.head}\n\n${marker}\n\n${bounded.tail}` : `${bounded.head}\n\n${marker}`
 }
 
@@ -129,7 +133,7 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const config = yield* Effect.serviceOption(Config.Service)
     // 暂存引用只属于本次 settlement，成功、失败与中断都由 registry 收尾。
-    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
+    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
     // Session 与 call 联合定位，避免不同 Session 的同名 call 串用原文。
     const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) => JSON.stringify([input.sessionID, input.toolCallID])
     const directory = path.join(global.data, MANAGED_DIRECTORY)
@@ -167,7 +171,7 @@ const layer = Layer.effect(
       // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
       const chunks: Uint8Array[] = []
       let bytes = 0
-      const captured = { path: "", retain: false, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
+      const captured = { path: "", retain: false, totalBytes: 0, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
         // 排他创建、窗口追加与登记连续完成；wx 失败没有所有权，不能删除碰撞文件。
         if (!captured.path) captured.path = yield* write("")
         // 窗口最多 MAX_BYTES；一次追加和消费登记不可分割，取消后不能重放已写前缀。
@@ -183,6 +187,8 @@ const layer = Layer.effect(
       return yield* Effect.gen(function* () {
         const result = yield* body((chunk) => Effect.gen(function* () {
           if (!chunk.byteLength) return
+          // 原始归档计数跨flush累加；编码未确认时不把解码窗口行数冒充原文行数。
+          captured.totalBytes += chunk.byteLength
           // 固定 MAX_BYTES 限制采集内存，不随用户模型预算放大或关闭。
           if (!captured.path && bytes + chunk.byteLength <= MAX_BYTES) {
             // 复制观察窗口，不能持有进程可能复用的缓冲；空 chunk 不增加对象数。
@@ -250,11 +256,15 @@ const layer = Layer.effect(
       // 有流式原文时复用同一个托管文件，不能把压缩后的文本另存成所谓完整原文。
       // 展示清理同样可能丢失原始信息，归档仍保存原文/原字节，不能保存清理后的替身。
       const outputPath = captured ? yield* captured.flush() : yield* write(raw)
-      const marker = captured
-        ? `... output ${fits ? "presentation changed" : "truncated"}; captured raw output saved to ${outputPath} ...`
-        : `... output ${fits ? "presentation changed" : "truncated"}; full content saved to ${outputPath} ...`
+      const total = captured ? { bytes: captured.totalBytes } : outputStats(raw)
+      const notice = (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") =>
+        formatOutputTruncatedNotice({ source: "tool", total, shown: { direction, ...shown }, path: outputPath })
+      // 未截断呈现变化仍沿原恢复广告；真实限幅才报告output_truncated。
+      const marker = fits
+        ? captured ? `... output presentation changed; captured raw output saved to ${outputPath} ...` : `... output presentation changed; full content saved to ${outputPath} ...`
+        : notice(outputStats(""), "head")
       captures.delete(captureKey(input))
-      // 通用预算仍只在这里执行；恢复标记本身也占用字节与行数预算。
+      // 通用预算仍只在这里执行；仅完整路径本身超额时允许固定notice开销。
       const withMarker = `${contextual}\n\n${marker}`
       // 若总预算允许就保留原 content 分段，退出状态与媒体位置不能因增加路径而变化。
       const preserveParts = lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
@@ -265,7 +275,7 @@ const layer = Layer.effect(
           content: preserveParts ? [...output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
             {
               type: "text" as const,
-              text: boundedPreview(contextual, marker, outputLimits.maxLines, outputLimits.maxBytes),
+              text: boundedPreview(contextual, notice, outputLimits.maxLines, outputLimits.maxBytes),
             },
             ...media,
           ],

@@ -14,8 +14,10 @@ import { Shell } from "@opencode-ai/core/shell"
 import { ShellRemote } from "@opencode-ai/core/shell-remote"
 import { ShellID } from "./shell/id"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+// #282：超时/中止/截断改用统一 notice 信封
+import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 
-import * as Truncate from "./truncate"
+import { Truncate } from "./truncate"
 import { Plugin } from "@/plugin"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -510,6 +512,9 @@ export const ShellTool = Tool.define(
       let displayed = false
       const list: Chunk[] = []
       let used = 0
+      // total描述恢复路径中的完整原始归档，统计不能重新载入已淘汰的输出。
+      const total = { bytes: 0, lines: 0 }
+      let trailingLine = false
       let file = ""
       let sink: ReturnType<typeof createWriteStream> | undefined
       let cut = false
@@ -569,6 +574,9 @@ export const ShellTool = Tool.define(
             const visible = preview(display.push(chunk))
             displayed = true
             const size = Buffer.byteLength(chunk, "utf-8")
+            total.bytes += size
+            for (const char of chunk) if (char === "\n") total.lines++
+            trailingLine = !chunk.endsWith("\n")
             list.push({ text: chunk, size })
             used += size
             while (used > keep && list.length > 1) {
@@ -648,10 +656,10 @@ export const ShellTool = Tool.define(
       const meta: string[] = []
       if (expired) {
         meta.push(
-          `shell tool terminated command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.`,
+          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
         )
       }
-      if (aborted) meta.push("User aborted the command")
+      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
       const raw = list.map((item) => item.text).join("")
       // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
@@ -672,16 +680,29 @@ export const ShellTool = Tool.define(
       let output = end.text
       if (!output) output = "(no output)"
 
+      if (cut && file) {
+        // 末尾换行不额外算一行；内存只保留计数器与原有尾部窗口。
+        output =
+          formatOutputTruncatedNotice({
+            source: "shell",
+            total: { bytes: total.bytes, lines: total.lines + Number(trailingLine) },
+            shown: { direction: "tail", ...outputStats(output) },
+            path: file,
+          }) +
+          "\n\n" +
+          output
+      }
+
       // 呈现变化与单独脱敏都广告原文路径，不能把收益布尔值当作恢复条件。
-      if (file && (transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
-        output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
+      if (file && !cut && (transformed || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+        output = `...output compacted or diagnostic frames sampled...\n\nFull output saved to: ${file}\n\n` + output
       }
 
       // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
       const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
       if (appendix) output += "\n\n" + appendix
       if (meta.length > 0) {
-        output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
+        output += "\n\n" + meta.join("\n")
       }
       return {
         title: input.command,

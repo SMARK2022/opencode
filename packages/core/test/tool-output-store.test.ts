@@ -71,6 +71,13 @@ describe("ToolOutputStore", () => {
         expect(result.output.content[0].text).toContain("HEAD-safe\\x07end\n")
         expect(result.output.content[0].text).not.toContain("\u0007")
         expect(result.output.content[0].text).not.toContain("\u001b")
+        // total对应归档，shown只对应head/tail正文，不将notice自身算入预览。
+        const visible = result.output.content[0].text
+        expect(visible).toContain('type="output_truncated" source="tool"')
+        expect(visible).toContain(`path="${result.outputPaths[0]}" />`)
+        expect(visible).toMatch(/total="2L\/59KB"/)
+        const excerpt = visible.replace(/\n\n<opencode_notice[^>]+ \/>\n\n/, "\n")
+        expect(visible).toContain(`shown="head+tail ${excerpt.split("\n").length}L/`)
       }),
     ),
   )
@@ -172,6 +179,20 @@ describe("ToolOutputStore", () => {
         if (!saved) throw new Error("expected published raw output")
         expect(yield* fs.readFileString(saved)).toBe(text)
         expect(yield* fs.readDirectory(directory)).toHaveLength(1)
+        // 两次写入跨越flush；UTF-16原字节不能由UTF-8模型窗口反推。
+        const bytes = Buffer.from("AB".repeat(20_000), "utf16le")
+        yield* store.capture(input, (write) => Effect.gen(function* () {
+          yield* write(bytes.subarray(0, 20_000))
+          yield* write(bytes.subarray(20_000))
+          return { value: undefined, retain: true }
+        }))
+        const captured = yield* store.bound({ ...input, output: { structured: {}, content: [{ type: "text", text: "x".repeat(20_000) }] } })
+        expect(Buffer.from(yield* fs.readFile(captured.outputPaths[0]))).toEqual(bytes)
+        const notice = captured.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+        expect(notice).toContain('total="78KB"')
+        expect(notice).not.toContain('total="1L/')
+        expect(notice).toContain(`path="${captured.outputPaths[0]}" />`)
+        expect(Buffer.byteLength(notice)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
       }),
     ),
   )
@@ -326,17 +347,23 @@ describe("ToolOutputStore", () => {
 
   it.live("honors configured limits", () =>
     withStore(
-      ({ store }) =>
+      ({ store, fs }) =>
         Effect.gen(function* () {
-          expect(yield* store.limits()).toEqual({ maxLines: 2, maxBytes: 1_000 })
+          expect(yield* store.limits()).toEqual({ maxLines: 2, maxBytes: 1 })
           const result = yield* store.bound({
             sessionID,
             toolCallID: "call-config",
             output: { structured: {}, content: [{ type: "text", text: "one\ntwo\nthree" }] },
           })
           expect(result.outputPaths).toHaveLength(1)
+          // 恢复地址即使超过极小预算也必须完整；空预览不能报成原文丢失。
+          const text = result.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+          expect(text).toContain('total="3L/13B" shown="head 0L/0B"')
+          expect(text).toContain(`path="${result.outputPaths[0]}" />`)
+          expect(text).toStartWith("<opencode_notice ")
+          expect(yield* fs.readFileString(result.outputPaths[0])).toBe("one\ntwo\nthree")
         }),
-      new Config.Info({ tool_output: new ConfigToolOutput.Info({ max_lines: 2, max_bytes: 1_000 }) }),
+      new Config.Info({ tool_output: new ConfigToolOutput.Info({ max_lines: 2, max_bytes: 1 }) }),
     ),
   )
 

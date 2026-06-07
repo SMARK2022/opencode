@@ -2,6 +2,10 @@ import { expect, test } from "bun:test"
 import { SessionCompaction } from "@opencode-ai/core/session/compaction"
 import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
 import { Token } from "@opencode-ai/core/util/token"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { DateTime } from "effect"
 
 test("compaction prompt preserves detailed work state and relevant files", () => {
   const prompt = SessionCompaction.buildPrompt({ context: ["conversation history"] })
@@ -50,6 +54,30 @@ test("compaction describes tool media without embedding base64", () => {
 
   expect(serialized).toBe("Image read successfully\n[Attached image/png: pixel.png]")
   expect(serialized).not.toContain(base64)
+  // 检查真实shell与已完成工具序列化；只省略交付文本，不改持久消息或媒体策略。
+  const text = "x".repeat(2_006)
+  const created = DateTime.makeUnsafe(0)
+  const shell = SessionMessage.Shell.make({
+    id: SessionMessage.ID.make("msg_notice_shell"), type: "shell", callID: "shell-notice",
+    command: "pwd", output: text, time: { created, completed: created },
+  })
+  const assistant = SessionMessage.Assistant.make({
+    id: SessionMessage.ID.make("msg_notice_assistant"), type: "assistant", agent: "build",
+    model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+    content: [SessionMessage.AssistantTool.make({
+      type: "tool", id: "notice-tool", name: "read", time: { created, completed: created },
+      state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, structured: {}, content: [{ type: "text", text }] }),
+    })],
+    time: { created, completed: created },
+  })
+  for (const message of [shell, assistant]) {
+    const result = SessionCompaction.serialize(message)
+    expect(result).toContain(`${"x".repeat(2_000)}\n[... compaction truncated 6 chars]`)
+    expect(result).not.toContain("[truncated]")
+    expect(result).not.toContain("compaction_cleared")
+  }
+  expect(shell.output).toBe(text)
+  expect(SessionCompaction.serialize({ ...shell, output: "short" })).toBe("[Shell]: pwd\nshort")
 })
 
 test("recent user memento budgets the full envelope and preserves newest literal instructions", () => {
