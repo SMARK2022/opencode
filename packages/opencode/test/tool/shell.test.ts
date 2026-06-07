@@ -1714,6 +1714,29 @@ describe("tool.shell truncation", () => {
     ),
   )
 
+  it.live("keeps a visible tail preview for an oversized single line with final newline", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        // #283：cmd 的 evalarg 使用双引号；数字构造保留原始内容及末尾换行。
+        const code = "console.log(String.fromCharCode(48,49,50,51,52,53,54,55,56,57).repeat(2400))"
+        const command = `${bin} -e ${evalarg(code)}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+          compress_output: false,
+        })
+
+        mustTruncate(result)
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+        expect(result.output).toContain('total="1L/')
+        expect(result.output).toContain('shown="tail 1L/')
+        expect(result.output).toContain(`path="${result.metadata.outputPath}"`)
+        expect(result.output).toContain("0123456789")
+        expect(result.output).not.toContain("(no output)")
+      }),
+    ),
+  )
+
   it.live("does not truncate small output", () =>
     runIn(
       projectRoot,

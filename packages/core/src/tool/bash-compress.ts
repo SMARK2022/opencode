@@ -721,8 +721,13 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig) {
   const frames = terminal.getFrameCount()
   const stable = terminal.getStableOutput()
   const replacement = `... [terminal progress collapsed: ${frames} frames]\n${stable}`
-  return frames >= config.minCarriageReturnFrames && scoreReplacement(text, replacement, config).profitable
+  return frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable) && scoreReplacement(text, replacement, config).profitable
     ? { text: replacement, groups: 1 } : { text, groups: 0 }
+}
+
+function terminalRenderCollapsedText(text: string, stable: string) {
+  // 比较保留空行与末尾换行；普通 CRLF 只计一次换行，CSI 装饰不算进度覆盖。
+  return stripAnsi(text).replace(/\r\n?/g, "\n") !== stable
 }
 
 // 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
@@ -1019,16 +1024,16 @@ type InlineCandidate = {
 
 /**
  * 保守的行内模式压缩。
- * 在此版本中，有意跳过包含 ANSI 控制字符的行和过长的行。
+ * 有意跳过包含 ANSI 控制字符的行，超长行只检查整行重复。
  * 主要解决诸如打印大量 "#" 或是 ".........." 的问题。
  */
 function compressInlineLine(line: string, config: CompressionConfig): { line: string; applied: boolean } {
   // 如果行本身太短，没必要跑正则扫描
   if (line.length < config.minInlineRunBytes) return { line, applied: false }
-  // 超长行原样通过以约束嵌套扫描 CPU 成本，不能切段压缩绕过单行上限。
-  if (line.length > config.maxInlineLineLength) return { line, applied: false }
   // 不处理带有 ANSI 转义序列的行（通常含有颜色代码，强行切割会破坏终端样式）
   if (ANSI_RE.test(line)) return { line, applied: false }
+  // 超长行只检查整行短周期重复，避免恢复逐起点的嵌套扫描。
+  if (line.length > config.maxInlineLineLength) return compressWholeLineRepeat(line, config)
 
   let best: InlineCandidate | undefined
   // 最大模式长度不能超过配置值，也不能超过整行被重复要求的最低倍数能分的份数
@@ -1087,12 +1092,40 @@ function compressInlineLine(line: string, config: CompressionConfig): { line: st
   }
 }
 
+function compressWholeLineRepeat(line: string, config: CompressionConfig): { line: string; applied: boolean } {
+  // 整行重复检测沿用模式宽度与收益门槛，不恢复逐起点扫描。
+  const maxPattern = Math.min(config.maxInlinePatternLength, Math.floor(line.length / config.minInlineRepeatCount))
+  for (let width = 1; width <= maxPattern; width++) {
+    if (line.length % width !== 0) continue
+    const pattern = line.slice(0, width)
+    if (!pattern.trim()) continue
+    const repeats = line.length / width
+    if (repeats < config.minInlineRepeatCount) continue
+    let ok = true
+    for (let cursor = width; cursor < line.length; cursor += width) {
+      if (line.startsWith(pattern, cursor)) continue
+      ok = false
+      break
+    }
+    if (!ok) continue
+    const replacement = `[repeated ${quotePattern(pattern)} ×${repeats}]`
+    const score = scoreReplacement(line, replacement, config)
+    if (score.profitable) return { line: replacement, applied: true }
+  }
+  return { line, applied: false }
+}
+
 // 遍历每一行执行行内压缩
 function compressInlinePatterns(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
   let groups = 0
   const next = lines.map((line) => {
-    // 专用行内策略也遵守源 ANSI 与长度保护，不以新策略绕过 CPU 上限。
-    if (ANSI_RE.test(line) || line.length > config.maxInlineLineLength) return line
+    // 专用策略仍受长度保护；超长行只走有界整行重复检测。
+    if (ANSI_RE.test(line)) return line
+    if (line.length > config.maxInlineLineLength) {
+      const result = compressInlineLine(line, config)
+      if (result.applied) groups++
+      return result.line
+    }
     const bar = compressProgressBars(line, config)
     const list = bar.applied ? bar : compressLongLists(line, config)
     const result = list.applied ? list : compressInlineLine(line, config)

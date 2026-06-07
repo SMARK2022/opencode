@@ -266,7 +266,8 @@ function preview(text: string) {
 }
 
 function tail(text: string, maxLines: number, maxBytes: number) {
-  const lines = text.split("\n")
+  // #283：折叠行末尾换行在压缩前去除，避免重复合并时引入多余空白行
+  const lines = text.replace(/\r?\n$/, "").split("\n")
   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
     return {
       text,
@@ -736,8 +737,8 @@ export const ShellTool = Tool.define(
         // #116：启用时提示默认压缩 + 需要精确格式时关 compress_output
         const compressionGuidance = compressionEnabled
           ? [
-              "Bash output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
-              "Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting.",
+              "Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
+              "Strongly prefer leaving `compress_output` omitted; set false only for exact raw formatting. Truncated output includes a compact notice and recovery path.",
             ].join(" ")
           : ""
         yield* Effect.logInfo("shell tool using shell", { shell })
