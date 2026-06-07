@@ -35,7 +35,7 @@ describe("Truncate", () => {
         const result = yield* svc.output(content)
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("truncated...")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
         if (result.truncated) expect(result.outputPath).toBeDefined()
       }),
     )
@@ -58,7 +58,23 @@ describe("Truncate", () => {
         const result = yield* svc.output(lines, { maxLines: 10 })
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("...90 lines truncated...")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+        expect(result.content).toContain('total="100L/')
+        expect(result.content).toContain('shown="head 10L/')
+        if (!result.truncated) throw new Error("expected truncated")
+        expect(result.content).toContain(`path="${result.outputPath}`)
+      }),
+    )
+
+    it.live("does not count final newline as an extra notice line", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const lines = Array.from({ length: 12 }, (_, i) => `line${i}`).join("\n") + "\n"
+        const result = yield* svc.output(lines, { maxLines: 10 })
+
+        expect(result.truncated).toBe(true)
+        expect(result.content).toContain('total="12L/')
+        expect(result.content).toContain('shown="head 10L/')
       }),
     )
 
@@ -69,7 +85,8 @@ describe("Truncate", () => {
         const result = yield* svc.output(content, { maxBytes: 100 })
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("truncated...")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+        expect(result.content).toContain('shown="head')
       }),
     )
 
@@ -133,7 +150,9 @@ describe("Truncate", () => {
           const content = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
           const result = yield* (yield* Truncate.Service).output(content)
           expect(result.truncated).toBe(true)
-          expect(result.content).toContain("...90 lines truncated...")
+          expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+          expect(result.content).toContain('total="100L/')
+          expect(result.content).toContain('shown="head 10L/')
         }),
       )
 
@@ -144,7 +163,8 @@ describe("Truncate", () => {
           const content = "a".repeat(1000)
           const result = yield* (yield* Truncate.Service).output(content)
           expect(result.truncated).toBe(true)
-          expect(result.content).toContain("bytes truncated...")
+          expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+          expect(result.content).toContain('shown="head')
         }),
       )
 
@@ -169,7 +189,8 @@ describe("Truncate", () => {
         const result = yield* svc.output(content)
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("bytes truncated...")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+        expect(result.content).toContain('shown="head')
         expect(Buffer.byteLength(content, "utf-8")).toBeGreaterThan(Truncate.MAX_BYTES)
       }),
     )
@@ -181,8 +202,7 @@ describe("Truncate", () => {
         const result = yield* svc.output(lines, { maxLines: 10 })
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("The tool call succeeded but the output was truncated")
-        expect(result.content).toContain("Grep")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
         if (!result.truncated) throw new Error("expected truncated")
         expect(result.outputPath).toBeDefined()
         expect(result.outputPath).toContain("tool_")
@@ -193,7 +213,7 @@ describe("Truncate", () => {
       }),
     )
 
-    it.live("suggests Task tool when agent has task permission", () =>
+    it.live("keeps truncation notice compact when agent has task permission", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
@@ -201,12 +221,13 @@ describe("Truncate", () => {
         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("Grep")
-        expect(result.content).toContain("Task tool")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+        expect(result.content).not.toContain("Task tool")
+        expect(result.content).not.toContain("Use Grep")
       }),
     )
 
-    it.live("omits Task tool hint when agent lacks task permission", () =>
+    it.live("keeps truncation notice compact when agent lacks task permission", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
@@ -214,7 +235,8 @@ describe("Truncate", () => {
         const result = yield* svc.output(lines, { maxLines: 10 }, agent as any)
 
         expect(result.truncated).toBe(true)
-        expect(result.content).toContain("Grep")
+        expect(result.content).toContain('<opencode_notice type="output_truncated" source="tool"')
+        expect(result.content).not.toContain("Use Grep")
         expect(result.content).not.toContain("Task tool")
       }),
     )

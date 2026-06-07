@@ -33,6 +33,7 @@ import {
   normalizePowerShellOutput,
   renderDiagnosticAppendix,
 } from "./bash-compress"
+import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 
 export { Parameters } from "./shell/prompt"
 
@@ -937,14 +938,15 @@ export const ShellTool = Tool.define(
       const meta: string[] = []
       if (expired) {
         meta.push(
-          `shell tool terminated command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.`,
+          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
         )
       }
-      if (aborted) meta.push("User aborted the command")
+      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
       const raw = list.map((item) => item.text).join("")
       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
       diag.end()
       const diagnosticSnapshot = diag.snapshot()
+      const normalizedStats = outputStats(normalized)
 
       // Compress output if enabled
       const compressed = input.compressOutput
@@ -961,7 +963,15 @@ export const ShellTool = Tool.define(
       if (!output) output = "(no output)"
 
       if (cut && file) {
-        output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
+        output =
+          formatOutputTruncatedNotice({
+            source: "shell",
+            total: normalizedStats,
+            shown: { direction: "tail", ...outputStats(output) },
+            path: file,
+          }) +
+          "\n\n" +
+          output
       }
 
       // Append diagnostic appendix for failed commands
@@ -975,7 +985,7 @@ export const ShellTool = Tool.define(
       }
 
       if (meta.length > 0) {
-        output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
+        output += "\n\n" + meta.join("\n")
       }
       // [local-smark] shell compression: close sink stream and track duration
       if (sink) {

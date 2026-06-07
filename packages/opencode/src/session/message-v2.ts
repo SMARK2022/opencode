@@ -26,6 +26,7 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
 import { AuthError, OutputLengthError } from "./message-error"
+import { formatCompactionClearedNotice } from "@/util/output-notice"
 export { AuthError, OutputLengthError } from "./message-error"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
@@ -389,7 +390,7 @@ export type ToolStateCompleted = Types.DeepMutable<Schema.Schema.Type<typeof Too
 function truncateToolOutput(text: string, maxChars?: number) {
   if (!maxChars || text.length <= maxChars) return text
   const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
 }
 
 export const ToolStateError = Schema.Struct({
@@ -937,7 +938,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
-              ? "[Old tool result content cleared]"
+              ? formatCompactionClearedNotice()
               : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 

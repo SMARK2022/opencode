@@ -63,6 +63,7 @@ import { AgentAttachment, FileAttachment, ReferenceAttachment, Source } from "@o
 import { Reference } from "@/reference/reference"
 import * as DateTime from "effect/DateTime"
 import { eq } from "@/storage/db"
+import { formatExecutionNotice } from "@/util/output-notice"
 import * as Database from "@/storage/db"
 import { SessionTable } from "./session.sql"
 import { TokenEstimate } from "@/token/estimate"
@@ -1238,7 +1239,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
               if (aborted) {
-                output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
+                // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
+                // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
+                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
               }
               const completed = Date.now()
               if (flags.experimentalEventSystem) {

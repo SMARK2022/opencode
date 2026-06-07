@@ -1679,7 +1679,7 @@ describe("tool.shell abort", () => {
             },
           )
           expect(res.output).toContain("before")
-          expect(res.output).toContain("User aborted the command")
+          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
           expect(collected.length).toBeGreaterThan(0)
         }),
       ),
@@ -1698,8 +1698,9 @@ describe("tool.shell abort", () => {
             timeout: 500,
           })
           expect(result.output).toContain("started")
-          expect(result.output).toContain("shell tool terminated command after exceeding timeout")
-          expect(result.output).toContain("retry with a larger timeout value in milliseconds")
+          expect(result.output).toContain(
+            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
+          )
         }),
       ),
     15_000,
@@ -1716,7 +1717,7 @@ describe("tool.shell abort", () => {
             description: "Default timeout test",
           })
           expect(result.output).toContain("started")
-          expect(result.output).toContain("exceeding timeout 500 ms")
+          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
         }),
       ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
     15_000,
@@ -1790,8 +1791,10 @@ describe("tool.shell truncation", () => {
           description: "Generate lines exceeding limit",
         })
         mustTruncate(result)
-        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
-        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+        expect(result.output).toContain(`total="${lineCount}L/`)
+        expect(result.output).toContain('shown="tail')
+        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
       }),
     ),
   )
@@ -1806,8 +1809,10 @@ describe("tool.shell truncation", () => {
           description: "Generate bytes exceeding limit",
         })
         mustTruncate(result)
-        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
-        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+        expect(result.output).toContain('total="1L/')
+        expect(result.output).toContain('shown="tail')
+        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
       }),
     ),
   )

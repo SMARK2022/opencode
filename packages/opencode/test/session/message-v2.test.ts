@@ -741,7 +741,10 @@ describe("session.message-v2.toModelMessage", () => {
             type: "tool-result",
             toolCallId: "call-1",
             toolName: "bash",
-            output: { type: "text", value: "[Old tool result content cleared]" },
+            output: {
+              type: "text",
+              value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />',
+            },
           },
         ],
       },
@@ -810,7 +813,7 @@ describe("session.message-v2.toModelMessage", () => {
             toolName: "bash",
             output: {
               type: "text",
-              value: "abcd\n[Tool output truncated for compaction: omitted 6 chars]",
+              value: "abcd\n[... compaction truncated 6 chars]",
             },
           },
         ],
@@ -895,9 +898,7 @@ describe("session.message-v2.toModelMessage", () => {
       "12179",
       "4575",
       "",
-      "<shell_metadata>",
-      "User aborted the command",
-      "</shell_metadata>",
+      '<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />',
     ].join("\n")
 
     const input: MessageV2.WithParts[] = [

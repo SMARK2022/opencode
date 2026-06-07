@@ -3,12 +3,12 @@ import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effec
 import path from "path"
 import type { Agent } from "../agent/agent"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { evaluate } from "@/permission/evaluate"
 import { Config } from "@/config/config"
 import { Identifier } from "../id/id"
 import * as Log from "@opencode-ai/core/util/log"
 import { ToolID } from "./schema"
 import { TRUNCATION_DIR } from "./truncation-dir"
+import { formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 
 const log = Log.create({ service: "truncation" })
 const RETENTION = Duration.days(7)
@@ -26,17 +26,12 @@ export interface Options {
   direction?: "head" | "tail"
 }
 
-function hasTaskTool(agent?: Agent.Info) {
-  if (!agent?.permission) return false
-  return evaluate("task", "*", agent.permission).action !== "deny"
-}
-
 export interface Interface {
   readonly cleanup: () => Effect.Effect<void>
   readonly write: (text: string) => Effect.Effect<string>
   /**
-   * Returns output unchanged when it fits within the limits, otherwise writes the full text
-   * to the truncation directory and returns a preview plus a hint to inspect the saved file.
+   * 内容未超限时原样返回；超限时保存完整原文，并返回预览加统一 notice。
+   * `agent` 保留在签名中，避免调用方在权限上下文中使用截断服务时需要分叉 API。
    */
   readonly output: (text: string, options?: Options, agent?: Agent.Info) => Effect.Effect<Result>
   /**
@@ -83,7 +78,7 @@ export const layer = Layer.effect(
       }
     })
 
-    const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, agent?: Agent.Info) {
+    const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, _agent?: Agent.Info) {
       const resolved = yield* limits()
       const maxLines = options.maxLines ?? resolved.maxLines
       const maxBytes = options.maxBytes ?? resolved.maxBytes
@@ -98,44 +93,37 @@ export const layer = Layer.effect(
       const out: string[] = []
       let i = 0
       let bytes = 0
-      let hitBytes = false
 
       if (direction === "head") {
         for (i = 0; i < lines.length && i < maxLines; i++) {
           const size = Buffer.byteLength(lines[i], "utf-8") + (i > 0 ? 1 : 0)
-          if (bytes + size > maxBytes) {
-            hitBytes = true
-            break
-          }
+          if (bytes + size > maxBytes) break
           out.push(lines[i])
           bytes += size
         }
       } else {
         for (i = lines.length - 1; i >= 0 && out.length < maxLines; i--) {
           const size = Buffer.byteLength(lines[i], "utf-8") + (out.length > 0 ? 1 : 0)
-          if (bytes + size > maxBytes) {
-            hitBytes = true
-            break
-          }
+          if (bytes + size > maxBytes) break
           out.unshift(lines[i])
           bytes += size
         }
       }
 
-      const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
-      const unit = hitBytes ? "bytes" : "lines"
       const preview = out.join("\n")
       const file = yield* write(text)
-
-      const hint = hasTaskTool(agent)
-        ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
-        : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
+      const notice = formatOutputTruncatedNotice({
+        source: "tool",
+        total: outputStats(text),
+        shown: { direction, ...outputStats(preview) },
+        path: file,
+      })
 
       return {
         content:
           direction === "head"
-            ? `${preview}\n\n...${removed} ${unit} truncated...\n\n${hint}`
-            : `...${removed} ${unit} truncated...\n\n${hint}\n\n${preview}`,
+            ? `${preview}\n\n${notice}`
+            : `${notice}\n\n${preview}`,
         truncated: true,
         outputPath: file,
       } as const
