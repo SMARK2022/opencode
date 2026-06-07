@@ -32,4 +32,6 @@ logs/
 *.bun-build
 **/.artifacts/
 tsconfig.tsbuildinfo
-.temp/
+.temp/*
+!.temp/chatgpt-browser-agent/
+!.temp/chatgpt-browser-agent/**
