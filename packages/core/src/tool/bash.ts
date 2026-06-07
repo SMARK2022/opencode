@@ -21,6 +21,7 @@ import { ShellRemote } from "../shell-remote"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
 import { createAutoTextDecoder } from "../text-decoding"
+import { formatExecutionNotice } from "../util/output-notice"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -93,8 +94,8 @@ const modelOutput = (output: Output) => {
   const warnings = output.warnings?.length
     ? `\n\nWarnings:\n${output.warnings.map((warning) => `- ${warning}`).join("\n")}`
     : ""
-  if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.`
-  if (output.interrupted) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command interrupted before completion.`
+  // 终止原因已由唯一finish写入正文，状态投影不再叠加第二条同义提示。
+  if (output.timeout || output.interrupted) return warnings.trimStart()
   return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.`
 }
 
@@ -314,12 +315,14 @@ const layer = Layer.effectDiscard(
               const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
               const truncated = cut || result?.outputTruncated === true
               const outcome = interrupted ? { interrupted: true } : result ? { exit: result.exitCode } : { timeout: true }
-              const timeoutNotice = result || interrupted ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
+              const executionNotice = result && !interrupted ? undefined : formatExecutionNotice({
+                severity: "warning", reason: interrupted ? "user_abort" : "timeout", ...(interrupted ? {} : { timeout_ms: timeout }),
+              })
               // 传真实调用 command，不使用描述或重新解析执行命令。
               const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
               // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
               const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "", config: { enabled } })
-              const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
+              const projected = [compressed.text, executionNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
               // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
               const visible = !compressed.stats.applied && !truncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
               const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible, config: { enabled } })
@@ -331,8 +334,8 @@ const layer = Layer.effectDiscard(
                 retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0,
                 value: {
                 ...outcome,
-                output: [output, notice, timeoutNotice].filter(Boolean).join("\n\n"),
-                contextOutput: [compressed.text, notice, timeoutNotice, appendix].filter(Boolean).join("\n\n"),
+                output: [output, notice, executionNotice].filter(Boolean).join("\n\n"),
+                contextOutput: [compressed.text, notice, executionNotice, appendix].filter(Boolean).join("\n\n"),
                   // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
                 truncated,
                 compression: bashCompressionMetadata(compressed.stats),

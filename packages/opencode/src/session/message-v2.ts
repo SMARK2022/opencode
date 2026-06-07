@@ -34,6 +34,7 @@ import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
+import { formatCompactionClearedNotice, truncateForCompaction } from "@/util/output-notice"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { Effect, Schema } from "effect"
@@ -79,9 +80,7 @@ export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
 
 function truncateToolOutput(text: string, maxChars?: number) {
-  if (!maxChars || text.length <= maxChars) return text
-  const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+  return truncateForCompaction(text, maxChars)
 }
 
 export const Event = {
@@ -342,7 +341,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
-              ? "[Old tool result content cleared]"
+              ? formatCompactionClearedNotice()
               : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
             const attachments =
               part.state.time.compacted || options?.stripMedia

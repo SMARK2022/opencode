@@ -1572,7 +1572,7 @@ describe("tool.shell abort", () => {
             },
           )
           expect(res.output).toContain("before")
-          expect(res.output).toContain("User aborted the command")
+          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
           expect(collected.length).toBeGreaterThan(0)
         }),
       ),
@@ -1589,8 +1589,9 @@ describe("tool.shell abort", () => {
             command: `sleep 60`,
             timeout: 500,
           })
-          expect(result.output).toContain("shell tool terminated command after exceeding timeout")
-          expect(result.output).toContain("retry with a larger timeout value in milliseconds")
+          expect(result.output).toContain(
+            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
+          )
         }),
       ),
     15_000,
@@ -1610,7 +1611,7 @@ describe("tool.shell abort", () => {
             },
             ctx,
           )
-          expect(result.output).toContain("exceeding timeout 500 ms")
+          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
         }),
       ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
     15_000,
@@ -1680,8 +1681,11 @@ describe("tool.shell truncation", () => {
           command: fill("lines", lineCount),
         })
         mustTruncate(result)
-        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
-        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
+        // #282：total 用源码常量计算行数，锁定 total 与实际完整行数的一致性
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+        expect(result.output).toContain(`total="${lineCount}L/`)
+        expect(result.output).toContain('shown="tail')
+        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
       }),
     ),
   )
@@ -1701,8 +1705,11 @@ describe("tool.shell truncation", () => {
         if (typeof retained !== "string") throw new Error("expected retained raw output")
         const fs = yield* FSUtil.Service
         expect(yield* fs.readFileString(retained)).toBe("a".repeat(byteCount))
-        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
-        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
+        // #282：单行超大输出的 total 固定为 1L——notice 行数口径与 tail 预览一致
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+        expect(result.output).toContain('total="1L/')
+        expect(result.output).toContain('shown="tail')
+        expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
       }),
     ),
   )

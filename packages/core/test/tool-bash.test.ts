@@ -746,11 +746,11 @@ describe("BashTool", () => {
             Effect.gen(function* () {
               const text = settled.output?.content.filter(part => part.type === "text").map(part => part.text).join("") ?? ""
               expect(text).toContain("ready\n")
-              expect(text).toContain("Command exceeded timeout of 10 ms")
-              expect(text).toContain("Retry with a larger timeout")
+              expect(text).toContain('type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="10"')
+              expect(text.match(/reason="timeout"/g)).toHaveLength(1)
               expect(settled.output?.content[1]).toMatchObject({
                 type: "text",
-                text: expect.stringContaining("Command timed out"),
+                text: "",
               })
               expect(settled.output?.structured).toMatchObject({
                 timeout: true,

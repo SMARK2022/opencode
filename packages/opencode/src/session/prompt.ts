@@ -61,6 +61,7 @@ import { LLMEvent } from "@opencode-ai/llm"
 import { usable } from "./overflow"
 // #194：改用 TokenEstimate 统一上传估算
 import { TokenEstimate } from "@/token/estimate"
+import { formatExecutionNotice } from "@/util/output-notice"
 
 // #159：decide 最近轮目标占用区间（相对 usable）
 // LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
@@ -710,7 +711,9 @@ const layer = Layer.effect(
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
               if (aborted) {
-                output += "\n\n" + ["<metadata>", "User aborted the command", "</metadata>"].join("\n")
+                // #282：prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
+                // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
+                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
               }
               const completed = Date.now()
               if (!msg.time.completed) {

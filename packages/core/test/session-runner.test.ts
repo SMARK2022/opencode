@@ -4183,11 +4183,11 @@ describe("SessionRunnerLLM", () => {
           expect(text).not.toContain("\u0007")
           expect(text).not.toContain("\u001b")
           expect(text).toContain("完成")
-          expect(text).toContain("Command interrupted before completion.")
+          expect(text).toContain('reason="user_abort"')
           expect(text).not.toContain("�")
           if (size === 16) expect(text).toContain("READY")
           expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
-          const retained = /captured raw output saved to (.+?) \.\.\./.exec(text)?.[1]
+          const retained = /(?:captured raw output saved to |path=")([^"\r\n]+?)(?: \.\.\.|"|$)/m.exec(text)?.[1] // 文本尾与XML属性都保留完整路径，不将标签尾部并入文件名。
           if (!retained) return yield* Effect.die("Expected the canonical raw recovery marker")
           // 进程与 capture 已退出后仍能恢复全部原文，不能只检查一个会被 cleanup 删除的路径。
           expect(Buffer.from(yield* Effect.promise(() => Bun.file(retained).arrayBuffer()))).toEqual(Buffer.from(raw))

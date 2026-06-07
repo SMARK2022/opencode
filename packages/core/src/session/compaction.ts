@@ -17,6 +17,7 @@ import { ProviderV2 } from "../provider"
 import { SessionRunnerModel } from "./runner/model"
 import { SessionMemento } from "./compaction-memento"
 import { SessionHistory } from "./history"
+import { truncateForCompaction } from "../util/output-notice"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_BUFFER_MIN = 5_000
@@ -109,8 +110,8 @@ type Input = {
 
 const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
-const truncate = (value: string) =>
-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
+// 保留原2000字符预算；只统一模型省略说明，不重做tail、memento或持久清理。
+const truncate = (value: string) => truncateForCompaction(value, TOOL_OUTPUT_MAX_CHARS)
 
 export const serializeToolContent = (content: SessionMessage.ToolStateCompleted["content"]) =>
   content
@@ -119,7 +120,7 @@ export const serializeToolContent = (content: SessionMessage.ToolStateCompleted[
     )
     .join("\n")
 
-const serialize = (message: SessionMessage.Message) => {
+export const serialize = (message: SessionMessage.Message) => {
   if (message.type === "user") {
     const files = message.files?.map((file) => `[Attached ${file.mime}: ${file.name ?? file.uri}]`) ?? []
     return [`[User]: ${message.text}`, ...files].join("\n")
