@@ -1817,6 +1817,28 @@ describe("tool.shell truncation", () => {
     ),
   )
 
+  it.live("keeps a visible tail preview for an oversized single line with final newline", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const code = 'console.log("0123456789".repeat(2400))'
+        const command = `${bin} -e ${evalarg(code)}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+          description: "Generate one oversized line with final newline",
+          compress_output: false,
+        })
+
+        mustTruncate(result)
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
+        expect(result.output).toContain('total="1L/')
+        expect(result.output).toContain('shown="tail 1L/')
+        expect(result.output).toContain("0123456789")
+        expect(result.output).not.toContain("(no output)")
+      }),
+    ),
+  )
+
   it.live("does not truncate small output", () =>
     runIn(
       projectRoot,

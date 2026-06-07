@@ -600,7 +600,7 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig): { tex
   const stable = vt.getStableOutput()
   const frames = vt.getFrameCount()
   
-  if (frames >= config.minCarriageReturnFrames) {
+  if (frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable)) {
     return {
       text: `... [terminal progress collapsed: ${frames} frames]\n${stable}`,
       frames
@@ -608,6 +608,12 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig): { tex
   }
   
   return { text: stable, frames }
+}
+
+function terminalRenderCollapsedText(text: string, stable: string) {
+  // 有些 shell 会在普通输出行前写入光标定位或样式 CSI。它们会增加 frame
+  // 计数，但并没有覆盖进度帧；只有渲染后的稳定画面少于原始可见文本时才提示 progress collapse。
+  return stripAnsi(text).replace(/\r/g, "\n").split("\n").filter((line) => line.trim().length > 0).join("\n") !== stable
 }
 
 // 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
@@ -1163,8 +1169,9 @@ type InlineCandidate = {
 function compressInlineLine(line: string, config: CompressionConfig): { line: string; applied: boolean } {
   // 如果行本身太短，没必要跑正则扫描
   if (line.length < config.minInlineRunBytes) return { line, applied: false }
-  // 如果行超长，为避免性能问题直接跳过
-  if (line.length > config.maxInlineLineLength) return { line, applied: false }
+  // 超长单行只允许检查“整行短周期重复”这种线性安全形态；避免恢复
+  // 旧的全位置扫描导致 ReDoS/CPU 尖峰，同时保留 abcabcabc 这类高收益压缩。
+  if (line.length > config.maxInlineLineLength) return compressWholeLineRepeat(line, config)
   // 不处理带有 ANSI 转义序列的行（通常含有颜色代码，强行切割会破坏终端样式）
   if (ANSI_RE.test(line)) return { line, applied: false }
 
@@ -1220,6 +1227,28 @@ function compressInlineLine(line: string, config: CompressionConfig): { line: st
     line: line.slice(0, best.start) + best.replacement + line.slice(best.end),
     applied: true,
   }
+}
+
+function compressWholeLineRepeat(line: string, config: CompressionConfig): { line: string; applied: boolean } {
+  const maxPattern = Math.min(config.maxInlinePatternLength, Math.floor(line.length / config.minInlineRepeatCount))
+  for (let width = 1; width <= maxPattern; width++) {
+    if (line.length % width !== 0) continue
+    const pattern = line.slice(0, width)
+    if (!pattern.trim()) continue
+    const repeats = line.length / width
+    if (repeats < config.minInlineRepeatCount) continue
+    let ok = true
+    for (let cursor = width; cursor < line.length; cursor += width) {
+      if (line.slice(cursor, cursor + width) === pattern) continue
+      ok = false
+      break
+    }
+    if (!ok) continue
+    const replacement = `[repeated ${quotePattern(pattern)} ×${repeats}]`
+    const score = scoreReplacement(line, replacement, config)
+    if (score.profitable) return { line: replacement, applied: true }
+  }
+  return { line, applied: false }
 }
 
 // 计算文本熵值

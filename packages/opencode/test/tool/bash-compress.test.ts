@@ -99,4 +99,21 @@ describe("tool.bash-compress", () => {
     expect(clean).not.toContain("<Objs")
     expect(clean).not.toContain("CLIXML")
   })
+
+  test("does not label normal ANSI-decorated repeated lines as terminal progress", () => {
+    const text = Array.from({ length: 20 }, () => "\x1b[1Grepeat-me-repeat-me-repeat-me").join("\n")
+
+    const result = compressVisibleOutput(text)
+
+    expect(result.text).toContain("repeat-me-repeat-me-repeat-me")
+    expect(result.text).toContain("same line repeated 19 more times")
+    expect(result.text).not.toContain("terminal progress collapsed")
+  })
+
+  test("compresses oversized single-line repeated patterns without regex scanning the whole line", () => {
+    const result = compressVisibleOutput("abc".repeat(6000))
+
+    expect(result.text).toBe('[repeated "abc" ×6000]')
+    expect(result.stats.inlinePatternGroups).toBe(1)
+  })
 })

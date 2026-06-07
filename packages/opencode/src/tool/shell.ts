@@ -297,7 +297,7 @@ function preview(text: string) {
 }
 
 function tail(text: string, maxLines: number, maxBytes: number) {
-  const lines = text.split("\n")
+  const lines = text.replace(/\r?\n$/, "").split("\n")
   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
     return {
       text,
@@ -1034,8 +1034,8 @@ export const ShellTool = Tool.define(
         const userCompressionEnabled = bashCompressionEnabled(cfg)
         const compressionGuidance = userCompressionEnabled
           ? [
-              "  - Shell output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
-              "  - Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result.",
+              "  - Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
+              "  - Strongly prefer leaving `compress_output` omitted; set false only for exact raw formatting. Truncated output includes a compact notice and recovery path.",
             ].join("\n")
           : ""
 

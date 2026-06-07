@@ -29,7 +29,7 @@ export function parameterSchema(description: string) {
     description: Schema.String.annotate({ description }),
     compress_output: Schema.optional(Schema.Boolean).annotate({
       description:
-        "Whether this shell call may compress repetitive output before returning it. Defaults to the user's shell output compression setting. Set false when exact raw formatting is important.",
+        "Whether this shell call may compress repetitive output, oversized lines, and terminal progress noise before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
     }),
   })
 }
