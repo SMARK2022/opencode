@@ -252,7 +252,7 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
-      // 恢复复用已保存权限；不能把当前调用代理的限制回写成旧会话的新策略。
+      // task_id 保留会话身份与模型变体，权限按本轮委派重新计算。
       const permission = [{ permission: "external_directory", pattern: "/saved/*", action: "allow" }] as const
       const child = yield* sessions.create({ parentID: chat.id, title: "Existing child", permission })
       const tool = yield* TaskTool
@@ -282,8 +282,10 @@ describe("tool.task", () => {
       const kids = yield* sessions.children(chat.id)
       expect(kids).toHaveLength(1)
       expect(kids[0]?.id).toBe(child.id)
-      // 从 Session owner 重新读取，避免只比较恢复前内存对象而漏掉 durable 回写。
-      expect((yield* sessions.get(child.id)).permission).toEqual([...permission])
+      // 从 Session owner 重读，检查旧 grant 已被本轮权限持久化替换。
+      const resumed = yield* sessions.get(child.id)
+      expect(resumed.permission).not.toEqual(expect.arrayContaining([...permission]))
+      expect(Permission.evaluate("external_directory", "/saved/file", resumed.permission ?? []).action).toBe("ask")
       expect(result.metadata.sessionId).toBe(child.id)
       expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
       expect(seen?.sessionID).toBe(child.id)
@@ -677,11 +679,160 @@ describe("tool.task", () => {
     { config: { subagent_depth: 2 } },
   )
 
+  it.instance("execute records the subagent and tightens permissions from the executing parent agent", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const agent = yield* Agent.Service
+      const general = yield* agent.get("general")
+      const { chat, assistant } = yield* seed()
+      yield* sessions.setAgentModel({
+        sessionID: chat.id,
+        agent: "build",
+        model: { id: ref.modelID, providerID: ref.providerID },
+        time: Date.now(),
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "auto",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const child = yield* sessions.get(result.metadata.sessionId)
+      const effective = Permission.merge(general.permission, child.permission ?? [])
+
+      // 持久化父代理为 build，本轮 ctx.agent 为 auto；子会话记录实际执行的 general。
+      expect(child.agent).toBe("general")
+      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
+      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
+      expect(seen?.agent).toBe("general")
+    }),
+  )
+
+  it.instance("execute recomputes an existing task session permission when resumed", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const agent = yield* Agent.Service
+      const general = yield* agent.get("general")
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({
+        parentID: chat.id,
+        title: "Existing child",
+        permission: [{ permission: "external_directory", pattern: "/outside/project/*", action: "allow" }],
+      })
+      const parentRuntimePermission = [
+        { permission: "read", pattern: "/parent-blocked/*", action: "deny" },
+      ] as const
+      // 旧子会话创建后更新父 Session，恢复必须读取最新的持久化 runtime ceiling。
+      yield* sessions.setPermission({
+        sessionID: chat.id,
+        permission: parentRuntimePermission,
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          task_id: child.id,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "auto",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const resumed = yield* sessions.get(result.metadata.sessionId)
+      const effective = Permission.merge(general.permission, resumed.permission ?? [])
+
+      expect(resumed.id).toBe(child.id)
+      expect(resumed.permission).toEqual(expect.arrayContaining([...parentRuntimePermission]))
+      expect(Permission.evaluate("read", "/parent-blocked/file.ts", effective).action).toBe("deny")
+      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
+      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
+    }),
+  )
+
+  it.instance(
+    "execute keeps primary tool denies at least as strict as parent admission ceilings",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "reviewer",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "auto",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        const child = yield* sessions.get(result.metadata.sessionId)
+
+        // primary_tools 在目标中是子代理禁令，不能被父 auto ceiling 覆盖。
+        // reviewer 允许 task，bash 则必须保持配置给出的更严格 deny。
+        expect(Permission.evaluate("bash", "git add .", child.permission ?? []).action).toBe("deny")
+      }),
+    {
+      config: {
+        agent: {
+          reviewer: {
+            mode: "subagent",
+            permission: {
+              task: "allow",
+            },
+          },
+        },
+        experimental: {
+          primary_tools: ["bash"],
+        },
+      },
+    },
+  )
+
   it.instance(
     "execute shapes child permissions for task, todowrite, and primary tools",
     () =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
+        const agent = yield* Agent.Service
+        const reviewer = yield* agent.get("reviewer")
         const { chat, assistant } = yield* seed()
         const tool = yield* TaskTool
         const def = yield* tool.init()
@@ -707,33 +858,40 @@ describe("tool.task", () => {
         )
 
         const child = yield* sessions.get(result.metadata.sessionId)
+        const effective = Permission.merge(reviewer.permission, child.permission ?? [])
         expect(child.parentID).toBe(chat.id)
         expect(child.agent).toBe("reviewer")
-        // source 过滤父 allow 后仍保留默认禁令；完整顺序比较同时守住继承边界与末尾工具 deny。
-        expect(child.permission).toEqual([
-          { permission: "doom_loop", pattern: "*", action: "ask" },
-          { permission: "external_directory", pattern: "*", action: "ask" },
-          { permission: "question", pattern: "*", action: "deny" },
-          { permission: "plan_enter", pattern: "*", action: "deny" },
-          { permission: "plan_exit", pattern: "*", action: "deny" },
-          { permission: "read", pattern: "*.env", action: "ask" },
-          { permission: "read", pattern: "*.env.*", action: "ask" },
-          {
-            permission: "todowrite",
-            pattern: "*",
-            action: "deny",
-          },
-          {
-            permission: "bash",
-            pattern: "*",
-            action: "deny",
-          },
-          {
-            permission: "read",
-            pattern: "*",
-            action: "deny",
-          },
-        ])
+        // 默认能力留在代理规则中；合并真实 overlay 后仍须保留原有审批规则与配置禁令。
+        expect(effective).toEqual(
+          expect.arrayContaining([
+            { permission: "doom_loop", pattern: "*", action: "ask" },
+            { permission: "external_directory", pattern: "*", action: "ask" },
+            { permission: "question", pattern: "*", action: "deny" },
+            { permission: "plan_enter", pattern: "*", action: "deny" },
+            { permission: "plan_exit", pattern: "*", action: "deny" },
+            { permission: "read", pattern: "*.env", action: "ask" },
+            { permission: "read", pattern: "*.env.*", action: "ask" },
+            {
+              permission: "todowrite",
+              pattern: "*",
+              action: "deny",
+            },
+            {
+              permission: "bash",
+              pattern: "*",
+              action: "deny",
+            },
+            {
+              permission: "read",
+              pattern: "*",
+              action: "deny",
+            },
+          ]),
+        )
+        expect(Permission.evaluate("task", "worker", effective).action).toBe("allow")
+        expect(Permission.evaluate("todowrite", "anything", effective).action).toBe("deny")
+        expect(Permission.evaluate("bash", "git status", effective).action).toBe("deny")
+        expect(Permission.evaluate("read", "README.md", effective).action).toBe("deny")
         expect(seen?.tools).toBeUndefined()
       }),
     {

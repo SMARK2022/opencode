@@ -258,6 +258,25 @@ describe("SessionV2.create", () => {
       })
 
       expect(yield* session.create(input)).toMatchObject({ id, agent: "build" })
+      const store = yield* SessionStore.Service
+      const db = (yield* Database.Service).db
+      yield* db.update(SessionTable).set({ cost: 3, tokens_input: 4, metadata: { custom: "keep" } }).where(eq(SessionTable.id, id)).run().pipe(Effect.orDie)
+      const permissions = [{ action: "bash", resource: "*", effect: "auto" as const }]
+      // 真正调用Session setter并重读wire、投影及事件；不运行任何子会话或后台job。
+      yield* session.setPermissions({ sessionID: id, permissions })
+      expect(yield* store.permissions(id)).toEqual(permissions)
+      expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)).toMatchObject({
+        agent: "build", title: "updated", slug: "updated", cost: 3, tokens_input: 4, metadata: { custom: "keep" },
+        permission: [{ permission: "bash", pattern: "*", action: "auto" }], time_created: 0,
+      })
+      const recorded = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, id)).orderBy(asc(EventTable.seq)).all().pipe(Effect.orDie)
+      expect(recorded.at(-1)).toMatchObject({ type: EventV2.versionedType(SessionV1.Event.Updated.type, 1), data: { info: { title: "updated", permission: [{ permission: "bash", pattern: "*", action: "auto" }] } } })
+      // 恢复是替换而非累加，空集合也必须清掉旧grant。
+      yield* session.setPermissions({ sessionID: id, permissions: [{ action: "read", resource: "blocked/*", effect: "deny" }] })
+      expect(yield* store.permissions(id)).toEqual([{ action: "read", resource: "blocked/*", effect: "deny" }])
+      yield* session.setPermissions({ sessionID: id, permissions: [] })
+      expect(yield* store.permissions(id)).toEqual([])
+      expect(yield* session.get(id)).toMatchObject({ id, title: "updated", agent: "build" })
     }),
   )
 

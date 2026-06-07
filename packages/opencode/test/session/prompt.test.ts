@@ -2423,6 +2423,8 @@ it.instance("subtask child inherits directory grant beneath executing parent ask
     const { llm } = yield* useServerConfig(providerCfg)
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
+    const agent = yield* AgentSvc.Service
+    const general = yield* agent.get("general")
     const chat = yield* sessions.create({
       title: "Parent",
       permission: [{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }],
@@ -2436,11 +2438,11 @@ it.instance("subtask child inherits directory grant beneath executing parent ask
     const kids = yield* sessions.children(chat.id)
     expect(kids).toHaveLength(1)
     const child = kids[0]!
-    const rules = child.permission ?? []
-    expect(rules).toEqual(
+    const rules = Permission.merge(general.permission, child.permission ?? [])
+    expect(child.permission ?? []).not.toEqual(
       expect.arrayContaining([{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }]),
     )
-    // source 过滤父 allow 后仍保留默认 ask；继承 grant 的存在不能替代最终优先级检查。
+    // 父 grant 不属于双方共同 allow 的边界，最终仍受执行父代理的 ask 限制。
     expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("ask")
     expect(Permission.evaluate("task", "anything", rules).action).toBe("deny")
   }),

@@ -24,7 +24,7 @@ import { PermissionReviewerTranscript } from "./transcript"
 import type { PermissionAuto } from "../auto"
 
 // #198：reviewer 不可用——服务已禁用，回退到用户审批
-// #198：Disabled 是配置信号——approvals_reviewer 非 auto_review 时抛出，auto.ts 将其转为 ask
+// #280：Disabled 仅表示显式 approvals_reviewer=user，auto.ts 将其转为 ask
 export class ReviewerDisabled extends Schema.TaggedErrorClass<ReviewerDisabled>()("PermissionReviewerDisabled", {}) {
   override get message() {
     return "auto reviewer is disabled"
@@ -120,7 +120,7 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         const cfg = yield* config.get()
         const permission = cfg.permission
-        // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 auto 隐式启用
+        // #280：auto action 已决定送审；仅显式 user 禁用 reviewer，metadata.agent 只作审计证据
         if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
         const autoReview = permission?.auto_review
         // #264：默认 fallback=user，fallback=deny 保留 fail-closed
@@ -828,13 +828,12 @@ function isReviewerDecisionProtocolError(error: unknown) {
   return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
 }
 
-// #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
-// #203：无全局配置时原生 auto agent 隐式启用 reviewer；否则选 auto 只会把 cautious 降级成普通 ask
-function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
+// #203：reviewer 启用判定——显式 user 配置优先保留人工审批
+// #280：reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
+// auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
+function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, _metadata: Readonly<Record<string, unknown>>) {
   if (permission?.approvals_reviewer === "user") return false
-  if (permission?.approvals_reviewer === "auto_review") return true
-  // #225：reviewer 隐式启用判定与小写 agent key 对齐
-  return metadata.agent === "auto"
+  return true
 }
 
 // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议

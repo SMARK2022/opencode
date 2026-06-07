@@ -5,6 +5,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Auth } from "../../src/auth"
 import { Database } from "@opencode-ai/core/database/database"
+// #280：Config.Info 未导出，fixture 的权限字段沿用 TestConfig.get 使用的 core 配置类型
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Config } from "../../src/config/config"
 import { PermissionReviewer } from "../../src/permission/reviewer/service"
 import { Plugin } from "../../src/plugin"
@@ -63,10 +65,45 @@ describe("permission reviewer service", () => {
     rejectMaxOutputTokens: true,
     plugin: pluginLayer({ clearMaxOutputTokens: true, header: REVIEWER_HOOK_HEADER }),
   })
+  // #280：无 approvals_reviewer 配置——reviewer 启用由权限计算决定而非 agent 名称
+  const implicitAutoFixture = reviewerFixture(
+    { type: "api", key: "test-key" },
+    {
+      requireInstructions: false,
+      permission: {
+        // #280：省略 approvals_reviewer，显式 user 仍保留人工审批
+        auto_review: {
+          model: `${OPENAI_PROVIDER_ID}/gpt-5`,
+          policy: "Reviewer service test policy: allow only bounded auto requests.",
+        },
+      },
+    },
+  )
   const oauth = testEffect(oauthFixture.layer)
   const apiKey = testEffect(apiKeyFixture.layer)
   const customOauth = testEffect(customOauthFixture.layer)
   const oauthHook = testEffect(oauthHookFixture.layer)
+  const implicitAuto = testEffect(implicitAutoFixture.layer)
+
+  // #280：agent=general 的请求也进入 auto review——启用不再依赖执行 agent 名称
+  implicitAuto.effect("enables reviewer for auto requests without depending on the executing agent name", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(
+        reviewInput("review_general_agent_auto", {
+          agent: "general",
+        }),
+      )
+      // #280：bodies[0] 即本次 review 的唯一请求，无其他用例共享 fixture
+      const body = implicitAutoFixture.bodies[0]
+
+      // #280：decision allow 证明 reviewer 路径完整走通，而非被静默跳过
+      expect(decision.action).toBe("allow")
+      // #280：agent 证据进入 user input 而非 instructions——Codex 契约不因名称路径改变
+      expect(inputText(body)).toContain("general")
+      expectPreservedShellEvidence(inputText(body))
+    }),
+  )
 
   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
     Effect.gen(function* () {
@@ -145,6 +182,8 @@ function reviewerFixture(
     providerID?: ProviderV2.ID
     rejectMaxOutputTokens?: boolean
     plugin?: Layer.Layer<Plugin.Service>
+    // #280：注入自定义 permission 块（如无 approvals_reviewer 的隐式 auto 场景）
+    permission?: ConfigV1.Info["permission"]
   } = { requireInstructions: false },
 ) {
   const bodies: ReviewerRequestBody[] = []
@@ -201,7 +240,7 @@ function reviewerFixture(
     // #261：返回 requests 供测试验证 headers
     requests,
     layer: PermissionReviewer.layer.pipe(
-      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
+      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID, options.permission)) })),
       Layer.provide(provider.layer),
       Layer.provide(authLayer(authInfo)),
       // #261：提供 plugin 层——默认使用空 plugin，测试 fixture 可注入自定义 hook
@@ -274,20 +313,22 @@ function expectPreservedShellEvidence(text: string) {
   expect(text).toContain("$(pwd)/danger")
 }
 
-function reviewInput(reviewID: string) {
+function reviewInput(reviewID: string, metadata?: Readonly<Record<string, unknown>>) {
   return {
     reviewID,
     permission: "bash",
     patterns: [COMMAND_EVIDENCE],
-    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash" },
+    // #280：metadata 展开供 agent 名称类用例注入，不影响既有证据字段
+    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash", ...metadata },
     precheck: { level: "cautious" as const, reason: "shell command combines redirection and deletion-like behavior" },
   }
 }
 
 // #250：Config.Info 是 config 模块私有别名——测试直接用结构推断，避免依赖未导出类型
-function config(providerID: ProviderV2.ID) {
+function config(providerID: ProviderV2.ID, permission?: ConfigV1.Info["permission"]) {
   return {
-    permission: {
+    // #280：permission 注入时完全替换默认块（隐式 auto 用例无 approvals_reviewer）
+    permission: permission ?? {
       // #250：approvals_reviewer=auto_review 绕过禁用分支；model 字符串走
       // providerID/gpt-5 形态——与 fixture 的 provider id 严格对应
       approvals_reviewer: "auto_review" as const,

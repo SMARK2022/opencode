@@ -13,6 +13,7 @@ import { Config } from "@/config/config"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Permission } from "@/permission"
 import { Database } from "@opencode-ai/core/database/database"
 
 export interface TaskPromptOps {
@@ -170,23 +171,26 @@ export const TaskTool = Tool.define(
           action: "deny" as const,
         })) ?? []),
       ]
-      const nextSession =
-        session ??
-        (yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: params.description + ` (@${next.name} subagent)`,
-          agent: next.name,
-          permission: [
-            ...childPermission,
-            ...childToolDenies.filter(
-              (deny) =>
-                !childPermission.some(
-                  (rule) =>
-                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
-                ),
+      // primary_tools 保留既有 deny 语义，仍在派生父限制之后生效。
+      const nextPermission = Permission.compact([
+        ...childPermission,
+        ...childToolDenies.filter(
+          (deny) =>
+            !childPermission.some(
+              (rule) =>
+                rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
             ),
-          ],
-        }))
+        ),
+      ])
+      // 每次恢复都重算权限；新建与恢复记录同一个实际执行子代理。
+      const nextSession = session
+        ? { ...session, agent: next.name, permission: nextPermission }
+        : yield* sessions.create({
+            parentID: ctx.sessionID,
+            title: params.description + ` (@${next.name} subagent)`,
+            agent: next.name,
+            permission: nextPermission,
+          })
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),
@@ -198,6 +202,20 @@ export const TaskTool = Tool.define(
       const model = next.model ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
+      }
+      if (session) {
+        // setAgentModel 要求本轮模型；连同权限经同一 Session owner 回写，不依赖 promptOps 的副作用。
+        yield* sessions.setPermission({ sessionID: session.id, permission: nextPermission })
+        yield* sessions.setAgentModel({
+          sessionID: session.id,
+          agent: next.name,
+          model: {
+            id: model.modelID,
+            providerID: model.providerID,
+            variant: next.model ? undefined : variant,
+          },
+          time: Date.now(),
+        })
       }
       const metadata = {
         parentSessionId: ctx.sessionID,
