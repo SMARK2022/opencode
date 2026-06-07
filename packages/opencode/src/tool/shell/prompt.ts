@@ -28,7 +28,7 @@ export function parameterSchema() {
     // #116：可选关闭压缩，避免快照/二进制等场景被压扁
     compress_output: Schema.optional(Schema.Boolean).annotate({
       description:
-        "Whether this shell call may compress repetitive output before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
+        "Whether this shell call may compress repetitive output, oversized lines, and terminal progress noise before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
     }),
   })
 }
