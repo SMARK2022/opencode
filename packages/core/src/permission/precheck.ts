@@ -216,7 +216,33 @@ export function evaluate(input: {
   // #232：默认回到 general allow，除非上方的结构化边界（如 workspace delete metadata）
   // #232：先把它们提升到 cautious。
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
-  return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
+  return bashEffect(input)
+}
+
+function bashEffect(input: {
+  patterns: readonly string[]
+  metadata: Readonly<Record<string, unknown>>
+}) {
+  const command = typeof input.metadata.command === "string" ? input.metadata.command : undefined
+  // #285：metadata.command 缺省时退化为 patterns 拼接，保持与旧 evaluateShell 兼容；
+  // 存在原始命令时始终以其为最低基线
+  const patternCommand = input.patterns.join(" && ")
+  if (!command) return evaluateShell(patternCommand, 0)
+
+  const raw = evaluateShell(command, 0)
+  if (!patternCommand.trim() || patternCommand === command) return raw
+  // #285：canonical 与原始命令相同时无需二次评估，避免重复解析
+
+  // #285：shell metadata 是原始审计证据，permission patterns 是 canonical 规则键。
+  // auto precheck 必须同时考虑两个视角并保留更高风险，防止原始危险载荷被削弱，
+  // 也不能让 env 赋值将 git push --force 从 cautious 降为 general。
+  return maxRisk(raw, evaluateShell(patternCommand, 0))
+}
+
+function maxRisk(left: Decision, right: Decision) {
+// #285：双视角取风险更高者——env 赋值不得降低 git push --force 的 cautious 等级，
+// 原始危险载荷也不得因安全 pattern 被降级
+  return LEVELS.indexOf(right.level) > LEVELS.indexOf(left.level) ? right : left
 }
 
 // #232：external_directory 边界统一为 cautious review seam——shell 发起的访问复用同一条

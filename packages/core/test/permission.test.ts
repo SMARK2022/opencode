@@ -342,6 +342,37 @@ describe("PermissionV2", () => {
         id: PermissionV2.ID.create("per_test"),
         effect: "deny",
       })
+      // 旧raw审批仍可使用；canonical规则和原始凭证deny都保持实际裁决权。
+      const command = "GITHUB_TOKEN=x git push --force"
+      const bash = assertion({ action: "bash", resources: [command], save: [command], metadata: {
+        command, canonical_patterns: ["git push --force"], raw_patterns: [command],
+      } })
+      yield* saved.add({ projectID: Project.ID.global, action: "bash", resources: [command] })
+      yield* setRules([])
+      expect(yield* service.ask(bash)).toMatchObject({ effect: "allow" })
+      for (const effect of ["allow", "auto", "ask"] as const) {
+        yield* setRules([{ action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" }, { action: "bash", resource: "*", effect }])
+        expect(yield* service.ask(bash)).toMatchObject({ effect: "deny" })
+      }
+      yield* setRules([{ action: "bash", resource: "*", effect: "allow" }, { action: "bash", resource: "git push --force*", effect: "deny" }])
+      expect(yield* service.ask(bash)).toMatchObject({ effect: "deny" })
+      // 原始证据不参与普通allow/ask匹配；这些仍按canonical规则last-match-wins。
+      const fresh = { ...bash, resources: ["CI=true git push --force"], metadata: { command: "CI=true git push --force", canonical_patterns: ["git push --force"], raw_patterns: ["CI=true git push --force"] } }
+      yield* setRules([{ action: "bash", resource: "*", effect: "deny" }, { action: "bash", resource: "git push --force*", effect: "allow" }])
+      expect(yield* service.ask(fresh)).toMatchObject({ effect: "allow" })
+      yield* setRules([{ action: "bash", resource: "git push --force*", effect: "ask" }])
+      expect(yield* service.ask(fresh)).toMatchObject({ effect: "ask" })
+      yield* service.reply({ requestID: PermissionV2.ID.create("per_test"), reply: "once" })
+      reviewSettings = new Config.Info({})
+      reviewRequests.length = 0
+      malformed = false
+      reviewGate = undefined
+      reviewStarted = undefined
+      yield* setRules([{ action: "bash", resource: "git push --force*", effect: "auto" }])
+      expect(yield* service.ask(fresh)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      expect(JSON.stringify(reviewRequests[0])).toContain("force push requires explicit approval")
+      expect(yield* service.list()).toEqual([])
     }),
   )
 
@@ -405,6 +436,23 @@ describe("PermissionV2", () => {
       yield* service.assert(assertion({ id: PermissionV2.ID.create("per_next"), resources: ["src/next.ts"] }))
       yield* saved.remove(id)
       expect(yield* saved.list()).toEqual([])
+      // always只释放仍然有效的批准：挂起后新增raw硬拒不能被同一次保存的通配授权跨过。
+      const command = "GITHUB_TOKEN=x git push --force"
+      const permit = PermissionV2.ID.create("per_bash_permit")
+      const blocked = PermissionV2.ID.create("per_bash_blocked")
+      const plain = PermissionV2.ID.create("per_bash_plain")
+      yield* setRules([])
+      expect(yield* service.ask(assertion({ id: permit, action: "bash", resources: ["pwd"], save: ["*"] }))).toMatchObject({ effect: "ask" })
+      expect(yield* service.ask(assertion({ id: blocked, action: "bash", resources: [command], metadata: {
+        command, canonical_patterns: ["git push --force"], raw_patterns: [command],
+      } }))).toMatchObject({ effect: "ask" })
+      expect(yield* service.ask(assertion({ id: plain, action: "bash", resources: ["git status"] }))).toMatchObject({ effect: "ask" })
+      yield* setRules([{ action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" }, { action: "bash", resource: "*", effect: "allow" }])
+      yield* service.reply({ requestID: permit, reply: "always" })
+      expect((yield* service.list()).map((request) => request.id)).toEqual([blocked])
+      expect(yield* service.get(plain)).toBeUndefined()
+      yield* service.reply({ requestID: blocked, reply: "reject" })
+      expect(yield* service.list()).toEqual([])
     }),
   )
   it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {

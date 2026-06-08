@@ -674,4 +674,46 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git cherry-pick abc123")).toMatchObject({ level: "cautious" })
     expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
   })
+
+  test("keeps cautious classification when shell metadata has environment assignments", () => {
+  // #285：env 赋值是执行前缀，不是命令本体——git push --force 仍是 force push，必须保持 cautious
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ["git push --force"],
+        metadata: { command: "GITHUB_TOKEN=x git push --force" },
+      }),
+    ).toMatchObject({ level: "cautious", reason: "force push requires explicit approval" })
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ['git commit -m "test"'],
+        metadata: { command: 'CI=$GITHUB_TOKEN git commit -m "test"' },
+      }),
+    ).toMatchObject({ level: "cautious" })
+  })
+
+  test("does not lower raw dangerous shell metadata with safer permission patterns", () => {
+  // #285：patterns 只声明 git status，但原始命令 rm -rf / 的评估结果不被削弱
+  // ——metadata 原始证据以更高风险为准
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ["git status"],
+        metadata: { command: "rm -rf /" },
+      }),
+    ).toMatchObject({ level: "dangerous" })
+  })
+
+  test("does not promote environment-modified read-only shell metadata to safe", () => {
+  // #285：FOO=1 前缀命令仍是 read-only，允许 general；env 赋值本身不升级也不降级风险
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ["git status --porcelain"],
+        metadata: { command: "FOO=1 git status --porcelain" },
+      }),
+    ).toMatchObject({ level: "general" })
+  })
+
 })

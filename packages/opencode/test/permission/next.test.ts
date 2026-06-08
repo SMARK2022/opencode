@@ -774,6 +774,65 @@ it.instance(
   { git: true },
 )
 
+it.instance(
+  "ask - raw shell deny evidence remains terminal for canonicalized commands",
+  () =>
+    Effect.gen(function* () {
+      yield* Effect.forEach(["allow", "auto"] as const, (action) =>
+        Effect.gen(function* () {
+          const err = yield* fail(
+            ask({
+              sessionID: SessionID.make("session_test"),
+              permission: "bash",
+              patterns: ["git push --force"],
+              metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
+              always: ["git push *"],
+              ruleset: [
+                { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
+                { permission: "bash", pattern: "*", action },
+              ],
+            }),
+          )
+          expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+          expect(yield* list()).toHaveLength(0)
+        }),
+      )
+
+      const approved = yield* ask({
+      // #285：先走一次 ask+always 建立已批准规则，再验证已批准规则仍不能绕过
+      // 后续的硬拒绝——批准不是原始证据的豁免令牌
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["GITHUB_TOKEN=x git push --force"],
+        metadata: { command: "GITHUB_TOKEN=x git push --force" },
+        always: ["GITHUB_TOKEN=*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+      }).pipe(Effect.forkScoped)
+      const pending = yield* waitForPending(1)
+      yield* reply({ requestID: pending[0].id, reply: "always" })
+      yield* Fiber.await(approved)
+
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["git push --force"],
+          metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
+          // #285：ruleset 里 GITHUB_TOKEN=* deny 必须覆盖 canonical pattern 不可见的 env 赋值——
+          // 即使 bash:* 规则为 allow/auto，原始证据仍 fail-closed
+          always: ["git push *"],
+          ruleset: [
+            { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
+            { permission: "bash", pattern: "*", action: "auto" },
+          ],
+        }),
+      )
+      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
 // #199：验证 precheck fast-path 对只读 git 命令直接 allow，不进入用户审批。
 // #199：fast-path allow 不产生 pending 请求，验证 list() 为空。
 it.instance(

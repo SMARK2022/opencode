@@ -307,6 +307,26 @@ describe("BashTool", () => {
           }),
         )
           .pipe(Effect.andThen(() => Effect.gen(function* () {
+            // 危险命令仅作为审批输入；在实际进程替身之前拒绝，复用两代同一AST投影。
+            const bash = path.join(tmp.path, "bash.exe")
+            yield* Effect.promise(() => fs.writeFile(bash, "fixture executable is never invoked"))
+            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+              for (const [command, canonical, raw] of [
+                ["CI=true git push --force", ["git push --force"], ["CI=true git push --force"]],
+                ["FOO=1 BAR=2 echo hello", ["echo hello"], ["FOO=1 BAR=2 echo hello"]],
+                ["CI=true git log --oneline -5 > output.txt", ["git log --oneline -5 > output.txt"], ["CI=true git log --oneline -5 > output.txt"]],
+                ["echo before && CI=true git push --force", ["echo before", "git push --force"], ["CI=true git push --force"]],
+              ] as const) {
+                reset()
+                denyAction = "bash"
+                expect((yield* settleTool(registry, call({ command }))).result.type).toBe("error")
+                const request = assertions.find((request) => request.action === "bash")
+                expect(request).toMatchObject({ resources: [command], save: [command], metadata: {
+                  command, canonical_patterns: canonical, raw_patterns: raw,
+                } })
+                expect(runs).toEqual([])
+              }
+            }), appProcess, bash)
             if (process.platform !== "win32") return
             for (const shell of ["pwsh.exe", "powershell.exe", "cmd.exe"]) {
               const cmd = shell === "cmd.exe"
