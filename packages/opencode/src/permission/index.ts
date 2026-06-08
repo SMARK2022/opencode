@@ -225,6 +225,16 @@ export const layer = Layer.effect(
       let needsAuto = false
       const autoPatterns: string[] = []
 
+      for (const pattern of rawDenyPatterns(request.metadata)) {
+        const denied = rawDenyRule(request.permission, pattern, ruleset)
+        log.info("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
+        if (denied) {
+          return yield* new DeniedError({
+            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+          })
+        }
+      }
+
       // Evaluate every requested pattern before taking action. Static deny keeps
       // highest precedence, while mixed auto/ask requests preserve both gates:
       // auto can reject critical payloads, but reviewer allow cannot bypass a
@@ -474,6 +484,30 @@ function isPermissionObject(input: unknown): input is Record<string, Action> {
   // Arrays and auto_review objects are not permission pattern maps. Each nested
   // value is checked by isAction before a rule is emitted.
   return Boolean(input && typeof input === "object" && !Array.isArray(input))
+}
+
+function rawDenyPatterns(metadata: Readonly<Record<string, unknown>>) {
+  const patterns = metadata.raw_patterns
+  if (!Array.isArray(patterns)) return []
+  // raw_patterns is emitted by shell parsing for raw command evidence that was
+  // intentionally removed from canonical approval patterns. It is deny-only so
+  // sensitive env-assignment rules remain hard stops without giving raw env text
+  // authority to allow, auto-approve, or require extra asks for the canonical command.
+  return patterns.filter((pattern): pattern is string => typeof pattern === "string")
+}
+
+function rawDenyRule(permission: string, pattern: string, ruleset: Ruleset) {
+  // This intentionally does not use the normal last-match-wins evaluator or
+  // approved rules. Raw evidence is hidden from canonical approval patterns, so a
+  // concrete deny such as `GITHUB_TOKEN=*` must remain terminal even if a later
+  // `bash:*` rule would auto/allow the canonical command.
+  return ruleset.find(
+    (rule) =>
+      rule.action === "deny" &&
+      rule.pattern !== "*" &&
+      Wildcard.match(permission, rule.permission) &&
+      Wildcard.match(pattern, rule.pattern),
+  )
 }
 
 export function merge(...rulesets: Ruleset[]): Ruleset {

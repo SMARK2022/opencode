@@ -693,4 +693,41 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git cherry-pick abc123")).toMatchObject({ level: "cautious" })
     expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
   })
+
+  test("keeps cautious classification when shell metadata has environment assignments", () => {
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ["git push --force"],
+        metadata: { command: "GITHUB_TOKEN=x git push --force" },
+      }),
+    ).toMatchObject({ level: "cautious", reason: "force push requires explicit approval" })
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ['git commit -m "test"'],
+        metadata: { command: 'CI=$GITHUB_TOKEN git commit -m "test"' },
+      }),
+    ).toMatchObject({ level: "cautious" })
+  })
+
+  test("does not lower raw dangerous shell metadata with safer permission patterns", () => {
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ["git status"],
+        metadata: { command: "rm -rf /" },
+      }),
+    ).toMatchObject({ level: "dangerous" })
+  })
+
+  test("does not promote environment-modified read-only shell metadata to safe", () => {
+    expect(
+      PermissionPrecheck.evaluate({
+        permission: "bash",
+        patterns: ["git status --porcelain"],
+        metadata: { command: "FOO=1 git status --porcelain" },
+      }),
+    ).toMatchObject({ level: "general" })
+  })
 })

@@ -126,6 +126,7 @@ type Part = {
 type Scan = {
   dirs: Set<string>
   patterns: Set<string>
+  raw: Set<string>
   always: Set<string>
 }
 
@@ -190,8 +191,30 @@ function parts(node: Node) {
   return out
 }
 
-function source(node: Node) {
+function permissionPattern(node: Node, tokens: string[]) {
+  const command = tokens.join(" ")
+  // Permission patterns are the rule-matching key, not raw shell evidence. POSIX
+  // leading environment assignments are skipped by `parts()` so they cannot hide
+  // the actual command from a rule like `git push --force*`. Redirection appears
+  // as a parent suffix in bash and as a child node in PowerShell; in both cases it
+  // remains part of the visible shell effect for redirect-specific rules.
+  const redirect =
+    node
+      .descendantsOfType("redirection")
+      .filter((item): item is Node => Boolean(item))
+      .map((item) => item.text.trim())
+      .join(" ") || redirectedSuffix(node)
+  if (!redirect) return command
+  return `${command} ${redirect}`
+}
+
+function rawPattern(node: Node) {
   return (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
+}
+
+function redirectedSuffix(node: Node) {
+  if (node.parent?.type !== "redirected_statement") return ""
+  return node.parent.text.slice(node.endIndex - node.parent.startIndex).trim()
 }
 
 function commands(node: Node) {
@@ -373,6 +396,11 @@ const ask = Effect.fn("ShellTool.ask")(function* (
     metadata: {
       action_kind: "shell",
       command: metadata.command,
+      // raw_patterns is deny-only compatibility evidence. Canonical patterns
+      // deliberately omit POSIX env assignments so `git push --force*` still
+      // matches; the raw form remains available to explicit hard-deny rules
+      // such as `GITHUB_TOKEN=*` without affecting allow/ask/auto routing.
+      ...(scan.raw.size ? { raw_patterns: Array.from(scan.raw) } : {}),
       cwd: metadata.cwd,
       shell: metadata.shell,
       agent: ctx.agent,
@@ -731,6 +759,7 @@ export const ShellTool = Tool.define(
       const scan: Scan = {
         dirs: new Set<string>(),
         patterns: new Set<string>(),
+        raw: new Set<string>(),
         always: new Set<string>(),
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
@@ -751,7 +780,10 @@ export const ShellTool = Tool.define(
         }
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
-          scan.patterns.add(source(node))
+          const pattern = permissionPattern(node, tokens)
+          scan.patterns.add(pattern)
+          const raw = rawPattern(node)
+          if (raw && raw !== pattern) scan.raw.add(raw)
           const always = BashArity.prefix(tokens)
           // Auto permission must never suggest broad wrapper or interpreter
           // allow-rules (for example `bash *`, `python -c *`, or `git *`). Those

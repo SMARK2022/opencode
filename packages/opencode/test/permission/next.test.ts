@@ -722,6 +722,61 @@ it.instance(
 )
 
 it.instance(
+  "ask - raw shell deny evidence remains terminal for canonicalized commands",
+  () =>
+    Effect.gen(function* () {
+      yield* Effect.forEach(["allow", "auto"] as const, (action) =>
+        Effect.gen(function* () {
+          const err = yield* fail(
+            ask({
+              sessionID: SessionID.make("session_test"),
+              permission: "bash",
+              patterns: ["git push --force"],
+              metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
+              always: ["git push *"],
+              ruleset: [
+                { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
+                { permission: "bash", pattern: "*", action },
+              ],
+            }),
+          )
+          expect(err).toBeInstanceOf(Permission.DeniedError)
+          expect(yield* list()).toHaveLength(0)
+        }),
+      )
+
+      const approved = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["GITHUB_TOKEN=x git push --force"],
+        metadata: { command: "GITHUB_TOKEN=x git push --force" },
+        always: ["GITHUB_TOKEN=*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+      }).pipe(Effect.forkScoped)
+      const pending = yield* waitForPending(1)
+      yield* reply({ requestID: pending[0].id, reply: "always" })
+      yield* Fiber.await(approved)
+
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["git push --force"],
+          metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
+          always: ["git push *"],
+          ruleset: [
+            { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
+            { permission: "bash", pattern: "*", action: "auto" },
+          ],
+        }),
+      )
+      expect(err).toBeInstanceOf(Permission.DeniedError)
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+it.instance(
   "ask - auto resolves known safe bash commands without pending user approval",
   () =>
     Effect.gen(function* () {

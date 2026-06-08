@@ -314,10 +314,30 @@ export function evaluate(input: {
   // Other permissions default to general allow unless a structured boundary above
   // promoted them to cautious first, such as workspace delete metadata.
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
-  return evaluateShell(
-    typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-    0,
-  )
+  return bashEffect(input)
+}
+
+function bashEffect(input: {
+  patterns: readonly string[]
+  metadata: Readonly<Record<string, unknown>>
+}) {
+  const command = typeof input.metadata.command === "string" ? input.metadata.command : undefined
+  const patternCommand = input.patterns.join(" && ")
+  if (!command) return evaluateShell(patternCommand, 0)
+
+  const raw = evaluateShell(command, 0)
+  if (!patternCommand.trim() || patternCommand === command) return raw
+
+  // Shell metadata is the raw audit/reviewer evidence, while permission patterns
+  // are canonical rule keys that may omit POSIX leading environment assignments.
+  // Auto precheck must consider both views and keep the higher risk so raw
+  // dangerous payloads cannot be weakened, and env assignments cannot downgrade a
+  // canonical `git push --force` pattern from cautious to general.
+  return maxRisk(raw, evaluateShell(patternCommand, 0))
+}
+
+function maxRisk(left: Decision, right: Decision) {
+  return LEVELS.indexOf(right.level) > LEVELS.indexOf(left.level) ? right : left
 }
 
 function externalDirectoryEffect(input: {

@@ -261,6 +261,68 @@ describe("tool.shell permissions", () => {
     }),
   )
 
+  if (bash) {
+    it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
+      withShell(
+        { label: "bash", shell: bash },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: 'CI=true git commit -m "test"',
+                    description: "Commit with CI env",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns).toContain('git commit -m "test"')
+              expect(bashReq!.patterns).not.toContain('CI=true git commit -m "test"')
+              expect(bashReq!.metadata.raw_patterns).toContain('CI=true git commit -m "test"')
+            }),
+          )
+        }),
+      ),
+    )
+
+    it.live("omits multiple environment assignments from bash permission patterns [bash]", () =>
+      withShell(
+        { label: "bash", shell: bash },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: "FOO=1 BAR=2 echo hello",
+                    description: "Echo with env",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns).toContain("echo hello")
+              expect(bashReq!.patterns).not.toContain("FOO=1 BAR=2 echo hello")
+              expect(bashReq!.metadata.raw_patterns).toContain("FOO=1 BAR=2 echo hello")
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
   each("asks for bash permission with multiple commands", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
@@ -1557,6 +1619,35 @@ describe("tool.shell permissions", () => {
       )
     }),
   )
+
+  if (bash) {
+    it.live("keeps redirects after removing environment assignments from permission pattern [bash]", () =>
+      withShell(
+        { label: "bash", shell: bash },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: "CI=true echo hello > output.txt", description: "Redirect output with env" },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns).toContain("echo hello > output.txt")
+              expect(bashReq!.patterns).not.toContain("CI=true echo hello > output.txt")
+              expect(bashReq!.metadata.raw_patterns).toContain("CI=true echo hello > output.txt")
+            }),
+          )
+        }),
+      ),
+    )
+  }
 
   each("always pattern has space before wildcard to not include different commands", () =>
     Effect.gen(function* () {
