@@ -81,6 +81,19 @@ const layer = Layer.effect(
       let needsAuto = false
       const autoPatterns: string[] = []
 
+      // #285：raw_patterns 是 shell 解析的原始拒绝证据，绕过 canonical pattern 评估
+      for (const pattern of rawDenyPatterns(request.metadata)) {
+        const denied = rawDenyRule(request.permission, pattern, ruleset)
+        yield* Effect.logInfo("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
+        if (denied) {
+        // #285：命中 deny 立即 fail-closed，不给后续 ask 规则截获的机会；
+        // ruleset 过滤只保留本 permission 相关规则，错误对象不含无关规则
+          return yield* new PermissionV1.DeniedError({
+            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+          })
+        }
+      }
+
       // #199：逐 pattern 评估规则。静态 deny 立即 fail-closed；auto 收集后统一交由
       // #199：precheck+reviewer 决定；ask 累积到 needsAsk 等待用户审批。三者优先级
       // #199：由 evaluate 的 last-match-wins 决定，此处只分流不复核规则语义。
@@ -343,6 +356,29 @@ export function fromConfig(permission: ConfigPermissionV1.Info) {
 // #196：config 层合法的控制串/控制值（auto_review 等）在 ruleset 层不合法，谓词统一收窄
 function isPermissionAction(value: unknown): value is PermissionV1.Action {
   return value === "allow" || value === "deny" || value === "ask" || value === "auto"
+}
+
+function rawDenyPatterns(metadata: Readonly<Record<string, unknown>>) {
+  const patterns = metadata.raw_patterns
+  if (!Array.isArray(patterns)) return []
+  // #285：raw_patterns 由 shell 解析产出，用于原始命令证据的拒绝检查。
+  // 它是 deny-only：敏感 env 赋值规则保持硬停止，不赋予原始文本 allow/auto/ask 权限。
+  return patterns.filter((pattern): pattern is string => typeof pattern === "string")
+  // #285：filter 型守卫保持下游类型收窄，调用方无需再断言
+}
+
+function rawDenyRule(permission: string, pattern: string, ruleset: PermissionV1.Ruleset) {
+  // #285：不使用 last-match-wins 评估器或已批准规则。原始证据对 canonical
+  // pattern 不可见，因此 GITHUB_TOKEN=* 的 deny 必须保持终端性，即使后续 bash:* allow。
+  return ruleset.find(
+    (rule) =>
+      rule.action === "deny" &&
+      rule.pattern !== "*" &&
+      Wildcard.match(permission, rule.permission) &&
+      Wildcard.match(pattern, rule.pattern),
+      // #285：rule.pattern !== "*" 防止通配兜底规则吞掉原始证据检查；
+      // 只有显式命名 pattern 的 deny 才能命中 raw_patterns
+  )
 }
 
 export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {

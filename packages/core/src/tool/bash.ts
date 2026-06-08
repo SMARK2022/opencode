@@ -17,6 +17,7 @@ import { Tools } from "./tools"
 import { SystemContext } from "../system-context/index"
 import { SystemContextRegistry } from "../system-context/registry"
 import { Shell } from "../shell"
+import { ShellPermission } from "../shell-permission"
 import { ShellRemote } from "../shell-remote"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
@@ -191,33 +192,44 @@ const layer = Layer.effectDiscard(
               const shell = selectedShell(entries)
               const remote = ShellRemote.ranges(input.command, Shell.name(shell))
               // Windows PowerShell 递归检查命令节点；解析失败不能退回浅层扫描，Tree 在检查后释放。
-              const heads = process.platform === "win32" && Shell.ps(shell)
-                ? yield* Effect.gen(function* () {
+              const scan = Shell.name(shell) === "cmd" ? { patterns: [], raw: [], heads: [] } : yield* Effect.gen(function* () {
                     const tree = yield* Effect.acquireRelease(
                       Effect.tryPromise({
-                        try: () => Shell.parse(input.command, true),
+                        try: () => Shell.parse(input.command, Shell.ps(shell)),
                         catch: () => new ToolFailure({ message: `Unable to execute command: ${input.command}` }),
                       }),
                       (tree) => Effect.sync(() => tree.delete()),
                     )
-                    return tree.rootNode
+                    const nodes = tree.rootNode
                       .descendantsOfType("command")
-                      .flatMap((node) => {
-                        if (!node) return []
-                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
+                      .filter((node) => {
+                        if (!node) return false
+                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
+                        if (!Shell.ps(shell)) return true
                         // 引号与内部 ERROR 恢复出的远程脚本片段不是本地 PowerShell 命令。
                         let parent = node.parent
                         while (parent && parent.id !== tree.rootNode.id) {
-                          if (parent.type === "ERROR" || parent.type.includes("string")) return []
+                          if (parent.type === "ERROR" || parent.type.includes("string")) return false
                           parent = parent.parent
                         }
                         // 根 ERROR 仍承载真实主机命令，不能因此绕过本地管道的拒绝检查。
                         // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
                         const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
-                        return escaped && escaped.length % 2 ? [] : [...Shell.commandHeads(node.text, Shell.name(shell))]
+                        return !escaped || escaped.length % 2 === 0
                       })
+                    // 同一棵AST同时提供规则键和原始拒绝证据；不改执行串或保存审批资源。
+                    const commands = nodes.flatMap((node) => {
+                      if (!node) return []
+                      const tokens = ShellPermission.parts(node).map((part) => part.text)
+                      return tokens.length ? [{ pattern: ShellPermission.permissionPattern(node, tokens), raw: ShellPermission.rawPattern(node) }] : []
+                    })
+                    return {
+                      patterns: [...new Set(commands.map((command) => command.pattern))],
+                      raw: [...new Set(commands.flatMap((command) => command.raw !== command.pattern ? [command.raw] : []))],
+                      heads: nodes.flatMap((node) => node ? [...Shell.commandHeads(node.text, Shell.name(shell))] : []),
+                    }
                   }).pipe(Effect.scoped)
-                : Shell.commandHeads(input.command, Shell.name(shell))
+              const heads = process.platform === "win32" && Shell.ps(shell) ? scan.heads : Shell.commandHeads(input.command, Shell.name(shell))
               const compatibility = Shell.compatibilityError(heads, Shell.name(shell))
               // 在目录授权和命令授权之前返回已有 ToolFailure，不执行任何进程。
               if (compatibility) return yield* new ToolFailure({ message: compatibility })
@@ -248,7 +260,12 @@ const layer = Layer.effectDiscard(
                 save: [input.command],
                 sessionID: context.sessionID,
                 agent: context.agent,
-                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
+                metadata: {
+                  action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent,
+                  // 只有leaf产生的AST证据参与规则匹配；原资源与save继续表示整条原始调用。
+                  ...(scan.patterns.length && (scan.patterns.length !== 1 || scan.patterns[0] !== input.command) ? { canonical_patterns: scan.patterns } : {}),
+                  ...(scan.raw.length ? { raw_patterns: scan.raw } : {}),
+                },
                 source,
               })
 

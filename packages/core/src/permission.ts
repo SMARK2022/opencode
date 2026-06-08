@@ -165,7 +165,18 @@ const layer = Layer.effect(
     })
 
     function denied(input: AssertInput, rules: Permission.Ruleset) {
-      return input.resources.some((resource) => evaluate(input.action, resource, rules).effect === "deny")
+      // 原始差异只作具体deny证据，不让宽allow、已保存审批或always释放覆盖它。
+      const raw = input.action === "bash" ? input.metadata?.raw_patterns : undefined
+      return patterns(input).some((resource) => evaluate(input.action, resource, rules).effect === "deny") ||
+        Array.isArray(raw) && raw.some((resource) => typeof resource === "string" && rules.some((rule) =>
+          rule.effect === "deny" && rule.resource !== "*" && Wildcard.match(input.action, rule.action) && Wildcard.match(resource, rule.resource),
+        ))
+    }
+
+    function patterns(input: AssertInput) {
+      const value = input.action === "bash" ? input.metadata?.canonical_patterns : undefined
+      const canonical = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
+      return canonical.length ? canonical : input.resources
     }
 
     function relevant(input: AssertInput, rules: Permission.Ruleset) {
@@ -175,9 +186,13 @@ const layer = Layer.effect(
     const evaluateInput = EffectRuntime.fnUntraced(function* (input: AssertInput) {
       const rules = yield* configured(input.sessionID, input.agent)
       if (denied(input, rules)) return { effect: "deny" as const, rules }
-      const all = [...rules, ...(yield* savedRules())]
-      const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
-      const resources = input.resources.filter((_, index) => effects[index] === "auto")
+      const remembered = yield* savedRules()
+      const all = [...rules, ...remembered]
+      const canonical = patterns(input)
+      // 既有持久审批保存的是原命令；只有配置deny通过后才可复用该明确批准。
+      const approved = canonical !== input.resources && input.resources.every((resource) => evaluate(input.action, resource, remembered).effect === "allow")
+      const effects = canonical.map((resource) => approved ? "allow" : evaluate(input.action, resource, all).effect)
+      const resources = canonical.filter((_, index) => effects[index] === "auto")
       const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
       if (effect === "deny" || resources.length === 0) return { effect, rules: all }
       const entries = yield* config.entries()

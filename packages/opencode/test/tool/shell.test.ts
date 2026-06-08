@@ -374,6 +374,71 @@ describe("tool.shell permissions", () => {
     }),
   )
 
+  if (bash) {
+    it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
+    // #285：permission pattern 不含 CI=true 前缀，规则只需匹配真实命令；
+    // 原始命令进 raw_patterns 供 deny 检查
+      withShell(
+        { label: "bash", shell: bash },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: 'CI=true git commit -m "test"',
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns).toContain('git commit -m "test"')
+              expect(bashReq!.patterns).not.toContain('CI=true git commit -m "test"')
+              expect(bashReq!.metadata.raw_patterns).toContain('CI=true git commit -m "test"')
+              // #285：raw_patterns 保留完整原始命令，作为审计与硬拒绝证据
+            }),
+          )
+        }),
+      ),
+    )
+
+    it.live("omits multiple environment assignments from bash permission patterns [bash]", () =>
+    // #285：多个 env 赋值全部剥离，pattern 只留 echo hello
+      withShell(
+        { label: "bash", shell: bash },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  {
+                    command: "FOO=1 BAR=2 echo hello",
+                  },
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns).toContain("echo hello")
+              expect(bashReq!.patterns).not.toContain("FOO=1 BAR=2 echo hello")
+              expect(bashReq!.metadata.raw_patterns).toContain("FOO=1 BAR=2 echo hello")
+              // #285：raw_patterns 保留全部前缀赋值——顺序与原文一致，供 deny 规则精确匹配
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
   each("asks for bash permission with multiple commands", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
@@ -1435,6 +1500,39 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
   )
 
   // #108：always 模式按 shell 选择命令，避免 Windows cmd/pwsh 硬编码 ls
+  if (bash) {
+    it.live("keeps redirects after removing environment assignments from permission pattern [bash]", () =>
+    // #285：重定向不是前缀赋值，归属于命令本体——pattern 必须包含 > output.txt
+      withShell(
+        { label: "bash", shell: bash },
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const err = new Error("stop after permission")
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              expect(
+                yield* fail(
+                  { command: "CI=true echo hello > output.txt" },
+                  // #285：env 赋值 + 重定向混合场景验证 permissionPattern 拼接顺序：命令后接重定向
+                  // （raw 集合则保留完整原文）
+                  capture(requests, err),
+                ),
+              ).toMatchObject({ message: err.message })
+              const bashReq = requests.find((r) => r.permission === "bash")
+              expect(bashReq).toBeDefined()
+              expect(bashReq!.patterns).toContain("echo hello > output.txt")
+              // #285：parser 剥离 env 后，重定向作为后缀拼回 pattern，可复现真实命令
+              expect(bashReq!.patterns).not.toContain("CI=true echo hello > output.txt")
+              expect(bashReq!.metadata.raw_patterns).toContain("CI=true echo hello > output.txt")
+            }),
+          )
+        }),
+      ),
+    )
+  }
+
   each("always pattern has space before wildcard to not include different commands", (item) =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()

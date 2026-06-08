@@ -12,6 +12,7 @@ import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellRemote } from "@opencode-ai/core/shell-remote"
+import { parts, permissionPattern, rawPattern } from "@opencode-ai/core/shell-permission"
 import { ShellID } from "./shell/id"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 // #282：超时/中止/截断改用统一 notice 信封
@@ -123,6 +124,8 @@ type Part = {
 type Scan = {
   dirs: Set<string>
   patterns: Set<string>
+  raw: Set<string>
+  // #285：raw 集合与 patterns 并行收集，两者来源不同（原始文本 vs 规范化 pattern）
   always: Set<string>
 }
 
@@ -131,37 +134,7 @@ type Chunk = {
   size: number
 }
 
-function parts(node: Node) {
-  const out: Part[] = []
-  for (let i = 0; i < node.childCount; i++) {
-    const child = node.child(i)
-    if (!child) continue
-    if (child.type === "command_elements") {
-      for (let j = 0; j < child.childCount; j++) {
-        const item = child.child(j)
-        if (!item || item.type === "command_argument_sep" || item.type === "redirection") continue
-        out.push({ type: item.type, text: item.text })
-      }
-      continue
-    }
-    if (
-      child.type !== "command_name" &&
-      child.type !== "command_name_expr" &&
-      child.type !== "word" &&
-      child.type !== "string" &&
-      child.type !== "raw_string" &&
-      child.type !== "concatenation"
-    ) {
-      continue
-    }
-    out.push({ type: child.type, text: child.text })
-  }
-  return out
-}
 
-function source(node: Node) {
-  return (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
-}
 
 function commands(node: Node) {
   return node.descendantsOfType("command").filter((child): child is Node => Boolean(child))
@@ -337,6 +310,9 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
     metadata: {
       action_kind: "shell",
       command: input.command,
+      // #285：raw_patterns 是 deny-only 兼容证据。canonical patterns 刻意省略
+      // POSIX env 赋值，使 git push --force* 仍能匹配；原始形式保留给显式硬拒规则
+      ...(scan.raw.size ? { raw_patterns: Array.from(scan.raw) } : {}),
       cwd: input.cwd,
       shell: input.shell,
       agent: ctx.agent,
@@ -440,6 +416,7 @@ export const ShellTool = Tool.define(
       const scan: Scan = {
         dirs: new Set<string>(),
         patterns: new Set<string>(),
+        raw: new Set<string>(),
         always: new Set<string>(),
       }
       const shellKind = ShellID.toKind(Shell.name(shell))
@@ -460,7 +437,11 @@ export const ShellTool = Tool.define(
         }
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
-          scan.patterns.add(source(node))
+          const pattern = permissionPattern(node, tokens)
+          scan.patterns.add(pattern)
+          const raw = rawPattern(node)
+          if (raw && raw !== pattern) scan.raw.add(raw)
+          // #285：raw 与 canonical pattern 相同时不加重复证据；只有差异（如 env 赋值）才进 raw
           // 仍保留完整请求 pattern，只撤销危险写操作的自动前缀建议。
           const always = BashArity.prefix(tokens)
           // #197：高风险 git 写操作与宽泛 wrapper 前缀不自动加入 always-allow
