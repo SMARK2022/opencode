@@ -11,8 +11,8 @@
 <p align="center">
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
-  <a href="https://github.com/SMARK2022/opencode/tree/dev"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6--smark-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.6-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
+> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.6`，CLI release tag 为 `v1.15.6-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
 
 ---
 
@@ -166,20 +166,7 @@ opencode
 
 ## 桌面应用程序
 
-OpenCode 也提供桌面版应用（BETA）。可从 [SMARK release 页面](https://github.com/SMARK2022/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
-
-| 平台 | 下载文件 |
-| --- | --- |
-| macOS Apple Silicon | `opencode-desktop-mac-arm64.dmg` |
-| macOS Intel | `opencode-desktop-mac-x64.dmg` |
-| Windows x64 | `opencode-desktop-windows-x64.exe` |
-| Windows arm64 | `opencode-desktop-windows-arm64.exe` |
-| Linux | `.deb`、`.rpm` 或 `.AppImage` |
-
-```bash
-brew install --cask opencode-desktop
-scoop bucket add extras && scoop install extras/opencode-desktop
-```
+SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。需要桌面版（BETA）时，请以 [opencode.ai/download](https://opencode.ai/download) 和上游 release 说明为准；不要把 SMARK CLI release 页面当作 desktop 安装包来源。
 
 ---
 
@@ -253,7 +240,7 @@ scoop bucket add extras && scoop install extras/opencode-desktop
 
 ### VS Code Notebook 集成
 
-使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。该扩展版本 `1.15.6` 对应 SMARK CLI `1.15.6-smark` 及之后版本，负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
+使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。当前扩展版本保持 `1.15.5`，可继续配合 SMARK CLI `1.15.6` 使用，不需要随本次 CLI README 更新而升级。该扩展负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
 
 扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 会按 workspace 与 notebook 路径自动选择匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 需要运行在能访问该 bridge 的同一侧环境。
 
@@ -288,6 +275,7 @@ OpenCode 内置多种 primary agent，可用 `Tab` 快速切换。默认 agent �
 | --- | --- | --- | --- |
 | `build` | primary | 默认开发模式，按配置权限执行工具，允许问题确认和进入 plan | 实现功能、修复 bug、运行测试、端到端交付 |
 | `interactive` | primary | 更保守的交互模式；`bash`、notebook 执行和 notebook 环境操作默认询问 | 需要用户确认关键命令、希望降低误操作风险的开发任务 |
+| `auto` | primary | 显式选择才启用；`bash`、`edit` 和 shell 外部目录访问进入 auto permission review | 希望自动审查 shell/编辑风险，同时避免默认 build 行为被意外改变的场景 |
 | `decide` | primary | 禁用工具，只基于有限近期上下文输出一次性判断 | 使用高性能模型做相对低成本的单次决策、方案取舍、下一步判断 |
 | `plan` | primary | 禁止编辑工具和 notebook 变更，允许写入 plan 文件并退出 plan | 代码分析、方案制定、风险梳理、执行前规划 |
 | `general` | subagent | 通用子代理，禁止 `todowrite`，其余遵循合并后的权限配置 | 复杂搜索、多步骤研究、可并行拆解的辅助任务 |
