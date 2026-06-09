@@ -554,22 +554,22 @@ test("live full usage survives stale hydration and transcript eviction", async (
     // 等 HTTP 已发出再推进实时事件，避免测试只是比较两个顺序读取的快照。
     await wait(() => requested)
     emit(global({ id: "evt_usage", type: "session.updated", properties: { sessionID, info: current } }))
-    // 200 条窗口仍需越界，持久 usage 的正确性不能靠取消 transcript 淘汰保证。
-    for (let index = 0; index < 201; index++) {
+    // 300 条窗口仍需越界，持久 usage 的正确性不能靠取消 transcript 淘汰保证。
+    for (let index = 0; index < 301; index++) {
       const info = { ...assistant, id: `msg_usage_${index}`, time: { created: index, completed: index + 1 } }
       emit(global({ id: `evt_usage_${index}`, type: "message.updated", properties: { sessionID, info } }))
       emit(global({ id: `evt_usage_part_${index}`, type: "message.part.updated", properties: {
         sessionID, time: index, part: { id: `prt_usage_${index}`, sessionID, messageID: info.id, type: "text", text: "visible" },
       } }))
     }
-    // 窗口满后长度不再增长，等待第 201 条证明淘汰实际发生。
-    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_200") ?? false)
+    // 窗口满后长度不再增长，等待第 301 条证明淘汰实际发生。
+    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_300") ?? false)
     // GET 保留旧零值；若 hydration 覆盖了较新事件，本断言会观察到倒退。
     resolveSession(json({ ...current, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }))
     await hydrate
     expect(sync.session.get(sessionID)?.tokens).toEqual(current.tokens)
     expect(sync.session.get(sessionID)?.cost).toBe(1)
-    expect(sync.data.message[sessionID]).toHaveLength(200)
+    expect(sync.data.message[sessionID]).toHaveLength(300)
     // 连 parts 也必须随最老消息回收，不能把完整 transcript 偷藏在 part store。
     expect(sync.data.part.msg_usage_0).toBeUndefined()
     expect(sync.data.message[sessionID].some((item) => item.id === "msg_usage_0")).toBe(false)
@@ -579,7 +579,8 @@ test("live full usage survives stale hydration and transcript eviction", async (
 })
 
 // #162：窗口扩大后仍必须真正越界，验证实时合并与最旧 parts 的淘汰。
-test("live messages merged during hydration retain the 200 message window", async () => {
+// #290：窗口 300 后越界种子同步升至 300，断言仍锁定最旧淘汰
+test("live messages merged during hydration retain the 300 message window", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
 
@@ -606,7 +607,7 @@ test("live messages merged during hydration retain the 200 message window", asyn
     await wait(() => sync.data.message[sessionID]?.some((message) => message.id === live.id) ?? false)
     resolveMessages(
       json(
-        Array.from({ length: 200 }, (_, index) => {
+        Array.from({ length: 300 }, (_, index) => {
           const id = `msg_${String(index).padStart(3, "0")}`
           return {
             info: { ...assistant, id },
@@ -617,7 +618,7 @@ test("live messages merged during hydration retain the 200 message window", asyn
     )
     await hydrate
 
-    expect(sync.data.message[sessionID]).toHaveLength(200)
+    expect(sync.data.message[sessionID]).toHaveLength(300)
     expect(sync.data.message[sessionID].at(-1)?.id).toBe(live.id)
     expect(sync.data.message[sessionID].some((message) => message.id === "msg_000")).toBe(false)
     expect(sync.data.part.msg_000).toBeUndefined()

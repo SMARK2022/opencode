@@ -621,7 +621,8 @@ export const {
           )
           const updated = store.message[event.properties.info.sessionID]
           // #162：本地缓存消息数阈值与 200 窗口对齐
-          if (updated.length > 200) {
+          // #290：本地缓存窗口从 200 提升至 300，降低长会话过早截断风险
+          if (updated.length > 300) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -965,7 +966,8 @@ export const {
             const [session, messages, todo, diff] = await Promise.all([
               sdk.client.session.get({ sessionID }, { throwOnError: true }),
               // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
-              sdk.client.session.messages({ sessionID, limit: 200 }),
+              // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
+              sdk.client.session.messages({ sessionID, limit: 300 }),
               sdk.client.session.todo({ sessionID }),
               sdk.client.session.diff({ sessionID }),
               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
@@ -997,9 +999,10 @@ export const {
                 )
                 infos.sort(compareMessage)
                 // #162：裁掉窗口外旧消息，保留最近 200
-                const removed = infos.slice(0, -200)
+                // #290：可见切片随 limit 同步 300——缓存阈值/拉取 limit/可见切片三处对齐，缺一即无谓丢弃
+                const removed = infos.slice(0, -300)
                 // #162：可见消息切片与 hydrate limit 一致
-                const visible = infos.slice(-200)
+                const visible = infos.slice(-300)
                 const visibleIDs = new Set(visible.map((message) => message.id))
                 for (const message of messages.data ?? []) {
                   if (!visibleIDs.has(message.info.id)) {
