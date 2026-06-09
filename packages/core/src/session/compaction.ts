@@ -20,6 +20,7 @@ import { SessionHistory } from "./history"
 import { truncateForCompaction } from "../util/output-notice"
 import { FileEvidence } from "./file-evidence"
 import type { FSUtil } from "../fs-util"
+import type { SessionTodo } from "./todo"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_BUFFER_MIN = 5_000
@@ -103,6 +104,8 @@ type Dependencies = {
   readonly fs: FSUtil.Interface
   readonly worktree: string
   readonly directory?: string
+  // 读取同一Location的持久Todo，不从历史工具输出反推或创建第二份状态。
+  readonly todos: SessionTodo.Interface["get"]
 }
 
 type Input = {
@@ -330,7 +333,9 @@ export const make = (dependencies: Dependencies) => {
       return false
     }
     // 只有可用摘要才stat当前磁盘；失败和取消不生成或替换旧交接快照。
-    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, directory: dependencies.directory })
+    // 成功摘要才读取当前任务；失败和取消仍保留原交接快照。
+    const todos = yield* dependencies.todos(input.sessionID)
+    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, todos, directory: dependencies.directory })
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,

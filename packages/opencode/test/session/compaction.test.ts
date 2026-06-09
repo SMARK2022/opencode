@@ -19,6 +19,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
+import { Todo } from "../../src/session/todo"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -250,6 +251,7 @@ const compactionTestNode = LayerNode.group([
   SessionProjector.node,
   Database.node,
   SessionRequestUsage.node,
+  Todo.node,
   EventV2Bridge.node,
   CrossSpawnSpawner.node,
 ])
@@ -412,6 +414,14 @@ itCompaction.instance("uses current disk state for inspected file freshness", ()
     const test = yield* TestInstance
     const ssn = yield* SessionNs.Service
     const session = yield* ssn.create({})
+    // 真实 Todo 表快照与摘要同一次执行读取，不用伪造 todowrite 输出替代持久 owner。
+    const todo = yield* Todo.Service
+    yield* todo.update({ sessionID: session.id, todos: [
+      { content: "Read forensic report", status: "completed", priority: "high" },
+      { content: "Design P0 evidence handoff", status: "in_progress", priority: "high" },
+      { content: "Add compaction tests", status: "pending", priority: "medium" },
+      { content: "Discard obsolete sketch", status: "cancelled", priority: "low" },
+    ] })
     const user = yield* createUserMessage(session.id, "check inspected freshness")
     const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
     const names = ["unchanged file", "changed", "deleted", "missing-metadata"] as const
@@ -432,6 +442,16 @@ itCompaction.instance("uses current disk state for inspected file freshness", ()
             modified: "previous read", ...(index === 3 ? {} : { size: 20, modifiedMs }),
           } } },
       })
+      // 同一路径的重叠读取必须合并，版本判断仍由真实磁盘负责。
+      if (index === 0) yield* ssn.updatePart({
+        id: PartID.ascending(), sessionID: session.id, messageID: assistant.id,
+        type: "tool", tool: "read", callID: "read_overlap",
+        state: { status: "completed", input: { filePath: file }, output: "file", title: "read",
+          time: { start: 1, end: 2 }, metadata: { read: {
+            path: file, canonicalPath: file, start: 19, end: 20, total: 20,
+            modified: "previous read", size: 20, modifiedMs,
+          } } },
+      })
     }
     // 只有磁盘变化使凭证过期：write元数据本身不会让未变的文件失效。
     yield* ssn.updatePart({
@@ -445,7 +465,8 @@ itCompaction.instance("uses current disk state for inspected file freshness", ()
       await fs.writeFile(changed, "changed on disk")
       const time = new Date(2026, 4, 18, 5)
       await fs.utimes(changed, time, time)
-      await fs.unlink(path.join(test.directory, "deleted.ts"))
+      // 移动后的旧路径也必须标 deleted，不能只依赖工具 mutation 元数据。
+      await fs.rename(path.join(test.directory, "deleted.ts"), path.join(test.directory, "moved.ts"))
     })
     yield* createSummaryCompaction(session.id)
     const messages = yield* ssn.messages({ sessionID: session.id })
@@ -457,6 +478,12 @@ itCompaction.instance("uses current disk state for inspected file freshness", ()
     const text = compacted?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
     expect(text).toContain("summary")
     expect(text).toContain("## Evidence Handoff")
+    expect(text?.match(/## Evidence Handoff/g)).toHaveLength(1)
+    expect(text).toContain("| completed | high | Read forensic report |")
+    expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
+    expect(text).toContain("| pending | medium | Add compaction tests |")
+    expect(text).toContain("| cancelled | low | Discard obsolete sketch |")
+    expect(text).toContain("- Older raw tool outputs were compacted.")
     expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
     expect(text).toContain("| changed.ts | 1-20 | 20 | 2026-05-18 05:00:00 | stale |")
     expect(text).toContain("| deleted.ts | 1-20 | 20 | - | deleted |")
@@ -2312,6 +2339,8 @@ describe("session.compaction.process", () => {
         // 已总结 head 与未纳入 tail 的新消息都必须缺席
         expect(captured).toContain("<prior-summary>")
         expect(captured).toContain("PREVIOUS SUMMARY")
+        // 公开附录可回放，但不得进入下轮 prior-summary 再被模型重复总结。
+        expect(captured).not.toContain("## Evidence Handoff")
         expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
         expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")
         expect(captured).not.toContain("OLD_HEAD_USER_SHOULD_NOT_REAPPEAR")

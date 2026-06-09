@@ -5,6 +5,7 @@ import { createHash } from "crypto"
 import { mergeRanges } from "../util/range"
 import { Effect, Option, Schema } from "effect"
 import { FSUtil } from "../fs-util"
+import type { SessionTodo } from "@opencode-ai/schema/session-todo"
 
 const Receipt = Schema.Struct({
   path: Schema.String,
@@ -37,7 +38,7 @@ export const kind = "compaction_evidence_handoff"
 
 export const render = Effect.fn("FileEvidence.render")(function* (
   receipts: readonly unknown[], fs: FSUtil.Interface, worktree: string,
-  context: { readonly searches?: readonly SearchReceipt[]; readonly commands?: readonly CommandReceipt[]; readonly directory?: string; readonly compactionCount?: number } = {},
+  context: { readonly searches?: readonly SearchReceipt[]; readonly commands?: readonly CommandReceipt[]; readonly todos?: readonly SessionTodo.Info[]; readonly directory?: string; readonly compactionCount?: number } = {},
 ) {
   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
   // 两代只转换真实已完成Read凭证，合并/预算/stat仍只有一个owner。
@@ -76,7 +77,8 @@ export const render = Effect.fn("FileEvidence.render")(function* (
     commands.delete(key)
     commands.set(key, { command: receipt.command, cwd, exit: receipt.exit === undefined ? "unknown" : String(receipt.exit) })
   }
-  if (files.size === 0 && searches.size === 0 && commands.size === 0) return undefined
+  const todos = context.todos ?? []
+  if (files.size === 0 && searches.size === 0 && commands.size === 0 && todos.length === 0) return undefined
   // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
   const visible = [...files.values()].toReversed().slice(0, 20)
   const rows = yield* Effect.forEach(visible, (file) =>
@@ -114,7 +116,19 @@ export const render = Effect.fn("FileEvidence.render")(function* (
     // 数量与完整性是独立事实，保留source原话而非把权限遗漏伪装成更多匹配。
     ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? " (incomplete)" : ""} |`)] : []),
     ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
-    "", "### Lost Context Notice", "- Use current evidence before repeating reads or commands.",
+    // Todo 使用持久化原序及四种状态，不能从工具调用历史重建另一份任务表。
+    ...(todos.length ? [
+      "", "### Outstanding Todos",
+      "| status | priority | content |", "|---|---|---|",
+      ...todos.slice(0, 100).map((todo) => {
+        const content = cell(todo.content).trim()
+        // 源字符预算只裁展示，省略指纹和数量保持公开，实际任务内容不变。
+        const preview = content.length <= 160 ? content : `${content.slice(0, 142).trimEnd()}... [todo:${createHash("sha256").update(content).digest("hex").slice(0, 8)}]`
+        return `| ${cell(todo.status)} | ${cell(todo.priority)} | ${preview} |`
+      }),
+    ] : []),
+    ...(todos.length > 100 ? [`Omitted: ${todos.length - 100} todos due to evidence budget.`] : []),
+    "", "### Lost Context Notice", "- Older raw tool outputs were compacted.", "- Use current evidence before repeating reads or commands.",
     "- Treat stale evidence as advisory only.",
     `- This is compaction #${context.compactionCount ?? 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
   ].join("\n")

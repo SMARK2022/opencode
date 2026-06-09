@@ -34,6 +34,7 @@ import { McpTools } from "../../mcp/tools"
 import { ToolOutputStore } from "../../tool-output-store"
 import { SessionContextEpoch } from "../context-epoch"
 import { SessionCompaction } from "../compaction"
+import { SessionTodo } from "../todo"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionGoal } from "../goal"
@@ -133,7 +134,8 @@ const layer = Layer.effect(
     const buildReminders = yield* SessionReminders.make
     const configuration = yield* config.entries()
     const fileSystem = yield* FSUtil.Service
-    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
+    const todos = yield* SessionTodo.Service
+    const compaction = SessionCompaction.make({ events, llm, db, todos: todos.get, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
@@ -785,6 +787,7 @@ export const node = makeLocationNode({
     McpTools.node,
     SessionStore.node,
     SessionGoal.node,
+    SessionTodo.node,
     Location.node,
     SystemContextRegistry.node,
     SkillGuidance.node,

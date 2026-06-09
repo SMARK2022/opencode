@@ -28,6 +28,7 @@ import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { Database } from "@opencode-ai/core/database/database"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CompactionFileEvidence } from "./file-evidence"
+import { Todo } from "./todo"
 
 export const Event = SessionCompactionEvent
 
@@ -318,6 +319,7 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const db = (yield* Database.Service).db
     const fs = yield* FSUtil.Service
+    const todo = yield* Todo.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -615,7 +617,9 @@ const layer = Layer.effect(
       }
 
       if (result === "continue" && !processor.message.error) {
-        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1, ctx.directory)
+        // 复用唯一附录追加点；Todo 由现有服务读取，不新建 evidence 状态或写入旁路。
+        const todos = yield* todo.get(input.sessionID)
+        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1, ctx.directory, todos)
         if (handoff) yield* session.updatePart({
           id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID,
           type: "text", text: handoff, synthetic: true,
@@ -865,6 +869,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     FSUtil.node,
+    Todo.node,
   ],
 })
 

@@ -1,5 +1,4 @@
 import { SessionID, MessageID } from "./schema"
-import { CompactionFileEvidence } from "./file-evidence"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 // [local-smark] 测试与 prompt.ts 通过 MessageV2 命名空间引用 WithParts/Part；
@@ -158,7 +157,11 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
 
 function providerMeta(metadata: Record<string, any> | undefined) {
   if (!metadata) return undefined
-  const { providerExecuted: _, ...rest } = metadata
+  // 内部 primitive 标记不属于 providerOptions；保留对象 namespace 及自定义供应商签名。
+  const rest = Object.fromEntries(
+    Object.entries(metadata).filter(([key, value]) =>
+      key !== "providerExecuted" && typeof value === "object" && value !== null && !Array.isArray(value)),
+  )
   return Object.keys(rest).length > 0 ? rest : undefined
 }
 
@@ -330,11 +333,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       for (const part of msg.parts) {
         if (part.type === "text") {
           const text = part.text === "" && hasSignedReasoning ? " " : part.text
+          const providerMetadata = differentModel ? undefined : providerMeta(part.metadata)
           assistantMessage.parts.push({
             type: "text",
             text,
-            // 证据标记属于本地存储，不是 provider 参数；保留正文但不污染 SDK 的元数据契约。
-            ...(differentModel || part.metadata?.kind === CompactionFileEvidence.kind ? {} : { providerMetadata: part.metadata }),
+            ...(providerMetadata ? { providerMetadata } : {}),
           })
         }
         if (part.type === "step-start")
@@ -438,10 +441,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               })
             continue
           }
+          const providerMetadata = providerMeta(part.metadata)
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,
-            providerMetadata: part.metadata,
+            ...(providerMetadata ? { providerMetadata } : {}),
           })
         }
       }
