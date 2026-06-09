@@ -1898,6 +1898,9 @@ describe("tool.shell truncation", () => {
         const result = yield* run({
           command: fill("bytes", byteCount),
           description: "Generate bytes exceeding limit",
+          // 本用例只验证截断边界；重复字节默认会被 bash 压缩器折叠，
+          // 导致压缩后的可见输出低于 byte limit，所以这里显式关闭压缩。
+          compress_output: false,
         })
         mustTruncate(result)
         expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
