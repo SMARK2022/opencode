@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test"
 import { APICallError } from "ai"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
+import path from "path"
 import { Bus } from "../../src/bus"
 import { Config } from "@/config/config"
 import { Image } from "@/image/image"
@@ -18,13 +19,14 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
+import { Todo } from "../../src/session/todo"
 import { SessionV2 } from "../../src/v2/session"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import type { Provider } from "@/provider/provider"
 import * as SessionProcessorModule from "../../src/session/processor"
 import { Snapshot } from "../../src/snapshot"
 import { ProviderTest } from "../fake/provider"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
 import { SyncEvent } from "@/sync"
@@ -274,6 +276,7 @@ function withCompaction(options?: CompactionProcessOptions) {
 function compactionProcessLayer(options?: CompactionProcessOptions) {
   const bus = Bus.layer
   const status = SessionStatus.layer.pipe(Layer.provide(bus))
+  const todo = Todo.layer.pipe(Layer.provide(bus))
   const processor = options?.llm
     ? SessionProcessorModule.SessionProcessor.layer.pipe(
         Layer.provide(summary),
@@ -282,7 +285,7 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
         Layer.provide(status),
       )
     : layer(options?.result ?? "continue")
-  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status).pipe(
+  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status, todo).pipe(
     Layer.provide(SessionNs.defaultLayer),
     Layer.provide((options?.provider ?? wide()).layer),
     Layer.provide(Snapshot.defaultLayer),
@@ -290,7 +293,6 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
     Layer.provide(Permission.defaultLayer),
     Layer.provide(Agent.defaultLayer),
     Layer.provide(options?.plugin ?? Plugin.defaultLayer),
-    Layer.provide(status),
     Layer.provide(bus),
     Layer.provide(options?.config ?? Config.defaultLayer),
     Layer.provide(SyncEvent.defaultLayer),
@@ -308,6 +310,52 @@ function readCompactionPart(sessionID: SessionID) {
     Effect.map((messages) =>
       messages.at(-2)?.parts.find((item): item is MessageV2.CompactionPart => item.type === "compaction"),
     ),
+  )
+}
+
+function canonicalTestPath(file: string) {
+  return (process.platform === "win32" ? file.toLowerCase() : file).replaceAll("\\", "/")
+}
+
+function addCompletedToolPart(input: {
+  sessionID: SessionID
+  messageID: MessageID
+  tool: string
+  toolInput?: Record<string, unknown>
+  output?: string
+  metadata?: Record<string, unknown>
+  start?: number
+  end?: number
+}) {
+  return SessionNs.Service.use((ssn) =>
+    ssn.updatePart({
+      id: PartID.ascending(),
+      messageID: input.messageID,
+      sessionID: input.sessionID,
+      type: "tool",
+      callID: crypto.randomUUID(),
+      tool: input.tool,
+      state: {
+        status: "completed",
+        input: input.toolInput ?? {},
+        output: input.output ?? "",
+        title: input.tool,
+        metadata: input.metadata ?? {},
+        time: { start: input.start ?? Date.now(), end: input.end ?? Date.now() },
+      },
+    }),
+  )
+}
+
+function readLatestSummaryText(sessionID: SessionID) {
+  return SessionNs.Service.use((ssn) => ssn.messages({ sessionID })).pipe(
+    Effect.map((messages) => {
+      const summary = messages.findLast((msg) => msg.info.role === "assistant" && msg.info.summary)
+      return summary?.parts
+        .filter((part): part is MessageV2.TextPart => part.type === "text")
+        .map((part) => part.text)
+        .join("\n\n")
+    }),
   )
 }
 
@@ -856,6 +904,327 @@ describe("session.compaction.process", () => {
           filtered.some((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")),
         ).toBe(true)
         expect(latest.tasks).toEqual([])
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "appends evidence handoff without replacing the LLM summary",
+    () => {
+      const stub = llm()
+      stub.push(reply("ORIGINAL SUMMARY"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const todo = yield* Todo.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "collect evidence")
+        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+        const staleFile = path.join(test.directory, "src", "compaction.ts")
+        const currentFile = path.join(test.directory, "src", "message-v2.ts")
+
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: staleFile,
+              canonicalPath: canonicalTestPath(staleFile),
+              type: "file",
+              size: 100,
+              modified: "2026-06-09 01:00:00",
+              modifiedMs: 1000,
+              start: 1,
+              end: 100,
+              total: 200,
+              returned: 100,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: staleFile,
+              canonicalPath: canonicalTestPath(staleFile),
+              type: "file",
+              size: 100,
+              modified: "2026-06-09 01:00:00",
+              modifiedMs: 1000,
+              start: 90,
+              end: 170,
+              total: 200,
+              returned: 81,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: currentFile,
+              canonicalPath: canonicalTestPath(currentFile),
+              type: "file",
+              size: 100,
+              modified: "2026-06-09 02:00:00",
+              modifiedMs: 2000,
+              start: 220,
+              end: 359,
+              total: 1547,
+              returned: 140,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "write",
+          toolInput: { filePath: staleFile, content: "updated" },
+          metadata: { filepath: staleFile },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "bash",
+          toolInput: { command: "bun typecheck" },
+          metadata: { exit: 0 },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "bash",
+          toolInput: { command: "git status" },
+          metadata: { exit: 0 },
+        })
+        yield* todo.update({
+          sessionID: session.id,
+          todos: [
+            { content: "Read forensic report", status: "completed", priority: "high" },
+            { content: "Design P0 evidence handoff", status: "in_progress", priority: "high" },
+            { content: "Add compaction tests", status: "pending", priority: "medium" },
+            { content: "Discard obsolete sketch", status: "cancelled", priority: "low" },
+          ],
+        })
+
+        yield* createSummaryCompaction(session.id)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const text = yield* readLatestSummaryText(session.id)
+        expect(text).toContain("ORIGINAL SUMMARY")
+        expect(text).toContain("## Evidence Handoff")
+        expect(text).toContain("### Inspected Files")
+        expect(text).toContain("| src/compaction.ts | 1-170 | 200 | 2026-06-09 01:00:00 | stale |")
+        expect(text).toContain("| src/message-v2.ts | 220-359 | 1547 | 2026-06-09 02:00:00 | current |")
+        expect(text).toContain("### Verified Commands")
+        expect(text).toContain("| bun typecheck | . | 0 |")
+        expect(text).toContain("| 0 |")
+        expect(text).not.toContain("git status")
+        expect(text).toContain("### Outstanding Todos")
+        expect(text).toContain("| completed | high | Read forensic report |")
+        expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
+        expect(text).toContain("| pending | medium | Add compaction tests |")
+        expect(text).toContain("| cancelled | low | Discard obsolete sketch |")
+        expect(text).toContain("### Lost Context Notice")
+        expect(text).toContain("- Older raw tool outputs were compacted.")
+        expect(text).toContain("- Use current evidence before repeating reads or commands.")
+        expect(text).toContain("- Treat stale evidence as advisory only.")
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "marks moved inspected files deleted and reports command omissions",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "move and commands")
+        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+        const movedFrom = path.join(test.directory, "src", "old.ts")
+        const movedTo = path.join(test.directory, "src", "new.ts")
+
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: movedFrom,
+              canonicalPath: canonicalTestPath(movedFrom),
+              type: "file",
+              size: 10,
+              modified: "2026-06-09 03:00:00",
+              modifiedMs: 3000,
+              start: 1,
+              end: 10,
+              total: 10,
+              returned: 10,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "apply_patch",
+          metadata: {
+            files: [
+              {
+                filePath: movedFrom,
+                movePath: movedTo,
+                type: "move",
+              },
+            ],
+          },
+        })
+        for (let i = 0; i < 11; i++) {
+          yield* addCompletedToolPart({
+            sessionID: session.id,
+            messageID: assistant.id,
+            tool: "bash",
+            toolInput: { command: `node --check file-${i}.js`, workdir: "src" },
+            metadata: { exit: i === 10 ? 1 : 0 },
+          })
+        }
+
+        yield* createSummaryCompaction(session.id)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const text = yield* readLatestSummaryText(session.id)
+        expect(text).toContain("| src/old.ts | 1-10 | 10 | 2026-06-09 03:00:00 | deleted |")
+        expect(text).toContain("| node --check file-10.js | src | 1 |")
+        expect(text).toContain("Omitted: 1 verified commands due to evidence budget.")
+        expect(text).not.toContain("node --check file-0.js")
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps evidence compact for many inspected files",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "many reads")
+        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+        for (let i = 0; i < 21; i++) {
+          const file = path.join(test.directory, "src", `file-${i}.ts`)
+          yield* addCompletedToolPart({
+            sessionID: session.id,
+            messageID: assistant.id,
+            tool: "read",
+            metadata: {
+              read: {
+                path: file,
+                canonicalPath: canonicalTestPath(file),
+                type: "file",
+                size: 10,
+                modified: `2026-06-09 00:${String(i).padStart(2, "0")}:00`,
+                modifiedMs: i,
+                start: 1,
+                end: 10,
+                total: 10,
+                returned: 10,
+                stub: false,
+              },
+            },
+          })
+        }
+
+        yield* createSummaryCompaction(session.id)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const text = yield* readLatestSummaryText(session.id)
+        expect(text).toContain("| src/file-20.ts | 1-10 | 10 | 2026-06-09 00:20:00 | current |")
+        expect(text).toContain("Omitted: 1 inspected files due to evidence budget.")
+        expect(text).not.toContain("src/file-0.ts")
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "renders verification commands without exposing unsafe shell content",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "commands")
+        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+        const longFile = path.join(test.directory, "dir with spaces", `${"very-long-".repeat(12)}file.js`)
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "bash",
+          toolInput: {
+            command: `OPENAI_API_KEY=sk-secret node --check --token=sk-equals-secret --api-key sk-space-secret "${longFile}"`,
+            workdir: ".",
+          },
+          metadata: { exit: 0 },
+        })
+        for (const command of [
+          "node --check piped-sentinel.js | tee out.txt",
+          "node --check redirected-sentinel.js > out.txt",
+          "echo $(node --check subcommand-sentinel.js)",
+          "bun test && rm -rf dangerous-sentinel",
+          "",
+        ]) {
+          yield* addCompletedToolPart({
+            sessionID: session.id,
+            messageID: assistant.id,
+            tool: "bash",
+            toolInput: { command, workdir: "." },
+            metadata: { exit: 0 },
+          })
+        }
+
+        yield* createSummaryCompaction(session.id)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const text = yield* readLatestSummaryText(session.id)
+        expect(text).toContain("OPENAI_API_KEY=[redacted]")
+        expect(text).toContain("--token=[redacted]")
+        expect(text).toContain("--api-key [redacted]")
+        expect(text).toContain("[cmd:")
+        expect(text).not.toContain("sk-secret")
+        expect(text).not.toContain("sk-equals-secret")
+        expect(text).not.toContain("sk-space-secret")
+        expect(text).not.toContain("piped-sentinel")
+        expect(text).not.toContain("redirected-sentinel")
+        expect(text).not.toContain("subcommand-sentinel")
+        expect(text).not.toContain("dangerous-sentinel")
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
@@ -1608,17 +1977,10 @@ describe("session.compaction.process", () => {
 
       return Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
-        const bus = yield* Bus.Service
-        const ready = yield* Deferred.make<void>()
+        const status = yield* SessionStatus.Service
         const session = yield* ssn.create({})
         const msg = yield* createUserMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
-        const off = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
-          if (evt.properties.sessionID !== session.id) return
-          if (evt.properties.status.type !== "retry") return
-          Deferred.doneUnsafe(ready, Effect.void)
-        })
-        yield* Effect.addFinalizer(() => Effect.sync(off))
 
         const fiber = yield* SessionCompaction.use
           .process({
@@ -1629,15 +1991,23 @@ describe("session.compaction.process", () => {
           })
           .pipe(Effect.forkChild)
 
-        yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
+        yield* pollWithTimeout(
+          status.get(session.id).pipe(Effect.map((current) => (current.type === "retry" ? current : undefined))),
+          "compaction did not enter retry backoff",
+          "5 seconds",
+        )
         const start = Date.now()
         yield* Fiber.interrupt(fiber)
-        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
+        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("1 second"))
 
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
-          expect(Date.now() - start).toBeLessThan(250)
+          // This protects the retry-backoff invariant: abort must not wait for the
+          // provider's long retry-after delay. Windows process cleanup can take a
+          // few hundred milliseconds, so the bound is intentionally below the
+          // 10s retry delay rather than an unrealistically tight scheduler tick.
+          expect(Date.now() - start).toBeLessThan(1_000)
         }
       }).pipe(withCompaction({ llm: stub.layer }))
     },
@@ -1892,6 +2262,7 @@ describe("session.compaction.process", () => {
 
         expect(captured).toContain("<previous-summary>")
         expect(captured).toContain("PREVIOUS SUMMARY")
+        expect(captured).not.toContain("## Evidence Handoff")
         expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
         expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")
         expect(captured).not.toContain("OLD_HEAD_USER_SHOULD_NOT_REAPPEAR")

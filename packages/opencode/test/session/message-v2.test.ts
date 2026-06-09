@@ -408,6 +408,63 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("keeps internal assistant metadata out of provider replay", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "continue",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "text",
+            text: "handoff",
+            synthetic: true,
+            metadata: { kind: "compaction_evidence_handoff", version: 1 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "text",
+            text: "provider text",
+            metadata: { openai: { assistant: "meta" }, kind: "internal" },
+          },
+          {
+            ...basePart(assistantID, "a3"),
+            type: "reasoning",
+            text: "signed thinking",
+            metadata: { anthropic: { signature: "sig1" }, kind: "internal" },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "continue" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "handoff" },
+          { type: "text", text: "provider text", providerOptions: { openai: { assistant: "meta" } } },
+          { type: "reasoning", text: "signed thinking", providerOptions: { anthropic: { signature: "sig1" } } },
+        ],
+      },
+    ])
+  })
+
   test("preserves jpeg tool-result media for anthropic models", async () => {
     const anthropicModel: Provider.Model = {
       ...model,

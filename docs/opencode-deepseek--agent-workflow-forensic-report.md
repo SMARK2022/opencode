@@ -3417,3 +3417,82 @@ Qwen 报告可能检查了 `edit` 工具但没有检查 `apply_patch` 工具。b
 
 
 
+# Prioritized Improvement Roadmap
+
+基于 69 个 confirmed finding 的完整源码分析，按优先级排列。
+
+## P0: 关键安全/正确性问题
+
+| # | 标题 | 理由 | 难度 | 修改面 | 设计一致 |
+|---|---|---|---|---|---|
+| #44 | Invalid tool 返回completed | agent收到成功信号继续错误操作。src/tool/invalid.ts 20行 | Low | 1文件 | ✅ |
+| #29 | Question无timeout | src/tool/question.ts 无AbortSignal。15行 | Low | 1文件 | ✅ |
+| #28 | finish=length无感知 | message-v2.ts 截断通知。10行 | Low | 1文件 | ✅ |
+| #16 | Session too large无恢复 | compaction.ts 分层降级。100行 | Medium | 1文件 | ✅ |
+| #65 | Doom loop仅同turn | processor.ts 跨turn频率计数。60行 | Medium | 1文件 | ✅ |
+
+## P1: 显著效率/可靠性问题
+
+| # | 标题 | 理由 | 难度 | 修改面 | 设计一致 |
+|---|---|---|---|---|---|
+| #5 | apply_patch output无diff | metadata.diff存在但output无。30行 | Low | 1文件 | ✅ |
+| #17 | Edit error不提示re-read | edit.ts error msg添加。5行 | Low | 1文件 | ✅ |
+| #36 | File-not-found盲重试60% | read error加glob hint。10行 | Low | 1文件 | ✅ |
+| #37 | Unix on Windows 30次 | shell.ts error增强。15行 | Low | 1文件 | ✅ |
+| #11 | 90% saved outputs未读 | truncation notice增强。20行 | Low | 2文件 | ✅ |
+| #7 | 验证命令重复65-115x | SUMMARY_TEMPLATE加Verified State。15行 | Low | 1文件 | ✅ |
+| #18 | Glob无元数据 | 输出加size/mtime。30行 | Low | 1文件 | ✅ |
+| #66 | 27.8% bash复制工具 | system prompt强化。20行 | Low | 1文件 | ✅ |
+| #2 | 长工具链后纠偏增多 | max-steps.txt自检指令。10行 | Low | 1文件 | ✅ |
+| #35 | Tool aborted无原因 | tool.ts基类统一abort处理。50行 | Medium | 3文件 | ✅ |
+
+## P2: 中等优先级
+
+| # | 标题 | 理由 | 难度 | 修改面 | 设计一致 |
+|---|---|---|---|---|---|
+| #22 | 25% batching rate | system prompt指导。20行 | Low | 1文件 | ✅ |
+| #9 | Task被compaction截断 | PRUNE_PROTECTED_TOOLS加task。5行 | Low | 1文件 | ✅ |
+| #38/#63 | summary_diffs为空 | summary.ts修复diff计算。80行 | Medium | 1文件 | ✅ |
+| #27 | Step-finish不可见 | message-v2.ts hidden context注入。30行 | Medium | 1文件 | ✅ |
+| #15 | 22.5% reasoning空 | provider配置评估。50行 | Medium | 2文件 | ✅ |
+| #10 | 60% reads截断 | read.ts truncation notice增强。20行 | Low | 1文件 | ✅ |
+| #14 | 工具定义43K chars | registry schema压缩/按需。150行 | Medium | 2文件 | ✅ |
+| #24 | 1.3MB图片base64 | 外部文件引用+缩略图。100行 | Medium | 2文件 | ✅ |
+| #23/#58 | Fork无上下文 | fork时注入parent summary。80行 | Medium | 2文件 | ⚠️ |
+| #33 | Skill 22K chars持久 | skill过期/trim机制。40行 | Medium | 1文件 | ⚠️ |
+| #20/#50 | 上下文14x增长 | tiered memory(热/温/冷)。500行 | High | 跨模块 | ❌ |
+| #3 | Sycophancy | prompt加反附和指令。20行 | Low | 1文件 | ✅ |
+| #68 | Edit/patch选择模型依赖 | prompt指导工具选择。10行 | Low | 1文件 | ✅ |
+| #67 | Edit验证率10-20% | edit后自动include snippet。40行 | Medium | 1文件 | ✅ |
+
+## P3: 低优先级/观察性
+
+| # | 标题 | 理由 | 难度 | 修改面 |
+|---|---|---|---|---|
+| #8 | Grep 64结果限制 | 有意的设计，已有truncated flag。20行 | Low | 1文件 |
+| #13 | Preemptive compaction | PRUNE_MINIMUM参数调整。10行 | Low | 1文件 |
+| #25/#48/#62 | 时间无感知 | prompt加session age。15行 | Low | 1文件 |
+| #30/#57 | Cache模型依赖 | hidden cache hint。15行 | Low | 1文件 |
+| #34 | CWD不一致 | shell输出加CWD header。10行 | Low | 1文件 |
+| #40 | 20%小session无stop | 加time_closed字段。30行 | Low | 2文件 |
+| #32 | Agent类型切换 | prompt transition marker。10行 | Low | 1文件 |
+| #42 | Compaction不可见 | inject notice。15行 | Low | 1文件 |
+| #47 | Synthetic text无标记 | [SYSTEM]前缀。10行 | Low | 1文件 |
+| #49 | Provider error不透明 | error mapping增强。40行 | Medium | 1文件 |
+| #52 | Dead tools零调用 | registry删减。5行 | Low | 1文件 |
+| #53 | 8空表 | schema清洁。100行 | Medium | 1文件 |
+| #59 | 811 orphan IDs | CASCADE修复。5行 | Low | 1文件 |
+| #60 | 7808 duplicate callIDs | 唯一性检查。15行 | Low | 1文件 |
+| #61 | Cost不一致 | reconcile计算。60行 | Medium | 2文件 |
+| #64 | Slugs无语义 | content hash前缀。15行 | Low | 1文件 |
+| #69 | Reasoning-输出张力 | processor检测stop signal。30行 | Medium | 1文件 |
+| #4 | 短任务高效 | 正面发现，prompt增强。10行 | Low | 1文件 |
+| #21 | 空bash歧义 | exit code已有，行为问题 | — | — |
+
+## 实施建议
+
+**第一批 (1周，10处Low)**: #44, #29, #28, #17, #36, #37, #7, #18, #11, #9 — 全是单文件文本/常量修改
+**第二批 (2-3周，8处)**: #65, #5, #35, #27, #38, #22, #66, #15 — processor/compaction/message-v2管道扩展
+**第三批 (1-2月)**: #20/#50, #14, #24, #23/#58 — 需设计讨论的架构变更
+
+---

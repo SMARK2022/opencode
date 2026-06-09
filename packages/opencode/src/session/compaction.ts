@@ -18,6 +18,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
+import { Todo } from "./todo"
 // [local-smark] request usage tracking
 import { SessionRequestUsage } from "./request-usage"
 import { serviceUse } from "@/effect/service-use"
@@ -25,6 +26,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session-event"
+import path from "path"
+import { createHash } from "crypto"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -55,6 +58,16 @@ const MAX_PRESERVE_RECENT_TOKENS = 16_000
 // window so a 100k-token usable window can spend at most 20k on the memento.
 const DEFAULT_PRESERVE_RECENT_USER_TOKENS = 20_000
 const PRESERVE_RECENT_USER_RATIO = 0.2
+// Evidence Handoff 是压缩摘要后的公开证据清单：它作为 assistant text part
+// 同时给用户和模型看，不能变成隐藏状态或第二套 summary。下面这些上限只防止
+// evidence 自身成为新的上下文膨胀源；被裁剪的数量会在同一段文本里公开显示。
+const EVIDENCE_HANDOFF_KIND = "compaction_evidence_handoff"
+const EVIDENCE_FILE_LIMIT = 20
+const EVIDENCE_FILE_RANGE_LIMIT = 8
+const EVIDENCE_COMMAND_LIMIT = 10
+const EVIDENCE_TODO_LIMIT = 100
+const EVIDENCE_COMMAND_MAX_CHARS = 120
+const EVIDENCE_CELL_MAX_CHARS = 160
 // The truncation marker is part of the model-visible handoff so the next model
 // knows missing text was intentionally omitted by the memento budget, not by the
 // user. Keep it short because it can appear inside an already tight context.
@@ -122,6 +135,10 @@ type CompletedCompaction = {
 function summaryText(message: MessageV2.WithParts) {
   const text = message.parts
     .filter((part): part is MessageV2.TextPart => part.type === "text")
+    // Evidence Handoff 是原始 summary 的公开附录，不是 LLM 生成的 anchored
+    // summary 内容。这里过滤它，避免下一轮 compaction 把结构化表格写进
+    // <previous-summary> 后再被 LLM 改写或重复总结。
+    .filter((part) => part.metadata?.kind !== EVIDENCE_HANDOFF_KIND)
     .map((part) => part.text.trim())
     .filter(Boolean)
     .join("\n\n")
@@ -232,6 +249,297 @@ function truncateRecentUserMessage(input: {
     high = mid - 1
   }
   return best
+}
+
+type CompletedToolPart = MessageV2.ToolPart & { state: MessageV2.ToolStateCompleted }
+
+type ToolEvent = {
+  part: CompletedToolPart
+  sequence: number
+}
+
+type InspectedFileEvidence = {
+  path: string
+  canonicalPath: string
+  ranges: Array<{ start: number; end: number }>
+  total: number
+  modified: string
+  lastRead: number
+  status: "current" | "stale" | "deleted"
+}
+
+type MutationEvidence = {
+  canonicalPath: string
+  sequence: number
+  deleted: boolean
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input)
+}
+
+function stringField(input: Record<string, unknown>, key: string) {
+  const value = input[key]
+  return typeof value === "string" ? value : undefined
+}
+
+function numberField(input: Record<string, unknown>, key: string) {
+  const value = input[key]
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function completedToolEvents(messages: MessageV2.WithParts[]) {
+  const result: ToolEvent[] = []
+  let sequence = 0
+  for (const msg of messages) {
+    for (const part of msg.parts) {
+      sequence++
+      if (part.type !== "tool") continue
+      if (part.state.status !== "completed") continue
+      result.push({ part: part as CompletedToolPart, sequence })
+    }
+  }
+  return result
+}
+
+function canonicalEvidencePath(input: string, worktree: string) {
+  const resolved = path.isAbsolute(input) ? input : path.join(worktree, input)
+  const normalized = resolved.replaceAll("\\", "/")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function displayPath(input: string, worktree: string) {
+  const resolved = path.isAbsolute(input) ? input : path.join(worktree, input)
+  const relative = path.relative(worktree, resolved)
+  // worktree 根目录是最常见的默认 shell cwd；渲染为 "." 避免 evidence
+  // 暴露冗长临时目录，同时仍让工作区外路径保持绝对路径。
+  if (relative === "") return "."
+  const display = relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : resolved
+  return display.replaceAll("\\", "/") || "."
+}
+
+function mergeRanges(ranges: Array<{ start: number; end: number }>) {
+  const sorted = ranges.toSorted((a, b) => a.start - b.start || a.end - b.end)
+  return sorted.reduce<Array<{ start: number; end: number }>>((result, range) => {
+    const last = result.at(-1)
+    if (!last || range.start > last.end + 1) return [...result, { ...range }]
+    last.end = Math.max(last.end, range.end)
+    return result
+  }, [])
+}
+
+function hash8(input: string) {
+  // 这里只需要稳定短指纹来区分被截断的公开文本，不把它当安全哈希使用。
+  return createHash("sha256").update(input).digest("hex").slice(0, 8)
+}
+
+function evidenceCell(input: string) {
+  return input.replaceAll("|", "\\|").replace(/\r?\n/g, " ").trim()
+}
+
+function compactCell(input: string, max: number, label: string) {
+  const clean = evidenceCell(input)
+  if (clean.length <= max) return clean
+  return `${clean.slice(0, Math.max(0, max - 18)).trimEnd()}... [${label}:${hash8(clean)}]`
+}
+
+function collectMutationPaths(events: ToolEvent[], worktree: string) {
+  return events.flatMap((event): MutationEvidence[] => {
+    const metadata = event.part.state.metadata
+    const add = (file: string | undefined, deleted = false): MutationEvidence[] =>
+      file ? [{ canonicalPath: canonicalEvidencePath(file, worktree), sequence: event.sequence, deleted }] : []
+
+    if (event.part.tool === "write") return add(stringField(metadata, "filepath") ?? stringField(event.part.state.input, "filePath"))
+    if (event.part.tool === "edit") {
+      const filediff = isRecord(metadata.filediff) ? stringField(metadata.filediff, "file") : undefined
+      return add(stringField(metadata, "filepath") ?? filediff ?? stringField(event.part.state.input, "filePath"))
+    }
+    if (event.part.tool !== "apply_patch") return []
+    const files = Array.isArray(metadata.files) ? metadata.files : []
+    return files.flatMap((file): MutationEvidence[] => {
+      if (!isRecord(file)) return []
+      const type = stringField(file, "type")
+      const filePath = stringField(file, "filePath")
+      const movePath = stringField(file, "movePath")
+      // apply_patch 的 move 会同时让旧路径失效并产生新路径；Evidence 只给
+      // 已读文件判定状态，所以旧路径必须标记 deleted，不能泛化成 stale。
+      if (type === "move") return [...add(filePath, true), ...add(movePath)]
+      return add(filePath, type === "delete")
+    })
+  })
+}
+
+function renderInspectedFiles(input: { events: ToolEvent[]; worktree: string }) {
+  const files = new Map<string, InspectedFileEvidence>()
+  const mutations = collectMutationPaths(input.events, input.worktree)
+
+  for (const event of input.events) {
+    if (event.part.tool !== "read") continue
+    const read = isRecord(event.part.state.metadata.read) ? event.part.state.metadata.read : undefined
+    if (!read || read.stub === true) continue
+    const filePath = stringField(read, "path")
+    const canonicalPath = stringField(read, "canonicalPath")
+    const start = numberField(read, "start")
+    const end = numberField(read, "end")
+    const total = numberField(read, "total")
+    const modified = stringField(read, "modified")
+    if (!filePath || !canonicalPath || start === undefined || end === undefined || total === undefined || !modified) continue
+    const canonical = canonicalEvidencePath(canonicalPath, input.worktree)
+    const current = files.get(canonical)
+    if (!current) {
+      files.set(canonical, {
+        path: displayPath(filePath, input.worktree),
+        canonicalPath: canonical,
+        ranges: [{ start, end }],
+        total,
+        modified,
+        lastRead: event.sequence,
+        status: "current",
+      })
+      continue
+    }
+    current.ranges = mergeRanges([...current.ranges, { start, end }])
+    current.total = total
+    current.modified = modified
+    current.lastRead = event.sequence
+  }
+
+  for (const file of files.values()) {
+    const mutation = mutations.filter((item) => item.canonicalPath === file.canonicalPath && item.sequence > file.lastRead).at(-1)
+    if (!mutation) continue
+    file.status = mutation.deleted ? "deleted" : "stale"
+  }
+
+  const rows = [...files.values()].toSorted((a, b) => b.lastRead - a.lastRead)
+  const rendered = rows.slice(0, EVIDENCE_FILE_LIMIT)
+  const omitted = Math.max(0, rows.length - rendered.length)
+  const output = [
+    "### Inspected Files",
+    "| path | ranges | total | modified | status |",
+    "|---|---:|---:|---|---|",
+    ...rendered.map((file) => {
+      const ranges = file.ranges.slice(0, EVIDENCE_FILE_RANGE_LIMIT).map((range) => `${range.start}-${range.end}`)
+      const omittedRanges = Math.max(0, file.ranges.length - ranges.length)
+      return `| ${evidenceCell(file.path)} | ${ranges.join(", ")}${omittedRanges ? `, ...(+${omittedRanges})` : ""} | ${file.total} | ${evidenceCell(file.modified)} | ${file.status} |`
+    }),
+  ]
+  if (omitted > 0) output.push(`Omitted: ${omitted} inspected files due to evidence budget.`)
+  return output.join("\n")
+}
+
+function redactCommand(input: string) {
+  return input
+    .replace(/(authorization:\s*bearer\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
+    .replace(/((?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
+    .replace(/(--(?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
+    .replace(/(--(?:api[_-]?key|token|password|secret)\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
+}
+
+function commandDisplay(input: string) {
+  const redacted = redactCommand(input).replace(/\s+/g, " ").trim()
+  return compactCell(redacted, EVIDENCE_COMMAND_MAX_CHARS, "cmd")
+}
+
+function stripLeadingEnvAssignments(input: string) {
+  let command = input.trim()
+  while (true) {
+    const match = command.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
+    if (!match) return command
+    command = command.slice(match[0].length).trimStart()
+  }
+}
+
+function isSimpleVerificationCommand(command: string) {
+  const trimmed = command.trim()
+  if (!trimmed) return false
+  // Evidence 只记录已经完成的简单验证命令。带管道、重定向、子命令或链式操作的
+  // shell 片段可能混入副作用，不能被压缩摘要误呈现为单纯 verification 结果。
+  if (/[|<>`;]/.test(trimmed) || trimmed.includes("$(") || trimmed.includes("&&") || trimmed.includes("||")) return false
+  const normalized = stripLeadingEnvAssignments(trimmed).toLowerCase()
+  return (
+    /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(normalized) ||
+    /^node\s+--check(\s|$)/.test(normalized) ||
+    /^python\s+-m\s+py_compile(\s|$)/.test(normalized) ||
+    /^tsc\s+--noemit(\s|$)/.test(normalized) ||
+    /^eslint(\s|$)/.test(normalized) ||
+    /^prettier\s+--check(\s|$)/.test(normalized)
+  )
+}
+
+function commandCwd(input: Record<string, unknown>, directory: string) {
+  const legacy = stringField(input, "cwd")
+  if (legacy) return legacy
+  const workdir = stringField(input, "workdir")
+  // 真实 bash tool input 保存的是用户传入的 workdir，而不是 shell.ts 运行时
+  // 解析后的 cwd；缺省 workdir 时命令实际在实例目录执行。
+  if (!workdir) return directory
+  return path.isAbsolute(workdir) ? workdir : path.join(directory, workdir)
+}
+
+function renderVerifiedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
+  const commands = new Map<string, { command: string; cwd: string; exit: string; sequence: number }>()
+  for (const event of input.events) {
+    if (event.part.tool !== "bash") continue
+    const command = stringField(event.part.state.input, "command")
+    if (!command || !isSimpleVerificationCommand(command)) continue
+    const cwd = commandCwd(event.part.state.input, input.directory)
+    const exit = numberField(event.part.state.metadata, "exit")
+    commands.set(`${canonicalEvidencePath(cwd, input.worktree)}\u0000${stripLeadingEnvAssignments(command)}`, {
+      command,
+      cwd,
+      exit: exit === undefined ? "unknown" : String(exit),
+      sequence: event.sequence,
+    })
+  }
+  const all = [...commands.values()].toSorted((a, b) => b.sequence - a.sequence)
+  const rows = all.slice(0, EVIDENCE_COMMAND_LIMIT)
+  const omitted = Math.max(0, all.length - rows.length)
+  const output = [
+    "### Verified Commands",
+    "| command | cwd | exit |",
+    "|---|---|---:|",
+    ...rows.map((item) => `| ${commandDisplay(item.command)} | ${evidenceCell(displayPath(item.cwd, input.worktree))} | ${item.exit} |`),
+  ]
+  if (omitted > 0) output.push(`Omitted: ${omitted} verified commands due to evidence budget.`)
+  return output.join("\n")
+}
+
+function renderOutstandingTodos(todos: Todo.Info[]) {
+  const rendered = todos.slice(0, EVIDENCE_TODO_LIMIT)
+  const omitted = Math.max(0, todos.length - rendered.length)
+  const output = [
+    "### Outstanding Todos",
+    "| status | priority | content |",
+    "|---|---|---|",
+    ...rendered.map((todo) =>
+      `| ${evidenceCell(todo.status)} | ${evidenceCell(todo.priority)} | ${compactCell(todo.content, EVIDENCE_CELL_MAX_CHARS, "todo")} |`,
+    ),
+  ]
+  if (omitted > 0) output.push(`Omitted: ${omitted} todos due to evidence budget.`)
+  return output.join("\n")
+}
+
+function renderEvidenceHandoff(input: {
+  messages: MessageV2.WithParts[]
+  todos: Todo.Info[]
+  directory: string
+  worktree: string
+}) {
+  const events = completedToolEvents(input.messages)
+  return [
+    "## Evidence Handoff",
+    "",
+    renderInspectedFiles({ events, worktree: input.worktree }),
+    "",
+    renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
+    "",
+    renderOutstandingTodos(input.todos),
+    "",
+    "### Lost Context Notice",
+    "- Older raw tool outputs were compacted.",
+    "- Use current evidence before repeating reads or commands.",
+    "- Treat stale evidence as advisory only.",
+  ].join("\n")
 }
 
 function turns(messages: MessageV2.WithParts[]) {
@@ -652,6 +960,25 @@ export const layer = Layer.effect(
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
         return "stop"
+      }
+
+      if (result === "continue" && !processor.message.error) {
+        const todo = Option.getOrUndefined(yield* Effect.serviceOption(Todo.Service))
+        const todos = todo
+          ? yield* todo.get(input.sessionID).pipe(Effect.catch(() => Effect.succeed([] as Todo.Info[])))
+          : []
+        // Evidence 作为同一条 summary assistant 的 synthetic text 追加，保证用户可见内容
+        // 和模型 replay 内容一致；不写隐藏 JSON，避免后续维护者误以为模型看到了 UI 看不到的状态。
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID: input.sessionID,
+          type: "text",
+          text: renderEvidenceHandoff({ messages: history, todos, directory: ctx.directory, worktree: ctx.worktree }),
+          synthetic: true,
+          metadata: { kind: EVIDENCE_HANDOFF_KIND, version: 1 },
+          time: { start: Date.now(), end: Date.now() },
+        })
       }
 
       const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
