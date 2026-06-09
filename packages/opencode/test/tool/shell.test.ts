@@ -1671,6 +1671,7 @@ describe("tool.shell abort", () => {
           )
           expect(res.output).toContain("before")
           expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
+          expect(res.output).not.toContain('reason="exit"')
           expect(collected.length).toBeGreaterThan(0)
         }),
       ),
@@ -1690,6 +1691,8 @@ describe("tool.shell abort", () => {
           expect(result.output).toContain(
             '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
           )
+          expect(result.output).not.toContain('reason="exit"')
+          // #289：abort/timeout notice 不带 exit reason——中止不是进程自身退出，防止状态混淆
         }),
       ),
     15_000,
@@ -1739,6 +1742,107 @@ describe("tool.shell abort", () => {
           command: `exit 42`,
         })
         expect(result.metadata.exit).toBe(42)
+      }),
+    ),
+  )
+
+  
+  it.live("reports exit notice for empty successful output", () =>
+  // #289：空输出成功（exit 0）仍需 notice——模型无法从空输出推断命令是否真的执行成功
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const command = `${bin} -e ${evalarg("process.exit(0)")}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+        })
+
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toContain("(no output)")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0" />',
+        )
+      }),
+    ),
+  )
+
+  it.live("reports exit notice for empty failed output", () =>
+  // #289：空输出失败必须携带退出码，模型才能区分静默失败与结果丢失
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const command = `${bin} -e ${evalarg("process.exit(42)")}`
+        // #289：退出码 42 覆盖非 1 的任意错误码路径，验证 exit_code 原样透传
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+        })
+
+        expect(result.metadata.exit).toBe(42)
+        expect(result.output).toContain("(no output)")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42" />',
+        )
+      }),
+    ),
+  )
+
+  it.live("reports exit notice for non-empty failed output without diagnostics", () =>
+  // #289：非空但无诊断摘录的失败靠 exit notice 兜底，避免模型误读为成功产物
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const command = `${bin} -e ${evalarg("console.log(String.fromCharCode(112,108,97,105,110,32,111,117,116,112,117,116)); process.exit(7)")}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+        })
+
+        expect(result.metadata.exit).toBe(7)
+        expect(result.output).toContain("plain output")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />',
+        )
+      }),
+    ),
+  )
+
+  it.live("omits exit notice when diagnostics already explain non-empty failure", () =>
+  // #289：已有高信号摘录时不重复 exit notice，同一失败只提示一次
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const script = [
+          "console.error(String.fromCharCode(102,97,116,97,108,58,32,104,105,100,100,101,110,32,114,111,111,116,32,99,97,117,115,101))",
+          "await new Promise((resolve) => setTimeout(resolve, 2100))",
+          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log(String.fromCharCode(116,97,105,108,32,108,105,110,101,32) + i)`,
+          "process.exit(9)",
+        ].join(";")
+        const command = `${bin} -e ${evalarg(script)}`
+        // #289：诊断场景脚本较慢（2.1s 等待根因行）且触发截断，15s 超时留足余量
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+        })
+
+        expect(result.metadata.exit).toBe(9)
+        // #289：metadata.exit 仍记录真实退出码；模型可见输出里才省略 notice
+        expect(result.output).toContain("<bash_high_signal_excerpt>")
+        expect(result.output).not.toContain('reason="exit"')
+      }),
+    ),
+    15_000,
+  )
+
+  it.live("omits exit notice for non-empty successful output", () =>
+  // #289：非空成功是正常路径，零噪音不加 notice
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const result = yield* run({
+          command: `echo ok`,
+        })
+
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toContain("ok")
+        expect(result.output).not.toContain('reason="exit"')
       }),
     ),
   )

@@ -1,8 +1,33 @@
 import { describe, expect, test } from "bun:test"
-import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
+import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+import { formatExitNotice } from "@opencode-ai/core/util/output-notice"
 
 // #129：CLIXML 纯块解码与混合块保留
 describe("tool.bash-compress", () => {
+  test("keeps failed exit status when only diagnostic sampling was omitted", () => {
+    const raw = "a".repeat(5_000)
+    const collector = new BashDiagnosticCollector()
+    collector.push(raw)
+    collector.end()
+    const snapshot = collector.snapshot()
+    const appendix = renderDiagnosticAppendix(snapshot, { durationMs: 3_000, exitCode: 7, visibleOutput: raw, config: { enabled: false } })
+    expect(snapshot.errorLikeLines).toBe(0)
+    expect(snapshot.discardedChars).toBeGreaterThan(0)
+    expect(appendix).toContain("diagnostic sampling omitted")
+    // 真实采样说明不含失败证据，仍须交付退出码；取消与超时不得伪造exit。
+    expect(formatExitNotice(7, false, appendix)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
+    expect(formatExitNotice(0, true)).toContain('severity="info" reason="exit" exit_code="0"')
+    expect(formatExitNotice(42, true)).toContain('severity="error" reason="exit" exit_code="42"')
+    expect(formatExitNotice(null, false, appendix)).toBeUndefined()
+    expect(formatExitNotice(0, false, appendix)).toBeUndefined()
+    const failure = new BashDiagnosticCollector()
+    failure.push("fatal: hidden root cause\n")
+    failure.end()
+    const diagnosed = renderDiagnosticAppendix(failure.snapshot(), { durationMs: 3_000, exitCode: 9, visibleOutput: "tail" })
+    expect(diagnosed).toContain("<bash_high_signal_excerpt>")
+    expect(formatExitNotice(9, false, diagnosed)).toBeUndefined()
+  })
+
   test("renders split terminal clear-line sequences without leaking partial escapes", () => {
     const display = createTerminalDisplay()
 
