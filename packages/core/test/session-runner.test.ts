@@ -61,6 +61,7 @@ import {
   SessionInputTable,
   SessionMessageTable,
   SessionTable,
+  TodoTable,
 } from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { SystemContext } from "@opencode-ai/core/system-context"
@@ -2260,6 +2261,13 @@ describe("SessionRunnerLLM", () => {
       const pending = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Later queued request" }), delivery: "queue", resume: false })
       responses = undefined
       response = fragmentFixture("text", "manual-summary", ["Summary"]).completeEvents
+      // 持久任务不来自transcript；真实Native压缩必须将四态原序写入公开交接。
+      yield* Database.Service.use(({ db }) => db.insert(TodoTable).values([
+        { session_id: sessionID, position: 0, content: "Read forensic report", status: "completed", priority: "high" },
+        { session_id: sessionID, position: 1, content: "Design P0 evidence handoff", status: "in_progress", priority: "high" },
+        { session_id: sessionID, position: 2, content: "Add compaction tests", status: "pending", priority: "high" },
+        { session_id: sessionID, position: 3, content: "Discard obsolete sketch", status: "cancelled", priority: "high" },
+      ]).run().pipe(Effect.orDie))
       yield* session.compact({ sessionID })
       expect(requests).toHaveLength(1)
       expect(requests[0].tools).toEqual([])
@@ -2267,6 +2275,10 @@ describe("SessionRunnerLLM", () => {
       expect(context).toHaveLength(1)
       expect(context[0]).toMatchObject({ type: "compaction", summary: "Summary" })
       if (context[0].type !== "compaction") return yield* Effect.die("Missing manual summary")
+      // 检查Ended的真实读投影；附录不会替换LLM summary，回放仍应逐字段相等。
+      for (const [status, content] of [["completed", "Read forensic report"], ["in_progress", "Design P0 evidence handoff"], ["pending", "Add compaction tests"], ["cancelled", "Discard obsolete sketch"]]) {
+        expect(context[0].file_evidence).toContain(`| ${status} | high | ${content} |`)
+      }
       expect(context[0].recent).toContain("[User]: Keep recent tool turn")
       // 原话通过真实Ended与SQL投影保存；排队但尚未promote的用户输入不进入交接。
       expect(context[0].recent_user_messages?.map(message => message.text)).toEqual(["Earlier question", "Keep recent tool turn"])
@@ -2581,7 +2593,7 @@ describe("SessionRunnerLLM", () => {
         let estimated: SessionMessage.InputEstimate | undefined
         let compactRequestID: string | undefined
         const compaction = SessionCompaction.make({
-          db: database.db, events, fs: fileSystem, worktree: "/project",
+          db: database.db, events, fs: fileSystem, worktree: "/project", todos: () => Effect.succeed([]),
           // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
           llm: { stream: (summaryRequest, onPrepared) => {
             streams++
@@ -2634,7 +2646,7 @@ describe("SessionRunnerLLM", () => {
       const history = [head, retained, "Newest exact request"].map((text, index) => ({ seq: index + 1, message: SessionMessage.User.make({ type: "user", id: SessionMessage.ID.create(), text, time: { created: DateTime.makeUnsafe(index) } }) }))
       for (const keep of [undefined, 8_000, 0]) {
         let upload = ""
-        const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project",
+        const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project", todos: () => Effect.succeed([]),
           config: keep === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({ compaction: new ConfigCompaction.Info({ keep: new ConfigCompaction.Keep({ tokens: keep }) }) }) })],
           llm: { stream: request => {
             upload = userTexts(request)[0] ?? ""

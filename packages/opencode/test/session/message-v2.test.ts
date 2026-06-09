@@ -47,6 +47,27 @@ describe("session.message-v2.fromError APIError passthrough", () => {
     expect((result.data as { metadata: Record<string, string> }).metadata.finishReason).toBe("other")
   })
 })
+
+test("keeps internal assistant metadata out of provider replay", async () => {
+  // 混合 text/reasoning 一次验证本地 primitive 被滤除、供应商对象和公开正文仍保留。
+  const input: SessionV1.WithParts[] = [{
+    info: assistantInfo("m-meta", "m-meta-user"),
+    parts: [
+      { ...basePart("m-meta", "a1"), type: "text", text: "handoff", synthetic: true, metadata: { kind: "compaction_evidence_handoff", version: 1 } },
+      { ...basePart("m-meta", "a2"), type: "text", text: "provider text", metadata: { openai: { assistant: "meta" }, kind: "internal" } },
+      { ...basePart("m-meta", "a3"), type: "reasoning", text: "signed thinking", metadata: { anthropic: { signature: "sig1" }, kind: "internal" }, time: { start: 0, end: 1 } },
+    ] as SessionV1.Part[],
+  }]
+  const result = await MessageV2.toModelMessages(input, model)
+  expect(result).toStrictEqual([{
+    role: "assistant",
+    content: [
+      { type: "text", text: "handoff" },
+      { type: "text", text: "provider text", providerOptions: { openai: { assistant: "meta" } } },
+      { type: "reasoning", text: "signed thinking", providerOptions: { anthropic: { signature: "sig1" } } },
+    ],
+  }])
+})
 const model: Provider.Model = {
   id: ModelV2.ID.make("test-model"),
   providerID,
