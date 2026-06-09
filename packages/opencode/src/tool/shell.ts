@@ -16,7 +16,7 @@ import { parts, permissionPattern, rawPattern } from "@opencode-ai/core/shell-pe
 import { ShellID } from "./shell/id"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 // #282：超时/中止/截断改用统一 notice 信封
-import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
+import { formatExecutionNotice, formatExitNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 
 import { Truncate } from "./truncate"
 import { Plugin } from "@/plugin"
@@ -659,8 +659,9 @@ export const ShellTool = Tool.define(
         file = yield* trunc.write(raw)
       }
 
-      let output = end.text
-      if (!output) output = "(no output)"
+      // #289：空输出检测前移，exit notice 依赖此标志决定是否追加退出码
+      const emptyOutput = end.text.length === 0
+      let output = emptyOutput ? "(no output)" : end.text
 
       if (cut && file) {
         // 末尾换行不额外算一行；内存只保留计数器与原有尾部窗口。
@@ -683,6 +684,11 @@ export const ShellTool = Tool.define(
       // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
       const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
       if (appendix) output += "\n\n" + appendix
+      // #289：metadata.exit 不进入模型回放，空输出或缺少诊断的失败需补退出码 notice。
+      // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
+      const exitNotice = formatExitNotice(code, emptyOutput, appendix)
+      if (exitNotice) meta.push(exitNotice)
+
       if (meta.length > 0) {
         output += "\n\n" + meta.join("\n")
       }

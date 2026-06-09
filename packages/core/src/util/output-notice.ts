@@ -12,9 +12,13 @@ type OutputTruncatedNotice = {
 }
 
 type ExecutionNotice = {
-  severity: "warning"
-  reason: "timeout" | "user_abort"
+  // #289：execution notice 是 shell 输出里给模型看的执行状态，不是完整 metadata 回放。
+  // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
+  severity: "info" | "warning" | "error"
+  reason: "timeout" | "user_abort" | "exit"
   timeout_ms?: number
+  // #289：exit_code 在 reason 为 exit 时必填，携带原始进程退出码供审计
+  exit_code?: number
 }
 
 type Notice = Record<string, string | number | undefined>
@@ -44,6 +48,13 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
 export function formatExecutionNotice(input: ExecutionNotice) {
   return formatNotice({ type: "execution", source: "shell", ...input })
 }
+
+// 采样遗漏只说明观察边界，不能替代真实错误摘录或吞掉失败退出码。
+export function formatExitNotice(code: number | null, emptyOutput: boolean, appendix = "") {
+  if (code === null || (!emptyOutput && (code === 0 || appendix.includes("<bash_high_signal_excerpt>")))) return
+  return formatExecutionNotice({ severity: code === 0 ? "info" : "error", reason: "exit", exit_code: code })
+}
+
 
 // #282：compaction 已在持久层清理旧输出；给模型一个稳定的占位语义而不是空串
 export function formatCompactionClearedNotice() {
