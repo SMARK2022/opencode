@@ -567,7 +567,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             }),
           )
           const updated = store.message[info.sessionID]
-          if (updated.length > 200) {
+          if (updated.length > 300) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -829,7 +829,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           if (!options?.force && fullSyncedSessions.has(sessionID)) return
           const [session, messages, todo, diff, status] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
-            sdk.client.session.messages({ sessionID, limit: 200 }),
+            sdk.client.session.messages({ sessionID, limit: 300 }),
             sdk.client.session.todo({ sessionID }),
             sdk.client.session.diff({ sessionID }),
             sdk.client.session.status({ workspace: project.workspace.current() }),
