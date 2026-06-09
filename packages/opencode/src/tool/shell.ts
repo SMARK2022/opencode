@@ -991,8 +991,8 @@ export const ShellTool = Tool.define(
         file = yield* trunc.write(normalized)
       }
 
-      let output = end.text
-      if (!output) output = "(no output)"
+      const emptyOutput = end.text.length === 0
+      let output = emptyOutput ? "(no output)" : end.text
 
       if (cut && file) {
         output =
@@ -1015,6 +1015,23 @@ export const ShellTool = Tool.define(
       if (appendix) {
         output += "\n\n" + appendix
       }
+
+      // metadata.exit 已经保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
+      // 空输出和缺少诊断摘要的失败输出会让后续模型误判命令状态，所以只追加退出码 notice。
+      // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
+      const exitNotice =
+        code === null
+          ? undefined
+          : emptyOutput
+            ? formatExecutionNotice({
+                severity: code === 0 ? "info" : "error",
+                reason: "exit",
+                exit_code: code,
+              })
+            : code !== 0 && !appendix
+              ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
+              : undefined
+      if (exitNotice) meta.push(exitNotice)
 
       if (meta.length > 0) {
         output += "\n\n" + meta.join("\n")

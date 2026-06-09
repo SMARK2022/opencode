@@ -1771,6 +1771,7 @@ describe("tool.shell abort", () => {
           )
           expect(res.output).toContain("before")
           expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
+          expect(res.output).not.toContain('reason="exit"')
           expect(collected.length).toBeGreaterThan(0)
         }),
       ),
@@ -1792,6 +1793,7 @@ describe("tool.shell abort", () => {
           expect(result.output).toContain(
             '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
           )
+          expect(result.output).not.toContain('reason="exit"')
         }),
       ),
     15_000,
@@ -1840,6 +1842,103 @@ describe("tool.shell abort", () => {
           description: "Non-zero exit",
         })
         expect(result.metadata.exit).toBe(42)
+      }),
+    ),
+  )
+
+  it.live("reports exit notice for empty successful output", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const command = `${bin} -e ${evalarg("process.exit(0)")}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+          description: "Empty successful command",
+        })
+
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toContain("(no output)")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0" />',
+        )
+      }),
+    ),
+  )
+
+  it.live("reports exit notice for empty failed output", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const command = `${bin} -e ${evalarg("process.exit(42)")}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+          description: "Empty failed command",
+        })
+
+        expect(result.metadata.exit).toBe(42)
+        expect(result.output).toContain("(no output)")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42" />',
+        )
+      }),
+    ),
+  )
+
+  it.live("reports exit notice for non-empty failed output without diagnostics", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const command = `${bin} -e ${evalarg('console.log("plain output"); process.exit(7)')}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+          description: "Non-empty failed command",
+        })
+
+        expect(result.metadata.exit).toBe(7)
+        expect(result.output).toContain("plain output")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />',
+        )
+      }),
+    ),
+  )
+
+  it.live("omits exit notice when diagnostics already explain non-empty failure", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const script = [
+          'console.error("fatal: hidden root cause")',
+          "await new Promise((resolve) => setTimeout(resolve, 2100))",
+          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log("tail line " + i)`,
+          "process.exit(9)",
+        ].join(";")
+        const command = `${bin} -e ${evalarg(script)}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+          description: "Diagnostic failed command",
+        })
+
+        expect(result.metadata.exit).toBe(9)
+        expect(result.output).toContain("<bash_high_signal_excerpt>")
+        expect(result.output).not.toContain('reason="exit"')
+      }),
+    ),
+    15_000,
+  )
+
+  it.live("omits exit notice for non-empty successful output", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const result = yield* run({
+          command: `echo ok`,
+          description: "Non-empty successful command",
+        })
+
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toContain("ok")
+        expect(result.output).not.toContain('reason="exit"')
       }),
     ),
   )

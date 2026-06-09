@@ -11,9 +11,12 @@ type OutputTruncatedNotice = {
 }
 
 type ExecutionNotice = {
-  severity: "warning"
-  reason: "timeout" | "user_abort"
+  // execution notice 是 shell 输出里给模型看的执行状态，不是完整 metadata 回放。
+  // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
+  severity: "info" | "warning" | "error"
+  reason: "timeout" | "user_abort" | "exit"
   timeout_ms?: number
+  exit_code?: number
 }
 
 type Notice = Record<string, string | number | undefined>
