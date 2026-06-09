@@ -1,7 +1,7 @@
 import { BusEvent } from "@/bus/bus-event"
 import { SessionID, MessageID, PartID } from "./schema"
 import { NamedError } from "@opencode-ai/core/util/error"
-import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
+import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type ProviderMetadata, type UIMessage } from "ai"
 import { LSP } from "@/lsp/lsp"
 import { Snapshot } from "@/snapshot"
 import { SyncEvent } from "../sync"
@@ -761,10 +761,20 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
   }))
 }
 
-function providerMeta(metadata: Record<string, any> | undefined) {
+function providerMeta(metadata: Record<string, unknown> | undefined): ProviderMetadata | undefined {
   if (!metadata) return undefined
-  const { providerExecuted: _, ...rest } = metadata
+  // part.metadata 同时承载 provider 回放信息和 opencode 内部控制标记。
+  // 进入 AI SDK 的 providerOptions 必须保持 provider-name -> JSON object 的形态，
+  // 这里仅过滤会破坏 schema 的 primitive 内部标记和 providerExecuted；object
+  // 命名空间保持透传，避免破坏自定义 provider namespace 的既有兼容性。
+  const rest = Object.fromEntries(
+    Object.entries(metadata).filter(([key, value]) => key !== "providerExecuted" && providerMetaValue(value)),
+  ) as ProviderMetadata
   return Object.keys(rest).length > 0 ? rest : undefined
+}
+
+function providerMetaValue(input: unknown): input is ProviderMetadata[string] {
+  return typeof input === "object" && input !== null && !Array.isArray(input)
 }
 
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
@@ -921,15 +931,16 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type !== "reasoning") return false
         return part.metadata?.anthropic?.signature != null
       })
-      for (const part of msg.parts) {
-        if (part.type === "text") {
-          const text = part.text === "" && hasSignedReasoning ? " " : part.text
-          assistantMessage.parts.push({
-            type: "text",
-            text,
-            ...(differentModel ? {} : { providerMetadata: part.metadata }),
-          })
-        }
+        for (const part of msg.parts) {
+          if (part.type === "text") {
+            const text = part.text === "" && hasSignedReasoning ? " " : part.text
+            const providerMetadata = differentModel ? undefined : providerMeta(part.metadata)
+            assistantMessage.parts.push({
+              type: "text",
+              text,
+              ...(providerMetadata ? { providerMetadata } : {}),
+            })
+          }
         if (part.type === "step-start")
           assistantMessage.parts.push({
             type: "step-start",
@@ -1015,10 +1026,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               })
             continue
           }
+          const providerMetadata = providerMeta(part.metadata)
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,
-            providerMetadata: part.metadata,
+            ...(providerMetadata ? { providerMetadata } : {}),
           })
         }
       }
