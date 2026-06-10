@@ -1,4 +1,4 @@
-import { Effect, Schema, Stream } from "effect"
+import { Effect, Fiber, Schema, Stream } from "effect"
 import { PositiveInt } from "@/util/schema"
 import os from "os"
 import { createWriteStream } from "node:fs"
@@ -933,7 +933,7 @@ export const ShellTool = Tool.define(
           yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
-          yield* Effect.forkScoped(
+          const output = yield* Effect.forkScoped(
             Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
               Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
             ),
@@ -962,6 +962,12 @@ export const ShellTool = Tool.define(
             expired = true
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
           }
+
+          // 子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
+          // 已缓冲的最后几个 chunk 或它们触发的 metadata 更新。最终输出、截断、
+          // 诊断摘要都必须在输出消费完成后组装，否则 Linux 上 fast-exit 命令
+          // 会偶发丢尾部输出并把错误上下文误判为仍然可见。
+          yield* Fiber.join(output)
 
           return exit.kind === "exit" ? exit.code : null
         }),
@@ -1036,18 +1042,6 @@ export const ShellTool = Tool.define(
       if (meta.length > 0) {
         output += "\n\n" + meta.join("\n")
       }
-      // [local-smark] shell compression: close sink stream and track duration
-      if (sink) {
-        const stream = sink
-        yield* Effect.promise(
-          () =>
-            new Promise<void>((resolve) => {
-              stream.end(() => resolve())
-              stream.on("error", () => resolve())
-            }),
-        )
-      }
-
       const durationMs = Date.now() - started
       const displayOutput = preview(display.value())
       return {

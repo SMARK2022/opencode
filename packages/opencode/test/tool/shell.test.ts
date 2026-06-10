@@ -1950,7 +1950,9 @@ describe("tool.shell abort", () => {
         const updates: string[] = []
         const result = yield* run(
           {
-            command: `echo first && sleep 0.1 && echo second`,
+            // 0.3 秒用于制造可观察的流式输出边界，避免依赖不同平台对
+            // 相邻 echo 的管道 chunk 拆分；这些 chunk 在 Windows/CI 上可能被合并。
+            command: `echo first && sleep 0.3 && echo second`,
             description: "Streaming test",
           },
           {
@@ -1967,6 +1969,47 @@ describe("tool.shell abort", () => {
         expect(updates.length).toBeGreaterThan(1)
       }),
     ),
+  )
+
+  it.live(
+    "waits for final output metadata before returning",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          let finalMetadataDelivered = false
+          const command = `${bin} -e ${evalarg('console.log("first"); console.log("final")')}`
+          const result = yield* run(
+            {
+              command: PS.has(sh()) ? `& ${command}` : command,
+              description: "Emit final metadata output",
+            },
+            {
+              ...ctx,
+              metadata: (input) => {
+                const output = (input.metadata as { output?: string })?.output
+                if (!output?.includes("final") || finalMetadataDelivered) return Effect.void
+
+                // "final" 是本用例的最后输出哨兵；延迟的 metadata 回调模拟
+                // live UI 仍在消费最后一个 shell 输出 chunk。ShellTool 必须等
+                // 这个输出消费者 drain 完再组装完成态结果，否则 fast-exit 命令
+                // 会和最终 metadata、截断、诊断摘要计算发生竞态。
+                return Effect.sleep("750 millis").pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      finalMetadataDelivered = true
+                    }),
+                  ),
+                )
+              },
+            },
+          )
+
+          expect(result.output).toContain("final")
+          expect(finalMetadataDelivered).toBe(true)
+        }),
+      ),
+    15_000,
   )
 })
 
