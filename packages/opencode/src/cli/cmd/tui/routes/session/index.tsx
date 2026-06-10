@@ -32,6 +32,7 @@ import {
   MouseButton,
   type MouseEvent as TuiMouseEvent,
   type OptimizedBuffer,
+  type Renderable,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type {
@@ -2141,19 +2142,39 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
   const [hover, setHover] = createSignal(false)
   const clickable = createMemo(() => Boolean(props.review.sessionID))
   const openReview = (evt?: TuiMouseEvent) => openAutoReviewSession(props.review, navigate, renderer, evt)
+  // 这行是 reviewer 子会话入口，不是 transcript 正文。把 mouseup 放在整行 box 上，
+  // 并关闭内部 text selection，避免 OpenTUI 在不同平台把一次普通点击先解释成
+  // 文本选择，导致 openAutoReviewSession 只消费事件而不导航。
   return (
     <box
+      id={autoReviewLineID(props.review)}
       width="100%"
       height={1}
       flexShrink={0}
+      onMouseUp={openReview}
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
     >
-      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
+      <text selectable={false} fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
         {autoReviewLabel(props.review)}
       </text>
     </box>
   )
+}
+
+function autoReviewLineID(review: AutoReviewMetadata) {
+  // 固定前缀只用于 TUI renderable 查找，reviewID 负责区分同屏多个工具的
+  // reviewer 行；不要把这个 id 当作持久化数据或对外 API。
+  return `auto-review-${review.reviewID}`
+}
+
+function autoReviewLineTarget(review: AutoReviewMetadata, target: Renderable | null | undefined) {
+  const id = autoReviewLineID(review)
+  for (let item = target; item; item = item.parent) {
+    if (item.id === id) return item
+    const child = item.findDescendantById(id)
+    if (child) return child
+  }
 }
 
 function openAutoReviewSession(
@@ -2179,10 +2200,15 @@ function openAutoReviewFromToolChrome(
   renderer: ReturnType<typeof useRenderer>,
   evt: TuiMouseEvent | undefined,
 ) {
-  // OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。只在 target 的
-  // 父 renderable 下一行兜底处理；标题行是 parentY，review 行是 parentY + 1，
-  // diff body/expand affordance 更靠后，因此不会扩大成整卡片点击导航。
-  if (!evt?.target?.parent || evt.y !== evt.target.parent.screenY + 1) return false
+  // OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
+  // root + 1 这类布局猜测，因为 BlockTool 的相邻行可能是标题、body 或
+  // expand affordance；只接受事件命中的 renderable 子树里真实存在的 review row。
+  if (!review?.sessionID || !evt?.target) return false
+  const row = autoReviewLineTarget(review, evt.target)
+  // mockMouse 和真实终端鼠标事件传入的是 char frame 的 0-based y；OpenTUI
+  // renderable.screenY 在当前布局树中是对应行的 1-based 屏幕坐标。先用 id
+  // 找到真实 review row，再做这个坐标归一化，避免退回 root+1 的布局猜测。
+  if (!row || evt.y !== row.screenY - 1) return false
   return openAutoReviewSession(review, navigate, renderer, evt)
 }
 

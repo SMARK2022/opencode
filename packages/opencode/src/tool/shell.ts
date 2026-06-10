@@ -320,11 +320,13 @@ function preview(text: string) {
 }
 
 function tail(text: string, maxLines: number, maxBytes: number) {
-  const lines = text.replace(/\r?\n$/, "").split("\n")
+  const source = text.replace(/\r?\n$/, "")
+  const lines = source.split("\n")
   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
     return {
       text,
       cut: false,
+      hidden: "",
     }
   }
 
@@ -345,9 +347,13 @@ function tail(text: string, maxLines: number, maxBytes: number) {
     out.unshift(lines[i])
     bytes += size
   }
+  const visible = out.join("\n")
   return {
-    text: out.join("\n"),
+    text: visible,
     cut: true,
+    // tail 只展示末尾窗口；hidden 是同一个 source 中被窗口丢弃的前缀。
+    // 后续诊断只扫描这段文本，避免从全量输出再反推“是否已经可见”。
+    hidden: visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source,
   }
 }
 
@@ -735,7 +741,14 @@ export const ShellTool = Tool.define(
           const file = yield* cygpath(shell, text)
           if (file) return file
         }
-        return AppFileSystem.normalizePath(path.resolve(root, AppFileSystem.windowsPath(text)))
+        const textPath = AppFileSystem.windowsPath(text)
+        // PowerShell drive-relative paths like `C:../file` are scoped to the
+        // shell's current location on that drive. Node resolves them against the
+        // process-level per-drive cwd, which is unrelated to the command cwd and
+        // can request the wrong external_directory. Permission scanning keeps the
+        // visible command cwd as the only trust boundary while preserving absolute
+        // drive paths such as `C:/file` and `C:\\file`.
+        return AppFileSystem.normalizePath(path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath))
       }
       return path.resolve(root, text)
     })
@@ -835,7 +848,7 @@ export const ShellTool = Tool.define(
       let expired = false
       let aborted = false
       const started = Date.now()
-      const diag = new BashDiagnosticCollector()
+      const hiddenDiag = new BashDiagnosticCollector()
 
       const closeSink = Effect.fnUntraced(function* () {
         const stream = sink
@@ -874,7 +887,6 @@ export const ShellTool = Tool.define(
       let displayed = false
       const onChunk = (chunk: string) => {
         if (!chunk) return Effect.void
-        diag.push(chunk)
         const visible = preview(display.push(chunk))
         displayed = true
         const size = Buffer.byteLength(chunk, "utf-8")
@@ -883,6 +895,9 @@ export const ShellTool = Tool.define(
         while (used > keep && list.length > 1) {
           const item = list.shift()
           if (!item) break
+          // 这些 chunk 已经被内存窗口丢弃，最终不会进入模型可见输出。
+          // 诊断摘录只从隐藏输出生成，避免和 exit notice 或可见输出互相推断。
+          hiddenDiag.push(item.text)
           used -= item.size
           cut = true
         }
@@ -982,8 +997,6 @@ export const ShellTool = Tool.define(
       if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
       const raw = list.map((item) => item.text).join("")
       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
-      diag.end()
-      const diagnosticSnapshot = diag.snapshot()
       const normalizedStats = outputStats(normalized)
 
       // Compress output if enabled
@@ -992,10 +1005,15 @@ export const ShellTool = Tool.define(
         : { text: normalized, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
 
       const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
-      if (end.cut) cut = true
+      if (end.cut) {
+        cut = true
+        hiddenDiag.push(end.hidden)
+      }
       if (!file && end.cut) {
         file = yield* trunc.write(normalized)
       }
+      hiddenDiag.end()
+      const diagnosticSnapshot = hiddenDiag.snapshot()
 
       const emptyOutput = end.text.length === 0
       let output = emptyOutput ? "(no output)" : end.text
@@ -1012,29 +1030,30 @@ export const ShellTool = Tool.define(
           output
       }
 
-      // Append diagnostic appendix for failed commands
-      const appendix = renderDiagnosticAppendix(diagnosticSnapshot, {
+      // Append diagnostic appendix for failed commands. The snapshot only contains
+      // text omitted by the final output window, so any rendered excerpt is a
+      // genuinely missing signal rather than a duplicate of visible output.
+      const diagnosticAppendix = renderDiagnosticAppendix(diagnosticSnapshot, {
         durationMs: Date.now() - started,
         exitCode: code,
-        visibleOutput: output,
       })
-      if (appendix) {
-        output += "\n\n" + appendix
+      if (diagnosticAppendix) {
+        output += "\n\n" + diagnosticAppendix
       }
 
       // metadata.exit 已经保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
-      // 空输出和缺少诊断摘要的失败输出会让后续模型误判命令状态，所以只追加退出码 notice。
+      // exit notice 只描述进程如何结束；它和隐藏输出诊断互相独立，不能互相抑制。
       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
       const exitNotice =
         code === null
           ? undefined
-          : emptyOutput
+        : emptyOutput
             ? formatExecutionNotice({
                 severity: code === 0 ? "info" : "error",
                 reason: "exit",
                 exit_code: code,
               })
-            : code !== 0 && !appendix
+            : code !== 0
               ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
               : undefined
       if (exitNotice) meta.push(exitNotice)

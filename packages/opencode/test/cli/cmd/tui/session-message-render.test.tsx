@@ -115,6 +115,10 @@ test("block auto review click opens reviewer without toggling the tool card", as
     },
     async (app) => {
       let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      await clickVisibleText(app, "Edit external folder")
+      await app.renderOnce()
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("reviewer child visible"))).toBe(false)
+
       await clickVisibleText(app, "✓ auto review · allowed · auth high")
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))

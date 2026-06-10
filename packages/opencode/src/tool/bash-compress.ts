@@ -199,7 +199,6 @@ export type DiagnosticSnapshot = {
 export type RenderAppendixOptions = {
   durationMs: number           // 命令执行耗时
   exitCode: number | null      // 命令退出码
-  visibleOutput: string        // 当前对模型可见的已压缩、已截断输出
   config?: Partial<CompressionConfig> // 允许传入部分配置覆盖默认
 }
 
@@ -616,14 +615,10 @@ function terminalRenderCollapsedText(text: string, stable: string) {
   return stripAnsi(text).replace(/\r/g, "\n").split("\n").filter((line) => line.trim().length > 0).join("\n") !== stable
 }
 
-// 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
+// 去掉 ANSI 控制字符，供压缩和诊断渲染使用；诊断候选只来自隐藏输出，
+// 不再和可见窗口做重复性判断。
 function stripAnsi(text: string) {
   return text.replace(ANSI_GLOBAL_RE, "")
-}
-
-// 将空白差异归一化，降低 tail 截断、终端颜色、格式化空白导致的可见性误判。
-function normalizeVisibleText(text: string) {
-  return stripAnsi(text).replace(/\s+/g, " ").trim()
 }
 
 // 合并传入配置与默认配置
@@ -2046,28 +2041,6 @@ export class BashDiagnosticCollector {
   }
 }
 
-// 检查某个提取出来的错误上下文是否实际上已经存在于给 LLM 可见的输出 (visibleOutput) 当中。
-// 为了防止输出本就很短时还在尾部把错误内容重复打两遍，浪费 token 还会干扰模型。
-function contextAlreadyVisible(ctx: DiagnosticContext, visibleOutput: string, config: CompressionConfig) {
-  const center = ctx.lines.find((line) => line.no === ctx.centerLine)
-  if (!center) return false
-
-  const rawCenter = center.text
-  const truncatedCenter = truncateOneLine(rawCenter, config.diagnosticLineMaxChars)
-  const visibleNorm = normalizeVisibleText(visibleOutput)
-  const rawNorm = normalizeVisibleText(rawCenter)
-  const truncatedNorm = normalizeVisibleText(truncatedCenter)
-  if (!rawNorm && !truncatedNorm) return false
-
-  // 原文匹配优先，归一化匹配兜底，避免 ANSI、空白折叠或诊断行截断造成重复附录。
-  return (
-    visibleOutput.includes(rawCenter) ||
-    visibleOutput.includes(truncatedCenter) ||
-    visibleNorm.includes(rawNorm) ||
-    visibleNorm.includes(truncatedNorm)
-  )
-}
-
 // 将错误上下文集合格式化为字符串，方便追加到最后的 Bash 输出中（增强版：带优先级标签）
 function renderDiagnosticContexts(contexts: DiagnosticContext[], config: CompressionConfig) {
   const out: string[] = []
@@ -2095,7 +2068,8 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
 
 /**
  * 组装并渲染完整的诊断附录（Appendix），作为 Bash 输出结尾的后缀。
- * 只返回当前可见输出中没有出现的高信号错误上下文。
+ * 调用方只传入最终输出隐藏掉的文本生成的 snapshot；因此这里不和
+ * visible output 做二次比对，避免诊断摘录与 exit notice 互相推断。
  * 优化：只在命令失败或有致命错误时才输出诊断信息，避免成功时的 token 浪费。
  */
 export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
@@ -2114,28 +2088,11 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
   }
 
   // 优先级排序：first > fatal > recent
-  const priorityContexts: DiagnosticContext[] = []
-  
-  // 添加 first error contexts（最早的错误，通常是 root cause）
-  for (const ctx of snapshot.firstErrorContexts) {
-    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
-      priorityContexts.push(ctx)
-    }
-  }
-  
-  // 添加 fatal contexts（致命错误）
-  for (const ctx of snapshot.fatalContexts) {
-    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
-      priorityContexts.push(ctx)
-    }
-  }
-  
-  // 添加 recent contexts（最近的错误）
-  for (const ctx of snapshot.recentErrorContexts) {
-    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
-      priorityContexts.push(ctx)
-    }
-  }
+  const priorityContexts = [
+    ...snapshot.firstErrorContexts,
+    ...snapshot.fatalContexts,
+    ...snapshot.recentErrorContexts,
+  ]
 
   // 去重并限制数量
   const uniqueContexts = Array.from(
