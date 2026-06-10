@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { expect, test } from "bun:test"
+import { expect, test as baseTest } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
@@ -36,6 +36,108 @@ import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
 import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
 
 const sessionID = "ses_render"
+// withRenderedSession 会临时改写 Global.Path.state，并驱动真实 OpenTUI
+// renderer/mockMouse。Bun 同文件并发会让多个 app 共享鼠标、selection 和
+// parser worker 状态，导致点击/高亮行为互相污染；本文件按渲染行为串行。
+const test = baseTest.serial
+
+test("non-shell auto review status opens the reviewer child session", async () => {
+  const childID = "ses_reviewer_child"
+  await withRenderedSession(
+    [assistantMessage("msg_read_review_click", 1)],
+    {
+      msg_read_review_click: [
+        completedToolPart(
+          "part_read_review_click",
+          "msg_read_review_click",
+          "read",
+          { filePath: "external folder/secret key.txt" },
+          {
+            autoReview: {
+              reviewID: "review_read_click",
+              sessionID: childID,
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
+      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        messages: [
+          {
+            ...assistantMessage("msg_reviewer_child", 2),
+            sessionID: childID,
+            agent: "permission-reviewer",
+          },
+        ],
+        parts: { msg_reviewer_child: [textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID })] },
+      },
+    },
+  )
+})
+
+test("block auto review click opens reviewer without toggling the tool card", async () => {
+  const childID = "ses_reviewer_child"
+  await withRenderedSession(
+    [assistantMessage("msg_edit_review_click", 1)],
+    {
+      msg_edit_review_click: [
+        completedToolPart(
+          "part_edit_review_click",
+          "msg_edit_review_click",
+          "edit",
+          { filePath: "external folder/config.json", oldString: "old", newString: "new" },
+          {
+            diff: Array.from({ length: 30 }, (_, index) => `+line ${index}`).join("\n"),
+            diagnostics: {},
+            autoReview: {
+              reviewID: "review_edit_click",
+              sessionID: childID,
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external edit requires reviewer approval" },
+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this edit" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      await clickVisibleText(app, "✓ auto review · allowed · auth high")
+
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+      frame = rows(app.captureCharFrame())
+      expect(frame.some((line) => line.includes("Click to collapse"))).toBe(false)
+    },
+    {},
+    {},
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        messages: [
+          {
+            ...assistantMessage("msg_reviewer_child_block", 2),
+            sessionID: childID,
+            agent: "permission-reviewer",
+          },
+        ],
+        parts: { msg_reviewer_child_block: [textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", { sessionID: childID })] },
+      },
+    },
+  )
+})
 
 test("assistant inline tool messages are separated outside the message border", async () => {
   await withRenderedSession(
@@ -145,6 +247,34 @@ test("session follows streaming growth when the viewport is visually at the bott
     },
     {},
     { width: 100, height: 18 },
+  )
+})
+
+test("narrow viewport keeps the user message cell from collapsing", async () => {
+  await withRenderedSession(
+    [userMessage("msg_user_narrow", 1), assistantMessage("msg_assistant_after_user", 2, "msg_user_narrow")],
+    {
+      msg_user_narrow: [textPart("part_user_narrow", "msg_user_narrow", "keep this user request visible")],
+      msg_assistant_after_user: [textPart("part_assistant_after_user", "msg_assistant_after_user", "assistant remains below user")],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("keep this user request visible")) &&
+          lines.some((line) => line.includes("assistant remains below user")),
+      )
+      const user = findRow(frame, "keep this user request visible")
+      const assistant = findRow(frame, "assistant remains below user")
+
+      // 这是原先 UserMessage flexShrink 回归的行为面：终端高度很小且后续
+      // assistant 消息存在时，用户消息外层 cell 仍要保留左边框和内容行，不能
+      // 被布局压缩到只剩后续消息；这里不绑定 JSX 属性顺序或组件内部名称。
+      expect(frame[user]).toMatch(/^┃/)
+      expect(assistant).toBeGreaterThan(user)
+    },
+    {},
+    { width: 52, height: 8 },
   )
 })
 
@@ -1564,104 +1694,6 @@ test("multi-file apply_patch renders one auto review status for the whole patch"
   )
 })
 
-test("non-shell auto review status opens the reviewer child session", async () => {
-  const childID = "ses_reviewer_child"
-  await withRenderedSession(
-    [assistantMessage("msg_read_review_click", 1)],
-    {
-      msg_read_review_click: [
-        completedToolPart(
-          "part_read_review_click",
-          "msg_read_review_click",
-          "read",
-          { filePath: "external folder/secret key.txt" },
-          {
-            autoReview: {
-              reviewID: "review_read_click",
-              sessionID: childID,
-              status: "allowed",
-              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
-            },
-          },
-        ),
-      ],
-    },
-    async (app) => {
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
-
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-    },
-    {},
-    {},
-    {
-      [childID]: {
-        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-        messages: [
-          {
-            ...assistantMessage("msg_reviewer_child", 2),
-            sessionID: childID,
-            agent: "permission-reviewer",
-          },
-        ],
-        parts: { msg_reviewer_child: [textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID })] },
-      },
-    },
-  )
-})
-
-test("block auto review click opens reviewer without toggling the tool card", async () => {
-  const childID = "ses_reviewer_child"
-  await withRenderedSession(
-    [assistantMessage("msg_edit_review_click", 1)],
-    {
-      msg_edit_review_click: [
-        completedToolPart(
-          "part_edit_review_click",
-          "msg_edit_review_click",
-          "edit",
-          { filePath: "external folder/config.json", oldString: "old", newString: "new" },
-          {
-            diff: Array.from({ length: 30 }, (_, index) => `+line ${index}`).join("\n"),
-            diagnostics: {},
-            autoReview: {
-              reviewID: "review_edit_click",
-              sessionID: childID,
-              status: "allowed",
-              precheck: { level: "cautious", reason: "external edit requires reviewer approval" },
-              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this edit" },
-            },
-          },
-        ),
-      ],
-    },
-    async (app) => {
-      let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
-      await clickVisibleText(app, "✓ auto review · allowed · auth high")
-
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-      frame = rows(app.captureCharFrame())
-      expect(frame.some((line) => line.includes("Click to collapse"))).toBe(false)
-    },
-    {},
-    {},
-    {
-      [childID]: {
-        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-        messages: [
-          {
-            ...assistantMessage("msg_reviewer_child_block", 2),
-            sessionID: childID,
-            agent: "permission-reviewer",
-          },
-        ],
-        parts: { msg_reviewer_child_block: [textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", { sessionID: childID })] },
-      },
-    },
-  )
-})
-
 test("permission review decision renders as a reviewer cell", async () => {
   await withRenderedSession(
     [assistantMessage("msg_review_decision", 1)],
@@ -1935,10 +1967,14 @@ async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, tex
   expect(y).toBeGreaterThanOrEqual(0)
   const x = raw[y].indexOf(text)
   expect(x).toBeGreaterThanOrEqual(0)
-  // Click inside the rendered label rather than at a fixed column. The exact
-  // gutter can shift between OpenTUI renderers in the same process on Linux, but
-  // the user-visible label is the stable behaviour this test cares about.
-  await app.mockMouse.click(x + 1, y + 1)
+  const target = { x: x + Math.floor(text.length / 2), y }
+  // OpenTUI 的 mockMouse API 接收当前 char frame 的 0-based 坐标；先移动到
+  // label 中点并渲染一次，模拟真实鼠标进入目标行，避免复杂渲染历史下
+  // mouseup 被父工具卡的 hitbox 接走。
+  app.renderer.clearSelection()
+  await app.mockMouse.moveTo(target.x, target.y)
+  await app.renderOnce()
+  await app.mockMouse.click(target.x, target.y)
 }
 
 function sessionInfo(extra: Partial<SessionInfo> = {}) {

@@ -1649,17 +1649,21 @@ describe("tool.shell permissions", () => {
     )
   }
 
-  each("always pattern has space before wildcard to not include different commands", () =>
+  each("always pattern has space before wildcard to not include different commands", (item) =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
       yield* runIn(
         tmp,
         Effect.gen(function* () {
           const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-          yield* run({ command: "ls -la", description: "List" }, capture(requests))
+          // 这个用例只验证 approval 的 `always` pattern 必须是 `命令 + 空格 + *`，
+          // 避免 `ls*` 一类宽泛规则误放行其它命令；cmd.exe 下 `ls` 会被兼容性
+          // 保护提前拒绝，所以使用同样会产生文件访问 permission 的原生命令 `dir`。
+          const command = item.label === "cmd" ? "dir" : "ls -la"
+          yield* run({ command, description: "List" }, capture(requests))
           const bashReq = requests.find((r) => r.permission === "bash")
           expect(bashReq).toBeDefined()
-          expect(bashReq!.always[0]).toBe("ls *")
+          expect(bashReq!.always[0]).toBe(item.label === "cmd" ? "dir *" : "ls *")
         }),
       )
     }),

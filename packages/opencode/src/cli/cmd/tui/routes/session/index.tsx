@@ -2140,26 +2140,50 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
   const clickable = createMemo(() => Boolean(props.review.sessionID))
+  const openReview = (evt?: TuiMouseEvent) => openAutoReviewSession(props.review, navigate, renderer, evt)
   return (
     <box
+      width="100%"
+      height={1}
+      flexShrink={0}
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={(evt?: TuiMouseEvent) => {
-        if (!props.review.sessionID) return
-        if (renderer.getSelection()?.getSelectedText()) return
-        // Review rows can live inside clickable/collapsible tool cards. Stop the
-        // event here so opening @permission-reviewer does not also toggle the
-        // parent diff/output card or trigger a tool-specific click handler.
-        evt?.preventDefault()
-        evt?.stopPropagation()
-        navigate({ type: "session", sessionID: props.review.sessionID })
-      }}
     >
-      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
+      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
         {autoReviewLabel(props.review)}
       </text>
     </box>
   )
+}
+
+function openAutoReviewSession(
+  review: AutoReviewMetadata | undefined,
+  navigate: ReturnType<typeof useRoute>["navigate"],
+  renderer: ReturnType<typeof useRenderer>,
+  evt?: TuiMouseEvent,
+) {
+  if (!review?.sessionID) return false
+  // auto review 行经常嵌在可点击或可折叠的工具卡中。这里必须消费事件，
+  // 保持「点击审计结果只打开 reviewer 子会话」这个不变量，不能让事件
+  // 继续冒泡到父 BlockTool/InlineTool 后触发展开、折叠或工具专属点击。
+  evt?.preventDefault()
+  evt?.stopPropagation()
+  if (renderer.getSelection()?.getSelectedText()) return true
+  navigate({ type: "session", sessionID: review.sessionID })
+  return true
+}
+
+function openAutoReviewFromToolChrome(
+  review: AutoReviewMetadata | undefined,
+  navigate: ReturnType<typeof useRoute>["navigate"],
+  renderer: ReturnType<typeof useRenderer>,
+  evt: TuiMouseEvent | undefined,
+) {
+  // OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。只在 target 的
+  // 父 renderable 下一行兜底处理；标题行是 parentY，review 行是 parentY + 1，
+  // diff body/expand affordance 更靠后，因此不会扩大成整卡片点击导航。
+  if (!evt?.target?.parent || evt.y !== evt.target.parent.screenY + 1) return false
+  return openAutoReviewSession(review, navigate, renderer, evt)
 }
 
 function ToolAutoReviewLine() {
@@ -2184,6 +2208,8 @@ function InlineTool(props: {
   const ctx = use()
   const sync = useSync()
   const renderer = useRenderer()
+  const { navigate } = useRoute()
+  const review = useContext(ToolAutoReview)
   const [hover, setHover] = createSignal(false)
 
   const permission = createMemo(() => {
@@ -2216,7 +2242,8 @@ function InlineTool(props: {
       overflow="hidden"
       onMouseOver={() => props.onClick && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt?: TuiMouseEvent) => {
+        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
         if (renderer.getSelection()?.getSelectedText()) return
         props.onClick?.()
       }}
@@ -2288,6 +2315,8 @@ function BlockTool(props: {
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
+  const { navigate } = useRoute()
+  const review = useContext(ToolAutoReview)
   const toolTopMargin = useContext(ToolPartTopMargin)
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
@@ -2330,6 +2359,7 @@ function BlockTool(props: {
       onMouseOver={() => (props.onClick || props.onRightClick || collapsible()) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: TuiMouseEvent) => {
+        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
         if (renderer.getSelection()?.getSelectedText()) return
         if (evt?.button === MouseButton.RIGHT) {
           if (!props.onRightClick) return

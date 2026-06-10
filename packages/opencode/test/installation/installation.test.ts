@@ -5,6 +5,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Installation } from "../../src/installation"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { AppProcess } from "@opencode-ai/core/process"
+import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { testEffect } from "../lib/effect"
 
 const encoder = new TextEncoder()
@@ -82,7 +83,10 @@ describe("installation", () => {
       Effect.gen(function* () {
         const result = yield* Installation.Service.use((svc) => svc.latest("npm"))
         expect(result).toBe("1.5.0")
-        expect(npmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+        // Installation.latest intentionally follows NpmConfig.registry so local
+        // npm mirrors and OPENCODE_NPM_REGISTRY overrides are honored. The test
+        // asserts that integration boundary instead of pinning one public mirror.
+        expect(npmCalls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`)
       }),
     )
 
@@ -96,7 +100,9 @@ describe("installation", () => {
       Effect.gen(function* () {
         const result = yield* Installation.Service.use((svc) => svc.latest("bun"))
         expect(result).toBe("1.6.0")
-        expect(bunCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+        // Same registry contract as npm: bun installs query the registry chosen
+        // by NpmConfig, which may be a configured mirror in offline/China setups.
+        expect(bunCalls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`)
       }),
     )
 
@@ -110,7 +116,9 @@ describe("installation", () => {
       Effect.gen(function* () {
         const result = yield* Installation.Service.use((svc) => svc.latest("pnpm"))
         expect(result).toBe("1.7.0")
-        expect(pnpmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+        // Keep pnpm aligned with npm/bun so all Node package managers respect
+        // the same registry selection and avoid environment-dependent failures.
+        expect(pnpmCalls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`)
       }),
     )
 

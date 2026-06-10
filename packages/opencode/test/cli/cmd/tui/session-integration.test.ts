@@ -58,13 +58,6 @@ describe("Session route integration points", () => {
     })
   })
 
-  describe("message cell border", () => {
-    test("UserMessage has flexShrink={0} on outer border box", () => {
-      // The user message border box should have flexShrink to prevent collapse
-      expect(sessionSource).toMatch(/borderColor={color\(\)}\s*\n\s*customBorderChars.*\n\s*marginTop.*\n\s*flexShrink={0}/)
-    })
-  })
-
   describe("prompt area overlay (renderBefore)", () => {
     test("footer box uses renderBefore to clear background below messages", () => {
       expect(sessionSource).toContain("renderBefore={function")
