@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Fiber, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -600,7 +600,8 @@ export const ShellTool = Tool.define(
             })
           }
 
-          yield* Effect.forkScoped(
+          // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成
+          const output = yield* Effect.forkScoped(
             // #126：end 时 flush decoder 尾部不完整码点
             Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
               Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
@@ -630,6 +631,12 @@ export const ShellTool = Tool.define(
             expired = true
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
           }
+
+          // #291：子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
+          // 已缓冲的最后几个 chunk 或它们触发的 metadata 更新。最终输出、截断、
+          // 诊断摘要都必须在输出消费完成后组装，否则 Linux 上 fast-exit 命令
+          // 会偶发丢尾部输出并把错误上下文误判为仍然可见。
+          yield* Fiber.join(output)
 
           return exit.kind === "exit" ? exit.code : null
         }),
