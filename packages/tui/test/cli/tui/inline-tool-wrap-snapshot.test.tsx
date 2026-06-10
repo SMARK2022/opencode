@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { createSignal, For, Show } from "solid-js"
-import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core"
+import { createRequire } from "node:module"
+import { createContext, createMemo, createSignal, For, Show, useContext } from "solid-js"
+import { BoxRenderable, MouseButton, type ScrollBoxRenderable } from "@opentui/core"
 import { testRender, type JSX } from "@opentui/solid"
+import { SplitBorder } from "../../../src/ui/border"
+import { selectedForeground } from "../../../src/context/theme"
+import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import {
   formatCompletedSubagentDetail,
   formatSubagentRetry,
@@ -15,6 +19,7 @@ import {
   parseTodos,
   alwaysSeparate,
   toolDisplay,
+  autoReviewLabel,
 } from "../../../src/routes/session"
 import { layoutGroups } from "../../../src/util/layout"
 
@@ -224,6 +229,16 @@ async function renderFrame(component: () => JSX.Element, options: { width: numbe
     .trimEnd()
 }
 
+// 新增真实点击用例复用可见文本坐标，避免布局变化把操作落到父卡片。
+function findVisibleText(frame: string[], text: string) {
+  const y = frame.findIndex((line) => line.includes(text))
+  if (y < 0) return undefined
+  const x = frame[y].indexOf(text)
+  if (x < 0) return undefined
+  return { x, y }
+}
+
+
 describe("TUI inline tool wrapping", () => {
   test("separates assistant groups without separating tools inside one group", async () => {
     // 使用生产行和实际布局，空组不能吞掉边界或给同组工具增加空行。
@@ -309,6 +324,190 @@ describe("TUI inline tool wrapping", () => {
         .map((line) => line.trim())
         .filter(Boolean),
     ).toEqual(["$ echo hello", "auto review"])
+  })
+
+  test.serial.each(["read", "edit"] as const)("auto review preserves %s card actions and narrow user layout", async (kind) => {
+    const require = createRequire(import.meta.resolve("@opentui/solid"))
+    const runtime = { ...(await import("solid-js")), ...(await import("@opentui/solid")) }
+    const source = await Bun.file(new URL("../../../src/routes/session/index.tsx", import.meta.url)).text()
+    // 沿用 #212 的生产源码执行边界，编译真实组件，不另写点击或布局算法。
+    const names = [
+      "UserMessage",
+      "autoReviewColor",
+      "AutoReviewLine",
+      "ToolAutoReviewLine",
+      "InlineTool",
+      "BlockTool",
+      "openAutoReviewSession",
+      "openAutoReviewFromToolChrome",
+    ]
+    const functions = names.map((name) => {
+      const found = source.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}(?=\\r?\\n|$)`))?.[0]
+      expect(found).toBeDefined()
+      return found!
+    })
+    const compiler = require("@babel/core") as {
+      transformSync(source: string, options: Record<string, unknown>): { code?: string } | null
+    }
+    const compiled = compiler.transformSync(functions.join("\n"), {
+      filename: "session-review-fixture.tsx",
+      configFile: false,
+      babelrc: false,
+      presets: [[require("babel-preset-solid"), { generate: "universal", moduleName: "@opentui/solid" }]],
+      plugins: [[require("@babel/plugin-transform-typescript"), { isTSX: true }]],
+    })?.code
+    expect(compiled).toBeDefined()
+    const code = compiled!.replace(
+      /import \{([\s\S]*?)\} from "(?:@opentui\/solid|solid-js)";/g,
+      (_: string, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = runtime;`,
+    )
+    expect(code).not.toMatch(/\bimport\s/)
+    const review = {
+      reviewID: "review_click", sessionID: "ses_reviewer_child", status: "allowed",
+      result: { risk_level: "high", user_authorization: "high", rationale: "user requested this action" },
+    } as const
+    const navigation: { type: string; sessionID: string }[] = []
+    const navigate = (route: { type: string; sessionID: string }) => navigation.push(route)
+    const [expanded, setExpanded] = createSignal(false)
+    let parentClicks = 0
+    const ToolAutoReview = createContext(() => review)
+    const theme = createTuiPluginApi().theme.current
+    const dependencies = {
+      createMemo,
+      createSignal,
+      useContext,
+      Show,
+      For,
+      InlineToolRow,
+      alwaysSeparate,
+      SplitBorder,
+      selectedForeground,
+      MouseButton,
+      autoReviewLabel,
+      ToolAutoReview,
+      useRenderer: runtime.useRenderer,
+      useTheme: () => ({ theme }),
+      useRoute: () => ({ navigate }),
+      use: () => ({ sessionID: "ses_render", showTimestamps: () => false }),
+      useLocal: () => ({ agent: { color: () => theme.text } }),
+      useSync: () => ({ data: { permission: {} } }),
+    }
+    const production = new Function(
+      "runtime",
+      "dependencies",
+      `const {${Object.keys(dependencies).join(",")}} = dependencies;\n${code}\nreturn {UserMessage, InlineTool, BlockTool, openAutoReviewSession, openAutoReviewFromToolChrome};`,
+    )(runtime, dependencies) as Record<"UserMessage" | "InlineTool" | "BlockTool", (props: Record<string, unknown>) => JSX.Element> &
+      Record<"openAutoReviewSession" | "openAutoReviewFromToolChrome", (...args: unknown[]) => boolean>
+    const Card = kind === "edit" ? production.BlockTool : production.InlineTool
+    await renderFrame(
+      () => (
+        <ToolAutoReview.Provider value={() => review}>
+          <Card
+            title="Edit external folder/config.json with a long wrapped title that spans another row"
+            icon="→"
+            complete={true}
+            pending=""
+            part={{ tool: kind, state: { status: "completed" } }}
+            preview={kind === "edit" && !expanded() ? <text>diff preview</text> : undefined}
+            onClick={() => {
+              parentClicks++
+              setExpanded((value) => !value)
+            }}
+          >
+            {kind === "edit" ? <text>expanded diff body</text> : "Read external folder/secret key.txt"}
+          </Card>
+        </ToolAutoReview.Provider>
+      ),
+      { width: 72, height: 18 },
+    )
+    const app = testSetup!
+    const label = autoReviewLabel(review)
+    const point = findVisibleText(app.captureCharFrame().split("\n"), label)
+    expect(point).toBeDefined()
+    // #292：使用原生零基坐标，先进入标签再点击，避免误中父卡 hitbox。
+    app.renderer.clearSelection()
+    await app.mockMouse.moveTo(point!.x + Math.floor(label.length / 2), point!.y)
+    await app.renderOnce()
+    await app.mockMouse.click(point!.x + Math.floor(label.length / 2), point!.y)
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    expect(parentClicks).toBe(0)
+    expect(expanded()).toBe(false)
+    if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
+    navigation.length = 0
+    // 选区消费事件但不导航；无子会话、无 target 或非审查 target 不产生导航。
+    const effects: string[] = []
+    const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: { id: "unrelated" } }
+    const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }) }
+    expect(production.openAutoReviewSession(review, navigate, selected, evt)).toBe(true)
+    expect(effects).toEqual(["default", "bubble"])
+    expect(navigation).toEqual([])
+    expect(production.openAutoReviewSession({ ...review, sessionID: undefined }, navigate, app.renderer, evt)).toBe(false)
+    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, evt)).toBe(false)
+    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, undefined)).toBe(false)
+    expect(navigation).toEqual([])
+    expect(production.openAutoReviewSession(review, navigate, app.renderer)).toBe(true)
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    navigation.length = 0
+    const reviewTarget = app.renderer.root.getChildren()[0].getChildren().find((item) => item.id === `auto-review-${review.reviewID}`)
+    expect(reviewTarget).toBeInstanceOf(BoxRenderable)
+    expect(reviewTarget!.height).toBe(1)
+    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...evt, target: reviewTarget })).toBe(true)
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    navigation.length = 0
+    // 标题和正文仍执行父卡动作，审查导航不能扩展成整卡点击。
+    const title = findVisibleText(app.captureCharFrame().split("\n"), kind === "edit" ? "Edit external folder/config.json" : "Read external folder/secret key.txt")
+    expect(title).toBeDefined()
+    app.renderer.clearSelection()
+    await app.mockMouse.moveTo(title!.x + 1, title!.y)
+    await app.renderOnce()
+    await app.mockMouse.click(title!.x + 1, title!.y)
+    await app.renderOnce()
+    await app.renderOnce()
+    expect(navigation).toEqual([])
+    expect(parentClicks).toBe(1)
+    if (kind === "edit") {
+      const body = findVisibleText(app.captureCharFrame().split("\n"), "expanded diff body")
+      expect(body).toBeDefined()
+      await app.mockMouse.moveTo(body!.x + 1, body!.y)
+      await app.renderOnce()
+      await app.mockMouse.click(body!.x + 1, body!.y)
+      expect(navigation).toEqual([])
+      expect(parentClicks).toBe(2)
+    }
+    app.renderer.destroy()
+    let scroll: ScrollBoxRenderable | undefined
+    // 窄屏加载生产 UserMessage，断言真实外框高度和回绕边框，而非复制一个 box。
+    const frame = await renderFrame(
+      () => (
+        <scrollbox ref={(value) => (scroll = value)} width={52} height={8}>
+          <production.UserMessage
+            message={{ id: "msg_user_narrow", agent: "build", time: { created: 0 } }}
+            parts={[{ type: "text", text: "keep this user request visible with wrapped detail for this narrow viewport" }]}
+            index={0}
+            onMouseUp={() => {}}
+          />
+          <text>assistant remains below user</text>
+          <text>{"later assistant detail\n".repeat(12)}</text>
+        </scrollbox>
+      ),
+      { width: 52, height: 8 },
+    )
+    const lines = frame.split("\n")
+    const user = findVisibleText(lines, "keep this user request visible")
+    const wrapped = findVisibleText(lines, "narrow viewport")
+    const assistant = findVisibleText(lines, "assistant remains below user")
+    expect(user).toBeDefined()
+    expect(wrapped).toBeDefined()
+    expect(assistant).toBeDefined()
+    expect(wrapped!.y).toBeGreaterThan(user!.y)
+    expect(lines[user!.y]).toMatch(/^┃/)
+    expect(lines[wrapped!.y]).toMatch(/^┃/)
+    expect(assistant!.y).toBeGreaterThan(wrapped!.y)
+    const card = scroll!.getChildren().find((item) => item.id === "msg_user_narrow")
+    expect(card).toBeInstanceOf(BoxRenderable)
+    expect(card!.height).toBeGreaterThanOrEqual(4)
+    expect(card!.screenY + card!.height).toBeLessThanOrEqual(assistant!.y)
+    expect(scroll!.scrollHeight).toBeGreaterThan(scroll!.viewport.height)
   })
 
   test("preserves useful completed copy when a tool fails", async () => {

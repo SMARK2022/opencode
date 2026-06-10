@@ -2205,26 +2205,49 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
   const [hover, setHover] = createSignal(false)
   // #209：仅当有 sessionID 时可点击——无子会话的审查不可导航，hover 也不高亮
   const clickable = createMemo(() => Boolean(props.review.sessionID))
+  const openReview = (evt: MouseEvent) => openAutoReviewSession(props.review, navigate, renderer, evt)
   return (
     <box
+      id={`auto-review-${props.review.reviewID}`}
+      width="100%"
+      height={1}
+      flexShrink={0}
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={(evt?: MouseEvent) => {
-        // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
-        if (!props.review.sessionID) return
-        // 拖选审查结论时保留复制行为，不将选择动作当作导航。
-        if (renderer.getSelection()?.getSelectedText()) return
-        // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
-        evt?.preventDefault()
-        evt?.stopPropagation()
-        navigate({ type: "session", sessionID: props.review.sessionID })
-      }}
     >
-      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
+      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
         {autoReviewLabel(props.review)}
       </text>
     </box>
   )
+}
+
+function openAutoReviewSession(
+  review: AutoReviewMetadata | undefined,
+  navigate: ReturnType<typeof useRoute>["navigate"],
+  renderer: ReturnType<typeof useRenderer>,
+  evt?: MouseEvent,
+) {
+  // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
+  if (!review?.sessionID) return false
+  // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
+  evt?.preventDefault()
+  evt?.stopPropagation()
+  // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
+  if (renderer.getSelection()?.getSelectedText()) return true
+  navigate({ type: "session", sessionID: review.sessionID })
+  return true
+}
+
+function openAutoReviewFromToolChrome(
+  review: AutoReviewMetadata | undefined,
+  navigate: ReturnType<typeof useRoute>["navigate"],
+  renderer: ReturnType<typeof useRenderer>,
+  evt: MouseEvent | undefined,
+) {
+  // #292：标题会换行且卡片有 padding，兜底只认审查行自身，避免误把标题或正文当成入口。
+  if (!evt?.target || evt.target.id !== `auto-review-${review?.reviewID}`) return false
+  return openAutoReviewSession(review, navigate, renderer, evt)
 }
 
 // #214：ToolAutoReviewLine——从 context 读取 autoReview 并渲染共享审查状态行
@@ -2350,6 +2373,8 @@ function InlineTool(props: {
   const ctx = use()
   const sync = useSync()
   const renderer = useRenderer()
+  const { navigate } = useRoute()
+  const review = useContext(ToolAutoReview)
   const [hover, setHover] = createSignal(false)
   const [errorExpanded, setErrorExpanded] = createSignal(false)
 
@@ -2397,7 +2422,8 @@ function InlineTool(props: {
       separate={props.separate}
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
-      onMouseUp={() => {
+      onMouseUp={(evt: MouseEvent) => {
+        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
         if (renderer.getSelection()?.getSelectedText()) return
         if (failed()) {
           setErrorExpanded((value) => !value)
@@ -2436,7 +2462,7 @@ export function InlineToolRow(props: {
   review?: JSX.Element
   onMouseOver?: () => void
   onMouseOut?: () => void
-  onMouseUp?: () => void
+  onMouseUp?: (evt: MouseEvent) => void
 }) {
   return (
     <box
@@ -2518,6 +2544,8 @@ function BlockTool(props: {
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
+  const { navigate } = useRoute()
+  const review = useContext(ToolAutoReview)
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
   // 上下文状态优先于 hover，鼠标移入不能抹掉当前视图的颜色提示。
@@ -2541,6 +2569,7 @@ function BlockTool(props: {
       onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: MouseEvent) => {
+        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
         // 文本选择优先于视图动作，右键不会在复制日志时意外切换内容。
         if (renderer.getSelection()?.getSelectedText()) return
         if (evt?.button === MouseButton.RIGHT) {
