@@ -1805,8 +1805,7 @@ describe("tool.shell abort", () => {
     ),
   )
 
-  it.live("omits exit notice when diagnostics already explain non-empty failure", () =>
-  // #289：已有高信号摘录时不重复 exit notice，同一失败只提示一次
+  it.live("adds hidden diagnostics without suppressing non-empty failure exit notice", () =>
     runIn(
       projectRoot,
       Effect.gen(function* () {
@@ -1823,9 +1822,36 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(9)
-        // #289：metadata.exit 仍记录真实退出码；模型可见输出里才省略 notice
         expect(result.output).toContain("<bash_high_signal_excerpt>")
-        expect(result.output).not.toContain('reason="exit"')
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
+        )
+      }),
+    ),
+    15_000,
+  )
+
+  it.live("keeps visible diagnostics out of appendix without suppressing exit notice", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const script = [
+          "await new Promise((resolve) => setTimeout(resolve, 2100))",
+          "console.log(String.fromCharCode(102,97,116,97,108,58,32,118,105,115,105,98,108,101,32,114,111,111,116,32,99,97,117,115,101))",
+          "process.exit(9)",
+        ].join(";")
+        const command = `${bin} -e ${evalarg(script)}`
+        const result = yield* run({
+          command: PS.has(sh()) ? `& ${command}` : command,
+        })
+
+        expect(result.metadata.exit).toBe(9)
+        expect(result.output).toContain("fatal: visible root cause")
+        // 可见 fatal 不进入隐藏摘录，失败退出码仍需独立回放。
+        expect(result.output).not.toContain("<bash_high_signal_excerpt>")
+        expect(result.output).toContain(
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
+        )
       }),
     ),
     15_000,

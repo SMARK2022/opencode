@@ -49,9 +49,9 @@ export function formatExecutionNotice(input: ExecutionNotice) {
   return formatNotice({ type: "execution", source: "shell", ...input })
 }
 
-// 采样遗漏只说明观察边界，不能替代真实错误摘录或吞掉失败退出码。
-export function formatExitNotice(code: number | null, emptyOutput: boolean, appendix = "") {
-  if (code === null || (!emptyOutput && (code === 0 || appendix.includes("<bash_high_signal_excerpt>")))) return
+// 退出状态与隐藏诊断互相独立，非零退出始终交付，取消仍不冒充进程退出。
+export function formatExitNotice(code: number | null, emptyOutput: boolean) {
+  if (code === null || (!emptyOutput && code === 0)) return
   return formatExecutionNotice({ severity: code === 0 ? "info" : "error", reason: "exit", exit_code: code })
 }
 

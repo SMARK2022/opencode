@@ -830,9 +830,11 @@ describe("BashTool", () => {
         crossDiagnostic.end()
         const crossSnapshot = crossDiagnostic.snapshot()
         expect(JSON.stringify(crossSnapshot)).not.toContain(credential)
-        const crossAppendix = renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })
+        const crossAppendix = renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1 })
         expect(crossAppendix).toContain("> 2 | <REDACTED_CREDENTIAL> ERROR: rejected")
         expect(crossAppendix).not.toContain(credential)
+        // 隐藏快照直接渲染，显式可见窗口仍沿用相同掩码去重。
+        expect(renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toBe(crossAppendix)
         expect(renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: crossMasked.text })).toBe("")
         // 半径0与多个空白帧使标签完全离开邻域，续接仍受同一个canonical字段/长度门槛约束。
         for (const label of ["password:", "passwd=", "pwd:", "secret=", "token:", "key=", "api_key:", "api-key=", "apikey:", "password\n:", "api_key\n ="]) {

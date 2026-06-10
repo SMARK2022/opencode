@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { createRequire } from "node:module"
-import { createContext, createMemo, createSignal, For, Show, useContext } from "solid-js"
+import { createContext, createEffect, createMemo, createSignal, For, Match, Show, Switch, useContext } from "solid-js"
 import { BoxRenderable, MouseButton, type ScrollBoxRenderable } from "@opentui/core"
 import { testRender, type JSX } from "@opentui/solid"
+import stripAnsi from "strip-ansi"
 import { SplitBorder } from "../../../src/ui/border"
 import { selectedForeground } from "../../../src/context/theme"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
@@ -22,6 +23,7 @@ import {
   autoReviewLabel,
 } from "../../../src/routes/session"
 import { layoutGroups } from "../../../src/util/layout"
+import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
 
@@ -334,10 +336,15 @@ describe("TUI inline tool wrapping", () => {
     const names = [
       "UserMessage",
       "autoReviewColor",
+      "autoReviewLineID",
+      "autoReviewLineTarget",
       "AutoReviewLine",
       "ToolAutoReviewLine",
       "InlineTool",
       "BlockTool",
+      "Shell",
+      "previewText",
+      "stringValue",
       "openAutoReviewSession",
       "openAutoReviewFromToolChrome",
     ]
@@ -373,30 +380,36 @@ describe("TUI inline tool wrapping", () => {
     const ToolAutoReview = createContext(() => review)
     const theme = createTuiPluginApi().theme.current
     const dependencies = {
+      createEffect,
       createMemo,
       createSignal,
       useContext,
       Show,
       For,
+      Match,
+      Switch,
       InlineToolRow,
       alwaysSeparate,
       SplitBorder,
       selectedForeground,
       MouseButton,
+      collapseToolOutput,
+      stripAnsi,
       autoReviewLabel,
       ToolAutoReview,
       useRenderer: runtime.useRenderer,
       useTheme: () => ({ theme }),
       useRoute: () => ({ navigate }),
-      use: () => ({ sessionID: "ses_render", showTimestamps: () => false }),
+      use: () => ({ sessionID: "ses_render", showTimestamps: () => false, width: 72 }),
+      usePathFormatter: () => ({ format: (value: string) => value }),
       useLocal: () => ({ agent: { color: () => theme.text } }),
       useSync: () => ({ data: { permission: {} } }),
     }
     const production = new Function(
       "runtime",
       "dependencies",
-      `const {${Object.keys(dependencies).join(",")}} = dependencies;\n${code}\nreturn {UserMessage, InlineTool, BlockTool, openAutoReviewSession, openAutoReviewFromToolChrome};`,
-    )(runtime, dependencies) as Record<"UserMessage" | "InlineTool" | "BlockTool", (props: Record<string, unknown>) => JSX.Element> &
+      `const {${Object.keys(dependencies).join(",")}} = dependencies;\n${code}\nreturn {UserMessage, InlineTool, BlockTool, Shell, openAutoReviewSession, openAutoReviewFromToolChrome};`,
+    )(runtime, dependencies) as Record<"UserMessage" | "InlineTool" | "BlockTool" | "Shell", (props: Record<string, unknown>) => JSX.Element> &
       Record<"openAutoReviewSession" | "openAutoReviewFromToolChrome", (...args: unknown[]) => boolean>
     const Card = kind === "edit" ? production.BlockTool : production.InlineTool
     await renderFrame(
@@ -424,6 +437,11 @@ describe("TUI inline tool wrapping", () => {
     const label = autoReviewLabel(review)
     const point = findVisibleText(app.captureCharFrame().split("\n"), label)
     expect(point).toBeDefined()
+    const reviewTarget = app.renderer.root.findDescendantById(`auto-review-${review.reviewID}`)
+    expect(reviewTarget).toBeInstanceOf(BoxRenderable)
+    expect(reviewTarget!.height).toBe(1)
+    expect(reviewTarget!.screenY).toBe(point!.y)
+    expect(reviewTarget!.getChildren()[0].selectable).toBe(false)
     // #292：使用原生零基坐标，先进入标签再点击，避免误中父卡 hitbox。
     app.renderer.clearSelection()
     await app.mockMouse.moveTo(point!.x + Math.floor(label.length / 2), point!.y)
@@ -434,9 +452,14 @@ describe("TUI inline tool wrapping", () => {
     expect(expanded()).toBe(false)
     if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
     navigation.length = 0
+    await app.mockMouse.click(reviewTarget!.screenX + reviewTarget!.width - 1, reviewTarget!.screenY)
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    expect(parentClicks).toBe(0)
+    expect(expanded()).toBe(false)
+    navigation.length = 0
     // 选区消费事件但不导航；无子会话、无 target 或非审查 target 不产生导航。
     const effects: string[] = []
-    const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: { id: "unrelated" } }
+    const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: app.renderer.root, y: -1 }
     const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }) }
     expect(production.openAutoReviewSession(review, navigate, selected, evt)).toBe(true)
     expect(effects).toEqual(["default", "bubble"])
@@ -448,12 +471,16 @@ describe("TUI inline tool wrapping", () => {
     expect(production.openAutoReviewSession(review, navigate, app.renderer)).toBe(true)
     expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
     navigation.length = 0
-    const reviewTarget = app.renderer.root.getChildren()[0].getChildren().find((item) => item.id === `auto-review-${review.reviewID}`)
-    expect(reviewTarget).toBeInstanceOf(BoxRenderable)
-    expect(reviewTarget!.height).toBe(1)
-    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...evt, target: reviewTarget })).toBe(true)
-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
-    navigation.length = 0
+    const rowEvent = { ...evt, y: reviewTarget!.screenY }
+    for (const target of [reviewTarget!, reviewTarget!.getChildren()[0], reviewTarget!.parent!]) {
+      expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, target })).toBe(true)
+      expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+      navigation.length = 0
+    }
+    // 相邻行仍属于标题或正文，不能把零基坐标再减一。
+    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, y: reviewTarget!.screenY - 1 })).toBe(false)
+    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, y: reviewTarget!.screenY + 1 })).toBe(false)
+    expect(navigation).toEqual([])
     // 标题和正文仍执行父卡动作，审查导航不能扩展成整卡点击。
     const title = findVisibleText(app.captureCharFrame().split("\n"), kind === "edit" ? "Edit external folder/config.json" : "Read external folder/secret key.txt")
     expect(title).toBeDefined()
@@ -475,6 +502,40 @@ describe("TUI inline tool wrapping", () => {
       expect(parentClicks).toBe(2)
     }
     app.renderer.destroy()
+    // 可见诊断只保留一份，右键模型上下文仍须显示独立的退出状态。
+    if (kind === "edit") {
+      const visible = "fatal: visible root cause"
+      const notice = '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />'
+      await renderFrame(
+        () => (
+          <production.Shell
+            input={{ command: "failed command" }}
+            metadata={{ output: visible }}
+            output={`${visible}\n${notice}`}
+            part={{ tool: "shell", state: { status: "completed" } }}
+          />
+        ),
+        { width: 160, height: 12 },
+      )
+      const shell = testSetup!
+      const diagnostic = findVisibleText(shell.captureCharFrame().split("\n"), visible)
+      expect(diagnostic).toBeDefined()
+      expect(shell.captureCharFrame()).not.toContain('reason="exit"')
+      expect(shell.captureCharFrame()).not.toContain("<bash_high_signal_excerpt>")
+      shell.renderer.clearSelection()
+      await shell.mockMouse.moveTo(diagnostic!.x + 1, diagnostic!.y)
+      await shell.renderOnce()
+      await shell.mockMouse.click(diagnostic!.x + 1, diagnostic!.y, MouseButton.RIGHT)
+      await shell.renderOnce()
+      await shell.renderOnce()
+      const context = shell.captureCharFrame()
+      expect(context).toContain("Model context output")
+      expect(context.split(visible)).toHaveLength(2)
+      expect(context).toContain(notice)
+      expect(context).not.toContain("<bash_high_signal_excerpt>")
+      expect(navigation).toEqual([])
+      shell.renderer.destroy()
+    }
     let scroll: ScrollBoxRenderable | undefined
     // 窄屏加载生产 UserMessage，断言真实外框高度和回绕边框，而非复制一个 box。
     const frame = await renderFrame(

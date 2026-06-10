@@ -52,6 +52,7 @@ import {
   MouseButton,
   type MouseEvent,
   type OptimizedBuffer,
+  type Renderable,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
@@ -2206,20 +2207,35 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
   // #209：仅当有 sessionID 时可点击——无子会话的审查不可导航，hover 也不高亮
   const clickable = createMemo(() => Boolean(props.review.sessionID))
   const openReview = (evt: MouseEvent) => openAutoReviewSession(props.review, navigate, renderer, evt)
+  // 审查行是导航入口，关闭文本选择并让整行处理点击，避免普通点击被当成选区。
   return (
     <box
-      id={`auto-review-${props.review.reviewID}`}
+      id={autoReviewLineID(props.review)}
       width="100%"
       height={1}
       flexShrink={0}
+      onMouseUp={openReview}
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
     >
-      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
+      <text selectable={false} fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
         {autoReviewLabel(props.review)}
       </text>
     </box>
   )
+}
+
+function autoReviewLineID(review: AutoReviewMetadata) {
+  return `auto-review-${review.reviewID}`
+}
+
+function autoReviewLineTarget(review: AutoReviewMetadata, target: Renderable | null | undefined) {
+  const id = autoReviewLineID(review)
+  for (let item = target; item; item = item.parent) {
+    if (item.id === id) return item
+    const child = item.findDescendantById(id)
+    if (child) return child
+  }
 }
 
 function openAutoReviewSession(
@@ -2245,8 +2261,11 @@ function openAutoReviewFromToolChrome(
   renderer: ReturnType<typeof useRenderer>,
   evt: MouseEvent | undefined,
 ) {
-  // #292：标题会换行且卡片有 padding，兜底只认审查行自身，避免误把标题或正文当成入口。
-  if (!evt?.target || evt.target.id !== `auto-review-${review?.reviewID}`) return false
+  // 标题换行和 padding 会移动审查行，按稳定 id 查找，避免误中正文。
+  if (!review?.sessionID || !evt?.target) return false
+  const row = autoReviewLineTarget(review, evt.target)
+  // OpenTUI 已把终端坐标转成零基；screenY 与鼠标 y 可直接比较。
+  if (!row || evt.y !== row.screenY) return false
   return openAutoReviewSession(review, navigate, renderer, evt)
 }
 

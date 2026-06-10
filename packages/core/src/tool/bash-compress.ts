@@ -162,11 +162,11 @@ export type DiagnosticSnapshot = {
   truncatedFrames: number
 }
 
-// 可见性判断必须读取最终窗口，不能用截断前文本认定错误已经交给模型。
+// 隐藏快照可直接渲染；全流快照仍须传入最终可见窗口，避免重复摘录。
 export type RenderAppendixOptions = {
   durationMs: number           // 命令执行耗时
   exitCode: number | null      // 命令退出码
-  visibleOutput: string        // 当前对模型可见的已压缩、已截断输出
+  visibleOutput?: string       // 全流快照对应的最终可见窗口
   config?: Partial<CompressionConfig> // 允许传入部分配置覆盖默认
 }
 
@@ -1796,7 +1796,9 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
   const seen = new Set<number>()
   const hiddenContexts = shouldShowDiagnostics
     ? candidates.filter((ctx) => {
-        if (seen.has(ctx.centerLine) || contextAlreadyVisible(ctx, options.visibleOutput, config)) return false
+        // 隐藏快照不再和可见输出比对，全流调用仍按最终窗口过滤。
+        if (seen.has(ctx.centerLine)) return false
+        if (options.visibleOutput !== undefined && contextAlreadyVisible(ctx, options.visibleOutput, config)) return false
         seen.add(ctx.centerLine)
         return true
       }).slice(0, Math.max(0, config.maxDiagnosticContexts))
