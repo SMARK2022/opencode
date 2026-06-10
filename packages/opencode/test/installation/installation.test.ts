@@ -9,6 +9,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Installation } from "../../src/installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { testEffect } from "../lib/effect"
 
 const encoder = new TextEncoder()
@@ -118,8 +119,8 @@ describe("installation", () => {
         Effect.gen(function* () {
           calls.length = 0
           expect(yield* Installation.use.latest(method)).toBe("1.19.2")
-          // registry 可由用户配置；保留包名与 latest 路径约束，不固定主机名。
-          expect(calls[0]?.endsWith("/opencode-ai/latest")).toBe(true)
+          // 八种安装方式共用上游矩阵，校验实际配置的registry而不是只校验路径后缀。
+          expect(calls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/latest`)
           expect(calls.slice(1).every((url) => url.startsWith(choco))).toBe(true)
         }),
       )

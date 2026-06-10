@@ -6,6 +6,8 @@ import { tmpdir } from "../fixture/fixture"
 
 const INSTALL_SCRIPT = fileURLToPath(new URL("../../../../install", import.meta.url))
 const VERSION = "1.2.3-smark"
+// #292：Windows 下通过 WSL bash 运行 install 脚本，解析 bash 可执行路径
+const BASH = Bun.which("bash") ?? "bash"
 
 describe("install script", () => {
   // #167：PATH 已有同版本不得跳过目标目录安装
@@ -25,7 +27,7 @@ describe("install script", () => {
       HOME: home,
       OPENCODE_INSTALL_DIR: installDir,
       OPENCODE_TEST_ASSET: asset,
-      PATH: `${fakeBin}:${existingBin}:${process.env.PATH}`,
+      PATH: bashPath(fakeBin, existingBin),
     })
 
     expectSuccess(result)
@@ -53,7 +55,7 @@ describe("install script", () => {
       HOME: home,
       OPENCODE_INSTALL_DIR: installDir,
       OPENCODE_TEST_ASSET: asset,
-      PATH: `${fakeBin}:${installDir}:${process.env.PATH}`,
+      PATH: bashPath(fakeBin, installDir),
     })
 
     expectSuccess(result)
@@ -72,7 +74,8 @@ describe("install script", () => {
     const bashrc = path.join(home, ".bashrc")
     const bashProfile = path.join(home, ".bash_profile")
     const zshrc = path.join(home, ".zshrc")
-    const expected = `export PATH="${installDir}:$PATH"`
+    // #292：Windows 下 install 脚本写入的路径是 WSL /mnt/<drive> 形式
+    const expected = `export PATH="${bashPathForFile(installDir)}:$PATH"`
 
     await writeIdCommand(fakeBin, 501)
     await writeExecutable(binary, `#!/usr/bin/env bash\necho "${VERSION}"\n`)
@@ -86,7 +89,7 @@ describe("install script", () => {
       const result = await runInstall(["--binary", binary], {
         HOME: home,
         OPENCODE_INSTALL_DIR: installDir,
-        PATH: `${fakeBin}:${process.env.PATH}`,
+        PATH: bashPath(fakeBin),
         SHELL: "/bin/bash",
       })
       expectSuccess(result)
@@ -95,7 +98,7 @@ describe("install script", () => {
     expect(count(await Bun.file(bashrc).text(), expected)).toBe(1)
     expect(count(await Bun.file(bashProfile).text(), expected)).toBe(1)
     expect(count(await Bun.file(zshrc).text(), "$HOME/.local/bin")).toBe(1)
-    expect(count(await Bun.file(zshrc).text(), installDir)).toBe(0)
+    expect(count(await Bun.file(zshrc).text(), bashPathForFile(installDir))).toBe(0)
   })
 
   // #167：sudo 默认拒绝（uid=0 + SUDO_USER）
@@ -114,7 +117,7 @@ describe("install script", () => {
     const result = await runInstall(["--binary", binary, "--no-modify-path"], {
       HOME: home,
       OPENCODE_INSTALL_DIR: installDir,
-      PATH: `${fakeBin}:${process.env.PATH}`,
+      PATH: bashPath(fakeBin),
       SUDO_USER: "tester",
     })
 
@@ -143,7 +146,7 @@ async function writeFakeReleaseCommands(dir: string, asset: string) {
   )
   await writeExecutable(
     path.join(dir, "curl"),
-    `#!/usr/bin/env bash\nset -euo pipefail\nout=""\nstatus=false\nurl=""\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    -o) out="$2"; shift 2 ;;\n    -w) status=true; shift 2 ;;\n    *) url="$1"; shift ;;\n  esac\ndone\nif [ "$status" = "true" ]; then\n  printf "200"\n  exit 0\nfi\nif [[ "$url" == *checksums.txt ]]; then\n  exit 22\nfi\nif [ -z "$out" ]; then\n  printf '{"tag_name":"v${VERSION}"}'\n  exit 0\nfi\ncp "${asset}" "$out"\n`,
+    `#!/usr/bin/env bash\nset -euo pipefail\nout=""\nstatus=false\nurl=""\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    -o) out="$2"; shift 2 ;;\n    -w) status=true; shift 2 ;;\n    *) url="$1"; shift ;;\n  esac\ndone\nif [ "$status" = "true" ]; then\n  printf "200"\n  exit 0\nfi\nif [[ "$url" == *checksums.txt ]]; then\n  exit 22\nfi\nif [ -z "$out" ]; then\n  printf '{"tag_name":"v${VERSION}"}'\n  exit 0\nfi\ncp "${bashPathForFile(asset)}" "$out"\n`,
   )
 }
 
@@ -160,17 +163,30 @@ async function writeExecutable(file: string, content: string) {
 }
 
 // #167：清空 GITHUB_ACTIONS，避免测试误写 GITHUB_PATH
+// #292：Windows 下通过 WSL bash 运行 install 脚本，转换路径并显式 exec /bin/bash
 async function runInstall(args: string[], env: Record<string, string | undefined>) {
-  return runCommand(["bash", INSTALL_SCRIPT, ...args], path.dirname(INSTALL_SCRIPT), {
-    ...process.env,
+  const script = await installScriptForBash(env)
+  const scriptEnv = {
     GITHUB_ACTIONS: "",
-    ...env,
+    ...bashEnv(env),
+    // Empty overrides make installer profile discovery fall back to the fixture HOME.
+    XDG_CONFIG_HOME: "",
+    ZDOTDIR: "",
+  }
+  return runCommand(bashCommand(bashPathForFile(script), args, scriptEnv), path.dirname(INSTALL_SCRIPT), {
+    ...process.env,
+    ...scriptEnv,
   })
 }
 
 // #167：读取目标二进制 --version 验证安装落点
+// #292：Windows 下通过 WSL bash 运行安装后的二进制
 async function runBinary(file: string) {
-  const result = await runCommand([file, "--version"], path.dirname(file), process.env)
+  const result = await runCommand(
+    process.platform === "win32" ? bashCommand(bashPathForFile(file), ["--version"], { PATH: bashPath() }) : [file, "--version"],
+    path.dirname(file),
+    process.env,
+  )
   expect(result.code).toBe(0)
   return result.stdout.trim()
 }
@@ -179,7 +195,8 @@ async function runBinary(file: string) {
 async function runCommand(command: string[], cwd: string, env?: Record<string, string | undefined>) {
   const proc = Bun.spawn(command, {
     cwd,
-    env,
+    // Non-interactive Bash must not source a host startup file before the wrapper runs.
+    env: { ...process.env, ...env, BASH_ENV: "" },
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -199,4 +216,74 @@ function expectSuccess(result: { code: number; output: string }) {
 // #167：统计子串出现次数，断言 PATH 去重
 function count(text: string, needle: string) {
   return text.split(needle).length - 1
+}
+
+// #292：Windows 下将 install 脚本复制到临时位置并归一化 CRLF，供 WSL bash 执行
+async function installScriptForBash(env: Record<string, string | undefined>) {
+  if (process.platform !== "win32") return INSTALL_SCRIPT
+  const script = path.join(path.dirname(env.HOME ?? path.dirname(INSTALL_SCRIPT)), "install")
+  await fs.mkdir(path.dirname(script), { recursive: true })
+  // WSL bash executes the same script bytes as a POSIX shell would see from curl.
+  // On Windows checkouts git may materialize CRLF line endings, which turns
+  // `pipefail` into `pipefail\r`; normalize only the temporary test copy.
+  await Bun.write(script, (await Bun.file(INSTALL_SCRIPT).text()).replaceAll("\r\n", "\n"))
+  await fs.chmod(script, 0o755)
+  return script
+}
+
+// #292：Windows 下将测试传入的路径环境变量转换为 WSL 可识别的 /mnt/<drive> 形式
+function bashEnv(env: Record<string, string | undefined>) {
+  if (process.platform !== "win32") return env
+  return Object.fromEntries(
+    Object.entries(env).map(([key, value]) => {
+      if (!value) return [key, value]
+      // Windows 的 `bash` 通常是 WSL 入口；脚本内部只理解 `/mnt/<drive>`
+      // 形式的 POSIX 路径。只转换测试明确传给 install 脚本的路径变量，避免
+      // 改写 token、用户名等非路径环境值并掩盖脚本自身的真实行为。
+      if (["HOME", "OPENCODE_INSTALL_DIR", "OPENCODE_TEST_ASSET"].includes(key)) return [key, bashPathForFile(value)]
+      return [key, value]
+    }),
+  )
+}
+
+// #292：构建 WSL bash 执行命令——显式 exec /bin/bash 避免 login shell 重置 PATH
+function bashCommand(script: string, args: string[], env: Record<string, string | undefined>) {
+  if (process.platform !== "win32") return [BASH, script, ...args]
+  // Windows 的 bash.exe 是 WSL 启动器，直接传脚本时可能落到发行版默认 sh；
+  // install 脚本依赖 bash 的 `set -o pipefail`，因此在 WSL 内显式 exec /bin/bash。
+  // 不能使用 login shell：它会重置 PATH，导致测试桩 curl/id/uname 被真实命令替代。
+  const assignments = Object.entries(env)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined)
+    .map(([key, value]) => quoteForSh(`${key}=${value}`))
+  return [
+    BASH,
+    "-c",
+    ["exec", "/usr/bin/env", "-u", "BASH_ENV", ...assignments, "/bin/bash", quoteForSh(script), ...args.map((arg) => quoteForSh(bashPathForFile(arg)))].join(" "),
+  ]
+}
+
+// #292：构建 bash 可用的 PATH——Windows 下使用固定 POSIX 基础 PATH 保持测试隔离
+function bashPath(...entries: string[]) {
+  if (process.platform !== "win32") return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
+  // WSL 不会可靠解析 Windows PATH 中的 `C:\...` drive colon；测试只需要
+  // fake-bin 中的桩命令和标准 POSIX 工具链，所以使用固定基础 PATH 保持隔离。
+  return [...entries.map(bashPathForFile), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":")
+}
+
+// #292：Windows 路径转 WSL /mnt/<drive> 形式——仅测试内部使用，生产 install 脚本保持 POSIX-only
+function bashPathForFile(file: string) {
+  if (process.platform !== "win32") return file
+  const normalized = file.replaceAll("\\", "/")
+  const match = normalized.match(/^([A-Za-z]):\/(.*)$/)
+  if (!match) return normalized
+  // WSL exposes Windows drives under /mnt/<lower-drive>; keeping this conversion
+  // local to tests lets the production install script remain POSIX-only.
+  return `/mnt/${match[1].toLowerCase()}/${match[2]}`
+}
+
+// #292：POSIX sh 单引号转义——测试路径可能含空格或括号
+function quoteForSh(value: string) {
+  // 测试路径可能包含空格或括号；单引号是 POSIX sh 中最小且稳定的转义，
+  // 这里只用于测试启动命令，不进入生产 install 参数解析逻辑。
+  return `'${value.replaceAll("'", "'\\''")}'`
 }
