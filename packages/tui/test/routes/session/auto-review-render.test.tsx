@@ -246,11 +246,13 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
         }
         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
         if (scenario === "error" || scenario === "aborted") {
-          const x = lines[row + 1].indexOf("auto review")
-          await app.mockMouse.drag(x, row + 1, x + 6, row + 1)
+          // 审查标签不再可选择；在命令正文上验证拖选不会变成导航。
+          const x = lines[row].indexOf(command)
+          await app.mockMouse.drag(x, row, x + 6, row)
           expect(route.data).toMatchObject({ type: "session", sessionID })
           await app.renderOnce()
-          await app.mockMouse.click(x, row + 1)
+          app.renderer.clearSelection()
+          await clickVisibleText(app, "auto review")
           expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
         }
       },

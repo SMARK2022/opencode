@@ -240,11 +240,13 @@ function preview(text: string) {
 
 function tail(text: string, maxLines: number, maxBytes: number) {
   // #283：折叠行末尾换行在压缩前去除，避免重复合并时引入多余空白行
-  const lines = text.replace(/\r?\n$/, "").split("\n")
+  const source = text.replace(/\r?\n$/, "")
+  const lines = source.split("\n")
   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
     return {
       text,
       cut: false,
+      hidden: "",
     }
   }
 
@@ -265,9 +267,13 @@ function tail(text: string, maxLines: number, maxBytes: number) {
     out.unshift(lines[i])
     bytes += size
   }
+  const visible = out.join("\n")
   return {
-    text: out.join("\n"),
+    text: visible,
     cut: true,
+    // 隐藏诊断只扫描同一 source 被 tail 丢弃的前缀，避免重复可见错误。
+    // 字符切片沿用最终窗口边界，保留超长行的隐藏部分。
+    hidden: visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source,
   }
 }
 
@@ -392,7 +398,10 @@ export const ShellTool = Tool.define(
           const file = yield* cygpath(shell, text)
           if (file) return file
         }
-        return FSUtil.normalizePath(path.resolve(root, FSUtil.windowsPath(text)))
+        const textPath = FSUtil.windowsPath(text)
+        // PowerShell 盘符相对路径按命令 cwd 解析，避免使用进程的盘符 cwd。
+        // 保留 C:/file 与 C:\file 这类绝对路径，权限扫描仍以可见 cwd 为边界。
+        return FSUtil.normalizePath(path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath))
       }
       return path.resolve(root, text)
     })
@@ -528,9 +537,9 @@ export const ShellTool = Tool.define(
         ).pipe(Effect.catch(() => Effect.void))
       })
 
-      // 诊断观察完整流，不能只观察已经丢弃旧块的内存窗口。
+      // 隐藏诊断只采样被窗口驱逐的原始块与 tail 前缀，避免重复可见错误。
       // V1 采样与最终附录复用同一个开关，保留源逐字 opt-out。
-      const diag = new BashDiagnosticCollector({ enabled: input.compressOutput })
+      const hiddenDiag = new BashDiagnosticCollector({ enabled: input.compressOutput })
       const started = Date.now()
 
       yield* ctx.metadata({
@@ -551,8 +560,6 @@ export const ShellTool = Tool.define(
           // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
           const onChunk = (chunk: string) => {
             if (!chunk) return Effect.void
-            // 收集诊断信息用于压缩后的附录生成
-            diag.push(chunk)
             const visible = preview(display.push(chunk))
             displayed = true
             const size = Buffer.byteLength(chunk, "utf-8")
@@ -564,6 +571,7 @@ export const ShellTool = Tool.define(
             while (used > keep && list.length > 1) {
               const item = list.shift()
               if (!item) break
+              hiddenDiag.push(item.text)
               used -= item.size
               cut = true
             }
@@ -655,10 +663,13 @@ export const ShellTool = Tool.define(
       // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
       // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
       const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
-      diag.end()
-      const diagnostic = diag.snapshot()
       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
-      if (end.cut) cut = true
+      if (end.cut) {
+        cut = true
+        hiddenDiag.push(end.hidden)
+      }
+      hiddenDiag.end()
+      const diagnostic = hiddenDiag.snapshot()
       // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
       // CLIXML解码可能净增长；呈现变化仍须生成并广告未经改写的原文。
       const transformed = compressed.text !== raw
@@ -688,12 +699,12 @@ export const ShellTool = Tool.define(
         output = `...output compacted or diagnostic frames sampled...\n\nFull output saved to: ${file}\n\n` + output
       }
 
-      // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
-      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
+      // 附录只读取隐藏诊断；采样遗漏的恢复路径仍指向不可变原始归档。
+      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, config: { enabled: input.compressOutput } })
       if (appendix) output += "\n\n" + appendix
-      // #289：metadata.exit 不进入模型回放，空输出或缺少诊断的失败需补退出码 notice。
+      // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
-      const exitNotice = formatExitNotice(code, emptyOutput, appendix)
+      const exitNotice = formatExitNotice(code, emptyOutput)
       if (exitNotice) meta.push(exitNotice)
 
       if (meta.length > 0) {

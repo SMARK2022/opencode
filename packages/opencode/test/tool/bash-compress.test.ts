@@ -15,17 +15,17 @@ describe("tool.bash-compress", () => {
     expect(snapshot.discardedChars).toBeGreaterThan(0)
     expect(appendix).toContain("diagnostic sampling omitted")
     // 真实采样说明不含失败证据，仍须交付退出码；取消与超时不得伪造exit。
-    expect(formatExitNotice(7, false, appendix)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
+    expect(formatExitNotice(7, false)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
     expect(formatExitNotice(0, true)).toContain('severity="info" reason="exit" exit_code="0"')
     expect(formatExitNotice(42, true)).toContain('severity="error" reason="exit" exit_code="42"')
-    expect(formatExitNotice(null, false, appendix)).toBeUndefined()
-    expect(formatExitNotice(0, false, appendix)).toBeUndefined()
+    expect(formatExitNotice(null, false)).toBeUndefined()
+    expect(formatExitNotice(0, false)).toBeUndefined()
     const failure = new BashDiagnosticCollector()
     failure.push("fatal: hidden root cause\n")
     failure.end()
     const diagnosed = renderDiagnosticAppendix(failure.snapshot(), { durationMs: 3_000, exitCode: 9, visibleOutput: "tail" })
     expect(diagnosed).toContain("<bash_high_signal_excerpt>")
-    expect(formatExitNotice(9, false, diagnosed)).toBeUndefined()
+    expect(formatExitNotice(9, false)).toContain('reason="exit" exit_code="9"')
   })
 
   test("renders split terminal clear-line sequences without leaking partial escapes", () => {
