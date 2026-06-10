@@ -176,7 +176,8 @@ function firstEvent(open: (signal: AbortSignal) => Promise<{ stream: AsyncIterat
         Effect.flatMap((events) =>
           call(() => events.stream.next()).pipe(
             Effect.timeoutOrElse({
-              duration: "1 second",
+              // 这个 helper 覆盖 default/raw 与 global/instance 的 SDK SSE 首事件；Windows 上首包可能晚于 1 秒，测试只验证事件最终到达而不定义低延迟 SLA。
+              duration: "10 seconds",
               orElse: () => Effect.fail(new Error("timed out waiting for SDK event")),
             }),
           ),
