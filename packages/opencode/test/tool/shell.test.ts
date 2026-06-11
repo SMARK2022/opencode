@@ -1812,13 +1812,16 @@ describe("tool.shell abort", () => {
         const script = [
           "console.error(String.fromCharCode(102,97,116,97,108,58,32,104,105,100,100,101,110,32,114,111,111,116,32,99,97,117,115,101))",
           "await new Promise((resolve) => setTimeout(resolve, 2100))",
-          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log(String.fromCharCode(116,97,105,108,32,108,105,110,101,32) + i)`,
+          `for (let i = 0; i < ${Truncate.MAX_LINES + 500}; i++) console.log(String.fromCharCode(116,97,105,108,32,108,105,110,101,32) + i + String.fromCharCode(32) + String.fromCharCode(120).repeat(80))`,
           "process.exit(9)",
         ].join(";")
         const command = `${bin} -e ${evalarg(script)}`
         // #289：诊断场景脚本较慢（2.1s 等待根因行）且触发截断，15s 超时留足余量
         const result = yield* run({
           command: PS.has(sh()) ? `& ${command}` : command,
+          // 这个用例只验证 tail 截断隐藏区会生成诊断附录；关闭压缩，并让尾部
+          // 文本同时超过默认行数/字节阈值，避免平台输出差异让 root cause 仍可见。
+          compress_output: false,
         })
 
         expect(result.metadata.exit).toBe(9)

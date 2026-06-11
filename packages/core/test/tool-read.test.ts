@@ -296,12 +296,19 @@ describe("ReadTool", () => {
     ]).pipe(Layer.fresh)))
   }))
 
-  it.effect("projects malware reminders without changing typed text or permission ordering", () =>
+  it.effect("omits malware reminders without changing typed text or permission ordering", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
-      // 完整文件与分页都须保留结构化正文，提醒不能取代真实读取结果。
+      // 完整文件、无凭证旧结果和真实分页凭证都停用额外提醒，正文及next仍完整。
       for (const output of [readResult, new ReadToolFileSystem.TextPage({
         type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
+      }), new ReadToolFileSystem.TextPage({
+        type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
+        read: {
+          path: "sample.TS", canonicalPath: path.resolve("sample.TS"),
+          type: "file", size: 12, modified: "2026-10-25 00:00:00", modifiedMs: 0,
+          start: 2, end: 2, total: 3, totalExact: true, returned: 1, stub: false,
+        },
       })]) {
         readResult = output
         const settled = yield* settleTool(registry, {
@@ -310,14 +317,16 @@ describe("ReadTool", () => {
           call: { type: "tool-call", id: "call-cyber", name: "read", input: { path: "sample.TS" } },
         })
         expect(settled.output?.structured).toEqual(output)
-        // 提醒先于正文，普通泛型限幅不能因正文过长先丢掉安全语义。
-        expect(settled.output?.content[0]).toMatchObject({ type: "text" })
-        const reminder = settled.output?.content[0]
-        if (reminder?.type === "text") expect(reminder.text).toContain("MUST refuse to improve")
-        // 通过真实 registry 观察模型投影，同时验证 next 与 offset 没有消失。
-        expect(settled.output?.content[1]).toEqual({ type: "text", text: JSON.stringify(output) })
+        expect(JSON.stringify(settled.output)).not.toContain("MUST refuse to improve")
+        if ("read" in output && ReadPresentation.isReadRangeMeta(output.read)) {
+          expect(settled.output?.content).toEqual([{ type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) }])
+        } else {
+          // 旧结果继续走真实structured→JSON结算，不用空提醒替代正文与分页字段。
+          expect(settled.output?.content).toEqual([])
+          expect(settled.result).toEqual({ type: "json", value: output })
+        }
       }
-      // 权限拒绝时不执行读取，也不生成成功结果的安全提醒。
+      // 停用模型提醒不改变权限门禁：拒绝时仍不执行读取。
       allow = false
       readCalls.length = 0
       expect(yield* executeTool(registry, {

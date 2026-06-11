@@ -75,8 +75,8 @@ const TOKEN_BYTE_RATIOS: Record<string, number> = {
 export const FILE_UNCHANGED_STUB =
   "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
 
-// 恶意代码提醒 - 对高风险扩展名注入安全提示，防止模型改进恶意代码
-const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
+// // 恶意代码提醒 - 对高风险扩展名注入安全提示，防止模型改进恶意代码
+// const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
 
 // 黑名单在打开流之前检查，避免设备别名绕过普通文件的有界读取。
 function isBlockedDevicePath(filePath: string): boolean {
@@ -90,10 +90,10 @@ function isBlockedDevicePath(filePath: string): boolean {
   return false
 }
 
-// 只提醒源码风险，不把提醒当作 MIME 检测或可执行文件的读取授权。
-function shouldInjectCyberReminder(ext: string): boolean {
-  return HIGH_RISK_EXTENSIONS.has(ext)
-}
+// // 只提醒源码风险，不把提醒当作 MIME 检测或可执行文件的读取授权。
+// function shouldInjectCyberReminder(ext: string): boolean {
+//   return HIGH_RISK_EXTENSIONS.has(ext)
+// }
 
 // 估算内容 token 数量，按文件类型使用不同的 byte/token 比率
 function estimateTokensForContent(content: string, ext: string): number {
@@ -659,10 +659,10 @@ let output = renderReadOutput({
         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
       }
 
-      // 恶意代码安全提醒 - 仅对高风险扩展名注入
-      if (shouldInjectCyberReminder(ext)) {
-        output += CYBER_REMINDER
-      }
+      // // 恶意代码安全提醒 - 仅对高风险扩展名注入
+      // if (shouldInjectCyberReminder(ext)) {
+      //   output += CYBER_REMINDER
+      // }
 
 
       return {
