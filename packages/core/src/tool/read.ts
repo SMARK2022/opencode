@@ -1,7 +1,6 @@
 export * as ReadTool from "./read"
 
 import { ToolFailure } from "@opencode-ai/llm"
-import path from "path"
 import { FSUtil } from "../fs-util"
 import { Location } from "../location"
 import { SessionStore } from "../session/store"
@@ -21,10 +20,6 @@ import { ReadPresentation } from "./read-presentation"
 
 export const name = "read"
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
-// 提醒属于模型投影，不污染文件正文、分页结构或原生媒体的类型化输出。
-const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
-// 分析恶意代码仍被允许，安全边界是禁止改进其恶意能力。
-const CYBER_REMINDER = "<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>"
 const LocationInput = Schema.Struct({
   path: Schema.String,
   offset: ReadToolFileSystem.PageInput.fields.offset.annotate({
@@ -63,21 +58,18 @@ const layer = Layer.effectDiscard(
           toModelOutput: ({ input, output }) => {
             const instructions = "instructions" in output ? output.instructions ?? [] : []
             const reminders = instructions.length ? [{ type: "text" as const, text: `<system-reminder>\n${instructions.map(file => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")}\n</system-reminder>` }] : []
-            // 仅成功的源码文本触发提醒；目录与原生图片沿用既有投影。
+            // 两代同步关闭额外源码提醒；逐文件规则、分页凭证和原生图片保持原投影。
             if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
               if (!("content" in output)) return []
               if (ReadPresentation.isReadRangeMeta(output.read)) return [
-                ...(HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1)) ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
                 { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
                 ...reminders,
               ]
-              const risky = HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1))
-              if (!risky && reminders.length === 0)
+              if (reminders.length === 0)
                 return []
               // 保留完整结构化结果的模型表示，不能只返回提醒而隐藏正文与 next。
               // Schema 已完成编码，此处不增加解析器或改变 utf8/TextPage 的输出契约。
               return [
-                ...(risky ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
                 { type: "text", text: JSON.stringify({ ...output, instructions: undefined }) },
                 ...reminders,
               ]
