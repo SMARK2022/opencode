@@ -1914,13 +1914,16 @@ describe("tool.shell abort", () => {
         const script = [
           'console.error("fatal: hidden root cause")',
           "await new Promise((resolve) => setTimeout(resolve, 2100))",
-          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log("tail line " + i)`,
+          `for (let i = 0; i < ${Truncate.MAX_LINES + 500}; i++) console.log("tail line " + i + " " + "x".repeat(80))`,
           "process.exit(9)",
         ].join(";")
         const command = `${bin} -e ${evalarg(script)}`
         const result = yield* run({
           command: PS.has(sh()) ? `& ${command}` : command,
           description: "Diagnostic failed command",
+          // 这个用例只验证 tail 截断隐藏区会生成诊断附录；关闭压缩，并让尾部
+          // 文本同时超过默认行数/字节阈值，避免平台输出差异让 root cause 仍可见。
+          compress_output: false,
         })
 
         expect(result.metadata.exit).toBe(9)

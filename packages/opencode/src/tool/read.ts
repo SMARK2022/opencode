@@ -92,8 +92,8 @@ type ReadToolMetadata = {
   read?: ReadMetadata
 }
 
-// 恶意代码提醒
-const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
+// // 恶意代码提醒
+// const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
 
 // 判断是否为设备文件路径
 function isBlockedDevicePath(filePath: string): boolean {
@@ -107,10 +107,10 @@ function isBlockedDevicePath(filePath: string): boolean {
   return false
 }
 
-// 判断是否应该注入恶意代码提醒
-function shouldInjectCyberReminder(ext: string): boolean {
-  return HIGH_RISK_EXTENSIONS.has(ext)
-}
+// // 判断是否应该注入恶意代码提醒
+// function shouldInjectCyberReminder(ext: string): boolean {
+//   return HIGH_RISK_EXTENSIONS.has(ext)
+// }
 
 // 估算内容 token 数量
 function estimateTokensForContent(content: string, ext: string): number {
@@ -684,10 +684,10 @@ export const ReadTool = Tool.define(
         finalOutput += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
       }
 
-      // 恶意代码安全提醒 - 仅对高风险扩展名注入
-      if (shouldInjectCyberReminder(ext)) {
-        finalOutput += CYBER_REMINDER
-      }
+      // // 恶意代码安全提醒 - 仅对高风险扩展名注入
+      // if (shouldInjectCyberReminder(ext)) {
+      //   finalOutput += CYBER_REMINDER
+      // }
 
       return {
         title,
