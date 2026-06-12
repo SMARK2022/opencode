@@ -3566,7 +3566,7 @@ unixNoLLMServer(
         const { prompt, chat } = yield* boot()
 
         const a = yield* prompt
-          .shell({ sessionID: chat.id, agent: "build", command: "sleep 30" })
+          .shell({ sessionID: chat.id, agent: "build", command: "sleep 10" })
           .pipe(Effect.forkChild)
         yield* waitForBusy(chat.id)
 

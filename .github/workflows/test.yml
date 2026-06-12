@@ -393,6 +393,9 @@ jobs:
       - name: Run upstream extra package tests
         id: upstream
         continue-on-error: true
+        env:
+          # llm 包的兼容性测试需要非空 key 走通 provider 初始化；其它 matrix 项不需要真实密钥。
+          OPENAI_API_KEY: ${{ matrix.id == 'llm' && 'test-key' || '' }}
         run: |
           mkdir -p "${{ matrix.path }}/.artifacts/upstream"
           if [ -n "${{ matrix.target }}" ]; then

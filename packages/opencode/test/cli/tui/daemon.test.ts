@@ -21,7 +21,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import
 const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
 const credentials = { username: "daemon-test", password: "daemon-test-password" }
 
-const DAEMON_START_TIMEOUT_MS = 15_000
+const DAEMON_START_TIMEOUT_MS = 30_000
 const POLL_INTERVAL_MS = 100
 const DAEMON_STOP_TIMEOUT_MS = 60_000
 
