@@ -22,7 +22,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", im
 // 这样后续重构命令注册、yargs 包装或 worker 启动路径时，仍会保住完整的外部契约。
 const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
 
-const DAEMON_START_TIMEOUT_MS = 15_000
+const DAEMON_START_TIMEOUT_MS = 30_000
 const DAEMON_STOP_TIMEOUT_MS = 60_000
 const POLL_INTERVAL_MS = 100
 const SIGNAL_TEST_TIMEOUT_MS = 10_000

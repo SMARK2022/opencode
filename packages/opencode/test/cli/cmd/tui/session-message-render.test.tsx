@@ -1940,9 +1940,9 @@ function findRow(frame: string[], text: string) {
 async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
   const raw = app.captureCharFrame().split("\n")
   const y = raw.findIndex((line) => line.includes(text))
-  expect(y).toBeGreaterThanOrEqual(0)
+  if (y < 0) throw new Error(`missing clickable text ${JSON.stringify(text)}:\n${raw.join("\n")}`)
   const x = raw[y].indexOf(text)
-  expect(x).toBeGreaterThanOrEqual(0)
+  if (x < 0) throw new Error(`missing clickable text column ${JSON.stringify(text)}:\n${raw[y]}`)
   const target = { x: x + Math.floor(text.length / 2), y }
   // OpenTUI 的 mockMouse API 接收当前 char frame 的 0-based 坐标；先移动到
   // label 中点并渲染一次，模拟真实鼠标进入目标行，避免复杂渲染历史下

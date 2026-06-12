@@ -377,6 +377,8 @@ jobs:
       - name: Run upstream extra package tests
         id: upstream
         continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ matrix.id == 'llm' && 'test-key' || '' }}
         run: |
           mkdir -p "${{ matrix.path }}/.artifacts/upstream"
           if [ -n "${{ matrix.target }}" ]; then

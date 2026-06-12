@@ -2215,6 +2215,7 @@ function openAutoReviewFromToolChrome(
   navigate: ReturnType<typeof useRoute>["navigate"],
   renderer: ReturnType<typeof useRenderer>,
   evt: TuiMouseEvent | undefined,
+  options?: { inline?: boolean },
 ) {
   // OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
   // root + 1 这类布局猜测；父卡片兜底必须再经过行坐标校验，因为标题、
@@ -2229,7 +2230,7 @@ function openAutoReviewFromToolChrome(
   if (!match) return false
   if (match.direct) {
     if (evt.y !== match.row.screenY - 1) return false
-  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || evt.y !== match.row.screenY - 1)) return false
+  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || !options?.inline || evt.y !== match.row.screenY - 1)) return false
   return openAutoReviewSession(review, navigate, renderer, evt)
 }
 
@@ -2290,7 +2291,7 @@ function InlineTool(props: {
       onMouseOver={() => props.onClick && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: TuiMouseEvent) => {
-        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
+        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt, { inline: true })) return
         if (renderer.getSelection()?.getSelectedText()) return
         props.onClick?.()
       }}
