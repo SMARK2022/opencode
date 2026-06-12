@@ -212,7 +212,7 @@ describe("Format", () => {
         formatter: {
           first: {
             command: [
-              "node",
+              process.execPath,
               "-e",
               "const fs = require('fs'); const file = process.argv[1]; fs.writeFileSync(file, fs.readFileSync(file, 'utf8') + 'A')",
               "$FILE",
@@ -221,7 +221,7 @@ describe("Format", () => {
           },
           second: {
             command: [
-              "node",
+              process.execPath,
               "-e",
               "const fs = require('fs'); const file = process.argv[1]; fs.writeFileSync(file, fs.readFileSync(file, 'utf8') + 'B')",
               "$FILE",

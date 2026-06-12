@@ -118,5 +118,6 @@ await Bun.write(sseTypesPath, sseTypesPatched)
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`
-await $`bun tsc`
+// TypeScript's CLI is a Node entrypoint; running it through Bun can leave the Windows CI SDK build alive.
+await $`node ${Bun.resolveSync("typescript/bin/tsc", dir)}`
 await $`rm openapi.json`

@@ -1972,7 +1972,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   return (
     <Show when={!shouldHide()}>
       {/* #214：ToolAutoReview.Provider 提供 autoReview metadata——InlineTool/BlockTool 从 context 渲染共享审查状态行 */}
-      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata)}>
+      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata, props.part.tool)}>
         <Switch>
           <Match when={display() === "bash"}>
             <Shell {...toolprops} />
@@ -2147,6 +2147,7 @@ function GenericTool(props: ToolProps) {
 const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
 type AutoReviewMetadata = {
   reviewID: string
+  tool: string
   sessionID?: string
   // #216：aborted 状态——工具执行被取消时审查终止，与 reviewing/allowed/denied 等终态并列
   status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user" | "aborted"
@@ -2155,14 +2156,15 @@ type AutoReviewMetadata = {
 }
 
 // #209：从工具 metadata 提取 autoReview——非对象或缺少 reviewID 返回 undefined
-export function autoReviewMetadata(metadata: Record<string, unknown>): AutoReviewMetadata | undefined {
+export function autoReviewMetadata(metadata: Record<string, unknown>, tool: string): AutoReviewMetadata | undefined {
   const value = metadata.autoReview
   // #209：非对象或数组直接拒绝——防止 string/number 等 metadata 被强转为 review 结构
   if (!value || typeof value !== "object" || Array.isArray(value)) return
   const review = value as Record<string, unknown>
   // #209：reviewID 是 reviewer 写入的必填锚点——缺少则非有效 auto-review 注解，避免渲染空壳状态行
   if (typeof review.reviewID !== "string") return
-  return review as AutoReviewMetadata
+  // #296：tool 由调用方从 part.tool 注入，供父卡片兜底区分 shell 与 inline 工具坐标语义
+  return { ...(review as AutoReviewMetadata), tool }
 }
 
 // #209：auto-review 状态标签——两行合约：命令 + 一行紧凑审查状态
@@ -2218,7 +2220,13 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
     >
-      <text selectable={false} fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
+      <text
+        id={autoReviewLabelID(props.review)}
+        selectable={false}
+        fg={hover() ? theme.text : autoReviewColor(props.review, theme)}
+        wrapMode="none"
+        onMouseUp={openReview}
+      >
         {autoReviewLabel(props.review)}
       </text>
     </box>
@@ -2229,12 +2237,18 @@ function autoReviewLineID(review: AutoReviewMetadata) {
   return `auto-review-${review.reviewID}`
 }
 
+function autoReviewLabelID(review: AutoReviewMetadata) {
+  // 鼠标目标可能是内部文本；标签与外层行共享reviewID，只参与本地命中判断。
+  return `${autoReviewLineID(review)}-label`
+}
+
 function autoReviewLineTarget(review: AutoReviewMetadata, target: Renderable | null | undefined) {
   const id = autoReviewLineID(review)
+  const label = autoReviewLabelID(review)
   for (let item = target; item; item = item.parent) {
-    if (item.id === id) return item
+    if (item.id === id || item.id === label) return { row: item, direct: true }
     const child = item.findDescendantById(id)
-    if (child) return child
+    if (child) return { row: child, direct: false }
   }
 }
 
@@ -2249,8 +2263,9 @@ function openAutoReviewSession(
   // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
   evt?.preventDefault()
   evt?.stopPropagation()
-  // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
-  if (renderer.getSelection()?.getSelectedText()) return true
+  // review 行不是 transcript 正文，并且内部 text 已关闭 selection。前序 TUI
+  // 测试或真实用户留下的旧 selection 不能让这次明确点击只消费事件不导航。
+  renderer.clearSelection()
   navigate({ type: "session", sessionID: review.sessionID })
   return true
 }
@@ -2263,9 +2278,9 @@ function openAutoReviewFromToolChrome(
 ) {
   // 标题换行和 padding 会移动审查行，按稳定 id 查找，避免误中正文。
   if (!review?.sessionID || !evt?.target) return false
-  const row = autoReviewLineTarget(review, evt.target)
+  const match = autoReviewLineTarget(review, evt.target)
   // OpenTUI 已把终端坐标转成零基；screenY 与鼠标 y 可直接比较。
-  if (!row || evt.y !== row.screenY) return false
+  if (!match || evt.y !== match.row.screenY) return false
   return openAutoReviewSession(review, navigate, renderer, evt)
 }
 
