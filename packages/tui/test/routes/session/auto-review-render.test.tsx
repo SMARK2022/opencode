@@ -414,9 +414,9 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
 async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
   const lines = app.captureCharFrame().split("\n")
   const y = lines.findIndex((line) => line.includes(text))
-  expect(y).toBeGreaterThanOrEqual(0)
+  if (y < 0) throw new Error(`missing clickable text ${JSON.stringify(text)}:\n${lines.join("\n")}`)
   const x = lines[y].indexOf(text)
-  expect(x).toBeGreaterThanOrEqual(0)
+  if (x < 0) throw new Error(`missing clickable text column ${JSON.stringify(text)}:\n${lines[y]}`)
   // 文本锚点跟随布局变化；当前mockMouse使用零基行号，列坐标进入标签内部。
   await app.mockMouse.click(x + 1, y)
 }
