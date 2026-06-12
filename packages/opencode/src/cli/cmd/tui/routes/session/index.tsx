@@ -1881,7 +1881,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   return (
     <Show when={!shouldHide()}>
-      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata)}>
+      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata, props.part.tool)}>
         <Switch>
           <Match when={props.part.tool === ShellID.ToolID}>
             <Shell {...toolprops} />
@@ -2090,18 +2090,19 @@ function GenericTool(props: ToolProps<any>) {
 
 type AutoReviewMetadata = {
   reviewID: string
+  tool: string
   sessionID?: string
   status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user" | "aborted"
   precheck?: { level: string; reason: string }
   result?: { risk_level: string; user_authorization: string; rationale: string }
 }
 
-function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>): AutoReviewMetadata | undefined {
+function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>, tool: string): AutoReviewMetadata | undefined {
   const value = (metadata as Record<string, unknown>).autoReview
   if (!value || typeof value !== "object" || Array.isArray(value)) return
   const review = value as Record<string, unknown>
   if (typeof review.reviewID !== "string") return
-  return review as AutoReviewMetadata
+  return { ...(review as AutoReviewMetadata), tool }
 }
 
 function autoReviewLabel(review: AutoReviewMetadata) {
@@ -2155,7 +2156,13 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
     >
-      <text selectable={false} fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none" onMouseUp={openReview}>
+      <text
+        id={autoReviewLabelID(props.review)}
+        selectable={false}
+        fg={hover() ? theme.text : autoReviewColor(props.review, theme)}
+        wrapMode="none"
+        onMouseUp={openReview}
+      >
         {autoReviewLabel(props.review)}
       </text>
     </box>
@@ -2168,12 +2175,19 @@ function autoReviewLineID(review: AutoReviewMetadata) {
   return `auto-review-${review.reviewID}`
 }
 
+function autoReviewLabelID(review: AutoReviewMetadata) {
+  // OpenTUI 在不同平台可能把 mouse target 设为 text 内部 renderable，而不是
+  // 外层 row box；label id 与 row id 共用 reviewID，仍只服务本地 hit-test。
+  return `${autoReviewLineID(review)}-label`
+}
+
 function autoReviewLineTarget(review: AutoReviewMetadata, target: Renderable | null | undefined) {
   const id = autoReviewLineID(review)
+  const label = autoReviewLabelID(review)
   for (let item = target; item; item = item.parent) {
-    if (item.id === id) return item
+    if (item.id === id || item.id === label) return { row: item, direct: true }
     const child = item.findDescendantById(id)
-    if (child) return child
+    if (child) return { row: child, direct: false }
   }
 }
 
@@ -2189,7 +2203,9 @@ function openAutoReviewSession(
   // 继续冒泡到父 BlockTool/InlineTool 后触发展开、折叠或工具专属点击。
   evt?.preventDefault()
   evt?.stopPropagation()
-  if (renderer.getSelection()?.getSelectedText()) return true
+  // review 行不是 transcript 正文，并且内部 text 已关闭 selection。前序 TUI
+  // 测试或真实用户留下的旧 selection 不能让这次明确点击只消费事件不导航。
+  renderer.clearSelection()
   navigate({ type: "session", sessionID: review.sessionID })
   return true
 }
@@ -2201,14 +2217,19 @@ function openAutoReviewFromToolChrome(
   evt: TuiMouseEvent | undefined,
 ) {
   // OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
-  // root + 1 这类布局猜测，因为 BlockTool 的相邻行可能是标题、body 或
-  // expand affordance；只接受事件命中的 renderable 子树里真实存在的 review row。
+  // root + 1 这类布局猜测；父卡片兜底必须再经过行坐标校验，因为标题、
+  // 命令行、body 或 expand affordance 与 review row 是兄弟区域，不能共享导航语义。
   if (!review?.sessionID || !evt?.target) return false
-  const row = autoReviewLineTarget(review, evt.target)
+  const match = autoReviewLineTarget(review, evt.target)
   // mockMouse 和真实终端鼠标事件传入的是 char frame 的 0-based y；OpenTUI
-  // renderable.screenY 在当前布局树中是对应行的 1-based 屏幕坐标。先用 id
-  // 找到真实 review row，再做这个坐标归一化，避免退回 root+1 的布局猜测。
-  if (!row || evt.y !== row.screenY - 1) return false
+  // renderable.screenY 在当前布局树中是对应行的 1-based 屏幕坐标。direct 命中
+  // 说明事件 target 已在 review row 内，沿用归一化坐标。shell 工具的命令行
+  // 和 review row 紧邻，父卡片兜底必须只接受真正 status 行；非 shell inline
+  // 工具在部分 OpenTUI hit-grid 状态下会把 review 文本报告成上一行内部 text。
+  if (!match) return false
+  if (match.direct) {
+    if (evt.y !== match.row.screenY - 1) return false
+  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || evt.y !== match.row.screenY - 1)) return false
   return openAutoReviewSession(review, navigate, renderer, evt)
 }
 

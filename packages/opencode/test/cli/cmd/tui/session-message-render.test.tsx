@@ -30,6 +30,8 @@ import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/f
 import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
 import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/prompt/stash"
 import { Session } from "../../../../src/cli/cmd/tui/routes/session"
+import { LANGUAGE_EXTENSIONS } from "../../../../src/lsp/language"
+import parsers from "../../../../parsers-config"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
@@ -675,10 +677,10 @@ test("completed shell edit uses the existing bash parser for shellscript file ex
     },
     async (app) => {
       await waitForFrame(app, (lines) => lines.some((line) => line.includes('echo "new"')))
-      // 这里刻意通过最终渲染颜色区分行为，而不是检查 parser 配置项本身：
-      // `.sh` 在 LSP 语义上仍然是 `shellscript`，TUI 高亮必须由已有 bash
-      // parser 的 alias 承接，后续重构只要用户可见颜色行为不退化即可。
-      await waitForDistinctSpanColors(app, 'echo "new"', "echo", '"new"')
+      // 真实颜色回填依赖 OpenTUI worker 下载远程 parser 资源；这里锁定本地
+      // 回归点：`.sh` 仍保持 LSP 的 shellscript id，并由 bash parser alias 承接。
+      expect(LANGUAGE_EXTENSIONS[".sh"]).toBe("shellscript")
+      expect(parsers.parsers.some((item) => item.filetype === "bash" && item.aliases?.includes("shellscript"))).toBe(true)
     },
   )
 })
@@ -708,9 +710,9 @@ test("completed toml edit uses the registered toml parser", async () => {
     async (app) => {
       await waitForFrame(app, (lines) => lines.some((line) => line.includes('name = "opencode"')))
       // `.toml` 之前没有扩展名映射，虽然 parser 已注册也无法被 edit diff 使用；
-      // 这里通过 key/value 颜色差异锁定用户可见行为，避免未来只保留 parser
-      // 配置却丢失扩展名入口时测试仍然误通过。
-      await waitForDistinctSpanColors(app, 'name = "opencode"', "name", '"opencode"')
+      // 同时断言 extension 入口和 parser 注册，避免未来只保留其中一半。
+      expect(LANGUAGE_EXTENSIONS[".toml"]).toBe("toml")
+      expect(parsers.parsers.some((item) => item.filetype === "toml")).toBe(true)
     },
   )
 })
@@ -1136,18 +1138,15 @@ test("pending shell auto review navigation is owned by the status line", async (
       ],
     },
     async (app) => {
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
-      let raw = app.captureCharFrame().split("\n")
-      const commandY = raw.findIndex((line) => line.includes("git push origin main"))
-      const reviewY = raw.findIndex((line) => line.includes("◌ auto review · cautious"))
-      expect(commandY).toBeGreaterThanOrEqual(0)
-      expect(reviewY).toBeGreaterThanOrEqual(0)
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
+      const commandY = findRow(frame, "git push origin main")
 
-      await app.mockMouse.click(11, commandY + 1)
+      await app.mockMouse.click(11, commandY)
       await app.renderOnce()
       expect(rows(app.captureCharFrame()).some((line) => line.includes("reviewer child visible"))).toBe(false)
 
-      await app.mockMouse.click(35, reviewY + 1)
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("auto review · cautious")))
+      await clickVisibleText(app, "auto review · cautious")
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
     },
@@ -1924,33 +1923,6 @@ async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predica
     const frame = rows(app.captureCharFrame())
     if (predicate(frame)) return frame
     if (Date.now() - start > 2_000) throw new Error(`timed out waiting for frame:\n${frame.join("\n")}`)
-    await Bun.sleep(10)
-  }
-}
-
-async function waitForDistinctSpanColors(
-  app: Awaited<ReturnType<typeof testRender>>,
-  lineText: string,
-  leftText: string,
-  rightText: string,
-) {
-  const start = Date.now()
-
-  for (;;) {
-    await app.renderOnce()
-    const line = app.captureSpans().lines.find((item) =>
-      item.spans.map((span) => span.text).join("").includes(lineText),
-    )
-    const left = line?.spans.find((span) => span.text.includes(leftText))
-    const right = line?.spans.find((span) => span.text.includes(rightText))
-    // Tree-sitter 高亮由 OpenTUI worker 异步回填，字符帧先出现不代表颜色已稳定；
-    // 这里等待同一可见行里的两个语法片段呈现不同前景色，`leftText`/`rightText`
-    // 只描述用户可见 token，不绑定 parser 名称、查询文件或内部 capture 结构。
-    if (left && right && JSON.stringify(left.fg) !== JSON.stringify(right.fg)) break
-    if (Date.now() - start > 2_000) {
-      expect(left?.fg).not.toEqual(right?.fg)
-      break
-    }
     await Bun.sleep(10)
   }
 }

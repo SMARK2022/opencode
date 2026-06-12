@@ -5,9 +5,9 @@ import { onMount } from "solid-js"
 import { SDKProvider, useSDK } from "../../../../src/cli/cmd/tui/context/sdk"
 
 async function wait(fn: () => boolean, timeout = 2000) {
-  const start = Date.now()
+  const start = performance.now()
   while (!fn()) {
-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
+    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
     await Bun.sleep(10)
   }
 }

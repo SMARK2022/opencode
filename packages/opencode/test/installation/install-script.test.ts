@@ -191,13 +191,13 @@ function count(text: string, needle: string) {
 }
 
 async function installScriptForBash(env: Record<string, string | undefined>) {
-  if (process.platform !== "win32") return INSTALL_SCRIPT
+  const source = await Bun.file(INSTALL_SCRIPT).text()
+  if (process.platform !== "win32" && !source.includes("\r\n")) return INSTALL_SCRIPT
   const script = path.join(path.dirname(env.HOME ?? path.dirname(INSTALL_SCRIPT)), "install")
   await fs.mkdir(path.dirname(script), { recursive: true })
-  // WSL bash executes the same script bytes as a POSIX shell would see from curl.
-  // On Windows checkouts git may materialize CRLF line endings, which turns
-  // `pipefail` into `pipefail\r`; normalize only the temporary test copy.
-  await Bun.write(script, (await Bun.file(INSTALL_SCRIPT).text()).replaceAll("\r\n", "\n"))
+  // WSL may run these Linux tests from a Windows checkout where git materialized
+  // CRLF line endings. Bash then sees `pipefail\r`; normalize only the temp copy.
+  await Bun.write(script, source.replaceAll("\r\n", "\n"))
   await fs.chmod(script, 0o755)
   return script
 }
