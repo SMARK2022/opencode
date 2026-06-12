@@ -41,15 +41,15 @@ describe("auto review rendering (#209)", () => {
   test("autoReviewMetadata returns undefined for missing autoReview", () => {
     // #209：无 autoReview 字段时返回 undefined
     // #209：覆盖 null/string/array 四种非法类型——确保 type guard 不被 falsy 或非对象值欺骗
-    expect(autoReviewMetadata({})).toBeUndefined()
-    expect(autoReviewMetadata({ autoReview: null })).toBeUndefined()
-    expect(autoReviewMetadata({ autoReview: "string" })).toBeUndefined()
-    expect(autoReviewMetadata({ autoReview: [] })).toBeUndefined()
+    expect(autoReviewMetadata({}, "bash")).toBeUndefined()
+    expect(autoReviewMetadata({ autoReview: null }, "bash")).toBeUndefined()
+    expect(autoReviewMetadata({ autoReview: "string" }, "bash")).toBeUndefined()
+    expect(autoReviewMetadata({ autoReview: [] }, "bash")).toBeUndefined()
   })
 
   test("autoReviewMetadata returns undefined when reviewID is missing", () => {
     // #209：缺少 reviewID 字段时返回 undefined——防止部分写入的 metadata 被误用
-    expect(autoReviewMetadata({ autoReview: { status: "reviewing" } })).toBeUndefined()
+    expect(autoReviewMetadata({ autoReview: { status: "reviewing" } }, "bash")).toBeUndefined()
   })
 
   test("autoReviewMetadata extracts valid autoReview metadata", () => {
@@ -64,9 +64,11 @@ describe("auto review rendering (#209)", () => {
         result: { risk_level: "high", user_authorization: "high", rationale: "authorized" },
       },
     }
-    const review = autoReviewMetadata(metadata)
+    const review = autoReviewMetadata(metadata, "edit")
     expect(review).toBeDefined()
     expect(review?.reviewID).toBe("review_1")
+    // #296：tool 参数由调用方注入并透传，供父卡片兜底区分 shell 与 inline 工具坐标语义
+    expect(review?.tool).toBe("edit")
     expect(review?.sessionID).toBe("ses_reviewer")
     expect(review?.status).toBe("allowed")
     expect(review?.precheck?.level).toBe("cautious")
@@ -76,6 +78,7 @@ describe("auto review rendering (#209)", () => {
   test("autoReviewLabel shows reviewing state with precheck level", () => {
     // #209：reviewing 状态展示 ◌ + precheck level + @permission-reviewer
     const label = autoReviewLabel({
+      tool: "bash",
       reviewID: "review_2",
       status: "reviewing",
       precheck: { level: "cautious", reason: "sensitive read" },
@@ -86,6 +89,7 @@ describe("auto review rendering (#209)", () => {
   test("autoReviewLabel shows allowed state with auth level", () => {
     // #209：allowed 状态展示 ✓ + auth level + @permission-reviewer
     const label = autoReviewLabel({
+      tool: "bash",
       reviewID: "review_3",
       status: "allowed",
       result: { risk_level: "high", user_authorization: "high", rationale: "authorized" },
@@ -96,6 +100,7 @@ describe("auto review rendering (#209)", () => {
   test("autoReviewLabel shows denied state with risk and auth", () => {
     // #209：denied 状态展示 ! + risk + auth + @permission-reviewer
     const label = autoReviewLabel({
+      tool: "bash",
       reviewID: "review_4",
       status: "denied",
       result: { risk_level: "high", user_authorization: "unknown", rationale: "not authorized" },
@@ -105,25 +110,25 @@ describe("auto review rendering (#209)", () => {
 
   test("autoReviewLabel shows timed_out state as failed closed", () => {
     // #209：timed_out 状态展示 ! + timed out + failed closed
-    const label = autoReviewLabel({ reviewID: "review_5", status: "timed_out" })
+    const label = autoReviewLabel({ reviewID: "review_5", tool: "bash", status: "timed_out" })
     expect(label).toBe("! auto review · timed out · failed closed · @permission-reviewer")
   })
 
   test("autoReviewLabel shows failed state as failed closed", () => {
     // #209：failed 状态展示 ! + failed + failed closed
-    const label = autoReviewLabel({ reviewID: "review_6", status: "failed" })
+    const label = autoReviewLabel({ reviewID: "review_6", tool: "bash", status: "failed" })
     expect(label).toBe("! auto review · failed · failed closed · @permission-reviewer")
   })
 
   test("autoReviewLabel shows fallback_user state as asking user", () => {
     // #209：fallback_user 状态展示 ! + unavailable + asking user
-    const label = autoReviewLabel({ reviewID: "review_7", status: "fallback_user" })
+    const label = autoReviewLabel({ reviewID: "review_7", tool: "bash", status: "fallback_user" })
     expect(label).toBe("! auto review · unavailable · asking user · @permission-reviewer")
   })
 
   test("autoReviewLabel shows aborted state", () => {
     // #216：aborted 状态展示 ! + aborted + @permission-reviewer——工具执行被取消时的审查终态
-    const label = autoReviewLabel({ reviewID: "review_9", status: "aborted" })
+    const label = autoReviewLabel({ reviewID: "review_9", tool: "bash", status: "aborted" })
     expect(label).toBe("! auto review · aborted · @permission-reviewer")
   })
 
@@ -131,6 +136,7 @@ describe("auto review rendering (#209)", () => {
     // #209：无 status 时默认展示 reviewing + precheck level
     // #209：默认 reviewing 是安全假设——metadata 写入与状态更新非原子，读取时可能尚未标记终态
     const label = autoReviewLabel({
+      tool: "bash",
       reviewID: "review_8",
       precheck: { level: "general", reason: "unknown" },
     })

@@ -7,9 +7,10 @@ import { SDKProvider, useSDK } from "../../src/context/sdk"
 
 // #139：等待生产 SSE rebind 完成
 async function wait(fn: () => boolean, timeout = 4000) {
-  const start = Date.now()
+  // #296：单调时钟防墙钟跳变（NTP 回拨会使 Date 差值为负、等待永不超时）
+  const start = performance.now()
   while (!fn()) {
-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
+    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
     await Bun.sleep(10)
   }
 }

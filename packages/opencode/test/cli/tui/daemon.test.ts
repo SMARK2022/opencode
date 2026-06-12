@@ -23,6 +23,7 @@ const credentials = { username: "daemon-test", password: "daemon-test-password" 
 
 const DAEMON_START_TIMEOUT_MS = 15_000
 const POLL_INTERVAL_MS = 100
+const DAEMON_STOP_TIMEOUT_MS = 60_000
 
 afterEach(() => {
   ServerLock._setLockPath(undefined)
@@ -36,6 +37,10 @@ function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
     ...process.env,
     OPENCODE_DAEMON_LAUNCHER_PID: "",
     OPENCODE_PROCESS_ROLE: "main",
+    // Slow WSL/drvfs cold starts can make the real CLI stop path take >5s before
+    // it reaches the daemon control endpoint. Startup-idle behavior tests pass
+    // explicit shorter values below; lifecycle tests need the daemon to stay up.
+    OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "60000",
     OPENCODE_SERVER_USERNAME: credentials.username,
     OPENCODE_SERVER_PASSWORD: credentials.password,
     ...env,
@@ -139,7 +144,7 @@ describe("daemon lifecycle", () => {
         await proc.exited.catch(() => undefined)
       }
     },
-    DAEMON_START_TIMEOUT_MS + 10_000,
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
   )
 
   // 先等待 connected 再调用 stop，确保观察到主动关闭广播；真实启动用例仅作静态审查。
@@ -167,7 +172,10 @@ describe("daemon lifecycle", () => {
 
           const stop = runDaemonStop(lockPath)
           // 同一订阅必须收到 global.disposed 及 daemon-stop 原因，五秒内未收到就失败。
-          const shutdownEvent = await Promise.race([readUntil(reader, "daemon-stop"), Bun.sleep(5_000).then(() => "timeout")])
+          const shutdownEvent = await Promise.race([
+            readUntil(reader, "daemon-stop"),
+            Bun.sleep(DAEMON_STOP_TIMEOUT_MS).then(() => "timeout"),
+          ])
           expect(shutdownEvent).not.toBe("timeout")
           expect(String(shutdownEvent)).toContain("global.disposed")
           expect(String(shutdownEvent)).toContain("daemon-stop")
@@ -182,7 +190,7 @@ describe("daemon lifecycle", () => {
         await proc.exited.catch(() => undefined)
       }
     },
-    DAEMON_START_TIMEOUT_MS + 10_000,
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
   )
 
   test(
@@ -209,7 +217,7 @@ describe("daemon lifecycle", () => {
         await proc.exited.catch(() => undefined)
       }
     },
-    DAEMON_START_TIMEOUT_MS + 10_000,
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
   )
 
   test("daemon stop command is a no-op when no daemon lock exists", async () => {
@@ -317,7 +325,7 @@ describe("daemon lifecycle", () => {
         await Promise.all([nonDaemon.exited.catch(() => undefined), proc.exited.catch(() => undefined)])
       }
     },
-    DAEMON_START_TIMEOUT_MS + 10_000,
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
   )
 
   test(

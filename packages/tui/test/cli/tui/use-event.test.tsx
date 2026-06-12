@@ -13,9 +13,10 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 const projectID = "proj_test"
 
 async function wait(fn: () => boolean, timeout = 2000) {
-  const start = Date.now()
+  // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
+  const start = performance.now()
   while (!fn()) {
-    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
+    if (performance.now() - start > timeout) throw new Error("timed out waiting for condition")
     await Bun.sleep(10)
   }
 }

@@ -337,6 +337,7 @@ describe("TUI inline tool wrapping", () => {
       "UserMessage",
       "autoReviewColor",
       "autoReviewLineID",
+      "autoReviewLabelID",
       "autoReviewLineTarget",
       "AutoReviewLine",
       "ToolAutoReviewLine",
@@ -370,6 +371,7 @@ describe("TUI inline tool wrapping", () => {
     )
     expect(code).not.toMatch(/\bimport\s/)
     const review = {
+      tool: kind,
       reviewID: "review_click", sessionID: "ses_reviewer_child", status: "allowed",
       result: { risk_level: "high", user_authorization: "high", rationale: "user requested this action" },
     } as const
@@ -457,13 +459,14 @@ describe("TUI inline tool wrapping", () => {
     expect(parentClicks).toBe(0)
     expect(expanded()).toBe(false)
     navigation.length = 0
-    // 选区消费事件但不导航；无子会话、无 target 或非审查 target 不产生导航。
+    // 明确点击审查入口会清除旧选区；缺少子会话或命中无关目标仍不导航。
     const effects: string[] = []
     const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: app.renderer.root, y: -1 }
-    const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }) }
+    const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }), clearSelection: () => effects.push("clear") }
     expect(production.openAutoReviewSession(review, navigate, selected, evt)).toBe(true)
-    expect(effects).toEqual(["default", "bubble"])
-    expect(navigation).toEqual([])
+    expect(effects).toEqual(["default", "bubble", "clear"])
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    navigation.length = 0
     expect(production.openAutoReviewSession({ ...review, sessionID: undefined }, navigate, app.renderer, evt)).toBe(false)
     expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, evt)).toBe(false)
     expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, undefined)).toBe(false)
