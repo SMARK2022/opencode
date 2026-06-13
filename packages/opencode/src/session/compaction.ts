@@ -26,6 +26,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session-event"
+import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import path from "path"
 import { createHash } from "crypto"
 
@@ -261,17 +262,13 @@ type ToolEvent = {
 type InspectedFileEvidence = {
   path: string
   canonicalPath: string
+  size: number | undefined
   ranges: Array<{ start: number; end: number }>
   total: number
   modified: string
+  modifiedMs: number | undefined
   lastRead: number
   status: "current" | "stale" | "deleted"
-}
-
-type MutationEvidence = {
-  canonicalPath: string
-  sequence: number
-  deleted: boolean
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {
@@ -343,88 +340,126 @@ function compactCell(input: string, max: number, label: string) {
   return `${clean.slice(0, Math.max(0, max - 18)).trimEnd()}... [${label}:${hash8(clean)}]`
 }
 
-function collectMutationPaths(events: ToolEvent[], worktree: string) {
-  return events.flatMap((event): MutationEvidence[] => {
-    const metadata = event.part.state.metadata
-    const add = (file: string | undefined, deleted = false): MutationEvidence[] =>
-      file ? [{ canonicalPath: canonicalEvidencePath(file, worktree), sequence: event.sequence, deleted }] : []
-
-    if (event.part.tool === "write") return add(stringField(metadata, "filepath") ?? stringField(event.part.state.input, "filePath"))
-    if (event.part.tool === "edit") {
-      const filediff = isRecord(metadata.filediff) ? stringField(metadata.filediff, "file") : undefined
-      return add(stringField(metadata, "filepath") ?? filediff ?? stringField(event.part.state.input, "filePath"))
-    }
-    if (event.part.tool !== "apply_patch") return []
-    const files = Array.isArray(metadata.files) ? metadata.files : []
-    return files.flatMap((file): MutationEvidence[] => {
-      if (!isRecord(file)) return []
-      const type = stringField(file, "type")
-      const filePath = stringField(file, "filePath")
-      const movePath = stringField(file, "movePath")
-      // apply_patch 的 move 会同时让旧路径失效并产生新路径；Evidence 只给
-      // 已读文件判定状态，所以旧路径必须标记 deleted，不能泛化成 stale。
-      if (type === "move") return [...add(filePath, true), ...add(movePath)]
-      return add(filePath, type === "delete")
-    })
-  })
+function statSize(stat: { size: unknown }) {
+  return typeof stat.size === "bigint" ? Number(stat.size) : Number(stat.size)
 }
 
-function renderInspectedFiles(input: { events: ToolEvent[]; worktree: string }) {
-  const files = new Map<string, InspectedFileEvidence>()
-  const mutations = collectMutationPaths(input.events, input.worktree)
+function statModifiedMs(stat: { mtime: Option.Option<Date> }) {
+  return stat.mtime.pipe(
+    Option.map((time) => Math.floor(time.getTime())),
+    Option.getOrUndefined,
+  )
+}
 
-  for (const event of input.events) {
-    if (event.part.tool !== "read") continue
-    const read = isRecord(event.part.state.metadata.read) ? event.part.state.metadata.read : undefined
-    if (!read || read.stub === true) continue
-    const filePath = stringField(read, "path")
-    const canonicalPath = stringField(read, "canonicalPath")
-    const start = numberField(read, "start")
-    const end = numberField(read, "end")
-    const total = numberField(read, "total")
-    const modified = stringField(read, "modified")
-    if (!filePath || !canonicalPath || start === undefined || end === undefined || total === undefined || !modified) continue
-    const canonical = canonicalEvidencePath(canonicalPath, input.worktree)
-    const current = files.get(canonical)
-    if (!current) {
-      files.set(canonical, {
-        path: displayPath(filePath, input.worktree),
-        canonicalPath: canonical,
-        ranges: [{ start, end }],
-        total,
-        modified,
-        lastRead: event.sequence,
-        status: "current",
-      })
-      continue
+function formatEvidenceModified(ms: number) {
+  // 这里必须和 read tool 的 `<file modified="..." />` 展示保持同一种本地时间格式。
+  // 不从 read.ts 导出 helper，是为了避免 session compaction 反向依赖 tool 内部实现。
+  const date = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`
+}
+
+function isNotFoundError(error: unknown) {
+  if (!isRecord(error)) return false
+  const reason = error.reason
+  return isRecord(reason) && reason._tag === "NotFound"
+}
+
+function statFailureEvidence(error: unknown): Pick<InspectedFileEvidence, "modified" | "status"> {
+  // NotFound 才代表当前路径已经没有可比对的磁盘文件；其它 stat 错误只说明无法确认，
+  // 继续标 stale 比误报 current 或 deleted 更安全，也不会阻断 compaction 摘要落库。
+  return { modified: "-", status: isNotFoundError(error) ? "deleted" : "stale" }
+}
+
+function currentFileEvidence(
+  file: InspectedFileEvidence,
+  stat: { type: string; size: unknown; mtime: Option.Option<Date> },
+): Pick<InspectedFileEvidence, "modified" | "status"> {
+  if (stat.type !== "File") return { modified: "-", status: "deleted" }
+  const modifiedMs = statModifiedMs(stat)
+  if (modifiedMs === undefined) return { modified: "-", status: "stale" }
+  const modified = formatEvidenceModified(modifiedMs)
+  // 历史会话里可能存在旧 read metadata，缺少 size/modifiedMs 时无法证明版本相同。
+  // 仍展示当前磁盘 mtime，但状态必须保守标 stale，避免把不可确认的证据伪装成 current。
+  if (file.size === undefined || file.modifiedMs === undefined) return { modified, status: "stale" }
+  return {
+    modified,
+    status: statSize(stat) === file.size && modifiedMs === file.modifiedMs ? "current" : "stale",
+  }
+}
+
+function renderInspectedFiles(input: { events: ToolEvent[]; fs: AppFileSystem.Interface; worktree: string }) {
+  return Effect.gen(function* () {
+    const files = new Map<string, InspectedFileEvidence>()
+
+    for (const event of input.events) {
+      if (event.part.tool !== "read") continue
+      const read = isRecord(event.part.state.metadata.read) ? event.part.state.metadata.read : undefined
+      if (!read || read.stub === true) continue
+      const filePath = stringField(read, "path")
+      const canonicalPath = stringField(read, "canonicalPath")
+      const size = numberField(read, "size")
+      const start = numberField(read, "start")
+      const end = numberField(read, "end")
+      const total = numberField(read, "total")
+      const modified = stringField(read, "modified")
+      const modifiedMs = numberField(read, "modifiedMs")
+      if (!filePath || !canonicalPath || start === undefined || end === undefined || total === undefined || !modified) continue
+      const canonical = canonicalEvidencePath(canonicalPath, input.worktree)
+      const current = files.get(canonical)
+      if (!current) {
+        files.set(canonical, {
+          path: displayPath(filePath, input.worktree),
+          canonicalPath: canonical,
+          size,
+          ranges: [{ start, end }],
+          total,
+          modified,
+          modifiedMs,
+          lastRead: event.sequence,
+          status: "current",
+        })
+        continue
+      }
+      current.ranges = mergeRanges([...current.ranges, { start, end }])
+      current.size = size
+      current.total = total
+      current.modified = modified
+      current.modifiedMs = modifiedMs
+      current.lastRead = event.sequence
     }
-    current.ranges = mergeRanges([...current.ranges, { start, end }])
-    current.total = total
-    current.modified = modified
-    current.lastRead = event.sequence
-  }
 
-  for (const file of files.values()) {
-    const mutation = mutations.filter((item) => item.canonicalPath === file.canonicalPath && item.sequence > file.lastRead).at(-1)
-    if (!mutation) continue
-    file.status = mutation.deleted ? "deleted" : "stale"
-  }
+    const rows = [...files.values()].toSorted((a, b) => b.lastRead - a.lastRead)
+    const rendered = rows.slice(0, EVIDENCE_FILE_LIMIT)
+    const omitted = Math.max(0, rows.length - rendered.length)
+    // 当前磁盘 stat 是 handoff 的事实来源，但它只服务最终可见 rows。
+    // 先按 evidence budget 截断，保证一次 compaction 最多触发 EVIDENCE_FILE_LIMIT 次 I/O。
+    yield* Effect.forEach(rendered, (file) =>
+      Effect.gen(function* () {
+        const evidence = yield* input.fs.stat(file.canonicalPath).pipe(
+          Effect.map((stat) => currentFileEvidence(file, stat)),
+          Effect.catch((error) => Effect.succeed(statFailureEvidence(error))),
+        )
+        file.modified = evidence.modified
+        file.status = evidence.status
+      }),
+    )
 
-  const rows = [...files.values()].toSorted((a, b) => b.lastRead - a.lastRead)
-  const rendered = rows.slice(0, EVIDENCE_FILE_LIMIT)
-  const omitted = Math.max(0, rows.length - rendered.length)
-  const output = [
-    "### Inspected Files",
-    "| path | ranges | total | modified | status |",
-    "|---|---:|---:|---|---|",
-    ...rendered.map((file) => {
-      const ranges = file.ranges.slice(0, EVIDENCE_FILE_RANGE_LIMIT).map((range) => `${range.start}-${range.end}`)
-      const omittedRanges = Math.max(0, file.ranges.length - ranges.length)
-      return `| ${evidenceCell(file.path)} | ${ranges.join(", ")}${omittedRanges ? `, ...(+${omittedRanges})` : ""} | ${file.total} | ${evidenceCell(file.modified)} | ${file.status} |`
-    }),
-  ]
-  if (omitted > 0) output.push(`Omitted: ${omitted} inspected files due to evidence budget.`)
-  return output.join("\n")
+    const output = [
+      "### Inspected Files",
+      "| path | ranges | total | modified | status |",
+      "|---|---:|---:|---|---|",
+      ...rendered.map((file) => {
+        const ranges = file.ranges.slice(0, EVIDENCE_FILE_RANGE_LIMIT).map((range) => `${range.start}-${range.end}`)
+        const omittedRanges = Math.max(0, file.ranges.length - ranges.length)
+        return `| ${evidenceCell(file.path)} | ${ranges.join(", ")}${omittedRanges ? `, ...(+${omittedRanges})` : ""} | ${file.total} | ${evidenceCell(file.modified)} | ${file.status} |`
+      }),
+    ]
+    if (omitted > 0) output.push(`Omitted: ${omitted} inspected files due to evidence budget.`)
+    return output.join("\n")
+  })
 }
 
 function redactCommand(input: string) {
@@ -523,23 +558,26 @@ function renderEvidenceHandoff(input: {
   messages: MessageV2.WithParts[]
   todos: Todo.Info[]
   directory: string
+  fs: AppFileSystem.Interface
   worktree: string
 }) {
-  const events = completedToolEvents(input.messages)
-  return [
-    "## Evidence Handoff",
-    "",
-    renderInspectedFiles({ events, worktree: input.worktree }),
-    "",
-    renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
-    "",
-    renderOutstandingTodos(input.todos),
-    "",
-    "### Lost Context Notice",
-    "- Older raw tool outputs were compacted.",
-    "- Use current evidence before repeating reads or commands.",
-    "- Treat stale evidence as advisory only.",
-  ].join("\n")
+  return Effect.gen(function* () {
+    const events = completedToolEvents(input.messages)
+    return [
+      "## Evidence Handoff",
+      "",
+      yield* renderInspectedFiles({ events, fs: input.fs, worktree: input.worktree }),
+      "",
+      renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
+      "",
+      renderOutstandingTodos(input.todos),
+      "",
+      "### Lost Context Notice",
+      "- Older raw tool outputs were compacted.",
+      "- Use current evidence before repeating reads or commands.",
+      "- Treat stale evidence as advisory only.",
+    ].join("\n")
+  })
 }
 
 function turns(messages: MessageV2.WithParts[]) {
@@ -637,6 +675,7 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const fs = yield* AppFileSystem.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: MessageV2.Assistant["tokens"]
@@ -969,12 +1008,13 @@ export const layer = Layer.effect(
           : []
         // Evidence 作为同一条 summary assistant 的 synthetic text 追加，保证用户可见内容
         // 和模型 replay 内容一致；不写隐藏 JSON，避免后续维护者误以为模型看到了 UI 看不到的状态。
+        const handoff = yield* renderEvidenceHandoff({ messages: history, todos, directory: ctx.directory, fs, worktree: ctx.worktree })
         yield* session.updatePart({
           id: PartID.ascending(),
           messageID: msg.id,
           sessionID: input.sessionID,
           type: "text",
-          text: renderEvidenceHandoff({ messages: history, todos, directory: ctx.directory, worktree: ctx.worktree }),
+          text: handoff,
           synthetic: true,
           metadata: { kind: EVIDENCE_HANDOFF_KIND, version: 1 },
           time: { start: Date.now(), end: Date.now() },
@@ -1228,6 +1268,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(AppFileSystem.defaultLayer),
   ),
 )
 

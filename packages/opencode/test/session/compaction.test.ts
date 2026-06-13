@@ -3,8 +3,10 @@ import { APICallError } from "ai"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import path from "path"
+import fs from "fs/promises"
 import { Bus } from "../../src/bus"
 import { Config } from "@/config/config"
+import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Image } from "@/image/image"
 import { Agent } from "../../src/agent/agent"
 import { LLM } from "../../src/session/llm"
@@ -244,6 +246,7 @@ const deps = Layer.mergeAll(
   Agent.defaultLayer,
   Plugin.defaultLayer,
   Bus.layer,
+  AppFileSystem.defaultLayer,
   Config.defaultLayer,
   SyncEvent.defaultLayer,
   RuntimeFlags.layer({ experimentalEventSystem: true }),
@@ -288,6 +291,7 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
   return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status, todo).pipe(
     Layer.provide(SessionNs.defaultLayer),
     Layer.provide((options?.provider ?? wide()).layer),
+    Layer.provide(AppFileSystem.defaultLayer),
     Layer.provide(Snapshot.defaultLayer),
     Layer.provide(options?.llm ?? LLM.defaultLayer),
     Layer.provide(Permission.defaultLayer),
@@ -315,6 +319,27 @@ function readCompactionPart(sessionID: SessionID) {
 
 function canonicalTestPath(file: string) {
   return (process.platform === "win32" ? file.toLowerCase() : file).replaceAll("\\", "/")
+}
+
+function localTimestamp(year: number, month: number, day: number, hour: number, minute = 0) {
+  // 测试断言依赖 Evidence Handoff 的本地时间展示，固定使用本地时区构造 mtime。
+  return new Date(year, month - 1, day, hour, minute, 0).getTime()
+}
+
+function writeEvidenceFile(file: string, input: { size: number; modifiedMs: number }) {
+  // Evidence Handoff 的新鲜度由当前文件系统版本决定，测试必须创建真实文件，
+  // 不能只伪造 read/write metadata，否则无法覆盖磁盘 mtime 和 size 的比较边界。
+  return Effect.promise(async () => {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, "x".repeat(input.size), "utf-8")
+    await fs.utimes(file, new Date(input.modifiedMs), new Date(input.modifiedMs))
+  })
+}
+
+function removeEvidenceFile(file: string) {
+  // deleted 状态来自当前磁盘事实，不再来自 apply_patch metadata；force 让 Windows
+  // 临时目录中的重复清理保持幂等，避免测试只因为文件已不存在而失败。
+  return Effect.promise(() => fs.rm(file, { force: true }))
 }
 
 function addCompletedToolPart(input: {
@@ -907,6 +932,7 @@ describe("session.compaction.process", () => {
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
+    20_000,
   )
 
   itCompaction.instance(
@@ -923,6 +949,8 @@ describe("session.compaction.process", () => {
         const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
         const staleFile = path.join(test.directory, "src", "compaction.ts")
         const currentFile = path.join(test.directory, "src", "message-v2.ts")
+        yield* writeEvidenceFile(staleFile, { size: 100, modifiedMs: localTimestamp(2026, 6, 9, 1) })
+        yield* writeEvidenceFile(currentFile, { size: 100, modifiedMs: localTimestamp(2026, 6, 9, 2) })
 
         yield* addCompletedToolPart({
           sessionID: session.id,
@@ -935,7 +963,7 @@ describe("session.compaction.process", () => {
               type: "file",
               size: 100,
               modified: "2026-06-09 01:00:00",
-              modifiedMs: 1000,
+              modifiedMs: localTimestamp(2026, 6, 9, 1),
               start: 1,
               end: 100,
               total: 200,
@@ -955,7 +983,7 @@ describe("session.compaction.process", () => {
               type: "file",
               size: 100,
               modified: "2026-06-09 01:00:00",
-              modifiedMs: 1000,
+              modifiedMs: localTimestamp(2026, 6, 9, 1),
               start: 90,
               end: 170,
               total: 200,
@@ -975,7 +1003,7 @@ describe("session.compaction.process", () => {
               type: "file",
               size: 100,
               modified: "2026-06-09 02:00:00",
-              modifiedMs: 2000,
+              modifiedMs: localTimestamp(2026, 6, 9, 2),
               start: 220,
               end: 359,
               total: 1547,
@@ -1025,7 +1053,7 @@ describe("session.compaction.process", () => {
         expect(text).toContain("ORIGINAL SUMMARY")
         expect(text).toContain("## Evidence Handoff")
         expect(text).toContain("### Inspected Files")
-        expect(text).toContain("| src/compaction.ts | 1-170 | 200 | 2026-06-09 01:00:00 | stale |")
+        expect(text).toContain("| src/compaction.ts | 1-170 | 200 | 2026-06-09 01:00:00 | current |")
         expect(text).toContain("| src/message-v2.ts | 220-359 | 1547 | 2026-06-09 02:00:00 | current |")
         expect(text).toContain("### Verified Commands")
         expect(text).toContain("| bun typecheck | . | 0 |")
@@ -1043,6 +1071,132 @@ describe("session.compaction.process", () => {
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
+    20_000,
+  )
+
+  itCompaction.instance(
+    "uses current disk state for inspected file freshness",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const test = yield* TestInstance
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "check inspected freshness")
+        const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+        const unchanged = path.join(test.directory, "src", "unchanged file.ts")
+        const changed = path.join(test.directory, "src", "changed.ts")
+        const deleted = path.join(test.directory, "src", "deleted.ts")
+        const incomplete = path.join(test.directory, "src", "missing-metadata.ts")
+        yield* writeEvidenceFile(unchanged, { size: 20, modifiedMs: localTimestamp(2026, 5, 18, 1) })
+        yield* writeEvidenceFile(changed, { size: 20, modifiedMs: localTimestamp(2026, 5, 18, 2) })
+        yield* writeEvidenceFile(deleted, { size: 10, modifiedMs: localTimestamp(2026, 5, 18, 3) })
+        yield* writeEvidenceFile(incomplete, { size: 5, modifiedMs: localTimestamp(2026, 5, 18, 5) })
+
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: unchanged,
+              canonicalPath: canonicalTestPath(unchanged),
+              type: "file",
+              size: 20,
+              modified: "2026-05-18 01:00:00",
+              modifiedMs: localTimestamp(2026, 5, 18, 1),
+              start: 1,
+              end: 20,
+              total: 20,
+              returned: 20,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "write",
+          toolInput: { filePath: unchanged, content: "metadata-only mutation should not make disk-current evidence stale" },
+          metadata: { filepath: unchanged },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: changed,
+              canonicalPath: canonicalTestPath(changed),
+              type: "file",
+              size: 20,
+              modified: "2026-05-18 02:00:00",
+              modifiedMs: localTimestamp(2026, 5, 18, 2),
+              start: 1,
+              end: 20,
+              total: 20,
+              returned: 20,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: deleted,
+              canonicalPath: canonicalTestPath(deleted),
+              type: "file",
+              size: 10,
+              modified: "2026-05-18 03:00:00",
+              modifiedMs: localTimestamp(2026, 5, 18, 3),
+              start: 1,
+              end: 10,
+              total: 10,
+              returned: 10,
+              stub: false,
+            },
+          },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "read",
+          metadata: {
+            read: {
+              path: incomplete,
+              canonicalPath: canonicalTestPath(incomplete),
+              type: "file",
+              modified: "2026-05-18 05:00:00",
+              start: 1,
+              end: 5,
+              total: 5,
+              returned: 5,
+              stub: false,
+            },
+          },
+        })
+        yield* writeEvidenceFile(changed, { size: 21, modifiedMs: localTimestamp(2026, 5, 18, 4) })
+        yield* removeEvidenceFile(deleted)
+
+        yield* createSummaryCompaction(session.id)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        const text = yield* readLatestSummaryText(session.id)
+        expect(text).toContain("| src/unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
+        expect(text).toContain("| src/changed.ts | 1-20 | 20 | 2026-05-18 04:00:00 | stale |")
+        expect(text).toContain("| src/deleted.ts | 1-10 | 10 | - | deleted |")
+        expect(text).toContain("| src/missing-metadata.ts | 1-5 | 5 | 2026-05-18 05:00:00 | stale |")
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+    20_000,
   )
 
   itCompaction.instance(
@@ -1110,13 +1264,14 @@ describe("session.compaction.process", () => {
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const text = yield* readLatestSummaryText(session.id)
-        expect(text).toContain("| src/old.ts | 1-10 | 10 | 2026-06-09 03:00:00 | deleted |")
+        expect(text).toContain("| src/old.ts | 1-10 | 10 | - | deleted |")
         expect(text).toContain("| node --check file-10.js | src | 1 |")
         expect(text).toContain("Omitted: 1 verified commands due to evidence budget.")
         expect(text).not.toContain("node --check file-0.js")
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
+    20_000,
   )
 
   itCompaction.instance(
@@ -1132,6 +1287,7 @@ describe("session.compaction.process", () => {
         const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
         for (let i = 0; i < 21; i++) {
           const file = path.join(test.directory, "src", `file-${i}.ts`)
+          yield* writeEvidenceFile(file, { size: 10, modifiedMs: localTimestamp(2026, 6, 9, 0, i) })
           yield* addCompletedToolPart({
             sessionID: session.id,
             messageID: assistant.id,
@@ -1143,7 +1299,7 @@ describe("session.compaction.process", () => {
                 type: "file",
                 size: 10,
                 modified: `2026-06-09 00:${String(i).padStart(2, "0")}:00`,
-                modifiedMs: i,
+                modifiedMs: localTimestamp(2026, 6, 9, 0, i),
                 start: 1,
                 end: 10,
                 total: 10,
@@ -1167,6 +1323,7 @@ describe("session.compaction.process", () => {
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },
+    20_000,
   )
 
   itCompaction.instance(
