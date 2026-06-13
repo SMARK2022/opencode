@@ -26,10 +26,14 @@ const VOICE_RECORDER_SAMPLE_RATE = 16_000
 const VOICE_RECORDER_CHANNELS = 1
 // 512 是 Picovoice Node 示例和当前录音 helper 使用的帧长；继续沿用它以避免改变延迟和缓冲行为。
 const VOICE_RECORDER_FRAME_LENGTH = 512
+// 帧周期只用于 stop drain 判断“立即返回的 backlog”和“正在录 stop 后新音频的 live read”。
+const VOICE_RECORDER_FRAME_INTERVAL_MS = Math.max(1, Math.round((VOICE_RECORDER_FRAME_LENGTH / VOICE_RECORDER_SAMPLE_RATE) * 1_000))
 // -1 表示系统默认输入设备；这是跨平台录音库的约定，不额外暴露 TUI 配置，避免扩大配置面。
 const VOICE_RECORDER_DEVICE_INDEX = -1
-// 50 是 PvRecorder 默认推荐的内部缓冲帧数；保留缓冲可减少 TUI 停顿时丢帧和 overflow 的概率。
-const VOICE_RECORDER_BUFFERED_FRAMES = 50
+// 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
+const VOICE_RECORDER_BUFFERED_FRAMES = 250
+// queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
+const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.75))
 
 export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
   const dir = path.join(Global.Path.tmp, "voice")
@@ -67,6 +71,7 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
       try {
         // stop 需要把录音错误反馈给用户；abort 是 cleanup 边界，必须尽力释放资源和删临时文件，不能因旧错误阻塞清理。
         if (writeFile && recordingError) throw recordingError
+        if (writeFile) drainBufferedFrames(PvRecorder, recorder, frames)
       } finally {
         state.closed = true
         // stop/release 必须在同一个 close 边界内执行一次；重复释放 native handle 会触发底层库错误。
@@ -127,6 +132,17 @@ function readFrame(PvRecorder: PvRecorderConstructor, recorder: PvRecorderInstan
   const status = PvRecorder._pvRecorder.read(recorder._handle, pcm)
   if (status !== 0) throw new Error(`PvRecorder read failed with status ${status}`)
   return pcm
+}
+
+function drainBufferedFrames(PvRecorder: PvRecorderConstructor, recorder: PvRecorderInstance, frames: Int16Array[]) {
+  // 帧数上限等于 native circular buffer 容量；这样即使 addon 行为异常，也不会无限延长 stop。
+  for (let index = 0; index < VOICE_RECORDER_BUFFERED_FRAMES; index++) {
+    const startedAt = performance.now()
+    const frame = readFrame(PvRecorder, recorder)
+    // 同步 native read 不能被 JS timeout 中断；耗时达到 live 帧级别时丢弃该帧并停止，只保留 stop 前已缓冲音频。
+    if (performance.now() - startedAt >= VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) return
+    frames.push(frame)
+  }
 }
 
 function flattenFrames(frames: Int16Array[]) {
