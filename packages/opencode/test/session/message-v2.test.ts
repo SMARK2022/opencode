@@ -231,6 +231,7 @@ describe("session.message-v2.toModelMessage", () => {
             type: "text",
             text: "assistant",
             synthetic: true,
+            metadata: { kind: "compaction_evidence_handoff", version: 1 },
           },
         ] as SessionV1.Part[],
       },

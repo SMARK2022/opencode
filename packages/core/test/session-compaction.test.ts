@@ -5,7 +5,12 @@ import { Token } from "@opencode-ai/core/util/token"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { DateTime } from "effect"
+import { DateTime, Effect } from "effect"
+import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import path from "path"
+import { tmpdir } from "./fixture/tmpdir"
 
 test("compaction prompt preserves detailed work state and relevant files", () => {
   const prompt = SessionCompaction.buildPrompt({ context: ["conversation history"] })
@@ -78,6 +83,46 @@ test("compaction describes tool media without embedding base64", () => {
   }
   expect(shell.output).toBe(text)
   expect(SessionCompaction.serialize({ ...shell, output: "short" })).toBe("[Shell]: pwd\nshort")
+})
+
+test("file handoff compares real disk versions before applying its bounded evidence budget", async () => {
+  await using tmp = await tmpdir()
+  await Effect.runPromise(Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
+    const receipts: { path: string; canonicalPath: string; start: number; end: number; total: number; modified: string; size: number; modifiedMs?: number }[] = []
+    for (const [index, name] of ["unchanged file.ts", "changed.ts", "deleted.ts", "missing-metadata.ts"].entries()) {
+      const file = path.join(tmp.path, name)
+      const time = new Date(2026, 4, 18, index + 1)
+      yield* fs.writeFileString(file, "x".repeat(20))
+      yield* fs.utimes(file, time, time)
+      receipts.push({ path: file, canonicalPath: file, start: 1, end: 10, total: 20, modified: "previous read", size: 20,
+        ...(index === 3 ? {} : { modifiedMs: time.getTime() }) })
+    }
+    // 同一路径两次读取合并范围；纯写事件从来不是文件失效的事实来源。
+    receipts.push({ ...receipts[0], start: 11, end: 20 })
+    const changed = new Date(2026, 4, 18, 5)
+    yield* fs.writeFileString(receipts[1].path, "changed on disk")
+    yield* fs.utimes(receipts[1].path, changed, changed)
+    yield* fs.remove(receipts[2].path)
+    const text = yield* FileEvidence.render(receipts, fs, tmp.path)
+    expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
+    expect(text).toContain("| changed.ts | 1-10 | 20 | 2026-05-18 05:00:00 | stale |")
+    expect(text).toContain("| deleted.ts | 1-10 | 20 | - | deleted |")
+    expect(text).toContain("| missing-metadata.ts | 1-10 | 20 | 2026-05-18 04:00:00 | stale |")
+    expect(text).toContain("Treat stale evidence as advisory only.")
+    const inspected: string[] = []
+    const observed = { ...fs, stat: (file: string) => Effect.sync(() => inspected.push(file)).pipe(Effect.andThen(fs.stat(file))) }
+    // 裁剪发生在stat前，未展示的第二十一条记录不访问磁盘。
+    const many = Array.from({ length: 21 }, (_, index) => ({ ...receipts[0], path: path.join(tmp.path, `file-${index}.ts`), canonicalPath: path.join(tmp.path, `file-${index}.ts`) }))
+    const bounded = yield* FileEvidence.render(many, observed, tmp.path)
+    expect(inspected).toHaveLength(20)
+    expect(inspected).not.toContain(many[0].canonicalPath)
+    expect(bounded).toContain("Omitted: 1 inspected files due to evidence budget.")
+    expect(bounded).not.toContain("| file-0.ts |")
+    const untouched = inspected.length
+    expect(yield* FileEvidence.render([{ ...receipts[0], stub: true }, { malformed: true }], observed, tmp.path)).toBeUndefined()
+    expect(inspected).toHaveLength(untouched)
+  }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
 })
 
 test("recent user memento budgets the full envelope and preserves newest literal instructions", () => {

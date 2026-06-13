@@ -14,6 +14,7 @@ import {
 } from "@opencode-ai/llm"
 import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
 import { Database } from "@opencode-ai/core/database/database"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { makeLocationNode } from "@opencode-ai/core/effect/app-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
@@ -326,6 +327,7 @@ const it = testEffect(
       ReferenceGuidance.node,
       Config.node,
       Snapshot.node,
+      FSUtil.node,
       SessionRunnerLLM.node,
       SessionExecution.node,
       SessionV2.node,
@@ -2068,6 +2070,7 @@ describe("SessionRunnerLLM", () => {
       const events = yield* EventV2.Service
       const store = yield* SessionStore.Service
       const info = yield* store.get(sessionID)
+      const fileSystem = yield* FSUtil.Service
       if (!info) return yield* Effect.die("Missing Session for catalog input budget")
       const entries = yield* SessionHistory.entriesForRunner(database.db, sessionID, 0)
       const providerID = ProviderV2.ID.make("input-budget")
@@ -2104,7 +2107,7 @@ describe("SessionRunnerLLM", () => {
         let estimated: SessionMessage.InputEstimate | undefined
         let compactRequestID: string | undefined
         const compaction = SessionCompaction.make({
-          db: database.db, events,
+          db: database.db, events, fs: fileSystem, worktree: "/project",
           // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
           llm: { stream: (summaryRequest, onPrepared) => {
             streams++
@@ -2156,7 +2159,7 @@ describe("SessionRunnerLLM", () => {
       const history = [head, retained, "Newest exact request"].map((text, index) => ({ seq: index + 1, message: SessionMessage.User.make({ type: "user", id: SessionMessage.ID.create(), text, time: { created: DateTime.makeUnsafe(index) } }) }))
       for (const keep of [undefined, 8_000, 0]) {
         let upload = ""
-        const compaction = SessionCompaction.make({ db: database.db, events,
+        const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project",
           config: keep === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({ compaction: new ConfigCompaction.Info({ keep: new ConfigCompaction.Keep({ tokens: keep }) }) }) })],
           llm: { stream: request => {
             upload = userTexts(request)[0] ?? ""

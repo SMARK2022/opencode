@@ -114,4 +114,21 @@ export const rawUserMessages = Effect.fn("SessionHistory.rawUserMessages")(funct
   return messages.flatMap(message => message.type === "user" && !hidden(message.metadata?.hidden) ? [message] : [])
 })
 
+// 连续压缩仍从真实助手行读取凭证，旧表格不参与，边界之后的消息不纳入本次交接。
+export const readReceipts = Effect.fn("SessionHistory.readReceipts")(function* (
+  db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number,
+) {
+  const rows = yield* db.select().from(SessionMessageTable).where(and(
+    eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), lte(SessionMessageTable.seq, throughSeq),
+  )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
+  const messages = yield* Effect.forEach(rows, decodeMessageRow)
+  return messages.flatMap((message) => message.type === "assistant" && !hidden(message.metadata?.hidden)
+    ? message.content.flatMap((part) =>
+        part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.state.status === "completed"
+          ? [part.state.structured.read] : [],
+      )
+    : [],
+  )
+})
+
 export * as SessionHistory from "./history"

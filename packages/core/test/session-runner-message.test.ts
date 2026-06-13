@@ -177,6 +177,7 @@ describe("toLLMMessages", () => {
           summary: "Earlier work",
           recent: "Recent work",
           recent_user_messages: [{ id: id("user"), text: '请保留 "原话"', truncated: true }],
+          file_evidence: "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |",
           time: { created },
         }),
       ],
@@ -219,6 +220,9 @@ Earlier work
 <recent-context>
 Recent work
 </recent-context>
+
+## Evidence Handoff
+| file.ts | 1-2 | 2 | local time | stale |
 </conversation-checkpoint>`,
         },
       ],

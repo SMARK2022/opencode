@@ -253,6 +253,8 @@ export const Compaction = Schema.Struct({
   recent_user_messages: Schema.Array(Schema.Struct({
     id: ID, text: Schema.String, truncated: Schema.Boolean.pipe(optional),
   })).pipe(optional),
+  // 只保存成功压缩时生成的确定性文件交接；旧消息缺失时保持原有回放。
+  file_evidence: Schema.String.pipe(optional),
   ...Base,
 }).annotate({ identifier: "Session.Message.Compaction" })
 

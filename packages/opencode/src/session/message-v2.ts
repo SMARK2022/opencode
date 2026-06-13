@@ -1,4 +1,5 @@
 import { SessionID, MessageID } from "./schema"
+import { CompactionFileEvidence } from "./file-evidence"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -330,7 +331,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           assistantMessage.parts.push({
             type: "text",
             text,
-            ...(differentModel ? {} : { providerMetadata: part.metadata }),
+            // 证据标记属于本地存储，不是 provider 参数；保留正文但不污染 SDK 的元数据契约。
+            ...(differentModel || part.metadata?.kind === CompactionFileEvidence.kind ? {} : { providerMetadata: part.metadata }),
           })
         }
         if (part.type === "step-start")
