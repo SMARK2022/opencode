@@ -13,6 +13,7 @@
     ".": "./src/index.tsx",
     "./builtins": "./src/feature-plugins/builtins.ts",
     "./config": "./src/config/index.tsx",
+    "./config/host": "./src/config/host.ts",
     "./context/args": "./src/context/args.tsx",
     "./context/epilogue": "./src/context/epilogue.tsx",
     "./context/exit": "./src/context/exit.tsx",
@@ -57,6 +58,7 @@
     "@opentui/keymap": "catalog:",
     "@opentui/solid": "catalog:",
     "clipboardy": "4.0.0",
+    "cross-spawn": "catalog:",
     "diff": "catalog:",
     "effect": "catalog:",
     "fuzzysort": "catalog:",
@@ -66,9 +68,13 @@
     "strip-ansi": "7.1.2",
     "solid-js": "catalog:"
   },
+  "optionalDependencies": {
+    "@picovoice/pvrecorder-node": "1.2.9"
+  },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
+    "@types/cross-spawn": "catalog:",
     "@typescript/native-preview": "catalog:"
   }
 }

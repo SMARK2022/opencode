@@ -1,28 +1,23 @@
 export * as TuiConfig from "./tui"
 
-import path from "path"
 import { mergeDeep, unique } from "remeda"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Context, Effect, Fiber, Layer } from "effect"
-import { ConfigParse } from "@/config/parse"
-import * as ConfigPaths from "@/config/paths"
+import { ConfigPaths } from "@opencode-ai/core/config/paths"
 import { migrateTuiConfig } from "./tui-migrate"
-import { resolveHostAttentionSoundPaths } from "./tui-host-attention"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { isRecord } from "@opencode-ai/tui/util/record"
 import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CurrentWorkingDirectory } from "./tui-cwd"
 import { ConfigPlugin } from "@/config/plugin"
-import { TuiKeybind } from "@opencode-ai/tui/config/keybind"
 import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import { Filesystem } from "@/util/filesystem"
-import { ConfigVariable } from "@/config/variable"
 import { Npm } from "@opencode-ai/core/npm"
 import { FormatError, FormatUnknownError } from "@/cli/error"
 import { TuiConfig } from "@opencode-ai/tui/config"
+import { TuiConfigHost } from "@opencode-ai/tui/config/host"
 
 export const Info = TuiConfig.Info
 export type Info = TuiConfig.Info
@@ -52,34 +47,6 @@ function pluginScope(file: string, ctx: { directory: string }): ConfigPlugin.Sco
   return "global"
 }
 
-function normalize(raw: Record<string, unknown>) {
-  const data = { ...raw }
-  if (!("tui" in data)) return data
-  if (!isRecord(data.tui)) {
-    delete data.tui
-    return data
-  }
-
-  const tui = data.tui
-  delete data.tui
-  return {
-    ...tui,
-    ...data,
-  }
-}
-
-function dropUnknownKeybinds(input: Record<string, unknown>) {
-  if (!isRecord(input.keybinds)) return input
-
-  const invalid = TuiKeybind.unknownKeys(input.keybinds)
-  if (!invalid.length) return input
-
-  return {
-    ...input,
-    keybinds: Object.fromEntries(Object.entries(input.keybinds).filter(([key]) => !invalid.includes(key))),
-  }
-}
-
 const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string }) {
   const afs = yield* FSUtil.Service
   let appliedOrder = 0
@@ -98,24 +65,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
 
   const load = (text: string, configFilepath: string): Effect.Effect<Info> =>
     Effect.gen(function* () {
-      const expanded = yield* Effect.promise(() =>
-        ConfigVariable.substitute({ text, type: "path", path: configFilepath, missing: "empty" }),
-      )
-      const data = ConfigParse.jsonc(expanded, configFilepath)
-      if (!isRecord(data)) return {} as Info
-      // Flatten a nested "tui" key so users who wrote `{ "tui": { ... } }` inside tui.json
-      // (mirroring the old opencode.json shape) still get their settings applied.
-      const normalized = dropUnknownKeybinds(normalize(data))
-      const parsed = ConfigParse.schema(Info, normalized, configFilepath)
-      const validated = parsed.attention?.sounds
-        ? {
-            ...parsed,
-            attention: {
-              ...parsed.attention,
-              sounds: resolveHostAttentionSoundPaths(path.dirname(configFilepath), parsed.attention.sounds),
-            },
-          }
-        : parsed
+      const validated = yield* TuiConfigHost.parse(text, configFilepath)
       return yield* resolvePlugins(validated, configFilepath)
     }).pipe(
       // catchCause (not tapErrorCause + orElseSucceed) because JSONC parsing and validation
@@ -174,6 +124,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
 
   const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
+  const projectOpencodeFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("opencode", ctx.directory)
 
   const acc: Acc = {
     result: {},
@@ -209,9 +160,25 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
     }
   }
 
+  const defaultVoiceTranscriber =
+    // 这里读取 opencode MCP 配置而不是 tui.json，复用用户已经安装好的 ChatGPT browser-agent 载体。
+    (yield* TuiConfigHost.loadMcpVoiceTranscriber([
+      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
+      ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
+      ...projectOpencodeFiles,
+      ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
+    ], ctx.directory)) ?? TuiConfigHost.DefaultVoiceTranscriber
+
   const result = TuiConfig.resolve(
     {
       ...acc.result,
+      // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
+      // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
+      voice: {
+        ...acc.result.voice,
+        // 显式 tui.voice.transcriber 优先；MCP 推导和固定默认值只填补未配置场景。
+        transcriber: acc.result.voice?.transcriber ?? defaultVoiceTranscriber,
+      },
     },
     {
       terminalSuspend: process.platform !== "win32",
