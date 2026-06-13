@@ -6,21 +6,32 @@ class FakePvRecorder {
   static releaseCount = 0
   static readCount = 0
   static readWaiters: Array<() => void> = []
+  static queuedFrameValues: number[] = []
+  static queuedReadDelayMs = 0
+  static liveReadDelayMs = 0
+  static liveFrameValue = 321
   static _pvRecorder = {
     read: (_handle: bigint, pcm: Int16Array) => {
       FakePvRecorder.readCount++
       FakePvRecorder.readWaiters.splice(0).forEach((resolve) => resolve())
       if (FakePvRecorder.readStatus !== 0) return FakePvRecorder.readStatus
-      pcm.fill(321)
+      // queuedFrameValues 模拟 native circular buffer 中已经录好的历史帧，应该被 stop drain 快速读走。
+      const queued = FakePvRecorder.queuedFrameValues.shift()
+      if (queued !== undefined && FakePvRecorder.queuedReadDelayMs > 0) busyWait(FakePvRecorder.queuedReadDelayMs)
+      // 队列耗尽后的 live read 会阻塞一个帧周期；测试用它证明实现不会继续录入 stop 之后的声音。
+      if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) busyWait(FakePvRecorder.liveReadDelayMs)
+      pcm.fill(queued ?? FakePvRecorder.liveFrameValue)
       return 0
     },
   }
   _handle = 1n
   frameLength = 4
+  bufferedFramesCount = 50
   started = false
 
-  constructor(_frameLength: number, _deviceIndex = -1, _bufferedFramesCount = 50) {
+  constructor(_frameLength: number, _deviceIndex = -1, bufferedFramesCount = 50) {
     FakePvRecorder.last = this
+    this.bufferedFramesCount = bufferedFramesCount
   }
 
   start() {
@@ -33,6 +44,14 @@ class FakePvRecorder {
 
   release() {
     FakePvRecorder.releaseCount++
+  }
+
+  static queueNativeFrames(count: number) {
+    // 保留数量受 constructor 传入的 bufferedFramesCount 限制，行为上贴近 PvRecorder 的内部 circular buffer。
+    const retained = Array.from({ length: count }, (_, index) => 1_000 + index).slice(
+      -Math.max(0, FakePvRecorder.last?.bufferedFramesCount ?? 0),
+    )
+    FakePvRecorder.queuedFrameValues.push(...retained)
   }
 }
 
@@ -47,6 +66,10 @@ describe("prompt voice recorder", () => {
     FakePvRecorder.releaseCount = 0
     FakePvRecorder.readCount = 0
     FakePvRecorder.readWaiters = []
+    FakePvRecorder.queuedFrameValues = []
+    FakePvRecorder.queuedReadDelayMs = 0
+    FakePvRecorder.liveReadDelayMs = 40
+    FakePvRecorder.liveFrameValue = 321
   })
 
   // 这个正常路径证明录音实现完全在 Bun 进程内完成，不依赖系统 node 可执行文件。
@@ -85,6 +108,7 @@ describe("prompt voice recorder", () => {
   // finally 中 abort 是测试安全边界，红灯失败也不能留下后台录音循环。
   // 这个缺口对应用户观察到的最后约 1.6 到 2 秒音频未被转写。
   test("keeps native audio reads caught up before the stop key writes the WAV", async () => {
+    FakePvRecorder.queuedFrameValues = [321, 321, 321]
     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
 
     const recorder = await startPromptVoiceRecorder()
@@ -95,6 +119,32 @@ describe("prompt voice recorder", () => {
       const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
 
       expect(wav.readUInt32LE(40)).toBeGreaterThanOrEqual(3 * FakePvRecorder.last!.frameLength * 2)
+    } finally {
+      await recorder.abort()
+    }
+  })
+
+  // 这个用例复现真实诊断：TUI/JS 线程阻塞时，PvRecorder native buffer 会继续积累音频帧。
+  // stop 写 WAV 前必须把这些已经存在的 queued 帧读出来，否则最终文件会比用户实际录音短。
+  // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
+  // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
+  // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
+  test("writes audio buffered during a stalled TUI tick before stopping", async () => {
+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+
+    const recorder = await startPromptVoiceRecorder()
+    try {
+      await waitForFakeRead()
+      FakePvRecorder.queueNativeFrames(120)
+      FakePvRecorder.queuedReadDelayMs = 4
+      FakePvRecorder.liveReadDelayMs = 40
+      FakePvRecorder.liveFrameValue = 9_999
+      await recorder.stop()
+
+      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
+
+      expect(wavFrameCount(wav)).toBe(121)
+      expect(wavSamples(wav)).not.toContain(9_999)
     } finally {
       await recorder.abort()
     }
@@ -160,4 +210,18 @@ function waitForFakeReadCount(count: number, timeout: number) {
     }
     wait()
   })
+}
+
+function wavFrameCount(wav: Buffer) {
+  return wav.readUInt32LE(40) / (FakePvRecorder.last!.frameLength * Int16Array.BYTES_PER_ELEMENT)
+}
+
+function wavSamples(wav: Buffer) {
+  // 解码 PCM sample 比搜索字节序列更可靠，避免 WAV header 或跨 sample 字节组合造成误判。
+  return Array.from({ length: wav.readUInt32LE(40) / Int16Array.BYTES_PER_ELEMENT }, (_, index) => wav.readInt16LE(44 + index * Int16Array.BYTES_PER_ELEMENT))
+}
+
+function busyWait(ms: number) {
+  const until = performance.now() + ms
+  while (performance.now() < until) {}
 }
