@@ -494,6 +494,12 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
       expect(config.keybinds.get("dialog.mcp.toggle")?.[0]?.key).toBe("ctrl+t")
       expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
       expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
+      // voice 默认值属于 TUI 配置解析结果，必须和其它 canonical keybind 一起进入 lookup。
+      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
+      // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
+      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
+      // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
+      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
       expect(
         config.keybinds.gather("plugins.dialog", ["dialog.plugins.install"]).map((binding) => binding.cmd),
       ).toEqual(["dialog.plugins.install"])
@@ -526,6 +532,98 @@ it.instance("keybinds accept OpenTUI binding specs", () =>
       })
       expect(config.keybinds.get("prompt.autocomplete.next")).toEqual([])
       expect(config.keybinds.get("plugins.list")?.[0]?.key).toBe("ctrl+shift+p")
+    }),
+  ),
+)
+
+// 这个用例覆盖用户显式写 tui.voice.transcriber 的正常路径。
+// 配置层只负责保留 command/args，不解释 shell，也不验证外部程序是否存在。
+// 这样用户可以把转写器替换成其它本地工具，同时保持 controller 侧统一安全校验。
+// 测试落在 TuiConfig 服务层，保证 JSON 解析、schema 和默认合并一起生效。
+it.instance("loads voice transcriber command from tui config", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* AppFileSystem.Service
+      const test = yield* TestInstance
+      yield* fs.writeJson(path.join(test.directory, "tui.json"), {
+        voice: {
+          transcriber: {
+            command: "chatgpt-browser-agent",
+            args: ["transcribe-file", "--file", "{file}", "--json"],
+          },
+        },
+      })
+
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
+      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
+    }),
+  ),
+)
+
+// 这个用例覆盖推荐路径：从本地 ChatGPT MCP 配置推导同目录 chatgpt.js。
+// 复用 MCP 的安装位置，但返回的是普通 CLI transcriber，不新增 MCP tool 或 HTTP surface。
+// agentDir 带空格，用来锁定路径 join/resolve 不会因为 shell 拆分而失效。
+// chatgpt.js 必须存在才启用默认转写器，避免用户录音后才遇到脚本缺失错误。
+it.instance("infers the default voice transcriber from the local ChatGPT MCP command", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* AppFileSystem.Service
+      const test = yield* TestInstance
+      const agentDir = path.join(test.directory, "tools", "chatgpt browser agent")
+      const mcpServer = path.join(agentDir, "mcp-server.js")
+      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
+      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
+        mcp: {
+          chatgpt: {
+            type: "local",
+            command: [process.execPath, mcpServer],
+            enabled: true,
+          },
+        },
+      })
+
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.voice?.transcriber?.command).toBe(process.execPath)
+      expect(config.voice?.transcriber?.args).toEqual([
+        path.join(agentDir, "chatgpt.js"),
+        "transcribe-file",
+        "--file",
+        "{file}",
+        "--json",
+      ])
+    }),
+  ),
+)
+
+// 这个用例保护 MCP 扫描边界：只有 key/name 明确指向 ChatGPT 的本地 server 才能作为语音后端。
+// unrelated server 即使目录里有 chatgpt.js，也不能被误当作语音转写器来源。
+// 同时保留多个 server 时的选择行为，防止未来遍历顺序改动导致错用其它工具目录。
+// 断言最终脚本路径来自 chatgpt server，说明过滤条件和路径解析都生效。
+it.instance("does not infer the voice transcriber from unrelated local MCP servers", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* AppFileSystem.Service
+      const test = yield* TestInstance
+      const otherDir = path.join(test.directory, "tools", "other-agent")
+      const chatgptDir = path.join(test.directory, "tools", "chatgpt-agent")
+      yield* fs.writeWithDirs(path.join(otherDir, "chatgpt.js"), "")
+      yield* fs.writeWithDirs(path.join(chatgptDir, "chatgpt.js"), "")
+      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
+        mcp: {
+          other: {
+            type: "local",
+            command: [process.execPath, path.join(otherDir, "mcp-server.js")],
+          },
+          chatgpt: {
+            type: "local",
+            command: [process.execPath, path.join(chatgptDir, "mcp-server.js")],
+          },
+        },
+      })
+
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.voice?.transcriber?.args?.[0]).toBe(path.join(chatgptDir, "chatgpt.js"))
     }),
   ),
 )
@@ -618,6 +716,8 @@ it.instance("keeps explicit configured keybind input undo on Windows", () =>
 
         const config = yield* getTuiConfig(test.directory)
         expect(config.keybinds.get("input.undo")?.[0]?.key).toBe("ctrl+y")
+        // Windows 用户显式保留 Ctrl+Y 给 undo 时，语音仍应使用不冲突的 Alt+V 默认键。
+        expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
       }),
     ),
   ),

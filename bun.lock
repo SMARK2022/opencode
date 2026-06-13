@@ -518,6 +518,7 @@
         "why-is-node-running": "3.2.2",
       },
       "optionalDependencies": {
+        "@picovoice/pvrecorder-node": "1.2.9",
         "sharp": "0.34.5",
       },
     },
@@ -1786,6 +1787,8 @@
     "@parcel/watcher-win32-ia32": ["@parcel/watcher-win32-ia32@2.5.1", "https://registry.npmmirror.com/@parcel/watcher-win32-ia32/-/watcher-win32-ia32-2.5.1.tgz", { "os": "win32", "cpu": "ia32" }, "sha512-c2KkcVN+NJmuA7CGlaGD1qJh1cLfDnQsHjE89E60vUEMlqduHGCdCLJCID5geFVM0dOtA3ZiIO8BoEQmzQVfpQ=="],
 
     "@parcel/watcher-win32-x64": ["@parcel/watcher-win32-x64@2.5.1", "https://registry.npmmirror.com/@parcel/watcher-win32-x64/-/watcher-win32-x64-2.5.1.tgz", { "os": "win32", "cpu": "x64" }, "sha512-9lHBdJITeNR++EvSQVUcaZoWupyHfXe1jZvGZ06O/5MflPcuPLtEphScIBL+AiCWBO46tDSHzWyD0uDmmZqsgA=="],
+
+    "@picovoice/pvrecorder-node": ["@picovoice/pvrecorder-node@1.2.9", "https://registry.npmmirror.com/@picovoice/pvrecorder-node/-/pvrecorder-node-1.2.9.tgz", {}, "sha512-e398ue4G8YihrnnyTpnVePvOiBEM5+R4D+ChoyyeC8J8KFBMuhGrZwrdmpIPqDqCjCA+YqO2mFaicHstVhEpcg=="],
 
     "@pierre/diffs": ["@pierre/diffs@1.1.0-beta.18", "https://registry.npmmirror.com/@pierre/diffs/-/diffs-1.1.0-beta.18.tgz", { "dependencies": { "@pierre/theme": "0.0.22", "@shikijs/transformers": "^3.0.0", "diff": "8.0.3", "hast-util-to-html": "9.0.5", "lru_map": "0.4.1", "shiki": "^3.0.0" }, "peerDependencies": { "react": "^18.3.1 || ^19.0.0", "react-dom": "^18.3.1 || ^19.0.0" } }, "sha512-7ZF3YD9fxdbYsPnltz5cUqHacN7ztp8RX/fJLxwv8wIEORpP4+7dHz1h/qx3o4EW2xUrIhmbM8ImywLasB787Q=="],
 

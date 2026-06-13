@@ -61,6 +61,17 @@ export const Attention = Schema.Struct({
   sounds: Schema.optional(TuiAttentionSounds),
 }).annotate({ description: "Attention notification and sound settings" })
 
+const VoiceTranscriber = Schema.Struct({
+  command: Schema.String.annotate({ description: "Executable used to transcribe a recorded WAV file" }),
+  // args 是 argv 数组，不是 shell 字符串；其中一项必须包含 `{file}`，确保录音路径按字面量传递。
+  // 这样即使路径包含空格、重定向符、管道或环境变量字符，也不会被解释成 shell 语法。
+  args: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Arguments for the transcriber command; include {file} for the WAV path" }),
+})
+
+export const Voice = Schema.Struct({
+  transcriber: Schema.optional(VoiceTranscriber),
+}).annotate({ description: "Prompt voice input settings" })
+
 export const TuiInfo = Schema.Struct({
   $schema: Schema.optional(Schema.String),
   theme: Schema.optional(Schema.String),
@@ -69,6 +80,7 @@ export const TuiInfo = Schema.Struct({
   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
   leader_timeout: Schema.optional(KeymapLeaderTimeout),
   attention: Schema.optional(Attention),
+  voice: Schema.optional(Voice),
   scroll_speed: Schema.optional(ScrollSpeed).annotate({
     description: "TUI scroll speed",
   }),
