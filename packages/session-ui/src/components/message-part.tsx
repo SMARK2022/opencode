@@ -1650,9 +1650,10 @@ export function MessageDivider(props: { label: string }) {
   )
 }
 
-PART_MAPPING["compaction"] = function CompactionPartDisplay() {
+PART_MAPPING["compaction"] = function CompactionPartDisplay(props) {
   const i18n = useI18n()
-  return <MessageDivider label={i18n.t("ui.messagePart.compaction")} />
+  // 通用part入口与Native时间线读取同一持久标记和共享词典。
+  return <MessageDivider label={i18n.t(props.part.type === "compaction" && props.part.auto ? "ui.messagePart.compaction.auto" : "ui.messagePart.compaction")} />
 }
 
 PART_MAPPING["text"] = function TextPartDisplay(props) {

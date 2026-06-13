@@ -20,6 +20,7 @@ export type TimelineRowMap = {
   TurnDivider: {
     userMessageID: string
     label: "compaction" | "interrupted"
+    auto?: boolean
   }
   AssistantPart: {
     userMessageID: string
@@ -114,7 +115,8 @@ export namespace Timeline {
     const previousUserMessage = index > 0
     const userParts = getMessageParts(userMessage.id)
     const comments = userParts.flatMap((p) => MessageComment.fromPart(p) ?? [])
-    const compaction = userParts.some((p) => p.type === "compaction")
+    // 保留真实压缩边界的auto，不能只剩一个布尔值而使Native丢失自动标题。
+    const compaction = userParts.find((p) => p.type === "compaction")
     const interruptedMessageIndex = assistantMessages.findIndex((m) => m.error?.name === "MessageAbortedError")
     const interrupted = interruptedMessageIndex !== -1
     const latestError = assistantMessages.at(-1)?.error
@@ -164,6 +166,7 @@ export namespace Timeline {
         new TimelineRow.TurnDivider({
           userMessageID: userMessage.id,
           label: "compaction",
+          auto: compaction.auto,
         }),
       )
     }
