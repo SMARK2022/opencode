@@ -15,6 +15,31 @@ mock.module("@opencode-ai/session-ui/message-part", () => ({
 const { Timeline, TimelineRow } = await import("./rows")
 
 describe("current session timeline rows", () => {
+  test.each(["auto", "manual"] as const)("preserves %s compaction without ordinary prompt text", (reason) => {
+    const source = [
+      { id: "msg_user", type: "user", text: "", time: { created: 1 } },
+      { id: "msg_compaction", type: "compaction", status: "completed", reason, summary: "summary", recent: "", time: { created: 2 } },
+    ] satisfies SessionMessageInfo[]
+    // 使用真实当前消息转换和Timeline构造，防止只给字段加类型却仍在consumer丢失。
+    const normalized = normalizeSessionMessages("ses_1", source)
+    const result = Timeline.constructSessionMessageRows(
+      source,
+      (id) => normalized.messages.find((message) => message.id === id),
+      (id) => normalized.parts.get(id) ?? [],
+      true, "idle", true,
+      normalized.messages.filter((message) => message.role === "user"),
+    )
+    const divider = result.rows.find((row) => row._tag === "TurnDivider")
+    expect(divider).toEqual(new TimelineRow.TurnDivider({
+      userMessageID: "msg_user", label: "compaction", auto: reason === "auto",
+    }))
+    // 自动/手动只改变可见文案，不改变虚拟时间线key或制造额外用户轮次。
+    expect(result.rows.map(TimelineRow.key)).toEqual([
+      "user-message:msg_user", "turn-divider:msg_user:compaction",
+    ])
+    expect(normalized.messages.filter((message) => message.role === "user")).toHaveLength(1)
+  })
+
   test("derives turns and tagged rows from chronological current messages", () => {
     const source = [
       { id: "msg_1", type: "user", text: "first", time: { created: 1 } },

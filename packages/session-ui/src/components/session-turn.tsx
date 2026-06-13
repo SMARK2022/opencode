@@ -292,7 +292,7 @@ export function SessionTurn(
 
   const interrupted = createMemo(() => assistantMessages().some((m) => m.error?.name === "MessageAbortedError"))
   const divider = createMemo(() => {
-    if (compaction()) return i18n.t("ui.messagePart.compaction")
+    if (compaction()) return i18n.t(compaction()?.auto ? "ui.messagePart.compaction.auto" : "ui.messagePart.compaction")
     if (interrupted()) return i18n.t("ui.message.interrupted")
     return ""
   })
