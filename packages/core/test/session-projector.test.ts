@@ -28,6 +28,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Location } from "@opencode-ai/core/location"
+import { SessionHistory } from "@opencode-ai/core/session/history"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
 const sessionsLayer = AppNodeBuilder.build(SessionV2.node, [[SessionExecution.node, SessionExecution.noopLayer]])
@@ -661,6 +662,7 @@ describe("SessionProjector", () => {
         text: "summary",
         recent: "recent context",
         recent_user_messages: [{ id: SessionMessage.ID.make("msg_instruction"), text: "Exact instruction", truncated: true }],
+        file_evidence: "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |",
       })
 
       const rows = yield* db
@@ -689,8 +691,10 @@ describe("SessionProjector", () => {
         summary: "summary",
         recent: "recent context",
         recent_user_messages: [{ id: "msg_instruction", text: "Exact instruction", truncated: true }],
+        file_evidence: "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |",
       })
       expect(rows.find(row => row.type === "compaction")?.data).toMatchObject({ recent_user_messages: [{ id: "msg_instruction", text: "Exact instruction", truncated: true }] })
+      expect(rows.find(row => row.type === "compaction")?.data).toHaveProperty("file_evidence", "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |")
       expect(
         yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie),
       ).toMatchObject({
@@ -698,6 +702,33 @@ describe("SessionProjector", () => {
         model,
         time_updated: DateTime.toEpochMillis(created),
       })
+      // 第二轮压缩仍能取到旧边界前真实Read；未来行不属于本次快照。
+      const receipt = { path: "/project/file.ts", canonicalPath: "/project/file.ts", type: "file", size: 1,
+        modified: "2026-05-18 01:00:00", modifiedMs: 0, start: 1, end: 1, total: 1,
+        totalExact: true, returned: 1, stub: false }
+      const tool = Schema.encodeSync(SessionMessage.AssistantTool)(SessionMessage.AssistantTool.make({
+        type: "tool", id: "read-evidence", name: "read", time: { created, completed: created },
+        state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, content: [{ type: "text", text: "x" }], structured: { read: receipt } }),
+      }))
+      const boundary = rows.find(row => row.type === "compaction")
+      if (!boundary) return yield* Effect.die("Missing persisted compaction boundary")
+      const earlier = assistantRow(SessionMessage.ID.make("msg_receipt_before"), boundary.seq - 1)
+      const later = assistantRow(SessionMessage.ID.make("msg_receipt_after"), boundary.seq + 1)
+      const earlierData = { ...earlier.data, content: [tool] }
+      const laterData = { ...later.data, content: [{ ...tool, id: "future-read", state: { ...tool.state, structured: { read: { ...receipt, path: "future.ts" } } } }] }
+      yield* db.insert(SessionMessageTable).values([
+        { ...earlier, data: earlierData },
+        { ...later, data: laterData },
+      ]).run().pipe(Effect.orDie)
+      expect(yield* SessionHistory.readReceipts(db, sessionID, boundary.seq)).toEqual([receipt])
+      expect((yield* SessionHistory.load(db, sessionID)).some(message => message.id === earlier.id)).toBe(false)
+      // 旧消息缺少optional证据字段仍能解码，已保存表格则保持逐字回放而不重新stat。
+      const compacted = messages.find(message => message.type === "compaction")
+      if (!compacted || compacted.type !== "compaction") return yield* Effect.die("Missing compaction projection")
+      const encoded = Schema.encodeSync(SessionMessage.Compaction)(compacted)
+      expect(Schema.decodeUnknownSync(SessionMessage.Compaction)(encoded).file_evidence).toBe(compacted.file_evidence)
+      const { file_evidence: _fileEvidence, ...legacy } = encoded
+      expect(Schema.decodeUnknownSync(SessionMessage.Compaction)(legacy).file_evidence).toBeUndefined()
     }),
   )
 

@@ -18,6 +18,8 @@ import { SessionRunnerModel } from "./runner/model"
 import { SessionMemento } from "./compaction-memento"
 import { SessionHistory } from "./history"
 import { truncateForCompaction } from "../util/output-notice"
+import { FileEvidence } from "./file-evidence"
+import type { FSUtil } from "../fs-util"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_BUFFER_MIN = 5_000
@@ -96,6 +98,8 @@ type Dependencies = {
     readonly stream: (request: LLMRequest, onPrepared?: (body: unknown) => Effect.Effect<void>) => Stream.Stream<LLMEvent, LLMError>
   }
   readonly config: readonly Config.Entry[]
+  readonly fs: FSUtil.Interface
+  readonly worktree: string
 }
 
 type Input = {
@@ -233,7 +237,9 @@ export const make = (dependencies: Dependencies) => {
       ? inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, (context ?? 0) - inputLimit)))
       : (context ?? 0) - output
     // 普通模型仍只读活动窗；原话单独读取真实历史，截止本次快照以免吞入并发新输入。
-    const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0))
+    const throughSeq = input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0)
+    const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, throughSeq)
+    const receipts = yield* SessionHistory.readReceipts(dependencies.db, input.sessionID, throughSeq)
     const recentUserMessages = SessionMemento.collect(
       rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
     const summaryPrompt = buildPrompt({
@@ -318,6 +324,8 @@ export const make = (dependencies: Dependencies) => {
       yield* fail(false, "Compaction did not produce a usable summary")
       return false
     }
+    // 只有可用摘要才stat当前磁盘；失败和取消不生成或替换旧交接快照。
+    const fileEvidence = yield* FileEvidence.render(receipts, dependencies.fs, dependencies.worktree)
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,
@@ -327,6 +335,7 @@ export const make = (dependencies: Dependencies) => {
       recent: selected.recent,
       // 只有成功Ended携带本次快照，失败与取消继续保留旧压缩边界。
       recent_user_messages: recentUserMessages.length ? recentUserMessages : undefined,
+      file_evidence: fileEvidence,
       usage,
     }, { id: terminalEventID })
     return true

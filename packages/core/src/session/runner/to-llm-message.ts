@@ -163,7 +163,7 @@ ${message.summary}
 
 <recent-context>
 ${message.recent}
-</recent-context>
+</recent-context>${message.file_evidence ? `\n\n${message.file_evidence}` : ""}
 </conversation-checkpoint>`].filter(Boolean).join("\n\n"),
           metadata: message.metadata,
         }),

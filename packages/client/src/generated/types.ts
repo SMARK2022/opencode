@@ -838,6 +838,7 @@ export type SessionsContextOutput = {
           readonly text: string
           readonly truncated?: boolean
         }>
+        readonly file_evidence?: string
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
@@ -1384,6 +1385,7 @@ export type SessionsHistoryOutput = {
             readonly text: string
             readonly truncated?: boolean
           }>
+          readonly file_evidence?: string
           readonly usage?: {
             readonly tokens: {
               readonly input: number
@@ -2001,6 +2003,7 @@ export type SessionsEventsOutput =
           readonly text: string
           readonly truncated?: boolean
         }>
+        readonly file_evidence?: string
         readonly usage?: {
           readonly tokens: {
             readonly input: number
@@ -2271,6 +2274,7 @@ export type SessionsMessageOutput = {
           readonly text: string
           readonly truncated?: boolean
         }>
+        readonly file_evidence?: string
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
@@ -2480,6 +2484,7 @@ export type MessagesListOutput = {
           readonly text: string
           readonly truncated?: boolean
         }>
+        readonly file_evidence?: string
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }

@@ -26,6 +26,8 @@ import { buildPrompt } from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { Database } from "@opencode-ai/core/database/database"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { CompactionFileEvidence } from "./file-evidence"
 
 export const Event = SessionCompactionEvent
 
@@ -100,6 +102,8 @@ const serialize = (message: SessionV1.WithParts) => {
 function summaryText(message: SessionV1.WithParts) {
   const text = message.parts
     .filter((part): part is SessionV1.TextPart => part.type === "text")
+    // 确定性证据由本次磁盘重新生成，不把旧表格混入下一次模型摘要。
+    .filter((part) => part.metadata?.kind !== CompactionFileEvidence.kind)
     .map((part) => part.text.trim())
     .filter(Boolean)
     .join("\n\n")
@@ -297,6 +301,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const db = (yield* Database.Service).db
+    const fs = yield* FSUtil.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -593,6 +598,17 @@ const layer = Layer.effect(
         return "stop"
       }
 
+      if (result === "continue" && !processor.message.error) {
+        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree)
+        if (handoff) yield* session.updatePart({
+          id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID,
+          type: "text", text: handoff, synthetic: true,
+          // 与摘要同一消息持久化，UI与模型回放看到相同的当前磁盘证据。
+          metadata: { kind: CompactionFileEvidence.kind, version: 1 },
+          time: { start: Date.now(), end: Date.now() },
+        })
+      }
+
       // #256：双锚点更新——tail_start_id 保留整轮尾部，recent_user_messages 保留最新用户意图；
       // 任一变化都触发持久化，保证 memento 与尾部边界在同一压缩边界上对齐。
       const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
@@ -818,6 +834,7 @@ export const node = LayerNode.make({
     Provider.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
+    FSUtil.node,
   ],
 })
 

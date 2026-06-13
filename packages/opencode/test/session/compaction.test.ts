@@ -23,6 +23,8 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Snapshot } from "../../src/snapshot"
+import fs from "fs/promises"
+import path from "path"
 
 import { Provider } from "@/provider/provider"
 import * as SessionProcessorModule from "../../src/session/processor"
@@ -402,6 +404,65 @@ function compactionContext(context: string) {
     init: () => Effect.void,
   })
 }
+
+itCompaction.instance("uses current disk state for inspected file freshness", () => {
+  const stub = llm()
+  stub.push(reply("summary"))
+  return Effect.gen(function* () {
+    const test = yield* TestInstance
+    const ssn = yield* SessionNs.Service
+    const session = yield* ssn.create({})
+    const user = yield* createUserMessage(session.id, "check inspected freshness")
+    const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+    const names = ["unchanged file", "changed", "deleted", "missing-metadata"] as const
+    for (const [index, name] of names.entries()) {
+      const file = path.join(test.directory, `${name}.ts`)
+      const modifiedMs = new Date(2026, 4, 18, index + 1).getTime()
+      // 真实落盘和mtime固定后再记录读取凭证，覆盖带外变更而非伪造工具事件。
+      yield* Effect.promise(async () => {
+        await fs.writeFile(file, "x".repeat(20))
+        await fs.utimes(file, new Date(modifiedMs), new Date(modifiedMs))
+      })
+      yield* ssn.updatePart({
+        id: PartID.ascending(), sessionID: session.id, messageID: assistant.id,
+        type: "tool", tool: "read", callID: `read_${index}`,
+        state: { status: "completed", input: { filePath: file }, output: "file", title: "read",
+          time: { start: 1, end: 2 }, metadata: { read: {
+            path: file, canonicalPath: file, start: 1, end: 20, total: 20,
+            modified: "previous read", ...(index === 3 ? {} : { size: 20, modifiedMs }),
+          } } },
+      })
+    }
+    // 只有磁盘变化使凭证过期：write元数据本身不会让未变的文件失效。
+    yield* ssn.updatePart({
+      id: PartID.ascending(), sessionID: session.id, messageID: assistant.id,
+      type: "tool", tool: "write", callID: "metadata_only",
+      state: { status: "completed", input: {}, output: "", title: "write",
+        time: { start: 2, end: 3 }, metadata: { filepath: path.join(test.directory, "unchanged file.ts") } },
+    })
+    yield* Effect.promise(async () => {
+      const changed = path.join(test.directory, "changed.ts")
+      await fs.writeFile(changed, "changed on disk")
+      const time = new Date(2026, 4, 18, 5)
+      await fs.utimes(changed, time, time)
+      await fs.unlink(path.join(test.directory, "deleted.ts"))
+    })
+    yield* createSummaryCompaction(session.id)
+    const messages = yield* ssn.messages({ sessionID: session.id })
+    yield* SessionCompaction.use.process({
+      parentID: messages.at(-1)!.info.id, messages, sessionID: session.id, auto: false,
+    })
+    const compacted = (yield* ssn.messages({ sessionID: session.id }))
+      .findLast((message) => message.info.role === "assistant" && message.info.summary)
+    const text = compacted?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
+    expect(text).toContain("summary")
+    expect(text).toContain("## Evidence Handoff")
+    expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
+    expect(text).toContain("| changed.ts | 1-20 | 20 | 2026-05-18 05:00:00 | stale |")
+    expect(text).toContain("| deleted.ts | 1-20 | 20 | - | deleted |")
+    expect(text).toContain("| missing-metadata.ts | 1-20 | 20 | 2026-05-18 04:00:00 | stale |")
+  }).pipe(withCompaction({ llm: stub.llmLayer }))
+}, { git: true }, 20_000)
 
 describe("session.compaction.isOverflow", () => {
   test("preserves conditional V1 usable budgets and explicit reserves", () => {
