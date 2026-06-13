@@ -284,6 +284,45 @@ test("narrow viewport keeps the user message cell from collapsing", async () => 
   )
 })
 
+test("auto compaction boundary is labeled in the session message stream", async () => {
+  await withRenderedSession(
+    [userMessage("msg_compaction_auto", 1), assistantMessage("msg_compaction_summary", 2, "msg_compaction_auto")],
+    {
+      msg_compaction_auto: [compactionPart("part_compaction_auto", "msg_compaction_auto", true)],
+      msg_compaction_summary: [textPart("part_compaction_summary", "msg_compaction_summary", "Compacted summary")],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Auto Compaction")))
+    },
+  )
+})
+
+test("session scrollbar marks compaction boundaries without user prompt text", async () => {
+  await withRenderedSession(
+    [userMessage("msg_compaction_marker", 1), assistantMessage("msg_after_compaction_marker", 2, "msg_compaction_marker")],
+    {
+      msg_compaction_marker: [compactionPart("part_compaction_marker", "msg_compaction_marker", true)],
+      msg_after_compaction_marker: [
+        textPart(
+          "part_after_compaction_marker",
+          "msg_after_compaction_marker",
+          `${"content after compaction ".repeat(500)}SCROLL_BOTTOM`,
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("SCROLL_BOTTOM")))
+
+      const raw = app.captureCharFrame().split("\n")
+      // smooth scrollbar 会按半格量化选择上/下半格 marker；这个场景没有普通 user prompt text，
+      // 因此右侧 gutter 出现半格 marker 只能来自 compaction 边界，而不是已有 prompt marker。
+      expect(raw.some((line) => /[▀▄]/.test(line.slice(-4)))).toBe(true)
+    },
+    {},
+    { width: 100, height: 14 },
+  )
+})
+
 test("pending edit tool shows streamed deletion and addition counts", async () => {
   await withRenderedSession(
     [assistantMessage("msg_pending_edit", 1)],
@@ -2003,6 +2042,16 @@ function textPart(id: string, messageID: string, text: string, extra: Partial<Ex
     text,
     ...extra,
   } satisfies Extract<Part, { type: "text" }>
+}
+
+function compactionPart(id: string, messageID: string, auto: boolean) {
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "compaction",
+    auto,
+  } satisfies Extract<Part, { type: "compaction" }>
 }
 
 function completedToolPart(

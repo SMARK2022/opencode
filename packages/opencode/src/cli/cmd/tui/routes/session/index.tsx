@@ -294,18 +294,34 @@ export function Session() {
         .map((m) => [m.id, local.agent.color(m.agent)]),
     )
   })
+  const compactionMessageIDs = createMemo(() => {
+    return new Set(
+      messages().flatMap((m) => {
+        if (m.role !== "user") return []
+        const parts = sync.data.part[m.id] ?? []
+        if (!parts.some((part) => part.type === "compaction")) return []
+        if (parts.some((part) => part.type === "text" && !part.synthetic && !part.ignored)) return []
+        return [m.id]
+      }),
+    )
+  })
   function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
     const s = scroll
     if (!s) return
 
     const colors = userMessageAgentColors()
+    const compactions = compactionMessageIDs()
     drawSmoothScrollbar({
       buffer,
       scrollBox: s,
       markers: s.content.getChildrenSortedByPrimaryAxis().flatMap((child): SmoothScrollbarMarker[] => {
+        const offset = Math.max(0, child.screenY - s.content.screenY)
+        // compaction 正文节点使用 theme.borderActive；滚动条 marker 复用同一 source color，
+        // 再交给 smooth-scrollbar 做和普通 prompt marker 一致的低干扰 muted 处理。
+        if (compactions.has(child.id)) return [{ offset, color: theme.borderActive }]
         const color = colors.get(child.id)
         if (!color) return []
-        return [{ offset: Math.max(0, child.screenY - s.content.screenY), color }]
+        return [{ offset, color }]
       }),
     })
   }
@@ -1541,9 +1557,11 @@ function UserMessage(props: {
       </Show>
       <Show when={compaction()}>
         <box
+          id={text() ? undefined : props.message.id}
           marginTop={1}
           border={["top"]}
-          title=" Compaction "
+          // compaction.auto 是持久化边界上区分自动/手动压缩的来源；主视图文案需要和 v2 调试视图保持一致。
+          title={compaction()?.auto ? " Auto Compaction " : " Compaction "}
           titleAlignment="center"
           borderColor={theme.borderActive}
         />
