@@ -1,12 +1,14 @@
 import { run } from "@opencode-ai/tui"
-import { TuiConfig } from "@opencode-ai/tui/config"
+import { TuiConfigHost } from "@opencode-ai/tui/config/host"
 import { Effect } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/core/global"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 
 export function runTui(transport: { url: string; headers: RequestInit["headers"] }) {
-  const config = TuiConfig.resolve({}, { terminalSuspend: false })
-  return run({
+  // Native必须读取真实host配置；保留该入口的终端挂起策略，避免空配置禁用语音。
+  return TuiConfigHost.load(process.cwd(), { terminalSuspend: false }).pipe(Effect.flatMap((config) => run({
     ...transport,
     args: {},
     config,
@@ -16,7 +18,7 @@ export function runTui(transport: { url: string; headers: RequestInit["headers"]
       async start() {},
       async dispose() {},
     },
-  }).pipe(Effect.provide(AppNodeBuilder.build(Global.node)))
+  })), Effect.provide(AppNodeBuilder.build(LayerNode.group([Global.node, FSUtil.node]))))
 }
 
 const legacyDefaults: Record<string, unknown> = {

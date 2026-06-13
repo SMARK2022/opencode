@@ -36,6 +36,8 @@ import { computePromptTraits } from "../../prompt/traits"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
+import { PromptVoiceInput } from "../../prompt-voice-input"
+import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
@@ -170,6 +172,7 @@ export function Prompt(props: PromptProps) {
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
+  const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
@@ -221,6 +224,7 @@ export function Prompt(props: PromptProps) {
   const [cursorVersion, setCursorVersion] = createSignal(0)
   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
   const hasRightContent = createMemo(() => Boolean(props.right))
+  const [voiceInputStatus, setVoiceInputStatus] = createSignal<PromptVoiceInput.VoiceInputStatus>({ type: "idle" })
 
   function promptModelWarning() {
     toast.show({
@@ -376,7 +380,32 @@ export function Prompt(props: PromptProps) {
   // #243：耗时口径统一——运行中 footer 用 transcript 时间戳（parent user.created）+
   // 刷新时钟，重挂载/重连不重新起算
   // 时钟仅绑定 isRunning：idle 后停 tick，重进 busy 重新起 tick（口径边界不变）
-  const now = createRefreshClock(isRunning)
+  // voice recording 也需要刷新时钟，否则 footer 的录音时长会停在开始时刻。
+  const now = createRefreshClock(() => isRunning() || voiceInputStatus().type === "recording")
+  // busy 覆盖 starting/stopping/transcribing，避免用户在语音文本尚未落入 prompt 前提交旧草稿。
+  const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
+  const voiceInputStatusText = createMemo(() =>
+    // shortcut 来自 keymap；缺省 alt+v 只用于展示兜底，实际绑定仍由 TuiKeybind 解析。
+    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || "alt+v", now()),
+  )
+  const voiceInput = PromptVoiceInput.createVoiceInputController({
+    // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
+    transcriber: () => tuiConfig.voice?.transcriber,
+    // recorder 单独放在 native 边界文件，Prompt 组件不直接加载 optional addon。
+    startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
+    insertText: insertVoiceText,
+    onStatus: setVoiceInputStatus,
+    onError: (message) =>
+      toast.show({
+        message,
+        variant: "error",
+      }),
+  })
+  onCleanup(() => {
+    // [语音退出清理] Prompt 卸载时不能留下仍占用麦克风的 Node 子进程；这里只 abort
+    // 已开始的录音，不触发转写，也不改动用户当前草稿。
+    void voiceInput.abort()
+  })
   // activeDuration 派生自 now 信号：now 不变时 memo 不重算，tick 成本仅为一次比较
   const activeDuration = createMemo(() => {
     // 无 sessionID 时组件尚未绑定会话，耗时无意义；0 让 Show 直接隐藏 footer 计时
@@ -1034,6 +1063,31 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  useBindings(() => {
+    return {
+      target: inputTarget,
+      enabled:
+        inputTarget() !== undefined &&
+        !props.disabled &&
+        !auto()?.visible &&
+        !dialog.stack.length &&
+        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
+        (!isRunning() || voiceInputStatus().type === "recording"),
+      commands: [
+        {
+          name: "prompt.voice.toggle",
+          title: "Toggle voice input",
+          category: "Prompt",
+          run() {
+            void voiceInput.toggle()
+            return true
+          },
+        },
+      ],
+      bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
+    }
+  })
+
   let submitting = false
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
@@ -1062,6 +1116,8 @@ export function Prompt(props: PromptProps) {
       syncExtmarksWithPromptParts()
     }
     if (props.disabled) return false
+    // [语音提交边界] 正在录音、保存或转写时禁止发送 prompt；否则 Enter 会把尚未插入的旧草稿提交出去。
+    if (voiceInputBusy()) return false
     if (workspace.creating() || move.creating()) return false
     if (auto()?.visible) return false
     if (!store.prompt.input) return false
@@ -1401,6 +1457,24 @@ export function Prompt(props: PromptProps) {
     return
   }
 
+  function insertVoiceText(text: string) {
+    if (!input || input.isDestroyed) return
+    // insertText 保持当前光标位置语义：语音转写结果像用户手动输入一样进入 textarea。
+    input.insertText(text)
+    // 写入 renderable 后立即同步 store/extmarks，否则后续 submit 会读到插入前的旧 prompt。
+    setStore("prompt", "input", input.plainText)
+    syncExtmarksWithPromptParts()
+    // cursorVersion 触发现有光标同步链路，不为语音输入新增独立光标状态。
+    setCursorVersion((value) => value + 1)
+
+    setTimeout(() => {
+      if (!input || input.isDestroyed) return
+      // OpenTUI textarea 的布局在插入后需要下一 tick 标脏，避免转写文本显示滞后一帧。
+      input.getLayoutNode().markDirty()
+      renderer.requestRender()
+    }, 0)
+  }
+
   function clearPrompt() {
     if (store.prompt.input.trim().length >= DRAFT_RETENTION_MIN_CHARS || store.prompt.parts.length > 0) {
       history.append({
@@ -1652,6 +1726,15 @@ export function Prompt(props: PromptProps) {
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between">
           <Switch>
+            <Match when={voiceInputBusy()}>
+              <box paddingLeft={3} flexDirection="row" gap={1}>
+                {/* 录音中显示红点，保存/转写阶段显示 spinner，让用户区分“仍在收音”和“正在处理”。 */}
+                <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
+                  <text fg={theme.error}>●</text>
+                </Show>
+                <text fg={theme.accent}>{voiceInputStatusText()}</text>
+              </box>
+            </Match>
             <Match when={isRunning()}>
               <box
                 flexDirection="row"
@@ -1841,6 +1924,11 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
+                  <Show when={tuiConfig.voice?.transcriber}>
+                    <text fg={theme.text}>
+                      {voiceShortcut() || "alt+v"} <span style={{ fg: theme.textMuted }}>voice</span>
+                    </text>
+                  </Show>
                 </Match>
                 <Match when={store.mode === "shell"}>
                   <text fg={theme.text}>
