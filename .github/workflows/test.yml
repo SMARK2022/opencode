@@ -487,12 +487,16 @@ jobs:
       - name: Install Playwright system dependencies
         if: runner.os == 'Linux'
         working-directory: packages/app
-        run: bunx playwright install-deps chromium
+        # setup-bun 使用 hoisted 安装，显式走根 node_modules 的锁定版本，避免 bunx 重新解析到未修复的安装器。
+        timeout-minutes: 10
+        run: bun ../../node_modules/.bin/playwright install-deps chromium
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: packages/app
-        run: bunx playwright install chromium
+        # 浏览器下载和解压发生在 E2E 测试前，独立超时可以防止 install 卡住占满整个 warning job。
+        timeout-minutes: 15
+        run: bun ../../node_modules/.bin/playwright install chromium
 
       - name: Run upstream app e2e tests
         id: e2e
