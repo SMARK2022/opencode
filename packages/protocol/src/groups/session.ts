@@ -30,6 +30,8 @@ const SessionsQueryFields = {
   order: Schema.optional(Schema.Union([Schema.Literal("asc"), Schema.Literal("desc")])).annotate({
     description: "Session order for the first page. Use desc for newest first or asc for oldest first.",
   }),
+  // 更新时间下界独立于创建时间分页；cursor沿既有字段派生保留同一搜索窗口。
+  start: Schema.NumberFromString.pipe(Schema.decodeTo(NonNegativeInt), Schema.optional),
   search: Schema.optional(Schema.String),
 }
 

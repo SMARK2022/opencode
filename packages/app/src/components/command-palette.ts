@@ -146,7 +146,7 @@ export function createCommandPaletteModel(props: { filesOnly?: () => boolean; on
     server: ServerConnection.key(serverSDK.server),
     opened: serverCtx.projects.list,
     stored: () => serverCtx.sync.data.project,
-    load: (search, signal) => serverSDK.api.session.list({ parentID: null, search, limit: 50 }, { signal }),
+    load: (query, signal) => serverSDK.api.session.list(query, { signal }),
     untitled: () => language.t("command.session.new"),
     category: () => language.t("command.category.session"),
   })
@@ -220,7 +220,7 @@ export function createServerSessionEntries(props: {
   server: ServerConnection.Key
   opened: () => LocalProject[]
   stored: () => Project[]
-  load: (search: string, signal: AbortSignal) => Promise<{ data: SessionInfo[] }>
+  load: (query: { parentID: null; search: string; limit: number; start: number }, signal: AbortSignal) => Promise<{ data: SessionInfo[] }>
   untitled: () => string
   category: () => string
 }) {
@@ -254,7 +254,8 @@ export function createServerSessionEntries(props: {
     const stored = props.stored().map((project) => ({ ...project, expanded: false }))
     const storedByID = new Map(stored.map((project) => [project.id, project] as const))
     return props
-      .load(search, current.signal)
+      // 两个Native入口共用实际查询预算，窗口进入服务端SQL而不是本地截掉一页。
+      .load({ parentID: null, search, limit: 100, start: Date.now() - 90 * 24 * 60 * 60 * 1000 }, current.signal)
       .then((result) =>
         result.data
           .map(normalizeSessionInfo)

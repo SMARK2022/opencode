@@ -44,8 +44,8 @@ export function createSdkForServer({
 export function createApiForServer(input: {
   server: ServerConnection.HttpBase
   fetch?: typeof globalThis.fetch
-}): OpenCodeClient {
-  return OpenCode.make({
+}) {
+  const options = {
     baseUrl: input.server.url,
     fetch: input.fetch,
     headers: input.server.password
@@ -56,7 +56,22 @@ export function createApiForServer(input: {
           })}`,
         }
       : undefined,
-  })
+  }
+  const client = OpenCode.make(options)
+  const fetcher = input.fetch ?? globalThis.fetch
+  return {
+    ...client,
+    session: {
+      ...client.session,
+      // 已发布的客户端只挑选旧查询字段；在唯一请求边界补start，保留原序列化和错误处理。
+      list: (query?: Parameters<OpenCodeClient["session"]["list"]>[0] & { start?: number }, requestOptions?: Parameters<OpenCodeClient["session"]["list"]>[1]) =>
+        OpenCode.make({ ...options, fetch: Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+          const target = new URL(url instanceof Request ? url.url : url)
+          if (query?.start !== undefined) target.searchParams.set("start", String(query.start))
+          return fetcher(target, init)
+        }, { preconnect: fetcher.preconnect }) }).session.list(query, requestOptions),
+    },
+  }
 }
 
-export type ServerApi = OpenCodeClient
+export type ServerApi = ReturnType<typeof createApiForServer>

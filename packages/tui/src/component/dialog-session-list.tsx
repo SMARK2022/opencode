@@ -26,7 +26,9 @@ export function createDialogSessionListQuery(input: { search?: string; filter: S
   const search = input.search?.trim()
   return {
     roots: true,
-    limit: search ? 30 : 100,
+    // #306：仅搜索限制 90 天；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
+    ...(search ? { start: Date.now() - 90 * 24 * 60 * 60 * 1000 } : {}),
+    limit: 100,
     ...(search ? { search } : {}),
     ...input.filter,
   }
@@ -59,7 +61,8 @@ const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
 // #120：最多扫描消息条数，避免全历史
 const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
 // #120：同时预加载预览的会话数上限
-const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
+// #306：预览上限从 50 提到 400，预览覆盖更完整，避免滚动时再触发补拉。
+const SESSION_LIST_PREVIEW_SESSION_LIMIT = 400
 // #120：会话预览并发度
 const SESSION_LIST_PREVIEW_CONCURRENCY = 6
 
