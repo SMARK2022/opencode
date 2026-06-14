@@ -46,6 +46,8 @@
 
 > **About this branch**: This is OpenCode's `dev-smark` enhanced branch (current version `1.15.6`, CLI release tag `v1.15.6-smark`). It is based on upstream `dev` and focuses on TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code Notebook integration, network proxy support, and installation experience.
 
+> **Database migration notice**: The SMARK branch includes custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local `opencode.db`; after migration, the database may not migrate or roll back cleanly to upstream or original branches. This project is not responsible for schema-format compatibility issues in your local database context data.
+
 ---
 
 ## Quick Install
@@ -180,6 +182,7 @@ This branch is not just a pile of features; it turns common development pain poi
 | Session management | Long sessions lose context and are costly to recover | Session search, path filters, manual compaction, interrupt recovery, Session Warping |
 | Token statistics | Hard to know what consumes context | Input/output tokens, tool results, attachments, request overhead breakdowns |
 | Tool system | File and shell output can pollute context | Structured Read output, Shell output compression, Write auto diff |
+| Voice transcription | Audio or voice notes need a clear text-entry path | Optional MCP can transcribe voice audio and feed the transcript back into context |
 | Provider | Multi-account, endpoint, and model setup is complex | Provider aliases, client version override, ClaudeCode provider |
 | VSCode | Notebook scenarios cannot be operated reliably by CLI agents | Cell summary, read, edit, run, output read, kernel management |
 | Windows | PowerShell, encoding, paths, and CRLF are error-prone | CLIXML decoding, UTF-8 fixes, path normalization, CRLF preservation |
@@ -204,7 +207,7 @@ This branch is not just a pile of features; it turns common development pain poi
 | Session recovery | Hidden messages, undo operations, pending-message checks, and error recovery are more robust |
 | Interrupt control | Records interrupt counts and confirmation time; parent session interrupts propagate to subtasks |
 | Path compatibility | Windows global session paths are normalized; session storage uses relative paths |
-| Manual compaction | Users can trigger compaction; compaction selection is asynchronous and reports errors |
+| Manual compaction | Users can trigger optimized compaction; compaction selection is asynchronous and reports errors |
 | Git context | Automatically injects current branch, status, recent commits, and related data with a config switch |
 
 ### Token And Cost Visibility
@@ -228,6 +231,10 @@ Internal stats prefer request usage data and fall back to message metadata for o
 | Shell | bash, PowerShell, and cmd use shell-aware prompts separately |
 | Write | Automatically generates a diff when overwriting files so users can confirm the actual change |
 | Permission | Parent-agent permissions are filtered before passing to subtasks; tool availability checks are stricter |
+
+### Optional MCP Integration
+
+If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode; installation, authorization, and browser-state handling remain governed by that project's README.
 
 ### Provider And Models
 

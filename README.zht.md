@@ -46,6 +46,8 @@
 
 > **關於本分支**：這是 OpenCode 的 `dev-smark` 增強分支（目前版本 `1.15.6`，CLI release tag 為 `v1.15.6-smark`）。它基於上游 `dev` 分支，重點增強 TUI 互動、會話管理、Token 統計、Windows/PowerShell 相容性、VSCode Notebook 整合、網路代理與安裝體驗。
 
+> **資料庫遷移提示**：SMARK 分支包含資料庫 schema 自訂與遷移。若你從上游 `dev`、主分支或原分支切換到本分支，請先手動備份本地 `opencode.db`；遷移後的資料庫可能無法無損遷移回上游或原分支。本專案不負責你本地資料庫上下文資訊的 schema 格式相容性問題。
+
 ---
 
 ## 快速安裝
@@ -180,6 +182,7 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。�
 | 會話管理 | 長會話易丟上下文，復原成本高 | 會話搜尋、路徑過濾、手動壓縮、中斷復原、Session Warping |
 | Token 統計 | 不知道上下文被什麼消耗 | 輸入/輸出 token、工具結果、附件、請求開銷分項展示 |
 | 工具系統 | 檔案讀寫和 shell 輸出容易污染上下文 | Read 輸出結構化、Shell 輸出壓縮、Write 自動 diff |
+| 語音轉錄 | 錄音或語音內容缺少清晰的文字入口 | 可配合可選 MCP 進行 voice 轉錄，將音訊轉寫結果納入上下文 |
 | Provider | 多帳號、多端點、多模型設定複雜 | Provider 別名、客戶端版本覆蓋、ClaudeCode provider |
 | VSCode | Notebook 場景無法被 CLI Agent 可靠操作 | 單元格概覽、讀取、編輯、執行、輸出讀取、kernel 管理 |
 | Windows | PowerShell、編碼、路徑、CRLF 容易出錯 | CLIXML 解碼、UTF-8 修復、路徑正規化、CRLF 保留 |
@@ -204,7 +207,7 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。�
 | 會話復原 | 隱藏訊息、撤銷操作、待處理訊息檢查和錯誤復原邏輯更穩 |
 | 中斷控制 | 記錄中斷次數和確認時間，父會話中斷會傳播到子任務 |
 | 路徑相容 | Windows 全域會話路徑正規化，會話儲存使用相對路徑 |
-| 手動壓縮 | 使用者可以主動觸發壓縮，壓縮選擇非同步處理並帶錯誤提示 |
+| 手動壓縮 | 使用者可以主動觸發優化後的 compaction，壓縮選擇非同步處理並帶錯誤提示 |
 | Git 上下文 | 自動注入目前分支、狀態、最近提交等資訊，可設定開關 |
 
 ### Token 與成本可見性
@@ -228,6 +231,10 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。�
 | Shell | bash、PowerShell、cmd 分別使用 shell 感知提示詞 |
 | Write | 覆蓋檔案時自動生成 diff，幫助使用者確認實際修改 |
 | 權限 | 父代理權限會過濾傳遞給子任務，工具可用性檢查更嚴格 |
+
+### 可選 MCP 整合
+
+如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力；安裝、授權與瀏覽器狀態管理以該專案 README 為準。
 
 ### Provider 與模型
 
