@@ -5,6 +5,7 @@ import path from "path"
 import fs from "fs/promises"
 import { setTimeout as sleep } from "node:timers/promises"
 import { afterAll } from "bun:test"
+import { markPluginDependenciesReady } from "./fixture/plugin"
 
 // Set XDG env vars FIRST, before any src/ imports
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
@@ -40,6 +41,9 @@ process.env["XDG_STATE_HOME"] = path.join(dir, "state")
 process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtures", "models-api.json")
 process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
 process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
+// #305：全局配置目录本轮测试不需要真实安装 @opencode-ai/plugin；只预置依赖完成标记，
+// 保留“没有全局 opencode.json/opencode.jsonc”的配置语义，同时避免 Windows full run 等待 npm reify。
+await markPluginDependenciesReady(path.join(process.env["XDG_CONFIG_HOME"], "opencode"))
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills
