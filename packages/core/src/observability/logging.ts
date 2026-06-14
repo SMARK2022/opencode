@@ -1,4 +1,5 @@
 import { Formatter, Logger, type LogLevel } from "effect"
+import fs from "fs"
 import path from "path"
 import { Global } from "../global"
 import { runID } from "./shared"
@@ -48,6 +49,9 @@ function format(input: unknown) {
 
 export function fileLogger(file = path.join(Global.Path.log, "opencode.log"), id: string = runID) {
   // Do not set batchWindow to 0; it causes high idle CPU usage.
+  // #304：测试会把 Global.Path.log 临时切到 scoped tmpdir，生产环境用户也可能删除日志目录；
+  // Logger.toFile 不自建目录，打开前先自愈，日志失败不能污染业务流程。
+  fs.mkdirSync(path.dirname(file), { recursive: true })
   return Logger.toFile(formatter(id), file, { flag: "a" })
 }
 

@@ -107,3 +107,24 @@ test("file logger flattens nested objects", async () => {
   expect(line).toContain("session.id=session-1")
   expect(line).not.toContain("request={")
 })
+
+test("file logger recreates a missing log directory", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-log-test-"))
+  await using _ = {
+    async [Symbol.asyncDispose]() {
+      await fs.rm(dir, { recursive: true, force: true })
+    },
+  }
+  // 模拟 CI 中临时日志目录被清理或尚未创建的边界：fileLogger 打开前自愈目录，
+  // 不能把 ENOENT 泄漏到业务流程。
+  const file = path.join(dir, "missing", "opencode.log")
+
+  await Effect.logInfo("log directory was recreated").pipe(
+    Effect.provide(Logger.layer([fileLogger(file, "run-a")]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)),
+    Effect.scoped,
+    Effect.runPromise,
+  )
+
+  const line = (await Bun.file(file).text()).trim()
+  expect(line).toContain("log directory was recreated")
+})
