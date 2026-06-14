@@ -81,7 +81,7 @@ function playwrightCommand(source: string) {
 function atLeast(actual: string, minimum: string) {
   const actualParts = actual.split(".").map(Number)
   const minimumParts = minimum.split(".").map(Number)
-  // 只比较主版本号段即可覆盖 Playwright 的固定版本约束，同时避免引入新的 semver 依赖。
+  // 逐段比较固定版本号即可覆盖 Playwright 下限约束，同时避免引入新的 semver 依赖。
   const comparison = Array.from({ length: Math.max(actualParts.length, minimumParts.length) }, (_, index) =>
     Math.sign((actualParts[index] ?? 0) - (minimumParts[index] ?? 0)),
   ).find((value) => value !== 0)

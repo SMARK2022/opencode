@@ -84,7 +84,11 @@ describe("tool.repo_clone", () => {
         const fs = yield* AppFileSystem.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
-        const remoteDir = path.join(remoteRoot, "owner")
+        const owner = "repo-clone-reuse"
+        const repo = "repo"
+        // 每个用例使用独立的 GitHub shorthand，避免全量 CI 并发时共享
+        // Global.Path.repos 下同一个 owner/repo 缓存而互相读到对方的工作区。
+        const remoteDir = path.join(remoteRoot, owner)
         const remoteRepo = path.join(remoteDir, "repo.git")
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
@@ -94,14 +98,14 @@ describe("tool.repo_clone", () => {
         yield* git(remoteRoot, ["clone", "--bare", source, remoteRepo])
 
         const tool = yield* init()
-        const cloned = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: "owner/repo" }, ctx))
+        const cloned = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: `${owner}/${repo}` }, ctx))
         const cached = yield* githubBase(
           `file://${remoteRoot}/`,
-          tool.execute({ repository: "https://github.com/owner/repo.git" }, ctx),
+          tool.execute({ repository: `https://github.com/${owner}/${repo}.git` }, ctx),
         )
 
         expect(cloned.metadata.status).toBe("cloned")
-        expect(cloned.metadata.localPath).toBe(path.join(Global.Path.repos, "github.com", "owner", "repo"))
+        expect(cloned.metadata.localPath).toBe(path.join(Global.Path.repos, "github.com", owner, repo))
         expect(cached.metadata.status).toBe("cached")
         expect(yield* fs.readFileString(path.join(cloned.metadata.localPath, "README.md"))).toBe("v1\n")
       }),
@@ -114,7 +118,11 @@ describe("tool.repo_clone", () => {
         const fs = yield* AppFileSystem.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
-        const remoteDir = path.join(remoteRoot, "owner")
+        const owner = "repo-clone-refresh"
+        const repo = "repo"
+        // refresh 会复用同一个 cache path；用例级 owner 防止别的 repo_clone
+        // 场景在全量 CI 中提前写入同名缓存，导致本测试刷新错误来源。
+        const remoteDir = path.join(remoteRoot, owner)
         const remoteRepo = path.join(remoteDir, "repo.git")
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
@@ -128,7 +136,7 @@ describe("tool.repo_clone", () => {
         yield* git(source, ["push", "-u", "origin", `${branch}:${branch}`])
 
         const tool = yield* init()
-        const first = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: "owner/repo" }, ctx))
+        const first = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: `${owner}/${repo}` }, ctx))
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v2\n"))
         yield* git(source, ["add", "."])
@@ -137,7 +145,7 @@ describe("tool.repo_clone", () => {
 
         const refreshed = yield* githubBase(
           `file://${remoteRoot}/`,
-          tool.execute({ repository: "owner/repo", refresh: true }, ctx),
+          tool.execute({ repository: `${owner}/${repo}`, refresh: true }, ctx),
         )
 
         expect(first.metadata.status).toBe("cloned")
@@ -153,7 +161,11 @@ describe("tool.repo_clone", () => {
         const fs = yield* AppFileSystem.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
-        const remoteDir = path.join(remoteRoot, "owner")
+        const owner = "repo-clone-branch"
+        const repo = "repo"
+        // branch 用例也必须独立 cache；否则同名 owner/repo 会让 checkout
+        // 结果依赖其他测试先后顺序，而不是依赖本用例创建的远端仓库。
+        const remoteDir = path.join(remoteRoot, owner)
         const remoteRepo = path.join(remoteDir, "repo.git")
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "main\n"))
@@ -169,7 +181,7 @@ describe("tool.repo_clone", () => {
         const tool = yield* init()
         const result = yield* githubBase(
           `file://${remoteRoot}/`,
-          tool.execute({ repository: "owner/repo", branch: "docs" }, ctx),
+          tool.execute({ repository: `${owner}/${repo}`, branch: "docs" }, ctx),
         )
 
         expect(result.metadata.status).toBe("cloned")

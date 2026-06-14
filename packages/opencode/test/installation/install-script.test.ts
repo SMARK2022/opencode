@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { existsSync } from "fs"
 import fs from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -6,7 +7,7 @@ import { tmpdir } from "../fixture/fixture"
 
 const INSTALL_SCRIPT = fileURLToPath(new URL("../../../../install", import.meta.url))
 const VERSION = "1.2.3-smark"
-const BASH = Bun.which("bash") ?? "bash"
+const BASH = preferredWindowsGitBash() ?? Bun.which("bash") ?? "bash"
 
 describe("install script", () => {
   test("installs to the requested directory even when PATH has the same version elsewhere", async () => {
@@ -127,7 +128,7 @@ async function writeFakeReleaseCommands(dir: string, asset: string) {
   await writeIdCommand(dir, 501)
   await writeExecutable(
     path.join(dir, "uname"),
-    `#!/usr/bin/env bash\ncase "${"$1"}" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\nesac\n`,
+    `#!/usr/bin/env bash\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\nesac\n`,
   )
   await writeExecutable(
     path.join(dir, "curl"),
@@ -136,7 +137,7 @@ async function writeFakeReleaseCommands(dir: string, asset: string) {
 }
 
 async function writeIdCommand(dir: string, uid: number) {
-  await writeExecutable(path.join(dir, "id"), `#!/usr/bin/env bash\n[ "${"$1"}" = "-u" ] && echo ${uid}\n`)
+  await writeExecutable(path.join(dir, "id"), `#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo ${uid}\n`)
 }
 
 async function writeExecutable(file: string, content: string) {
@@ -218,9 +219,8 @@ function bashEnv(env: Record<string, string | undefined>) {
 
 function bashCommand(script: string, args: string[], env: Record<string, string | undefined>) {
   if (process.platform !== "win32") return [BASH, script, ...args]
-  // Windows 的 bash.exe 是 WSL 启动器，直接传脚本时可能落到发行版默认 sh；
-  // install 脚本依赖 bash 的 `set -o pipefail`，因此在 WSL 内显式 exec /bin/bash。
-  // 不能使用 login shell：它会重置 PATH，导致测试桩 curl/id/uname 被真实命令替代。
+  // Windows CI 使用 Git Bash，本地机器可能把 bash.exe 解析到 WSL；统一通过
+  // env + /bin/bash 执行，既保留 bash-only 的 pipefail，也避免 login shell 重置 PATH。
   const assignments = Object.entries(env)
     .filter((entry): entry is [string, string] => entry[1] !== undefined)
     .map(([key, value]) => quoteForSh(`${key}=${value}`))
@@ -233,8 +233,8 @@ function bashCommand(script: string, args: string[], env: Record<string, string 
 
 function bashPath(...entries: string[]) {
   if (process.platform !== "win32") return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
-  // WSL 不会可靠解析 Windows PATH 中的 `C:\...` drive colon；测试只需要
-  // fake-bin 中的桩命令和标准 POSIX 工具链，所以使用固定基础 PATH 保持隔离。
+  // Windows POSIX 层不会可靠解析原生 PATH 里的 `C:\...` drive colon；测试只需要
+  // fake-bin 中的桩命令和基础工具链，所以固定基础 PATH 来隔离用户环境。
   return [...entries.map(bashPathForFile), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":")
 }
 
@@ -243,13 +243,28 @@ function bashPathForFile(file: string) {
   const normalized = file.replaceAll("\\", "/")
   const match = normalized.match(/^([A-Za-z]):\/(.*)$/)
   if (!match) return normalized
-  // WSL exposes Windows drives under /mnt/<lower-drive>; keeping this conversion
-  // local to tests lets the production install script remain POSIX-only.
-  return `/mnt/${match[1].toLowerCase()}/${match[2]}`
+  const drive = match[1].toLowerCase()
+  // Git Bash 使用 /c/...，WSL 使用 /mnt/c/...；根据实际 bash.exe 风味转换，
+  // 让同一组 install 行为测试能覆盖本地 WSL 和 GitHub Actions Git Bash。
+  return windowsBashFlavor() === "wsl" ? `/mnt/${drive}/${match[2]}` : `/${drive}/${match[2]}`
 }
 
 function quoteForSh(value: string) {
   // 测试路径可能包含空格或括号；单引号是 POSIX sh 中最小且稳定的转义，
   // 这里只用于测试启动命令，不进入生产 install 参数解析逻辑。
   return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+function preferredWindowsGitBash() {
+  if (process.platform !== "win32") return undefined
+  // GitHub Actions 固定提供 Git Bash；本地 Windows 常见 PATH 会先命中 WSL
+  // C:\Windows\System32\bash.exe，优先选择 Git Bash 才能复现 CI shell 语义。
+  return ["C:\\Program Files\\Git\\bin\\bash.exe", "D:\\Program Files\\Git\\bin\\bash.exe"].find((candidate) =>
+    existsSync(candidate),
+  )
+}
+
+function windowsBashFlavor() {
+  if (process.platform !== "win32") return "posix"
+  return BASH.replaceAll("\\", "/").toLowerCase().endsWith("/windows/system32/bash.exe") ? "wsl" : "git"
 }

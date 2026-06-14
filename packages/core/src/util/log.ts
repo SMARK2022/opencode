@@ -58,15 +58,27 @@ let logpath = ""
 export function file() {
   return logpath
 }
-let write = (msg: any) => {
+let stream: ReturnType<typeof createWriteStream> | undefined
+const writeStderr = (msg: any) => {
   process.stderr.write(msg)
   return msg.length
 }
+let write = writeStderr
 
 export async function init(options: Options) {
   if (options.level) level = options.level
   void cleanup(Global.Path.log)
-  if (options.print) return
+  stream?.destroy()
+  stream = undefined
+  if (options.print) {
+    // print=true 表示恢复到 stderr；不能继续持有上一次 dev log 的 writer，
+    // 否则测试或重初始化后仍可能写入已经被清理的临时日志文件。
+    write = writeStderr
+    return
+  }
+  // Global.Path.log 在测试中会临时切到 scoped tmpdir，生产环境下用户也可能
+  // 删除日志目录；init() 必须自愈目录，日志失败不能污染业务流程。
+  await fs.mkdir(Global.Path.log, { recursive: true }).catch(() => {})
   logpath = path.join(
     Global.Path.log,
     options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
@@ -75,13 +87,22 @@ export async function init(options: Options) {
   const shouldTruncate = !options.dev || !runID || process.env[initializedRunID] !== runID
   if (shouldTruncate) await fs.truncate(logpath).catch(() => {})
   if (options.dev && runID) process.env[initializedRunID] = runID
-  const stream = createWriteStream(logpath, { flags: "a" })
+  const current = createWriteStream(logpath, { flags: "a" })
+  stream = current
+  current.on("error", () => {
+    // 日志输出是诊断辅助通道，不能因为目录被删除或句柄被系统回收而让
+    // 调用方出现 unhandled error；下一次 init() 会重新创建可写目标。
+  })
   write = async (msg: any) => {
-    return new Promise((resolve, reject) => {
-      stream.write(msg, (err) => {
-        if (err) reject(err)
-        else resolve(msg.length)
-      })
+    if (current.destroyed || current.closed || !current.writable) return 0
+    return new Promise((resolve) => {
+      try {
+        current.write(msg, (err) => {
+          resolve(err ? 0 : msg.length)
+        })
+      } catch {
+        resolve(0)
+      }
     })
   }
 }

@@ -5,7 +5,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
 import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
 import { Filesystem } from "@/util/filesystem"
-import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { provideInstance, TestInstance } from "../fixture/fixture"
 import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
@@ -106,12 +106,15 @@ describe("tool.assertExternalDirectory", () => {
 
       const req = requests.find((r) => r.permission === "external_directory")
       expect(req).toBeDefined()
+      const filepath = process.platform === "win32" ? Filesystem.normalizePath("/tmp/outside/file.txt") : "/tmp/outside/file.txt"
       expect(req!.metadata).toMatchObject({
         action_kind: "tool",
         tool: "read",
         operation: "read",
-        filepath: process.platform === "win32" ? "F:\\tmp\\outside\\file.txt" : "/tmp/outside/file.txt",
-        parentDir: process.platform === "win32" ? "F:\\tmp\\outside" : "/tmp/outside",
+        // Windows 的 /tmp 会按当前进程所在盘符解析；CI 在 D:，本地可能在 F:。
+        // 断言归一化后的行为，而不是把某台机器的盘符写死进测试。
+        filepath,
+        parentDir: path.dirname(filepath),
       })
     }),
   )

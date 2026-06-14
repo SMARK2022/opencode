@@ -86,6 +86,9 @@ export async function tmpdir<T>(options?: TmpDirOptions<T>) {
   await fs.mkdir(dirpath, { recursive: true })
   if (options?.git) {
     await $`git init`.cwd(dirpath).quiet()
+    // 测试仓库必须复现 opencode Git 服务的 LF 行为；Windows runner 的
+    // 系统 core.autocrlf=true 会把 fixture 文件标记为脏并破坏 clone/commit 断言。
+    await $`git config core.autocrlf false`.cwd(dirpath).quiet()
     await $`git config core.fsmonitor false`.cwd(dirpath).quiet()
     await $`git config commit.gpgsign false`.cwd(dirpath).quiet()
     await $`git config user.email "test@opencode.test"`.cwd(dirpath).quiet()
@@ -138,6 +141,9 @@ export function tmpdirScoped(options?: { git?: boolean; config?: Partial<Config.
 
     if (options?.git) {
       yield* git("init")
+      // 与 promise 版 tmpdir 保持一致，屏蔽 Windows 系统级 autocrlf，确保
+      // Effect 测试中的 git add/commit 不受 runner 全局配置影响。
+      yield* git("config", "core.autocrlf", "false")
       yield* git("config", "core.fsmonitor", "false")
       yield* git("config", "commit.gpgsign", "false")
       yield* git("config", "user.email", "test@opencode.test")
