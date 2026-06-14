@@ -1165,17 +1165,17 @@ it.instance(
       }))
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
+      const test = yield* TestInstance
       const chat = yield* sessions.create({
         title: "Shell review metadata",
         permission: [
           { permission: "bash", pattern: "*", action: "auto" },
-          // This test targets the bash review envelope. The sensitive path would
-          // otherwise create a separate external_directory prompt and block the
-          // shell before the reviewed bash permission can complete.
-          { permission: "external_directory", pattern: "*", action: "allow" },
         ],
       })
-      const command = "cat ~/.ssh/id_rsa"
+      // 本用例只需要触发 SSH 私钥名的 cautious 预审并产生 shell 输出；
+      // 使用项目内文件避免 Windows runner 上家目录路径和缺失文件错误拖慢到 15s 超时边界。
+      yield* Effect.promise(() => Bun.write(path.join(test.directory, "id_rsa"), "review-output\n"))
+      const command = "cat id_rsa"
       yield* prompt.prompt({
         sessionID: chat.id,
         agent: "build",
@@ -1237,7 +1237,9 @@ it.instance(
       ).toBe(true)
     }),
   { git: true },
-  15_000,
+  // 这是 shell 执行、auto reviewer 子会话和审计回链的完整集成链路；
+  // Windows CI 慢机曾在 15s 边界取消，30s 仍保持有限等待且不会放宽任何行为断言。
+  30_000,
 )
 
 it.instance(

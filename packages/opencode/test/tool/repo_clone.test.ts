@@ -69,9 +69,9 @@ const commitFile = Effect.fn("RepoCloneToolTest.commitFile")(function* (
   // CI 上曾出现工作区已写入但 commit 没有纳入文件的情况；先验证 staged 内容，失败时直接指向 fixture 根因。
   if (!staged.split(/\r?\n/).includes(file)) throw new Error(`git did not stage ${file}`)
   yield* git(cwd, ["commit", "-m", message])
-  const clean = yield* gitResult(cwd, ["diff", "--quiet", "--exit-code", "HEAD", "--", file])
-  // refresh 用例依赖远端提交真实变化；用 Git 自身 diff 判断，避免 Windows runner 上 stdout 换行形态影响 fixture 校验。
-  if (clean.exitCode !== 0) throw new Error(`git did not commit ${file}`)
+  const tree = yield* git(cwd, ["ls-tree", "--name-only", "HEAD", "--", file])
+  // 只验证文件进入 HEAD 树；内容正确性由后面的 bare repo 与 clone 断言覆盖，避免 Windows 换行状态误杀 fixture。
+  if (!tree.split(/\r?\n/).includes(file)) throw new Error(`git did not commit ${file}`)
 })
 
 function githubFileBase(dir: string) {
