@@ -1,6 +1,79 @@
 import { describe, expect, test, afterAll } from "bun:test"
 import { Storage } from "../../src/core/storage"
 
+const storageStateKey = Symbol.for("opencode.enterprise.test.storage")
+// 与 share.test 共用同一 Symbol 键：两组用例读写同一进程内存储，锁定跨模块一致性。
+
+type StorageState = {
+  objects: Map<string, string>
+  originalFetch: typeof fetch
+  installed: boolean
+  bucket: string
+  region: string
+}
+
+function useTestStorage() {
+  const state = ((globalThis as typeof globalThis & Record<symbol, StorageState | undefined>)[storageStateKey] ??= {
+    objects: new Map(),
+    originalFetch: globalThis.fetch.bind(globalThis),
+    installed: false,
+    bucket: "opencode-enterprise-test",
+    region: "us-east-1",
+  })
+
+  // 这里保留真实 Storage 的 S3 适配器路径，只把目标测试 bucket 拦截为内存对象存储；
+  // 这样测试覆盖 read/write/list/remove 的真实 HTTP 形状，同时不会依赖 CI 上的云端密钥。
+  process.env.OPENCODE_STORAGE_ADAPTER = "s3"
+  process.env.OPENCODE_STORAGE_BUCKET = state.bucket
+  process.env.OPENCODE_STORAGE_REGION = state.region
+  process.env.OPENCODE_STORAGE_ACCESS_KEY_ID = "test-access-key"
+  process.env.OPENCODE_STORAGE_SECRET_ACCESS_KEY = "test-secret-key"
+
+  if (state.installed) return
+  // 拦截器单次安装：storage 直测与 share 间接覆盖共享同一全局态，重复包装会让请求被拦截两次。
+  state.installed = true
+  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const request = new Request(input, init)
+    const url = new URL(request.url)
+    const bucketPath = `/${state.bucket}`
+    if (url.host !== `s3.${state.region}.amazonaws.com` || (url.pathname !== bucketPath && !url.pathname.startsWith(`${bucketPath}/`))) {
+      return state.originalFetch(input, init)
+    // 仅拦截测试 bucket 前缀；其余 S3/外部流量原样透传，保证测试边界不外溢。
+    }
+
+    const key = decodeURIComponent(url.pathname.slice(bucketPath.length).replace(/^\//, ""))
+    if (url.searchParams.get("list-type") === "2") {
+      const prefix = url.searchParams.get("prefix") ?? ""
+      const startAfter = url.searchParams.get("start-after")
+      const keys = Array.from(state.objects.keys())
+        .filter((item) => item.startsWith(prefix))
+        .filter((item) => !startAfter || item > startAfter)
+        .sort((left, right) => left.localeCompare(right))
+      const limited = url.searchParams.has("max-keys") ? keys.slice(0, Number(url.searchParams.get("max-keys"))) : keys
+      // ListObjectsV2 三游标（prefix/start-after/max-keys）按 S3 真实分页语义模拟。
+      // Storage.createAdapter 只解析 <Key> 节点；测试 key 全部由 Storage.resolve 生成，保持简单 XML 足够覆盖 S3 list 行为。
+      return new Response(`<ListBucketResult>${limited.map((item) => `<Contents><Key>${item}</Key></Contents>`).join("")}</ListBucketResult>`, {
+        headers: { "Content-Type": "application/xml" },
+      })
+    }
+
+    if (request.method === "PUT") {
+      state.objects.set(key, await request.text())
+      return new Response(null, { status: 200 })
+    }
+    if (request.method === "DELETE") {
+      state.objects.delete(key)
+      return new Response(null, { status: 204 })
+      // PUT 覆盖写 200、DELETE 幂等 204——状态码契约与生产适配器分支一一对应。
+    }
+    if (!state.objects.has(key)) return new Response(null, { status: 404 })
+    // 404 区分缺失与空内容：storage.get/del 的错误分支依赖该可见性，不能伪装成空值。
+    return new Response(state.objects.get(key), { status: 200, headers: { "Content-Type": "application/json" } })
+  }, state.originalFetch)
+}
+
+useTestStorage()
+
 describe("core.storage", () => {
   test("should list files with after and before range", async () => {
     await Storage.write(["test", "users", "user1"], { name: "user1" })

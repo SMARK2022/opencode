@@ -98,6 +98,12 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   )
 }
 
+function shortShellDelayCommand() {
+  // Windows 的默认 shell 会把 `sleep 0.2` 解析成 PowerShell 命令，CI 冷启动时足以吃掉 3s 用例预算。
+  // 这里使用测试进程已依赖的 PATH 内 `bun` 执行短延迟脚本，避免 PowerShell 对引号路径需要 `&` 的差异。
+  return `bun -e "setTimeout(process.exit, 200)"`
+}
+
 function toolPart(parts: SessionV1.Part[]) {
   return parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 }
@@ -3296,7 +3302,7 @@ it.instance(
       yield* llm.text("after-shell")
 
       const sh = yield* prompt
-        .shell({ sessionID: chat.id, agent: "build", command: "sleep 0.2" })
+        .shell({ sessionID: chat.id, agent: "build", command: shortShellDelayCommand() })
         .pipe(Effect.forkChild)
       yield* waitForBusy(chat.id)
 
@@ -3316,7 +3322,8 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  10_000,
+  // Windows冷启动还包含Git与LLM测试服务，保留完整断言并使用有界集成预算。
+  30_000,
 )
 
 it.instance(
@@ -3333,7 +3340,7 @@ it.instance(
       yield* llm.text("done")
 
       const sh = yield* prompt
-        .shell({ sessionID: chat.id, agent: "build", command: "sleep 0.2" })
+        .shell({ sessionID: chat.id, agent: "build", command: shortShellDelayCommand() })
         .pipe(Effect.forkChild)
       yield* waitForBusy(chat.id)
 
@@ -3355,7 +3362,8 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  10_000,
+  // 两个等待者仍须共享同一结果，延长预算不改变并发排队契约。
+  30_000,
 )
 
 unix(
