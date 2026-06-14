@@ -218,6 +218,8 @@ describe("Vcs diff", () => {
         yield* write(path.join(test.directory, "file.txt"), "original\n")
         yield* git(test.directory, ["add", "."])
         yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", "add file"])
+        // #0309 用 git diff --quiet --exit-code 验证 HEAD 树包含已提交文件，避免 Windows runner 上 stdout 换行形态干扰 fixture 校验
+        yield* git(test.directory, ["diff", "--quiet", "--exit-code", "HEAD", "--", "file.txt"])
         yield* write(path.join(test.directory, "file.txt"), "changed\n")
 
         const vcs = yield* init()
