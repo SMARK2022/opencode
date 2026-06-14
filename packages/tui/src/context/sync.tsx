@@ -327,7 +327,7 @@ export const {
     function listSessions() {
       const tracker = new Map<string, SessionTrace>()
       listingSessions.add(tracker)
-      const query = { start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() }
+      const query = { start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() }
       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
       const projectID = project.project()
       const directory = query.directory

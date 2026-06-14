@@ -143,6 +143,31 @@ describe("SessionV2.create", () => {
       process.env.OPENCODE_TEST_HOME = child.replaceAll("\\", "/").toUpperCase() + "/"
       expect((yield* session.list(query)).map(item => item.title)).toContain("unrelated")
     }
+    // 创建更晚但早已不活跃的行排在前面，证明更新时间过滤必须发生在LIMIT之前。
+    const timedDirectory = AbsolutePath.make(path.join(child, "timed"))
+    const timed = [
+      { title: "inactive", time_created: 3000, time_updated: 999 },
+      { title: "edge", time_created: 2000, time_updated: 1000 },
+      { title: "active-old", time_created: 1000, time_updated: 1001 },
+      { title: "other-workspace", time_created: 4000, time_updated: 2000 },
+    ]
+    yield* db.insert(SessionTable).values(timed.map((row, index) => ({ ...row,
+      id: SessionV2.ID.make(`ses_timed_${index}`), slug: row.title, version: "test", project_id: projectID,
+      directory: timedDirectory, path: "packages/a/timed", workspace_id: index === 3 ? otherWorkspace : workspaceID,
+    }))).run().pipe(Effect.orDie)
+    const window = { directory: timedDirectory, workspaceID, start: 1000, limit: 1 }
+    expect((yield* session.list({ directory: timedDirectory, workspaceID, limit: 1 })).map(row => row.title)).toEqual(["inactive"])
+    const head = yield* session.list(window)
+    expect(head.map(row => row.title)).toEqual(["edge"])
+    expect((yield* session.list({ ...window, start: 1001 })).map(row => row.title)).toEqual(["active-old"])
+    expect(yield* session.list({ ...window, start: 1002 })).toEqual([])
+    const timeEdge = head[0]
+    if (!timeEdge) return yield* Effect.die("Missing time-filtered first page")
+    const tail = yield* session.list({ ...window, anchor: { id: timeEdge.id, time: DateTime.toEpochMillis(timeEdge.time.created), direction: "next" } })
+    expect(tail.map(row => row.title)).toEqual(["active-old"])
+    const end = tail[0]
+    if (!end) return yield* Effect.die("Missing time-filtered next page")
+    expect((yield* session.list({ ...window, anchor: { id: end.id, time: DateTime.toEpochMillis(end.time.created), direction: "previous" } })).map(row => row.id)).toEqual(head.map(row => row.id))
   }))
 
   it.effect("creates a fresh projected session when the ID is omitted", () =>

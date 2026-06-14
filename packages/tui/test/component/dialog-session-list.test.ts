@@ -11,6 +11,7 @@ describe("dialog session list", () => {
   })
 
   test("requests root sessions for the default browse list", () => {
+    // #306：精确匹配无 start 的浏览请求，防止搜索窗口泄漏到历史浏览。
     expect(createDialogSessionListQuery({ filter: { path: "packages/tui" } })).toEqual({
       roots: true,
       limit: 100,
@@ -21,7 +22,9 @@ describe("dialog session list", () => {
   test("requests root sessions for search results", () => {
     expect(createDialogSessionListQuery({ search: " deploy ", filter: { scope: "project" } })).toEqual({
       roots: true,
-      limit: 30,
+      start: expect.any(Number),
+      // #306：原始需求扩大搜索上限，不能沿用迁移前的 30 项断言。
+      limit: 100,
       search: "deploy",
       scope: "project",
     })

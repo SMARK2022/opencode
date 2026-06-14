@@ -19,7 +19,7 @@ import type {
 type LegacyClient = OpencodeClient
 type LegacyFor = (directory?: string) => LegacyClient
 type CompatibleSessionApi = Omit<
-  SessionApi,
+  ServerApi["session"],
   "prompt" | "command" | "shell" | "compact" | "rename" | "archive" | "remove"
 > & {
   prompt: (input: SessionPromptInput & LegacyPrompt) => Promise<SessionPromptOutput>
@@ -146,6 +146,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
             {
               roots: value.parentID === null ? true : undefined,
               search: value.search,
+              start: value.start,
               limit: value.limit,
             },
             options,
@@ -156,6 +157,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
           directory: value?.directory,
           roots: value?.parentID === null ? true : undefined,
           search: value?.search,
+          start: value?.start,
           limit: value?.limit,
         })
         return { data: (result.data ?? []).map(sessionInfo), cursor: {} }

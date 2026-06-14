@@ -35,7 +35,8 @@ describe("command palette sessions", () => {
       icon: { override: "home-project-avatar" },
       expanded: true,
     }
-    const searches: string[] = []
+    const searches: { search: string; limit: number; start: number; parentID: null }[] = []
+    const startedAt = Date.now()
     const result = await new Promise<Awaited<ReturnType<ReturnType<typeof createServerSessionEntries>>>>(
       (resolve, reject) => {
         createRoot((dispose) => {
@@ -43,10 +44,15 @@ describe("command palette sessions", () => {
             server,
             opened: () => [opened],
             stored: () => [{ ...stored, icon: { url: "stored-project-avatar" } }],
-            load: async (text) => {
-              searches.push(text)
+            load: async (query, signal) => {
+              searches.push(query)
+              expect(signal.aborted).toBe(false)
               return {
-                data: [session, { ...session, id: "archived-session", time: { ...session.time, archived: 3 } }],
+                data: [
+                  // 超过旧50条预算的真实结果仍经条目映射，归档行保持原有过滤。
+                  ...Array.from({ length: Math.min(query.limit, 60) }, (_, index) => ({ ...session, id: index ? `session-${index + 1}` : session.id })),
+                  { ...session, id: "archived-session", time: { ...session.time, archived: 3 } },
+                ],
               }
             },
             untitled: () => "Untitled",
@@ -65,8 +71,11 @@ describe("command palette sessions", () => {
       },
     )
 
-    expect(searches).toEqual(["palette session"])
-    expect(result).toHaveLength(1)
+    expect(searches.map(query => query.search)).toEqual(["palette session"])
+    expect(searches[0]).toMatchObject({ parentID: null, limit: 100 })
+    expect(searches[0]?.start).toBeGreaterThanOrEqual(startedAt - 90 * 24 * 60 * 60 * 1000)
+    expect(searches[0]?.start).toBeLessThanOrEqual(Date.now() - 90 * 24 * 60 * 60 * 1000)
+    expect(result).toHaveLength(60)
     expect(getProjectAvatarSource(result[0]?.project?.id, result[0]?.project?.icon)).toBe("home-project-avatar")
     expect(result[0]).toMatchObject({
       server,

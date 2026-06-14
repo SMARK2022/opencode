@@ -157,11 +157,21 @@ describe("createCompatibleApi", () => {
   })
   */
 
-  test("uses the global V1 session search endpoint", async () => {
-    const { api, requests } = setup("v1")
-    await api.session.list({ parentID: null, search: "session", limit: 50 })
-
-    expect(new URL(requests[0]!.url).pathname).toBe("/experimental/session")
+  test.each(["v1", "v2"] as const)("serializes the real %s session search window", async (protocol) => {
+    const { api, requests } = setup(protocol)
+    const abort = new AbortController()
+    await api.session.list({ parentID: null, search: "session", limit: 100, start: 1000 }, { signal: abort.signal })
+    const url = new URL(requests[0]!.url)
+    expect(url.pathname).toBe(protocol === "v1" ? "/experimental/session" : "/api/session")
+    expect(url.searchParams.get("search")).toBe("session")
+    expect(url.searchParams.get("limit")).toBe("100")
+    expect(url.searchParams.get("start")).toBe("1000")
+    expect(requests[0]!.signal.aborted).toBe(false)
+    // 默认/续页请求不继承前一次窗口；生成客户端的认证与取消通道仍照常使用。
+    await api.session.list({ directory: "/repo", search: "scoped", limit: 100, start: 2000 })
+    expect(new URL(requests[1]!.url).searchParams.get("start")).toBe("2000")
+    await api.session.list()
+    expect(new URL(requests[2]!.url).searchParams.has("start")).toBe(false)
   })
 
   /*

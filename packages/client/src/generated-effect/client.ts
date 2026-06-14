@@ -37,6 +37,7 @@ type Endpoint3_0Input = {
   readonly workspace?: Endpoint3_0Request["query"]["workspace"]
   readonly limit?: Endpoint3_0Request["query"]["limit"]
   readonly order?: Endpoint3_0Request["query"]["order"]
+  readonly start?: Endpoint3_0Request["query"]["start"]
   readonly search?: Endpoint3_0Request["query"]["search"]
   readonly directory?: Endpoint3_0Request["query"]["directory"]
   readonly project?: Endpoint3_0Request["query"]["project"]
@@ -49,6 +50,7 @@ const Endpoint3_0 = (raw: RawClient["server.session"]) => (input?: Endpoint3_0In
       workspace: input?.["workspace"],
       limit: input?.["limit"],
       order: input?.["order"],
+      start: input?.["start"],
       search: input?.["search"],
       directory: input?.["directory"],
       project: input?.["project"],
