@@ -43,6 +43,8 @@
 
 ---
 
+> **資料庫遷移提示**：SMARK 分支包含資料庫 schema 自訂與遷移。若你從上游 `dev`、主分支或原分支切換到本分支，請先手動備份本地 `opencode.db`；遷移後的資料庫可能無法無損遷移回上游或原分支。本專案不負責你本地資料庫上下文資訊的 schema 格式相容性問題。
+
 ### 安裝
 
 ```bash
@@ -96,6 +98,19 @@ scoop bucket add extras; scoop install extras/opencode-desktop
 OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
+
+### 可選 MCP 整合
+
+如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力；安裝、授權與瀏覽器狀態管理以該專案 README 為準。
+
+### 會話管理
+
+| 能力 | 說明 |
+|---|---|
+| 會話搜尋 | 按關鍵詞檢索歷史會話，並用路徑過濾縮小範圍 |
+| 手動壓縮 | 使用者可以主動觸發優化後的 compaction，壓縮選擇非同步處理並帶錯誤提示，壓縮後保留上下文摘要 |
+| 中斷恢復 | 記錄中斷次數和確認時間，父會話中斷會傳播到子任務 |
+| Session Warping | 長會話跨上下文繼續推進而無需重建 |
 
 ### Agents
 

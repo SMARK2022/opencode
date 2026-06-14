@@ -43,6 +43,8 @@
 
 ---
 
+> **Database migration notice**: The SMARK branch includes custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local `opencode.db`; after migration, the database may not migrate or roll back cleanly to upstream or original branches. This project is not responsible for schema-format compatibility issues in your local database context data.
+
 ### Installation
 
 ```bash
@@ -114,6 +116,19 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 | `vscode_notebook_env` | 查看 kernel/runtime，触发 kernel 选择，重启 kernel，或在用户明确要求时保存 notebook |
 
 推荐流程：先用 `vscode_notebook_summary` 获取当前 cell ID，再用 `vscode_notebook_source` 读取目标 cell，修改后用 `vscode_notebook_run` 验证，最后用 `vscode_notebook_output` 查看结果。不要把显示序号 `cN` 当成长期稳定引用；插入、删除或类型切换后应使用工具返回的新 `#VSC-*` ID 或重新 summary。
+
+### Optional MCP Integration
+
+If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode; installation, authorization, and browser-state handling remain governed by that project's README.
+
+### Session Management
+
+| Capability | Description |
+|---|---|
+| Session search | Search history sessions by keyword and narrow the scope with path filters |
+| Manual compaction | Trigger an optimized compaction on demand; compaction selection is asynchronous and reports errors while keeping a context summary |
+| Interrupt recovery | Interrupt counts and confirmation time are recorded; parent-session interrupts propagate to subtasks |
+| Session Warping | Long sessions keep advancing across contexts without a rebuild |
 
 ### Agents
 
