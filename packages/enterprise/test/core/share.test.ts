@@ -3,6 +3,73 @@ import { Share } from "../../src/core/share"
 import { Storage } from "../../src/core/storage"
 import { Identifier } from "@opencode-ai/core/util/identifier"
 
+const storageStateKey = Symbol.for("opencode.enterprise.test.storage")
+
+type StorageState = {
+  objects: Map<string, string>
+  originalFetch: typeof fetch
+  installed: boolean
+  bucket: string
+  region: string
+}
+
+function useTestStorage() {
+  const state = ((globalThis as typeof globalThis & Record<symbol, StorageState | undefined>)[storageStateKey] ??= {
+    objects: new Map(),
+    originalFetch: globalThis.fetch.bind(globalThis),
+    installed: false,
+    bucket: "opencode-enterprise-test",
+    region: "us-east-1",
+  })
+
+  // share 用例通过 Share 的公开 API 间接覆盖 Storage；同样走真实 S3 适配器配置，
+  // 只把测试 bucket 映射到进程内 Map，避免并发 CI 中缺少企业存储密钥导致整组用例失效。
+  process.env.OPENCODE_STORAGE_ADAPTER = "s3"
+  process.env.OPENCODE_STORAGE_BUCKET = state.bucket
+  process.env.OPENCODE_STORAGE_REGION = state.region
+  process.env.OPENCODE_STORAGE_ACCESS_KEY_ID = "test-access-key"
+  process.env.OPENCODE_STORAGE_SECRET_ACCESS_KEY = "test-secret-key"
+
+  if (state.installed) return
+  state.installed = true
+  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const request = new Request(input, init)
+    const url = new URL(request.url)
+    const bucketPath = `/${state.bucket}`
+    if (url.host !== `s3.${state.region}.amazonaws.com` || (url.pathname !== bucketPath && !url.pathname.startsWith(`${bucketPath}/`))) {
+      return state.originalFetch(input, init)
+    }
+
+    const key = decodeURIComponent(url.pathname.slice(bucketPath.length).replace(/^\//, ""))
+    if (url.searchParams.get("list-type") === "2") {
+      const prefix = url.searchParams.get("prefix") ?? ""
+      const startAfter = url.searchParams.get("start-after")
+      const keys = Array.from(state.objects.keys())
+        .filter((item) => item.startsWith(prefix))
+        .filter((item) => !startAfter || item > startAfter)
+        .sort((left, right) => left.localeCompare(right))
+      const limited = url.searchParams.has("max-keys") ? keys.slice(0, Number(url.searchParams.get("max-keys"))) : keys
+      // Share.data 依赖 list 顺序和 start-after 游标；这里模拟 S3 ListObjectsV2 的关键返回字段，不伪造生产模块。
+      return new Response(`<ListBucketResult>${limited.map((item) => `<Contents><Key>${item}</Key></Contents>`).join("")}</ListBucketResult>`, {
+        headers: { "Content-Type": "application/xml" },
+      })
+    }
+
+    if (request.method === "PUT") {
+      state.objects.set(key, await request.text())
+      return new Response(null, { status: 200 })
+    }
+    if (request.method === "DELETE") {
+      state.objects.delete(key)
+      return new Response(null, { status: 204 })
+    }
+    if (!state.objects.has(key)) return new Response(null, { status: 404 })
+    return new Response(state.objects.get(key), { status: 200, headers: { "Content-Type": "application/json" } })
+  }, state.originalFetch)
+}
+
+useTestStorage()
+
 describe.concurrent("core.share", () => {
   test("should create a share", async () => {
     const sessionID = Identifier.descending()

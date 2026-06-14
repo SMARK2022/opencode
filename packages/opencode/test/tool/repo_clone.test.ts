@@ -1,7 +1,6 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import { pathToFileURL } from "node:url"
-import type * as Scope from "effect/Scope"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Agent } from "../../src/agent/agent"
@@ -44,24 +43,41 @@ const init = Effect.fn("RepoCloneToolTest.init")(function* () {
   return yield* info.init()
 })
 
-const git = Effect.fn("RepoCloneToolTest.git")(function* (cwd: string, args: string[]) {
-  return yield* Effect.promise(async () => {
-    const proc = Bun.spawn(["git", ...args], {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ])
-    if (code !== 0) {
-      throw new Error(stderr.trim() || stdout.trim() || `git ${args.join(" ")} failed`)
-    }
-    return stdout.trim()
-  })
+const gitResult = Effect.fn("RepoCloneToolTest.gitResult")(function* (cwd: string, args: string[]) {
+  // 测试仓库初始化也复用生产 Git wrapper，确保 Windows CI 上 autocrlf、fsmonitor、longpaths 等配置一致。
+  const service = yield* Git.Service
+  return yield* service.run(args, { cwd })
 })
+
+const git = Effect.fn("RepoCloneToolTest.git")(function* (cwd: string, args: string[]) {
+  const result = yield* gitResult(cwd, args)
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.toString().trim() || result.text().trim() || `git ${args.join(" ")} failed`)
+  }
+  return result.text().trim()
+})
+
+const commitFile = Effect.fn("RepoCloneToolTest.commitFile")(function* (
+  cwd: string,
+  file: string,
+  content: string,
+  message: string,
+) {
+  yield* Effect.promise(() => Bun.write(path.join(cwd, file), content))
+  yield* git(cwd, ["add", "--", file])
+  const staged = yield* git(cwd, ["diff", "--cached", "--name-only", "--", file])
+  // CI 上曾出现工作区已写入但 commit 没有纳入文件的情况；先验证 staged 内容，失败时直接指向 fixture 根因。
+  if (!staged.split(/\r?\n/).includes(file)) throw new Error(`git did not stage ${file}`)
+  yield* git(cwd, ["commit", "-m", message])
+  const committed = yield* git(cwd, ["show", `HEAD:${file}`])
+  // refresh 用例依赖远端提交真实变化；确认 HEAD 内容可避免把空提交或旧内容推到 bare repo。
+  if (committed !== content.trim()) throw new Error(`git did not commit expected ${file}`)
+})
+
+function githubFileBase(dir: string) {
+  // OPENCODE_REPO_CLONE_GITHUB_BASE_URL 会作为 URL base 参与 new URL()；pathToFileURL 负责 Windows 盘符和空格路径转义。
+  return pathToFileURL(dir.endsWith(path.sep) ? dir : `${dir}${path.sep}`).href
+}
 
 const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
@@ -87,17 +103,28 @@ const waitForContent = (
   Effect.gen(function* () {
     const actual = yield* fs.readFileStringSafe(file)
     if (actual === content) return actual
-    if (attempts <= 0) return yield* Effect.fail(new Error(`timed out waiting for ${file}`))
+    if (attempts <= 0) {
+      return yield* Effect.fail(
+        new Error(`timed out waiting for ${file}\nexpected: ${JSON.stringify(content)}\nactual: ${JSON.stringify(actual)}`),
+      )
+    }
     yield* Effect.sleep("100 millis")
     return yield* waitForContent(fs, file, content, attempts - 1)
   })
 
-const isolateRepoCache = (fs: AppFileSystem.Interface, cache: string): Effect.Effect<void, never, Scope.Scope> =>
+const isolateRepoCache = (fs: AppFileSystem.Interface, cache: string) =>
   Effect.gen(function* () {
     // repo_clone 测试使用固定 GitHub shorthand；先清掉全局 cache，
     // 防止 full run 中其他 reference/read/repo 测试留下同名工作区污染内容断言。
+    yield* gitResult(cache, ["fsmonitor--daemon", "stop"]).pipe(Effect.ignore)
     yield* fs.remove(cache, { recursive: true }).pipe(Effect.ignore)
-    yield* Effect.addFinalizer(() => fs.remove(cache, { recursive: true }).pipe(Effect.ignore))
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        // Git for Windows 可能留下 fsmonitor 后台进程占用 .git 文件；清理前先 best-effort 停止，不影响不支持该命令的平台。
+        yield* gitResult(cache, ["fsmonitor--daemon", "stop"]).pipe(Effect.ignore)
+        yield* fs.remove(cache, { recursive: true }).pipe(Effect.ignore)
+      }),
+    )
   })
 
 describe("tool.repo_clone", () => {
@@ -116,16 +143,15 @@ describe("tool.repo_clone", () => {
         const cache = path.join(Global.Path.repos, "github.com", owner, repo)
         yield* isolateRepoCache(fs, cache)
 
-        yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
-        yield* git(source, ["add", "."])
-        yield* git(source, ["commit", "-m", "add readme"])
+        yield* commitFile(source, "README.md", "v1\n", "add readme")
         yield* fs.makeDirectory(remoteDir, { recursive: true }).pipe(Effect.orDie)
         yield* git(remoteRoot, ["clone", "--bare", source, remoteRepo])
+        expect(yield* git(remoteRepo, ["show", "HEAD:README.md"])).toBe("v1")
 
         const tool = yield* init()
-        const cloned = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: `${owner}/${repo}` }, ctx))
+        const cloned = yield* githubBase(githubFileBase(remoteRoot), tool.execute({ repository: `${owner}/${repo}` }, ctx))
         const cached = yield* githubBase(
-          `file://${remoteRoot}/`,
+          githubFileBase(remoteRoot),
           tool.execute({ repository: `https://github.com/${owner}/${repo}.git` }, ctx),
         )
 
@@ -152,9 +178,7 @@ describe("tool.repo_clone", () => {
         const cache = path.join(Global.Path.repos, "github.com", owner, repo)
         yield* isolateRepoCache(fs, cache)
 
-        yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
-        yield* git(source, ["add", "."])
-        yield* git(source, ["commit", "-m", "add readme"])
+        yield* commitFile(source, "README.md", "v1\n", "add readme")
         yield* fs.makeDirectory(remoteDir, { recursive: true }).pipe(Effect.orDie)
         yield* git(remoteRoot, ["clone", "--bare", source, remoteRepo])
 
@@ -163,21 +187,20 @@ describe("tool.repo_clone", () => {
         yield* git(source, ["push", "-u", "origin", `${branch}:${branch}`])
 
         const tool = yield* init()
-        const first = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: `${owner}/${repo}` }, ctx))
+        const first = yield* githubBase(githubFileBase(remoteRoot), tool.execute({ repository: `${owner}/${repo}` }, ctx))
 
-        yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v2\n"))
-        yield* git(source, ["add", "."])
-        yield* git(source, ["commit", "-m", "update readme"])
+        yield* commitFile(source, "README.md", "v2 updated\n", "update readme")
         yield* git(source, ["push", "origin", `${branch}:${branch}`])
+        expect(yield* git(remoteRepo, ["show", `refs/heads/${branch}:README.md`])).toBe("v2 updated")
 
         const refreshed = yield* githubBase(
-          `file://${remoteRoot}/`,
+          githubFileBase(remoteRoot),
           tool.execute({ repository: `${owner}/${repo}`, refresh: true }, ctx),
         )
 
         expect(first.metadata.status).toBe("cloned")
         expect(refreshed.metadata.status).toBe("refreshed")
-        expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2\n")).toBe("v2\n")
+        expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2 updated\n")).toBe("v2 updated\n")
       }),
     ),
   )
@@ -197,19 +220,16 @@ describe("tool.repo_clone", () => {
         const cache = path.join(Global.Path.repos, "github.com", owner, repo)
         yield* isolateRepoCache(fs, cache)
 
-        yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "main\n"))
-        yield* git(source, ["add", "."])
-        yield* git(source, ["commit", "-m", "add readme"])
+        yield* commitFile(source, "README.md", "main\n", "add readme")
         yield* git(source, ["checkout", "-b", "docs"])
-        yield* Effect.promise(() => Bun.write(path.join(source, "DOCS.md"), "docs\n"))
-        yield* git(source, ["add", "."])
-        yield* git(source, ["commit", "-m", "add docs"])
+        yield* commitFile(source, "DOCS.md", "docs\n", "add docs")
         yield* fs.makeDirectory(remoteDir, { recursive: true }).pipe(Effect.orDie)
         yield* git(remoteRoot, ["clone", "--bare", source, remoteRepo])
+        expect(yield* git(remoteRepo, ["show", "docs:DOCS.md"])).toBe("docs")
 
         const tool = yield* init()
         const result = yield* githubBase(
-          `file://${remoteRoot}/`,
+          githubFileBase(remoteRoot),
           tool.execute({ repository: `${owner}/${repo}`, branch: "docs" }, ctx),
         )
 
