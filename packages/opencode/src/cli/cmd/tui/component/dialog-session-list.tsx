@@ -25,7 +25,7 @@ type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
 const SESSION_LIST_PREVIEW_LINES = 2
 const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
 const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
-const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
+const SESSION_LIST_PREVIEW_SESSION_LIMIT = 400
 const SESSION_LIST_PREVIEW_CONCURRENCY = 6
 
 export function DialogSessionList() {
@@ -126,7 +126,12 @@ export function DialogSessionList() {
     () => ({ query: search(), filter: sync.session.query() }),
     async (input) => {
       if (!input.query) return undefined
-      const result = await sdk.client.session.list({ search: input.query, limit: 30, ...input.filter })
+      const result = await sdk.client.session.list({
+        search: input.query,
+        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
+        limit: 100,
+        ...input.filter,
+      })
       return result.data ?? []
     },
   )
