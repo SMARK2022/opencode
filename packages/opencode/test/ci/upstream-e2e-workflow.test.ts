@@ -10,6 +10,7 @@ describe("upstream app e2e workflow", () => {
     const job = section(workflow, "  upstream-e2e-warning:")
     const installDeps = step(job, "Install Playwright system dependencies")
     const installBrowsers = step(job, "Install Playwright browsers")
+    const runE2E = step(job, "Run upstream app e2e tests")
     const catalog = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")).workspaces.catalog
     const playwrightVersion = catalog["@playwright/test"]
     const lockfile = await fs.readFile(path.join(root, "bun.lock"), "utf8")
@@ -29,23 +30,29 @@ describe("upstream app e2e workflow", () => {
     expect(field(installBrowsers, "timeout-minutes")).toBe("15")
 
     expect(playwrightCommand(installDeps)).toEqual([
-      "bun",
-      "../../node_modules/.bin/playwright",
+      "node",
+      "../../node_modules/playwright/cli.js",
       "install-deps",
       "chromium",
     ])
     expect(playwrightCommand(installBrowsers)).toEqual([
-      "bun",
-      "../../node_modules/.bin/playwright",
+      "node",
+      "../../node_modules/playwright/cli.js",
       "install",
       "chromium",
     ])
+    expect(playwrightCommand(runE2E)).toEqual(["node", "../../node_modules/playwright/cli.js", "test"])
 
-    // 安装命令必须停留在 packages/app 的依赖边界内，并显式使用 hoisted 后的根 bin，
-    // 避免 bunx 重新解析版本，也避免管道、重定向、子命令等 shell 组合改变 CI 安全边界。
+    // 安装和测试命令必须停留在 packages/app 的依赖边界内，并显式使用 hoisted 后的根 CLI。
+    // Windows 上 Bun 执行 .bin shim 会尝试重映射 bin metadata；直接用 Node 执行锁定 CLI 可避开该边界。
     expect(field(installDeps, "working-directory")).toBe("packages/app")
     expect(field(installBrowsers, "working-directory")).toBe("packages/app")
+    expect(field(runE2E, "working-directory")).toBe("packages/app")
+    // E2E 入口改为直接执行 CLI 后仍必须保留 JUnit 输出位置，
+    // 后续汇总步骤依赖这个约定判断 warning job 是否产出报告。
+    expect(envField(runE2E, "PLAYWRIGHT_JUNIT_OUTPUT")).toBe("e2e/junit-${{ matrix.os_label }}.xml")
     expect(job).not.toContain("bunx playwright")
+    expect(job).not.toContain(".bin/playwright")
   })
 })
 
@@ -68,6 +75,11 @@ function step(source: string, name: string) {
 
 function field(source: string, key: string) {
   const match = source.match(new RegExp(`^        ${key}: (.+)$`, "m"))
+  return match?.[1]
+}
+
+function envField(source: string, key: string) {
+  const match = source.match(new RegExp(`^          ${key}: (.+)$`, "m"))
   return match?.[1]
 }
 

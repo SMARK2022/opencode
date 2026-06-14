@@ -487,21 +487,25 @@ jobs:
       - name: Install Playwright system dependencies
         if: runner.os == 'Linux'
         working-directory: packages/app
-        # setup-bun 使用 hoisted 安装，显式走根 node_modules 的锁定版本，避免 bunx 重新解析到未修复的安装器。
+        # setup-bun 使用 hoisted 安装，显式走根 node_modules 的锁定 CLI，避免 bunx 重新解析到未修复的安装器。
+        # Windows 上 Bun 执行 .bin shim 会重映射 bin metadata；Node 直接执行 CLI 不触发该边界。
         timeout-minutes: 10
-        run: bun ../../node_modules/.bin/playwright install-deps chromium
+        run: node ../../node_modules/playwright/cli.js install-deps chromium
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: packages/app
         # 浏览器下载和解压发生在 E2E 测试前，独立超时可以防止 install 卡住占满整个 warning job。
+        # 继续走锁定的 Node CLI，确保安装和测试阶段使用同一个 Playwright 入口。
         timeout-minutes: 15
-        run: bun ../../node_modules/.bin/playwright install chromium
+        run: node ../../node_modules/playwright/cli.js install chromium
 
       - name: Run upstream app e2e tests
         id: e2e
         continue-on-error: true
-        run: bun run --cwd packages/app test:e2e:local
+        working-directory: packages/app
+        # 不通过 package script 解析 playwright bin，避免 Windows Bun 再次触发 .bin metadata remap。
+        run: node ../../node_modules/playwright/cli.js test
         env:
           CI: true
           PLAYWRIGHT_JUNIT_OUTPUT: e2e/junit-${{ matrix.os_label }}.xml

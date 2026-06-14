@@ -1,6 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import { pathToFileURL } from "node:url"
+import type * as Scope from "effect/Scope"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Agent } from "../../src/agent/agent"
@@ -77,6 +78,28 @@ const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
       }),
   )
 
+const waitForContent = (
+  fs: AppFileSystem.Interface,
+  file: string,
+  content: string,
+  attempts = 50,
+): Effect.Effect<string, AppFileSystem.Error | Error> =>
+  Effect.gen(function* () {
+    const actual = yield* fs.readFileStringSafe(file)
+    if (actual === content) return actual
+    if (attempts <= 0) return yield* Effect.fail(new Error(`timed out waiting for ${file}`))
+    yield* Effect.sleep("100 millis")
+    return yield* waitForContent(fs, file, content, attempts - 1)
+  })
+
+const isolateRepoCache = (fs: AppFileSystem.Interface, cache: string): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    // repo_clone 测试使用固定 GitHub shorthand；先清掉全局 cache，
+    // 防止 full run 中其他 reference/read/repo 测试留下同名工作区污染内容断言。
+    yield* fs.remove(cache, { recursive: true }).pipe(Effect.ignore)
+    yield* Effect.addFinalizer(() => fs.remove(cache, { recursive: true }).pipe(Effect.ignore))
+  })
+
 describe("tool.repo_clone", () => {
   it.live("clones a repo into the managed cache and reuses it on subsequent calls", () =>
     provideTmpdirInstance((_dir) =>
@@ -90,6 +113,8 @@ describe("tool.repo_clone", () => {
         // Global.Path.repos 下同一个 owner/repo 缓存而互相读到对方的工作区。
         const remoteDir = path.join(remoteRoot, owner)
         const remoteRepo = path.join(remoteDir, "repo.git")
+        const cache = path.join(Global.Path.repos, "github.com", owner, repo)
+        yield* isolateRepoCache(fs, cache)
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
         yield* git(source, ["add", "."])
@@ -105,9 +130,9 @@ describe("tool.repo_clone", () => {
         )
 
         expect(cloned.metadata.status).toBe("cloned")
-        expect(cloned.metadata.localPath).toBe(path.join(Global.Path.repos, "github.com", owner, repo))
+        expect(cloned.metadata.localPath).toBe(cache)
         expect(cached.metadata.status).toBe("cached")
-        expect(yield* fs.readFileString(path.join(cloned.metadata.localPath, "README.md"))).toBe("v1\n")
+        expect(yield* waitForContent(fs, path.join(cloned.metadata.localPath, "README.md"), "v1\n")).toBe("v1\n")
       }),
     ),
   )
@@ -124,6 +149,8 @@ describe("tool.repo_clone", () => {
         // 场景在全量 CI 中提前写入同名缓存，导致本测试刷新错误来源。
         const remoteDir = path.join(remoteRoot, owner)
         const remoteRepo = path.join(remoteDir, "repo.git")
+        const cache = path.join(Global.Path.repos, "github.com", owner, repo)
+        yield* isolateRepoCache(fs, cache)
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
         yield* git(source, ["add", "."])
@@ -150,7 +177,7 @@ describe("tool.repo_clone", () => {
 
         expect(first.metadata.status).toBe("cloned")
         expect(refreshed.metadata.status).toBe("refreshed")
-        expect(yield* fs.readFileString(path.join(first.metadata.localPath, "README.md"))).toBe("v2\n")
+        expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2\n")).toBe("v2\n")
       }),
     ),
   )
@@ -167,6 +194,8 @@ describe("tool.repo_clone", () => {
         // 结果依赖其他测试先后顺序，而不是依赖本用例创建的远端仓库。
         const remoteDir = path.join(remoteRoot, owner)
         const remoteRepo = path.join(remoteDir, "repo.git")
+        const cache = path.join(Global.Path.repos, "github.com", owner, repo)
+        yield* isolateRepoCache(fs, cache)
 
         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "main\n"))
         yield* git(source, ["add", "."])
@@ -186,7 +215,7 @@ describe("tool.repo_clone", () => {
 
         expect(result.metadata.status).toBe("cloned")
         expect(result.metadata.branch).toBe("docs")
-        expect(yield* fs.readFileString(path.join(result.metadata.localPath, "DOCS.md"))).toBe("docs\n")
+        expect(yield* waitForContent(fs, path.join(result.metadata.localPath, "DOCS.md"), "docs\n")).toBe("docs\n")
       }),
     ),
   )

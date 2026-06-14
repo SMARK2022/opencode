@@ -20,6 +20,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Config } from "@/config/config"
 import { Auth } from "@/auth"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { markConfigDependenciesInstalled } from "../fixture/plugin-deps"
 
 const env = makeRuntime(Env.Service, Env.defaultLayer)
 const originalEnv = new Map<string, string | undefined>()
@@ -94,14 +95,6 @@ async function getSmallModel(providerID: ProviderID, ctx: InstanceContext) {
 
 async function defaultModel(ctx: InstanceContext) {
   return run(ctx, (provider) => provider.defaultModel())
-}
-
-async function markPluginDependenciesReady(dir: string) {
-  await mkdir(path.join(dir, "node_modules"), { recursive: true })
-  await Bun.write(
-    path.join(dir, "package-lock.json"),
-    JSON.stringify({ packages: { "": { dependencies: { "@opencode-ai/plugin": "0.0.0" } } } }),
-  )
 }
 
 function paid(providers: Awaited<ReturnType<typeof list>>) {
@@ -2635,8 +2628,8 @@ test("plugin config providers persist after instance dispose", async () => {
       const configDir = path.join(dir, ".opencode")
       const root = path.join(configDir, "plugin")
       await mkdir(root, { recursive: true })
-      await markPluginDependenciesReady(configDir)
-      await markPluginDependenciesReady(Global.Path.config)
+      await markConfigDependenciesInstalled(configDir)
+      await markConfigDependenciesInstalled(Global.Path.config)
       await Bun.write(
         path.join(root, "demo-provider.ts"),
         [
@@ -2694,8 +2687,12 @@ test("plugin config providers persist after instance dispose", async () => {
 test("plugin config enabled and disabled providers are honored", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
-      const root = path.join(dir, ".opencode", "plugin")
+      const configDir = path.join(dir, ".opencode")
+      const root = path.join(configDir, "plugin")
       await mkdir(root, { recursive: true })
+      // 这个用例只验证 plugin config hook 对 provider allow/deny 的影响，
+      // 不应把配置目录依赖安装耗时纳入断言路径。
+      await markConfigDependenciesInstalled(configDir)
       await Bun.write(
         path.join(root, "provider-filter.ts"),
         [

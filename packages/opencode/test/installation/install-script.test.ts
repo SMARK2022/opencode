@@ -119,9 +119,34 @@ async function createReleaseAsset(dir: string, marker: string) {
   const asset = path.join(dir, `opencode-linux-x64-${marker}.tar.gz`)
 
   await writeExecutable(path.join(payload, "opencode"), `#!/usr/bin/env bash\necho "${VERSION}"\n# ${marker}\n`)
-  await runCommand(["tar", "-czf", asset, "-C", payload, "opencode"], dir)
+  // release asset 是 fake curl 的唯一输入；必须在这里验证 tar 成功，
+  // 否则 Windows CI 会延迟到 cp cannot stat，掩盖真正的归档失败原因。
+  const result = await runCommand(archiveCommand(asset, payload), dir)
+  if (result.code !== 0) throw new Error(result.output || `failed to create release asset: ${asset}`)
+  if (!existsSync(asset)) throw new Error(`release asset was not created: ${asset}`)
 
   return asset
+}
+
+function archiveCommand(asset: string, payload: string) {
+  if (process.platform !== "win32") return ["tar", "-czf", asset, "-C", payload, "opencode"]
+  // GitHub Windows runner 的安装脚本实际由 Git Bash 执行；归档也走同一 POSIX PATH，
+  // 让 tar 产物和后续 fake curl/cp 使用一致的 /c/... 路径语义。
+  return [
+    BASH,
+    "-c",
+    [
+      "exec",
+      "env",
+      quoteForSh(`PATH=${bashPath()}`),
+      "tar",
+      "-czf",
+      quoteForSh(bashPathForFile(asset)),
+      "-C",
+      quoteForSh(bashPathForFile(payload)),
+      "opencode",
+    ].join(" "),
+  ]
 }
 
 async function writeFakeReleaseCommands(dir: string, asset: string) {
