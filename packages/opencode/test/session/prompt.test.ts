@@ -2131,16 +2131,15 @@ it.instance(
       }))
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
+      const test = yield* TestInstance
       const chat = yield* sessions.create({
         title: "Shell review metadata",
-        permission: [
-          { permission: "bash", pattern: "*", action: "auto" },
-          // #214：此测试针对 bash 审查包络——敏感路径会创建单独的 external_directory prompt 并阻止 shell
-          { permission: "external_directory", pattern: "*", action: "allow" },
-        ],
+        permission: [{ permission: "bash", pattern: "*", action: "auto" }],
       })
-      const key = path.join(chat.directory, ".ssh", "id_rsa")
-      yield* Effect.promise(() => Bun.write(key, "fixture-key"))
+      // 本用例只需要触发 SSH 私钥名的 cautious 预审并产生 shell 输出；
+      // 使用项目内文件避免 Windows runner 上家目录路径和缺失文件错误拖慢到 15s 超时边界。
+      const key = path.join(test.directory, "id_rsa")
+      yield* Effect.promise(() => Bun.write(key, "review-output\n"))
       const command = process.platform === "win32" ? `Get-Content -LiteralPath "${key}"` : `cat "${key}"`
       yield* prompt.prompt({
         sessionID: chat.id,
@@ -2199,7 +2198,9 @@ it.instance(
       ).toBe(true)
     }),
   { git: true },
-  15_000,
+  // 这是 shell 执行、auto reviewer 子会话和审计回链的完整集成链路；
+  // Windows CI 慢机曾在 15s 边界取消，30s 仍保持有限等待且不会放宽任何行为断言。
+  30_000,
 )
 
 // #216：cancel 在 auto-review 进行中触发——验证中止状态正确传播到工具和 reviewer 子会话
