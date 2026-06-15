@@ -1,6 +1,7 @@
 // #165：测试统一 testTransport，禁止顶层 fetch/events 生产缝
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
+import { engine } from "@opentui/core"
 import { onMount } from "solid-js"
 import { ArgsProvider } from "../../../../src/context/args"
 import { KVProvider, useKV } from "../../../../src/context/kv"
@@ -72,6 +73,19 @@ export async function mount(override?: FetchHandler, state?: string) {
       useThread: false,
     },
   )
+
+  // Solid cleanup 应退订测试事件源，但 Windows full-run 在所有命名 sync 用例
+  // 通过后仍出现文件级清理超时；显式清理测试传输并分离 OpenTUI 全局 engine，
+  // 确保销毁后的 renderer 或事件回调不会活过最后一次 sync fixture teardown。
+  const destroy = app.renderer.destroy.bind(app.renderer)
+  app.renderer.destroy = () => {
+    events.dispose()
+    try {
+      destroy()
+    } finally {
+      engine.detach()
+    }
+  }
 
   await ready
   await wait(() => sync.status === "complete")

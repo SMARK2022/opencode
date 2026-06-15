@@ -28,6 +28,9 @@ export function createEventSource() {
         }
       },
     } satisfies EventSource,
+    dispose() {
+      fn = undefined
+    },
     emit(event: GlobalEvent) {
       if (!fn) throw new Error("event source not ready")
       fn(event)
