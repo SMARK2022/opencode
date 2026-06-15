@@ -46,7 +46,8 @@ export async function mount(override?: FetchHandler, state?: string) {
     return <box />
   }
 
-  const app = await testRender(() => (
+  const app = await testRender(
+    () => (
     <TestTuiContexts paths={state ? { state } : undefined}>
       <ArgsProvider>
         <KVProvider>
@@ -64,9 +65,16 @@ export async function mount(override?: FetchHandler, state?: string) {
         </KVProvider>
       </ArgsProvider>
     </TestTuiContexts>
-  ))
+    ),
+    {
+      // core/testing 在 Linux 默认关闭 renderer 线程，但 Windows 默认开启。
+      // sync 套件会反复 mount/destroy；禁用线程让 Windows 清理路径和 Linux 一致，避免文件级 hook 等待 native renderer 线程退出超时。
+      useThread: false,
+    },
+  )
 
   await ready
   await wait(() => sync.status === "complete")
   return { app, emit: events.emit, kv, project, sync, session: calls.session }
 }
+
