@@ -502,7 +502,9 @@ describe("daemon lifecycle", () => {
       const lockPath = path.join(tmp.path, "tui-server.json")
       const { proc } = await spawnDaemon(lockPath, {
         OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
-        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+        // Windows CI 冷启动窗口更大，通用用例用 2000ms 启动 idle 避免启动期竞态；
+        // 专用启动保护用例仍保留 250ms 以验证保护语义本身。
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "2000",
         OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
       })
 

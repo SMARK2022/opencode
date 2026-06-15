@@ -3,13 +3,15 @@ import { spawn } from "child_process"
 import fs from "fs/promises"
 import path from "path"
 import os from "os"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
+import { systemError } from "effect/PlatformError"
 import { testEffect } from "../lib/effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { Global } from "@opencode-ai/core/global"
 import { Hash } from "@opencode-ai/core/util/hash"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 
 function lock(dir: string, key: string) {
   return path.join(dir, Hash.fast(key) + ".lock")
@@ -130,9 +132,67 @@ describe("util.effect-flock", () => {
       yield* Effect.scoped(flock.acquire("eflock:acquire", dir))
 
       expect(yield* Effect.promise(() => exists(lockDir))).toBe(false)
-      yield* Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))
+      const released: string[] = []
+      let attempts = 0
+      const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
+        const actual = yield* FSUtil.Service
+        return FSUtil.Service.of({ ...actual, rename: (from, to) => Effect.gen(function* () {
+          if (from === lockDir && process.platform === "win32" && ++attempts === 1) {
+            // 复刻线上Unknown/EPERM，不让第一次共享冲突跳过真实交接和后继owner断言。
+            return yield* systemError({ _tag: "Unknown", module: "FileSystem", method: "rename", cause: Object.assign(new Error("sharing violation"), { code: "EPERM" }) })
+          }
+          yield* actual.rename(from, to)
+          if (from !== lockDir) return
+          released.push(to)
+          // 在真实rename和旧目录清理之间重建活动锁，确定性模拟下一owner抢到同一路径。
+          yield* actual.makeDirectory(from)
+          yield* actual.writeFileString(path.join(from, "meta.json"), JSON.stringify({ token: "next-owner" }))
+        }) })
+      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+      yield* Effect.gen(function* () {
+        // 默认服务已在本用例构建；fresh避免memo复用它而绕过真实文件交接夹具。
+        yield* Effect.scoped(Effect.gen(function* () {
+          const guarded = yield* EffectFlock.Service
+          yield* guarded.acquire("eflock:acquire", dir)
+        }).pipe(Effect.provide(Layer.fresh(AppNodeBuilder.build(EffectFlock.node, [[Global.node, testGlobal], [FSUtil.node, filesystem]])))))
+        expect(released).toHaveLength(1)
+        expect(attempts).toBe(process.platform === "win32" ? 2 : 0)
+        expect(released[0]).toStartWith(`${lockDir}.release-`)
+        // scope释放只能清掉改名后的旧目录，下一owner的元数据和活动目录须完整保留。
+        expect((yield* Effect.promise(() => readJson<{ token: string }>(path.join(lockDir, "meta.json")))).token).toBe("next-owner")
+        expect(yield* Effect.promise(() => fs.readdir(dir))).toEqual([path.basename(lockDir)])
+      }).pipe(Effect.ensuring(Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))))
     }),
   )
+
+  for (const errorCode of ["EIO", "EPERM"]) {
+    it.live(`preserves persistent ${errorCode} release failures`, Effect.gen(function* () {
+      const tmp = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "eflock-error-")))
+      const dir = path.join(tmp, "locks")
+      let attempts = 0
+      const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
+        const actual = yield* FSUtil.Service
+        return FSUtil.Service.of({ ...actual, rename: () => Effect.suspend(() => {
+          attempts++
+          return Effect.fail(systemError({ _tag: "Unknown", module: "FileSystem", method: "rename", cause: Object.assign(new Error(`${errorCode} release failure`), { code: errorCode }) }))
+        }) })
+      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+      // 只替换外部FS失败边界，获取、token校验和释放仍执行真实锁实现。
+      const result = yield* Effect.scoped(Effect.gen(function* () {
+        const flock = yield* EffectFlock.Service
+        yield* flock.acquire("eflock:release-error", dir)
+      }).pipe(Effect.provide(Layer.fresh(AppNodeBuilder.build(EffectFlock.node, [[Global.node, testGlobal], [FSUtil.node, filesystem]]))))).pipe(Effect.exit)
+      yield* Effect.gen(function* () {
+        expect(Exit.isFailure(result)).toBe(true)
+        const failure = Exit.isFailure(result) ? Cause.pretty(result.cause) : ""
+        expect(failure).toContain(errorCode)
+        expect(failure).not.toContain("directory missing")
+        // 无关I/O错误不重试；持久共享拒绝也必须有界失败并保留活动owner。
+        expect(attempts).toBe(process.platform === "win32" && errorCode === "EPERM" ? 21 : 1)
+        expect(yield* Effect.promise(() => exists(lock(dir, "eflock:release-error")))).toBe(true)
+      }).pipe(Effect.ensuring(Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))))
+    }))
+  }
 
   it.live(
     "withLock data-first",

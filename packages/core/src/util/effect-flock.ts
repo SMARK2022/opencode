@@ -92,7 +92,13 @@ export namespace EffectFlock {
 
   const mtimeMs = (info: FileSystem.File.Info) => Option.getOrElse(info.mtime, () => new Date(0)).getTime()
 
-  const isPathGone = (e: PlatformError) => e.reason._tag === "NotFound" || e.reason._tag === "Unknown"
+  const nodeCode = (error: PlatformError) => {
+    const cause = error.reason.cause
+    return typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string" ? cause.code : undefined
+  }
+
+  const isPathGone = (error: PlatformError) =>
+    error.reason._tag === "NotFound" || ["ENOENT", "ENOTDIR"].some(code => code === nodeCode(error))
 
   const layer: Layer.Layer<Service, never, Global.Service | FSUtil.Service> = Layer.effect(
     Service,
@@ -245,7 +251,15 @@ export namespace EffectFlock {
 
           if (parsed.token !== handle.token) return yield* Effect.die(new ReleaseError({ detail: "token mismatch" }))
 
-          yield* forceRemove(handle.lockDir)
+          const releasePath = `${handle.lockDir}.release-${handle.token}`
+          // 安装与MCP凭据同样使用此锁；先移走旧owner，再清理，不能删除后继owner重新建立的活动路径。
+          yield* fs.rename(handle.lockDir, releasePath).pipe(
+            // Windows共享句柄可短暂拒绝rename；有界等待仍失败时保留原错误，不能当成路径消失。
+            Effect.retry({ while: error => process.platform === "win32" && ["EPERM", "EACCES", "EBUSY"].some(code => code === nodeCode(error)), times: 20, schedule: Schedule.spaced(50) }),
+            Effect.catchIf(isPathGone, (cause) => Effect.die(new ReleaseError({ detail: "directory missing", cause }))),
+            Effect.orDie,
+          )
+          yield* forceRemove(releasePath)
         })
 
       // -- build service --

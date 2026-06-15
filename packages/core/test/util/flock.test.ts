@@ -114,6 +114,39 @@ async function readJson<T>(p: string): Promise<T> {
 }
 
 describe("util.flock", () => {
+  test("retries a Windows sharing violation during owned release", async () => {
+    await using tmp = await tmpdir()
+    const dir = path.join(tmp.path, "locks")
+    const key = "flock:sharing"
+    const lease = await Flock.acquire(key, { dir })
+    if (process.platform !== "win32") {
+      await lease.release()
+      expect(await exists(lock(dir, key))).toBe(false)
+      return
+    }
+    const ready = path.join(tmp.path, "held")
+    const proceed = path.join(tmp.path, "release")
+    const meta = path.join(lock(dir, key), "meta.json")
+    // 不共享删除的真实句柄确定性阻塞rename；显式标记控制释放，不猜测子进程启动速度。
+    const script = `$handle = [IO.File]::Open('${meta.replaceAll("'", "''")}', 'Open', 'Read', 'Read'); try { [IO.File]::WriteAllText('${ready.replaceAll("'", "''")}', 'held'); while (-not [IO.File]::Exists('${proceed.replaceAll("'", "''")}')) { Start-Sleep -Milliseconds 10 } } finally { $handle.Dispose() }`
+    const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
+    let released = false
+    try {
+      await wait(ready, 5_000)
+      const releasing = lease.release()
+      // 句柄仍被明确持有时，原实现立即抛EPERM；新实现应保持等待而非删掉活动目录。
+      expect(await Promise.race([releasing.then(() => "released"), sleep(100).then(() => "waiting")])).toBe("waiting")
+      await fs.writeFile(proceed, "")
+      await releasing
+      released = true
+      expect(await exists(lock(dir, key))).toBe(false)
+      expect(await fs.readdir(dir)).toEqual([])
+    } finally {
+      await stopWorker(proc)
+      if (!released) await lease.release()
+    }
+  }, 10_000)
+
   test("enforces mutual exclusion under process contention", async () => {
     await using tmp = await tmpdir()
     const dir = path.join(tmp.path, "locks")
