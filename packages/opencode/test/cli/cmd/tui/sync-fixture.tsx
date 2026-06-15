@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
+import { engine } from "@opentui/core"
 import { onMount } from "solid-js"
 import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
 import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
@@ -48,6 +49,9 @@ export function createEventSource() {
     emit(event: GlobalEvent) {
       if (!fn) throw new Error("event source not ready")
       fn(event)
+    },
+    dispose() {
+      fn = undefined
     },
   }
 }
@@ -151,6 +155,19 @@ export async function mount(override?: FetchHandler) {
       useThread: false,
     },
   )
+  const destroy = app.renderer.destroy.bind(app.renderer)
+  app.renderer.destroy = () => {
+    // Solid cleanup should unsubscribe the test event source, but Windows full-run
+    // failures showed a file-level cleanup timeout after every named sync test passed.
+    // Clear the test transport and detach OpenTUI's global engine explicitly so no
+    // destroyed renderer or event callback survives the last sync fixture teardown.
+    events.dispose()
+    try {
+      destroy()
+    } finally {
+      engine.detach()
+    }
+  }
 
   await ready
   await wait(() => sync.status === "complete")
