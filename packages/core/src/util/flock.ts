@@ -1,7 +1,7 @@
 import path from "path"
 import os from "os"
 import { randomBytes, randomUUID } from "crypto"
-import { mkdir, readFile, rm, stat, utimes, writeFile } from "fs/promises"
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "fs/promises"
 import { Hash } from "./hash"
 import { Effect } from "effect"
 
@@ -261,7 +261,17 @@ export namespace Flock {
         throw new Error("Refusing to release: lock token mismatch (not the owner).")
       }
 
-      await rm(lockDir, { recursive: true, force: true })
+      const releasePath = `${lockDir}.release-${token}`
+      // 先原子改名再异步删除，避免 Windows 并发下 rm(lockDir) 删除到
+      // 另一个等待者刚刚 mkdir 成功的新锁目录，从而破坏互斥保证。
+      await rename(lockDir, releasePath).catch((err) => {
+        const errCode = code(err)
+        if (errCode === "ENOENT" || errCode === "ENOTDIR") {
+          throw new Error("Refusing to release: lock is compromised (directory missing).")
+        }
+        throw err
+      })
+      await rm(releasePath, { recursive: true, force: true })
     }
 
     return {

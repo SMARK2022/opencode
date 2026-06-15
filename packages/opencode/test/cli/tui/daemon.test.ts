@@ -509,7 +509,9 @@ describe("daemon lifecycle", () => {
       const lockPath = path.join(tmp.path, "tui-server.json")
       const { proc } = await spawnDaemon(lockPath, {
         OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
-        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+        // Windows CI 冷启动时 worker 写 lock 和 HTTP ready 可能超过 250ms；
+        // 这里仍验证“无首个 SSE 会在启动 idle 后退出”，但给 daemon 留出可观测的启动窗口。
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "2000",
       })
 
       try {
