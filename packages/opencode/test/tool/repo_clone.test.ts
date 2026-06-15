@@ -1,4 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
+import * as fs from "node:fs/promises"
 import path from "path"
 import { pathToFileURL } from "node:url"
 import { Cause, Effect, Exit, Layer } from "effect"
@@ -63,7 +64,11 @@ const commitFile = Effect.fn("RepoCloneToolTest.commitFile")(function* (
   content: string,
   message: string,
 ) {
-  yield* Effect.promise(() => Bun.write(path.join(cwd, file), content))
+  yield* Effect.promise(() => fs.writeFile(path.join(cwd, file), content, "utf8"))
+  const written = yield* Effect.promise(() => fs.readFile(path.join(cwd, file), "utf8"))
+  // Bun 1.3.13 的 Windows CI 曾把刚写入的 fixture 文件提交为空内容；
+  // 这里先用 Node fs 读回确认，再让 Git 参与，避免把写入时序误判成 repo_clone 行为回归。
+  if (written !== content) throw new Error(`git fixture write mismatch for ${file}`)
   yield* git(cwd, ["add", "--", file])
   const staged = yield* git(cwd, ["diff", "--cached", "--name-only", "--", file])
   // CI 上曾出现工作区已写入但 commit 没有纳入文件的情况；先验证 staged 内容，失败时直接指向 fixture 根因。

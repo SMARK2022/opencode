@@ -129,21 +129,28 @@ export async function mount(override?: FetchHandler) {
     return <box />
   }
 
-  const app = await testRender(() => (
-    <ArgsProvider>
-      <ExitProvider>
-        <KVProvider>
-          <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-            <ProjectProvider>
-              <SyncProvider>
-                <Probe />
-              </SyncProvider>
-            </ProjectProvider>
-          </SDKProvider>
-        </KVProvider>
-      </ExitProvider>
-    </ArgsProvider>
-  ))
+  const app = await testRender(
+    () => (
+      <ArgsProvider>
+        <ExitProvider>
+          <KVProvider>
+            <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+              <ProjectProvider>
+                <SyncProvider>
+                  <Probe />
+                </SyncProvider>
+              </ProjectProvider>
+            </SDKProvider>
+          </KVProvider>
+        </ExitProvider>
+      </ArgsProvider>
+    ),
+    {
+      // core/testing 在 Linux 默认关闭 renderer 线程，但 Windows 默认开启。
+      // sync 套件会反复 mount/destroy；禁用线程让 Windows 清理路径和 Linux 一致，避免文件级 hook 等待 native renderer 线程退出超时。
+      useThread: false,
+    },
+  )
 
   await ready
   await wait(() => sync.status === "complete")
