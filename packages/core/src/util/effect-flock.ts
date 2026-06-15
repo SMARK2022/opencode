@@ -245,7 +245,13 @@ export namespace EffectFlock {
 
           if (parsed.token !== handle.token) return yield* Effect.die(new ReleaseError({ detail: "token mismatch" }))
 
-          yield* forceRemove(handle.lockDir)
+          const releasePath = `${handle.lockDir}.release-${handle.token}`
+          // 安装与MCP凭据同样使用此锁；先移走旧owner，再清理，不能删除后继owner重新建立的活动路径。
+          yield* fs.rename(handle.lockDir, releasePath).pipe(
+            Effect.catchIf(isPathGone, (cause) => Effect.die(new ReleaseError({ detail: "directory missing", cause }))),
+            Effect.orDie,
+          )
+          yield* forceRemove(releasePath)
         })
 
       // -- build service --

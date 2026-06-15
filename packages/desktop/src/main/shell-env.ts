@@ -67,7 +67,9 @@ export function isNushell(shell: string) {
   return name === "nu" || name === "nu.exe" || raw.endsWith("\\nu.exe")
 }
 
-export function loadShellEnv(shell: string, logger: ShellEnvLogger) {
+export function loadShellEnv(shell: string, logger: ShellEnvLogger = console as unknown as ShellEnvLogger) {
+  // shell-env 的解析 helper 会被 Bun 单元测试直接导入；logger 缺省用 console，
+  // 避免测试环境在 import 阶段加载 electron-log 失败。
   if (isNushell(shell)) {
     logger.log(`[server] Skipping shell env probe for nushell: ${shell}`)
     return null
