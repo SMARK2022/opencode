@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Acerca de esta rama**: Esta es la rama mejorada `dev-smark` de OpenCode (versión actual `1.15.6`, CLI release tag `v1.15.6-smark`). Está basada en la rama upstream `dev` y se centra en la interacción TUI, la gestión de sesiones, las estadísticas de tokens, la compatibilidad con Windows/PowerShell, la integración con VS Code Notebook, el soporte de proxy de red y la experiencia de instalación.
+> **Acerca de esta rama**: Esta es la rama mejorada `dev-smark` de OpenCode (versión actual `1.15.7`, CLI release tag `v1.15.7-smark`). Está basada en la rama upstream `dev` y se centra en la interacción TUI, la gestión de sesiones, las estadísticas de tokens, la compatibilidad con Windows/PowerShell, la integración con VS Code Notebook, el soporte de proxy de red y la experiencia de instalación.
 
 ---
 
@@ -93,10 +93,10 @@ Eso solo pasa `OPENCODE_INSTALL_DIR` a `curl`, no al proceso `bash` que realment
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Esta es la forma completa: `bash -s --` indica a `bash` que lea el installer desde stdin y pase `--version 1.15.6-smark` como argumentos del installer. La versión puede ser `1.15.6-smark` o la forma de release tag `v1.15.6-smark`.
+Esta es la forma completa: `bash -s --` indica a `bash` que lea el installer desde stdin y pase `--version 1.15.7-smark` como argumentos del installer. La versión puede ser `1.15.7-smark` o la forma de release tag `v1.15.7-smark`.
 
 ### Comportamiento del installer
 
@@ -240,7 +240,7 @@ Las estadísticas internas prefieren datos de request usage y recurren a metadat
 
 ### Integración con VS Code Notebook
 
-Antes de usar herramientas Notebook, instala la extensión de VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La versión de la extensión permanece en `1.15.5` y puede seguir funcionando con SMARK CLI `1.15.6`; no necesita una actualización para este cambio de README de CLI. La extensión crea un bridge local autenticado entre VS Code/Jupyter Notebook y OpenCode CLI; sin instalarla o conectarla, la CLI no puede leer, editar ni ejecutar celdas de notebook de forma fiable.
+Antes de usar herramientas Notebook, instala la extensión de VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La versión de la extensión permanece en `1.15.5` y puede seguir funcionando con SMARK CLI `1.15.7`; no necesita una actualización para este cambio de README de CLI. La extensión crea un bridge local autenticado entre VS Code/Jupyter Notebook y OpenCode CLI; sin instalarla o conectarla, la CLI no puede leer, editar ni ejecutar celdas de notebook de forma fiable.
 
 Después de iniciar, la extensión abre un bridge local en `127.0.0.1:<random port>` y escribe un manifest con heartbeat en `~/.local/state/opencode/ide/<uuid>.json`. OpenCode selecciona automáticamente el bridge de VS Code que coincide por workspace y ruta de notebook. En configuraciones remotas SSH, WSL o contenedores, la CLI debe ejecutarse en el mismo lado que puede acceder al bridge.
 

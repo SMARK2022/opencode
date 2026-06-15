@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **এই শাখা সম্পর্কে**: এটি OpenCode-এর `dev-smark` উন্নত শাখা (বর্তমান সংস্করণ `1.15.6`, CLI release tag `v1.15.6-smark`)। এটি upstream `dev`-এর উপর ভিত্তি করে তৈরি এবং TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code Notebook integration, network proxy support, ও installation experience উন্নত করার উপর কেন্দ্রীভূত।
+> **এই শাখা সম্পর্কে**: এটি OpenCode-এর `dev-smark` উন্নত শাখা (বর্তমান সংস্করণ `1.15.7`, CLI release tag `v1.15.7-smark`)। এটি upstream `dev`-এর উপর ভিত্তি করে তৈরি এবং TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code Notebook integration, network proxy support, ও installation experience উন্নত করার উপর কেন্দ্রীভূত।
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-এটি সম্পূর্ণ form: `bash -s --` `bash`-কে stdin থেকে installer পড়তে এবং `--version 1.15.6-smark` installer arguments হিসেবে পাঠাতে বলে। version `1.15.6-smark` হতে পারে অথবা release tag form `v1.15.6-smark` হতে পারে।
+এটি সম্পূর্ণ form: `bash -s --` `bash`-কে stdin থেকে installer পড়তে এবং `--version 1.15.7-smark` installer arguments হিসেবে পাঠাতে বলে। version `1.15.7-smark` হতে পারে অথবা release tag form `v1.15.7-smark` হতে পারে।
 
 ### Installer Behavior
 
@@ -240,7 +240,7 @@ Internal stats request usage data পছন্দ করে এবং older sess
 
 ### VS Code Notebook Integration
 
-Notebook tools ব্যবহার করার আগে VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) install করুন। extension version `1.15.5`-ই থাকে এবং SMARK CLI `1.15.6`-এর সাথে কাজ চালিয়ে যেতে পারে; এই CLI README update-এর জন্য upgrade দরকার নেই। extension VS Code/Jupyter Notebook এবং OpenCode CLI-এর মধ্যে local authenticated bridge তৈরি করে; এটি installed বা connected না থাকলে CLI reliably notebook cells read, edit, বা run করতে পারে না।
+Notebook tools ব্যবহার করার আগে VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) install করুন। extension version `1.15.5`-ই থাকে এবং SMARK CLI `1.15.7`-এর সাথে কাজ চালিয়ে যেতে পারে; এই CLI README update-এর জন্য upgrade দরকার নেই। extension VS Code/Jupyter Notebook এবং OpenCode CLI-এর মধ্যে local authenticated bridge তৈরি করে; এটি installed বা connected না থাকলে CLI reliably notebook cells read, edit, বা run করতে পারে না।
 
 Startup-এর পরে extension `127.0.0.1:<random port>`-এ local bridge খোলে এবং heartbeat manifest `~/.local/state/opencode/ide/<uuid>.json`-এ লেখে। OpenCode workspace এবং notebook path অনুযায়ী matching VS Code bridge automatically select করে। remote SSH, WSL, বা container setups-এ CLI একই side-এ run করতে হবে যেখান থেকে bridge access করা যায়।
 

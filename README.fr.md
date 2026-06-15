@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **À propos de cette branche** : il s'agit de la branche améliorée `dev-smark` d'OpenCode (version actuelle `1.15.6`, tag de release CLI `v1.15.6-smark`). Elle est basée sur la branche amont `dev` et se concentre sur l'interaction TUI, la gestion des sessions, les statistiques de tokens, la compatibilité Windows/PowerShell, l'intégration VS Code Notebook, la prise en charge des proxys réseau et l'expérience d'installation.
+> **À propos de cette branche** : il s'agit de la branche améliorée `dev-smark` d'OpenCode (version actuelle `1.15.7`, tag de release CLI `v1.15.7-smark`). Elle est basée sur la branche amont `dev` et se concentre sur l'interaction TUI, la gestion des sessions, les statistiques de tokens, la compatibilité Windows/PowerShell, l'intégration VS Code Notebook, la prise en charge des proxys réseau et l'expérience d'installation.
 
 ---
 
@@ -93,10 +93,10 @@ Cela transmet seulement `OPENCODE_INSTALL_DIR` à `curl`, pas au processus `bash
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-C'est la forme complète : `bash -s --` indique à `bash` de lire l'installateur depuis stdin et de transmettre `--version 1.15.6-smark` comme arguments de l'installateur. La version peut être `1.15.6-smark` ou la forme tag de release `v1.15.6-smark`.
+C'est la forme complète : `bash -s --` indique à `bash` de lire l'installateur depuis stdin et de transmettre `--version 1.15.7-smark` comme arguments de l'installateur. La version peut être `1.15.7-smark` ou la forme tag de release `v1.15.7-smark`.
 
 ### Comportement De L'installateur
 
@@ -240,7 +240,7 @@ Les statistiques internes préfèrent les données d'utilisation des requêtes e
 
 ### Intégration VS Code Notebook
 
-Avant d'utiliser les outils Notebook, installez l'extension VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La version de l'extension reste `1.15.5` et peut continuer à fonctionner avec SMARK CLI `1.15.6` ; elle n'a pas besoin d'une mise à niveau pour cette mise à jour du README CLI. L'extension crée un bridge local authentifié entre VS Code/Jupyter Notebook et l'OpenCode CLI ; sans installation ou connexion, le CLI ne peut pas lire, éditer ou exécuter fiablement les cellules de notebook.
+Avant d'utiliser les outils Notebook, installez l'extension VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La version de l'extension reste `1.15.5` et peut continuer à fonctionner avec SMARK CLI `1.15.7` ; elle n'a pas besoin d'une mise à niveau pour cette mise à jour du README CLI. L'extension crée un bridge local authentifié entre VS Code/Jupyter Notebook et l'OpenCode CLI ; sans installation ou connexion, le CLI ne peut pas lire, éditer ou exécuter fiablement les cellules de notebook.
 
 Après le démarrage, l'extension ouvre un bridge local sur `127.0.0.1:<random port>` et écrit un manifeste heartbeat dans `~/.local/state/opencode/ide/<uuid>.json`. OpenCode sélectionne automatiquement le bridge VS Code correspondant selon le workspace et le chemin du notebook. Dans les configurations SSH distant, WSL ou conteneur, le CLI doit s'exécuter du même côté que celui qui peut accéder au bridge.
 
