@@ -66,6 +66,23 @@ describe("Truncate", () => {
       }),
     )
 
+    it.live("guides targeted recovery from saved output when truncated", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const lines = Array.from({ length: 100 }, (_, i) => `line${i}`).join("\n")
+        const result = yield* svc.output(lines, { maxLines: 10 })
+
+        expect(result.truncated).toBe(true)
+        if (!result.truncated) throw new Error("expected truncated")
+        // Notice 是模型可见的恢复入口；这里验证它给出先 grep 定位、再 read
+        // 局部读取的低成本路径，避免调用方为了找隐藏日志而直接读取完整文件。
+        expect(result.content).toContain(`path="${result.outputPath}`)
+        expect(result.content).toContain("grep")
+        expect(result.content).toContain("read offset/limit")
+        expect(result.content).toContain("Avoid reading the full file")
+      }),
+    )
+
     it.live("does not count final newline as an extra notice line", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service

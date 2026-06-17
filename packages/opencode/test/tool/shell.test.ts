@@ -2065,6 +2065,11 @@ describe("tool.shell truncation", () => {
         expect(result.output).toContain(`total="${lineCount}L/`)
         expect(result.output).toContain('shown="tail')
         expect(result.output).toContain(`path="${(result.metadata as { outputPath?: string }).outputPath}`)
+        // Shell 日志通常很长，notice 必须引导模型先搜索保存文件、再按行段读取，
+        // 否则截断恢复容易退化成读取完整日志并浪费上下文。
+        expect(result.output).toContain("grep")
+        expect(result.output).toContain("read offset/limit")
+        expect(result.output).toContain("Avoid reading the full file")
       }),
     ),
   )

@@ -21,6 +21,13 @@ type ExecutionNotice = {
 
 type Notice = Record<string, string | number | undefined>
 
+// 这段文本是模型可见的截断恢复策略，而不是 UI 文案：它必须足够短，
+// 同时明确先用保存文件做 grep 定位，再用 read offset/limit 读取局部上下文。
+// 保持为单个 attribute 可以复用现有 XML-like notice 解析和展示路径，
+// 避免为了增强提示性而改变 shell/tool 截断输出的前后位置不变量。
+const OUTPUT_TRUNCATED_GUIDANCE =
+  "Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."
+
 export function outputStats(text: string): Required<OutputAmount> {
   return {
     // 工具输出经常以最终换行结束；这里按人类查看保存文件时的行数统计，
@@ -39,6 +46,7 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
     total: formatOutputAmount(input.total),
     shown: [input.shown.direction, formatOutputAmount(input.shown)].filter(Boolean).join(" "),
     path: input.path,
+    guidance: OUTPUT_TRUNCATED_GUIDANCE,
   })
 }
 
