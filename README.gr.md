@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Σχετικά με αυτόν τον κλάδο**: Αυτός είναι ο ενισχυμένος κλάδος `dev-smark` του OpenCode (τρέχουσα έκδοση `1.15.6`, CLI release tag `v1.15.6-smark`). Βασίζεται στον upstream κλάδο `dev` και εστιάζει στην αλληλεπίδραση TUI, στη διαχείριση συνεδριών, στα στατιστικά token, στη συμβατότητα Windows/PowerShell, στην ενσωμάτωση VS Code Notebook, στην υποστήριξη network proxy και στην εμπειρία εγκατάστασης.
+> **Σχετικά με αυτόν τον κλάδο**: Αυτός είναι ο ενισχυμένος κλάδος `dev-smark` του OpenCode (τρέχουσα έκδοση `1.15.7`, CLI release tag `v1.15.7-smark`). Βασίζεται στον upstream κλάδο `dev` και εστιάζει στην αλληλεπίδραση TUI, στη διαχείριση συνεδριών, στα στατιστικά token, στη συμβατότητα Windows/PowerShell, στην ενσωμάτωση VS Code Notebook, στην υποστήριξη network proxy και στην εμπειρία εγκατάστασης.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Αυτή είναι η πλήρης μορφή: το `bash -s --` λέει στο `bash` να διαβάσει τον installer από stdin και να περάσει το `--version 1.15.6-smark` ως ορίσματα installer. Η έκδοση μπορεί να είναι `1.15.6-smark` ή η μορφή release tag `v1.15.6-smark`.
+Αυτή είναι η πλήρης μορφή: το `bash -s --` λέει στο `bash` να διαβάσει τον installer από stdin και να περάσει το `--version 1.15.7-smark` ως ορίσματα installer. Η έκδοση μπορεί να είναι `1.15.7-smark` ή η μορφή release tag `v1.15.7-smark`.
 
 ### Συμπεριφορά Installer
 
@@ -240,7 +240,7 @@ opencode
 
 ### Ενσωμάτωση VS Code Notebook
 
-Πριν χρησιμοποιήσετε Notebook tools, εγκαταστήστε το VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Η έκδοση του extension παραμένει `1.15.5` και μπορεί να συνεχίσει να λειτουργεί με SMARK CLI `1.15.6`. Δεν χρειάζεται αναβάθμιση για αυτήν την ενημέρωση CLI README. Το extension δημιουργεί ένα τοπικό authenticated bridge μεταξύ VS Code/Jupyter Notebook και OpenCode CLI. Χωρίς να είναι εγκατεστημένο ή συνδεδεμένο, το CLI δεν μπορεί να διαβάσει, να επεξεργαστεί ή να εκτελέσει notebook cells αξιόπιστα.
+Πριν χρησιμοποιήσετε Notebook tools, εγκαταστήστε το VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Η έκδοση του extension παραμένει `1.15.5` και μπορεί να συνεχίσει να λειτουργεί με SMARK CLI `1.15.7`. Δεν χρειάζεται αναβάθμιση για αυτήν την ενημέρωση CLI README. Το extension δημιουργεί ένα τοπικό authenticated bridge μεταξύ VS Code/Jupyter Notebook και OpenCode CLI. Χωρίς να είναι εγκατεστημένο ή συνδεδεμένο, το CLI δεν μπορεί να διαβάσει, να επεξεργαστεί ή να εκτελέσει notebook cells αξιόπιστα.
 
 Μετά την εκκίνηση, το extension ανοίγει ένα local bridge στο `127.0.0.1:<random port>` και γράφει ένα heartbeat manifest στο `~/.local/state/opencode/ide/<uuid>.json`. Το OpenCode επιλέγει αυτόματα το αντίστοιχο VS Code bridge με βάση workspace και notebook path. Σε remote SSH, WSL ή container setups, το CLI πρέπει να τρέχει στην ίδια πλευρά που μπορεί να προσπελάσει το bridge.
 

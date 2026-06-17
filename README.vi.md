@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Ve nhanh nay**: Day la nhanh nang cao `dev-smark` cua OpenCode (phien ban hien tai `1.15.6`, CLI release tag `v1.15.6-smark`). Nhanh nay dua tren upstream `dev` va tap trung vao tuong tac TUI, quan ly phien, thong ke token, tuong thich Windows/PowerShell, tich hop VS Code Notebook, ho tro network proxy va trai nghiem cai dat.
+> **Ve nhanh nay**: Day la nhanh nang cao `dev-smark` cua OpenCode (phien ban hien tai `1.15.7`, CLI release tag `v1.15.7-smark`). Nhanh nay dua tren upstream `dev` va tap trung vao tuong tac TUI, quan ly phien, thong ke token, tuong thich Windows/PowerShell, tich hop VS Code Notebook, ho tro network proxy va trai nghiem cai dat.
 
 ---
 
@@ -93,10 +93,10 @@ Cach do chi truyen `OPENCODE_INSTALL_DIR` cho `curl`, khong truyen cho tien trin
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Day la dang day du: `bash -s --` bao `bash` doc installer tu stdin va truyen `--version 1.15.6-smark` lam doi so installer. Phien ban co the la `1.15.6-smark` hoac dang release tag `v1.15.6-smark`.
+Day la dang day du: `bash -s --` bao `bash` doc installer tu stdin va truyen `--version 1.15.7-smark` lam doi so installer. Phien ban co the la `1.15.7-smark` hoac dang release tag `v1.15.7-smark`.
 
 ### Hanh Vi Installer
 
@@ -240,7 +240,7 @@ Thong ke noi bo uu tien du lieu request usage va fallback ve message metadata ch
 
 ### Tich Hop VS Code Notebook
 
-Truoc khi dung Notebook tools, hay cai VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Phien ban extension van la `1.15.5` va tiep tuc hoat dong voi SMARK CLI `1.15.6`; khong can nang cap cho ban cap nhat CLI README nay. Extension tao mot local authenticated bridge giua VS Code/Jupyter Notebook va OpenCode CLI; neu no chua duoc cai dat hoac ket noi, CLI khong the doc, sua hoac chay notebook cells mot cach tin cay.
+Truoc khi dung Notebook tools, hay cai VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Phien ban extension van la `1.15.5` va tiep tuc hoat dong voi SMARK CLI `1.15.7`; khong can nang cap cho ban cap nhat CLI README nay. Extension tao mot local authenticated bridge giua VS Code/Jupyter Notebook va OpenCode CLI; neu no chua duoc cai dat hoac ket noi, CLI khong the doc, sua hoac chay notebook cells mot cach tin cay.
 
 Sau khi khoi dong, extension mo mot local bridge tai `127.0.0.1:<random port>` va ghi heartbeat manifest vao `~/.local/state/opencode/ide/<uuid>.json`. OpenCode tu dong chon VS Code bridge phu hop theo workspace va notebook path. Trong cac thiet lap remote SSH, WSL hoac container, CLI phai chay cung phia co the truy cap bridge.
 

@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Branch dev upstream" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Versao npm upstream" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="Branch SMARK" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Versao SMARK atual" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Versao SMARK atual" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Sobre este branch**: este e o branch aprimorado `dev-smark` do OpenCode (versao atual `1.15.6`, CLI release tag `v1.15.6-smark`). Ele e baseado no `dev` upstream e foca em interacao TUI, gerenciamento de sessoes, estatisticas de token, compatibilidade com Windows/PowerShell, integracao com VS Code Notebook, suporte a proxy de rede e experiencia de instalacao.
+> **Sobre este branch**: este e o branch aprimorado `dev-smark` do OpenCode (versao atual `1.15.7`, CLI release tag `v1.15.7-smark`). Ele e baseado no `dev` upstream e foca em interacao TUI, gerenciamento de sessoes, estatisticas de token, compatibilidade com Windows/PowerShell, integracao com VS Code Notebook, suporte a proxy de rede e experiencia de instalacao.
 
 ---
 
@@ -93,10 +93,10 @@ Isso passa `OPENCODE_INSTALL_DIR` apenas para o `curl`, nao para o processo `bas
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Esta e a forma completa: `bash -s --` diz ao `bash` para ler o instalador de stdin e passar `--version 1.15.6-smark` como argumentos do instalador. A versao pode ser `1.15.6-smark` ou a forma de release tag `v1.15.6-smark`.
+Esta e a forma completa: `bash -s --` diz ao `bash` para ler o instalador de stdin e passar `--version 1.15.7-smark` como argumentos do instalador. A versao pode ser `1.15.7-smark` ou a forma de release tag `v1.15.7-smark`.
 
 ### Comportamento Do Instalador
 
@@ -240,7 +240,7 @@ As estatisticas internas preferem dados de request usage e recorrem a metadados 
 
 ### Integracao Com VS Code Notebook
 
-Antes de usar ferramentas de Notebook, instale a extensao do VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). A versao da extensao permanece `1.15.5` e pode continuar funcionando com a CLI SMARK `1.15.6`; ela nao precisa de upgrade para esta atualizacao do README da CLI. A extensao cria uma bridge local autenticada entre VS Code/Jupyter Notebook e a CLI OpenCode; sem ela instalada ou conectada, a CLI nao consegue ler, editar ou executar celulas de notebook de forma confiavel.
+Antes de usar ferramentas de Notebook, instale a extensao do VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). A versao da extensao permanece `1.15.5` e pode continuar funcionando com a CLI SMARK `1.15.7`; ela nao precisa de upgrade para esta atualizacao do README da CLI. A extensao cria uma bridge local autenticada entre VS Code/Jupyter Notebook e a CLI OpenCode; sem ela instalada ou conectada, a CLI nao consegue ler, editar ou executar celulas de notebook de forma confiavel.
 
 Depois da inicializacao, a extensao abre uma bridge local em `127.0.0.1:<random port>` e grava um manifest de heartbeat em `~/.local/state/opencode/ide/<uuid>.json`. O OpenCode seleciona automaticamente a bridge VS Code correspondente por workspace e caminho do notebook. Em configuracoes remotas SSH, WSL ou container, a CLI deve executar no mesmo lado que consegue acessar a bridge.
 

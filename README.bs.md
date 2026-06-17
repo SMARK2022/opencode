@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **O ovoj grani**: Ovo je OpenCode `dev-smark` poboljšana grana (trenutna verzija `1.15.6`, CLI release tag `v1.15.6-smark`). Zasnovana je na upstream `dev` grani i fokusira se na TUI interakciju, upravljanje sesijama, statistiku tokena, Windows/PowerShell kompatibilnost, VS Code Notebook integraciju, podršku za mrežni proxy i iskustvo instalacije.
+> **O ovoj grani**: Ovo je OpenCode `dev-smark` poboljšana grana (trenutna verzija `1.15.7`, CLI release tag `v1.15.7-smark`). Zasnovana je na upstream `dev` grani i fokusira se na TUI interakciju, upravljanje sesijama, statistiku tokena, Windows/PowerShell kompatibilnost, VS Code Notebook integraciju, podršku za mrežni proxy i iskustvo instalacije.
 
 ---
 
@@ -93,10 +93,10 @@ To prosljeđuje `OPENCODE_INSTALL_DIR` samo komandi `curl`, ne `bash` procesu ko
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Ovo je potpuni oblik: `bash -s --` kaže komandi `bash` da čita installer iz stdin i proslijedi `--version 1.15.6-smark` kao argumente installera. Verzija može biti `1.15.6-smark` ili oblik release taga `v1.15.6-smark`.
+Ovo je potpuni oblik: `bash -s --` kaže komandi `bash` da čita installer iz stdin i proslijedi `--version 1.15.7-smark` kao argumente installera. Verzija može biti `1.15.7-smark` ili oblik release taga `v1.15.7-smark`.
 
 ### Ponašanje Installera
 
@@ -240,7 +240,7 @@ Interna statistika preferira request usage podatke i vraća se na metapodatke po
 
 ### VS Code Notebook Integracija
 
-Prije korištenja Notebook alata instalirajte VS Code ekstenziju [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Verzija ekstenzije ostaje `1.15.5` i može nastaviti raditi sa SMARK CLI `1.15.6`; ne mora se nadograditi za ovo ažuriranje CLI README-a. Ekstenzija kreira lokalni autentificirani bridge između VS Code/Jupyter Notebook i OpenCode CLI-ja; bez nje instalirane ili povezane, CLI ne može pouzdano čitati, uređivati ili pokretati notebook ćelije.
+Prije korištenja Notebook alata instalirajte VS Code ekstenziju [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Verzija ekstenzije ostaje `1.15.5` i može nastaviti raditi sa SMARK CLI `1.15.7`; ne mora se nadograditi za ovo ažuriranje CLI README-a. Ekstenzija kreira lokalni autentificirani bridge između VS Code/Jupyter Notebook i OpenCode CLI-ja; bez nje instalirane ili povezane, CLI ne može pouzdano čitati, uređivati ili pokretati notebook ćelije.
 
 Nakon pokretanja, ekstenzija otvara lokalni bridge na `127.0.0.1:<random port>` i upisuje heartbeat manifest u `~/.local/state/opencode/ide/<uuid>.json`. OpenCode automatski bira odgovarajući VS Code bridge prema workspaceu i notebook putanji. U remote SSH, WSL ili container postavkama, CLI mora raditi na istoj strani koja može pristupiti bridgeu.
 

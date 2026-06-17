@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.6`，CLI release tag 为 `v1.15.6-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
+> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.7`，CLI release tag 为 `v1.15.7-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
 
 > **数据库迁移提示**：SMARK 分支包含数据库 schema 自定义与迁移。若你从上游 `dev`、主分支或原分支切换到本分支，请先手动备份本地 `opencode.db`；迁移后的数据库可能无法无损迁移回上游或原分支。本项目不负责您本地数据库上下文信息的 schema 格式兼容性问题。
 
@@ -95,10 +95,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-这条命令是完整写法：`bash -s --` 表示让 `bash` 从 stdin 读取 installer，并把后面的 `--version 1.15.6-smark` 作为 installer 参数传入。版本参数可以写 `1.15.6-smark`，也可以写 release tag 形式的 `v1.15.6-smark`。
+这条命令是完整写法：`bash -s --` 表示让 `bash` 从 stdin 读取 installer，并把后面的 `--version 1.15.7-smark` 作为 installer 参数传入。版本参数可以写 `1.15.7-smark`，也可以写 release tag 形式的 `v1.15.7-smark`。
 
 ### 安装脚本行为
 
@@ -247,7 +247,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。�
 
 ### VS Code Notebook 集成
 
-使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。当前扩展版本保持 `1.15.5`，可继续配合 SMARK CLI `1.15.6` 使用，不需要随本次 CLI README 更新而升级。该扩展负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
+使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。当前扩展版本保持 `1.15.5`，可继续配合 SMARK CLI `1.15.7` 使用，不需要随本次 CLI README 更新而升级。该扩展负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
 
 扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 会按 workspace 与 notebook 路径自动选择匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 需要运行在能访问该 bridge 的同一侧环境。
 

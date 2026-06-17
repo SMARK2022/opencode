@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **เกี่ยวกับสาขานี้**: นี่คือสาขาปรับปรุง `dev-smark` ของ OpenCode (เวอร์ชันปัจจุบัน `1.15.6`, CLI release tag `v1.15.6-smark`) โดยอิงจาก upstream `dev` และมุ่งเน้นประสบการณ์ TUI, การจัดการเซสชัน, สถิติ token, ความเข้ากันได้กับ Windows/PowerShell, การผสานรวม VS Code Notebook, การรองรับ network proxy และประสบการณ์การติดตั้ง
+> **เกี่ยวกับสาขานี้**: นี่คือสาขาปรับปรุง `dev-smark` ของ OpenCode (เวอร์ชันปัจจุบัน `1.15.7`, CLI release tag `v1.15.7-smark`) โดยอิงจาก upstream `dev` และมุ่งเน้นประสบการณ์ TUI, การจัดการเซสชัน, สถิติ token, ความเข้ากันได้กับ Windows/PowerShell, การผสานรวม VS Code Notebook, การรองรับ network proxy และประสบการณ์การติดตั้ง
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-นี่คือรูปแบบเต็ม: `bash -s --` บอกให้ `bash` อ่าน installer จาก stdin และส่ง `--version 1.15.6-smark` เป็น installer arguments เวอร์ชันอาจเป็น `1.15.6-smark` หรือรูปแบบ release tag `v1.15.6-smark`
+นี่คือรูปแบบเต็ม: `bash -s --` บอกให้ `bash` อ่าน installer จาก stdin และส่ง `--version 1.15.7-smark` เป็น installer arguments เวอร์ชันอาจเป็น `1.15.7-smark` หรือรูปแบบ release tag `v1.15.7-smark`
 
 ### พฤติกรรมของ Installer
 
@@ -240,7 +240,7 @@ Internal stats จะเลือกใช้ request usage data ก่อน �
 
 ### การผสานรวม VS Code Notebook
 
-ก่อนใช้ Notebook tools ให้ติดตั้ง VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) เวอร์ชัน extension ยังคงเป็น `1.15.5` และยังทำงานต่อกับ SMARK CLI `1.15.6` ได้ ไม่จำเป็นต้องอัปเกรดสำหรับการอัปเดต CLI README นี้ extension สร้าง local authenticated bridge ระหว่าง VS Code/Jupyter Notebook และ OpenCode CLI; หากไม่ได้ติดตั้งหรือเชื่อมต่อ CLI จะไม่สามารถอ่าน แก้ไข หรือรัน notebook cells ได้อย่างน่าเชื่อถือ
+ก่อนใช้ Notebook tools ให้ติดตั้ง VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) เวอร์ชัน extension ยังคงเป็น `1.15.5` และยังทำงานต่อกับ SMARK CLI `1.15.7` ได้ ไม่จำเป็นต้องอัปเกรดสำหรับการอัปเดต CLI README นี้ extension สร้าง local authenticated bridge ระหว่าง VS Code/Jupyter Notebook และ OpenCode CLI; หากไม่ได้ติดตั้งหรือเชื่อมต่อ CLI จะไม่สามารถอ่าน แก้ไข หรือรัน notebook cells ได้อย่างน่าเชื่อถือ
 
 หลังเริ่มต้น extension จะเปิด local bridge บน `127.0.0.1:<random port>` และเขียน heartbeat manifest ไปที่ `~/.local/state/opencode/ide/<uuid>.json` OpenCode จะเลือก VS Code bridge ที่ตรงกันโดยอัตโนมัติตาม workspace และ notebook path ใน remote SSH, WSL หรือ container setups CLI ต้องรันอยู่ฝั่งเดียวกับที่เข้าถึง bridge ได้
 

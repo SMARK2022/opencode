@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **О ветке**: это расширенная ветка OpenCode `dev-smark` (текущая версия `1.15.6`, CLI release tag `v1.15.6-smark`). Она основана на upstream `dev` и сосредоточена на TUI-взаимодействии, управлении сессиями, статистике token, совместимости с Windows/PowerShell, интеграции VS Code Notebook, поддержке сетевых proxy и опыте установки.
+> **О ветке**: это расширенная ветка OpenCode `dev-smark` (текущая версия `1.15.7`, CLI release tag `v1.15.7-smark`). Она основана на upstream `dev` и сосредоточена на TUI-взаимодействии, управлении сессиями, статистике token, совместимости с Windows/PowerShell, интеграции VS Code Notebook, поддержке сетевых proxy и опыте установки.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Это полная форма: `bash -s --` говорит `bash` читать installer из stdin и передать `--version 1.15.6-smark` как аргументы installer. Версия может быть `1.15.6-smark` или в форме release tag `v1.15.6-smark`.
+Это полная форма: `bash -s --` говорит `bash` читать installer из stdin и передать `--version 1.15.7-smark` как аргументы installer. Версия может быть `1.15.7-smark` или в форме release tag `v1.15.7-smark`.
 
 ### Поведение Installer
 
@@ -240,7 +240,7 @@ Internal stats предпочитает request usage data и откатывае
 
 ### Интеграция VS Code Notebook
 
-Перед использованием Notebook tools установите расширение VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Версия расширения остается `1.15.5` и может продолжать работать с SMARK CLI `1.15.6`; обновление для этого CLI README update не требуется. Расширение создает локальный authenticated bridge между VS Code/Jupyter Notebook и OpenCode CLI; без установленного или подключенного расширения CLI не может надежно читать, редактировать или запускать notebook cells.
+Перед использованием Notebook tools установите расширение VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Версия расширения остается `1.15.5` и может продолжать работать с SMARK CLI `1.15.7`; обновление для этого CLI README update не требуется. Расширение создает локальный authenticated bridge между VS Code/Jupyter Notebook и OpenCode CLI; без установленного или подключенного расширения CLI не может надежно читать, редактировать или запускать notebook cells.
 
 После запуска расширение открывает local bridge на `127.0.0.1:<random port>` и записывает heartbeat manifest в `~/.local/state/opencode/ide/<uuid>.json`. OpenCode автоматически выбирает подходящий VS Code bridge по workspace и notebook path. В remote SSH, WSL или container setups CLI должен запускаться на той же стороне, которая может получить доступ к bridge.
 

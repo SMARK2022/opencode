@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **このブランチについて**: これは OpenCode の `dev-smark` 強化ブランチです（現在のバージョン `1.15.6`、CLI release tag は `v1.15.6-smark`）。上流 `dev` を基にしており、TUI 操作、セッション管理、Token 統計、Windows/PowerShell 互換性、VS Code Notebook 統合、ネットワークプロキシ対応、インストール体験に重点を置いています。
+> **このブランチについて**: これは OpenCode の `dev-smark` 強化ブランチです（現在のバージョン `1.15.7`、CLI release tag は `v1.15.7-smark`）。上流 `dev` を基にしており、TUI 操作、セッション管理、Token 統計、Windows/PowerShell 互換性、VS Code Notebook 統合、ネットワークプロキシ対応、インストール体験に重点を置いています。
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-これが完全な形式です。`bash -s --` は `bash` に stdin から installer を読ませ、`--version 1.15.6-smark` を installer 引数として渡します。バージョンは `1.15.6-smark`、または release tag 形式の `v1.15.6-smark` を指定できます。
+これが完全な形式です。`bash -s --` は `bash` に stdin から installer を読ませ、`--version 1.15.7-smark` を installer 引数として渡します。バージョンは `1.15.7-smark`、または release tag 形式の `v1.15.7-smark` を指定できます。
 
 ### Installer の動作
 
@@ -240,7 +240,7 @@ SMARK `dev-smark` ブランチは現在 CLI releases のみを公開しており
 
 ### VS Code Notebook Integration
 
-Notebook tools を使用する前に、VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) をインストールしてください。extension version は `1.15.5` のままで、SMARK CLI `1.15.6` と引き続き動作します。この CLI README update のために upgrade する必要はありません。この extension は VS Code/Jupyter Notebook と OpenCode CLI の間に local authenticated bridge を作成します。インストールまたは接続されていない場合、CLI は notebook cells を確実に read、edit、run できません。
+Notebook tools を使用する前に、VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) をインストールしてください。extension version は `1.15.5` のままで、SMARK CLI `1.15.7` と引き続き動作します。この CLI README update のために upgrade する必要はありません。この extension は VS Code/Jupyter Notebook と OpenCode CLI の間に local authenticated bridge を作成します。インストールまたは接続されていない場合、CLI は notebook cells を確実に read、edit、run できません。
 
 起動後、extension は `127.0.0.1:<random port>` に local bridge を開き、heartbeat manifest を `~/.local/state/opencode/ide/<uuid>.json` に書き込みます。OpenCode は workspace と notebook path によって一致する VS Code bridge を自動選択します。remote SSH、WSL、container setup では、CLI は bridge にアクセスできる同じ側で実行する必要があります。
 

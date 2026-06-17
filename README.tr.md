@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.6-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Bu dal hakkında**: Bu, OpenCode'un `dev-smark` geliştirilmiş dalıdır (geçerli sürüm `1.15.6`, CLI release tag `v1.15.6-smark`). Upstream `dev` temel alınmıştır ve TUI etkileşimi, oturum yönetimi, token istatistikleri, Windows/PowerShell uyumluluğu, VS Code Notebook entegrasyonu, ağ proxy desteği ve kurulum deneyimine odaklanır.
+> **Bu dal hakkında**: Bu, OpenCode'un `dev-smark` geliştirilmiş dalıdır (geçerli sürüm `1.15.7`, CLI release tag `v1.15.7-smark`). Upstream `dev` temel alınmıştır ve TUI etkileşimi, oturum yönetimi, token istatistikleri, Windows/PowerShell uyumluluğu, VS Code Notebook entegrasyonu, ağ proxy desteği ve kurulum deneyimine odaklanır.
 
 ---
 
@@ -93,10 +93,10 @@ Bu yalnızca `OPENCODE_INSTALL_DIR` değerini `curl` için geçirir; installer'�
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.6-smark
+  bash -s -- --version 1.15.7-smark
 ```
 
-Tam biçim budur: `bash -s --`, `bash`'e installer'ı stdin'den okumasını ve `--version 1.15.6-smark` değerini installer argümanları olarak geçirmesini söyler. Sürüm `1.15.6-smark` veya release tag biçimi olan `v1.15.6-smark` olabilir.
+Tam biçim budur: `bash -s --`, `bash`'e installer'ı stdin'den okumasını ve `--version 1.15.7-smark` değerini installer argümanları olarak geçirmesini söyler. Sürüm `1.15.7-smark` veya release tag biçimi olan `v1.15.7-smark` olabilir.
 
 ### Installer Davranışı
 
@@ -240,7 +240,7 @@ Dahili istatistikler request usage verisini tercih eder ve eski oturumlar için 
 
 ### VS Code Notebook Entegrasyonu
 
-Notebook tools kullanmadan önce VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) kurun. Extension sürümü `1.15.5` olarak kalır ve SMARK CLI `1.15.6` ile çalışmaya devam edebilir; bu CLI README güncellemesi için yükseltme gerekmez. Extension, VS Code/Jupyter Notebook ile OpenCode CLI arasında yerel authenticated bridge oluşturur; kurulu veya bağlı değilse CLI notebook cell'lerini güvenilir şekilde okuyamaz, düzenleyemez veya çalıştıramaz.
+Notebook tools kullanmadan önce VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) kurun. Extension sürümü `1.15.5` olarak kalır ve SMARK CLI `1.15.7` ile çalışmaya devam edebilir; bu CLI README güncellemesi için yükseltme gerekmez. Extension, VS Code/Jupyter Notebook ile OpenCode CLI arasında yerel authenticated bridge oluşturur; kurulu veya bağlı değilse CLI notebook cell'lerini güvenilir şekilde okuyamaz, düzenleyemez veya çalıştıramaz.
 
 Başladıktan sonra extension `127.0.0.1:<random port>` üzerinde yerel bridge açar ve heartbeat manifest'ini `~/.local/state/opencode/ide/<uuid>.json` yoluna yazar. OpenCode, workspace ve notebook path'e göre eşleşen VS Code bridge'i otomatik seçer. Remote SSH, WSL veya container kurulumlarında CLI, bridge'e erişebilen aynı tarafta çalışmalıdır.
 
