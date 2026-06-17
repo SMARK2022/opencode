@@ -232,7 +232,7 @@ test("string edit preserves CRLF notebook cell content around the replacement", 
 })
 
 test("source includes a bounded preview for a single oversized source line", async () => {
-  activeNotebook.cellAt(1).document.setText(`visible-prefix-${"x".repeat(20_000)}-hidden-suffix`)
+  activeNotebook.cellAt(1).document.setText(`visible-prefix-${"x".repeat(30_000)}-hidden-suffix`)
 
   const result = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 5 })
 
@@ -244,7 +244,7 @@ test("source includes a bounded preview for a single oversized source line", asy
 
 test("source does not consume a normal line that only overflows the current page", async () => {
   const secondLine = `second-line-fits-next-page-${"y".repeat(600)}`
-  activeNotebook.cellAt(1).document.setText(`${"x".repeat(15_900)}\n${secondLine}`)
+  activeNotebook.cellAt(1).document.setText(`${"x".repeat(23_950)}\n${secondLine}`)
 
   const firstPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 10 })
   const secondPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), offset: 5, limit: 10 })

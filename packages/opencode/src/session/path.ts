@@ -47,8 +47,9 @@ export function aliases(input: { path: string; directory?: string; global?: bool
   // `...` forms depending on the daemon current drive. Query both spellings so
   // old rows remain visible while new writes keep the drive-qualified form.
   const absolute = input.global && input.directory ? windowsAbsolute(input.directory) : undefined
-  const driveRelative = (absolute ?? input.path).replace(/^[A-Za-z]:\//, "")
-  return [...new Set([input.path, absolute, driveRelative].filter((item): item is string => !!item))]
+  const normalized = input.path.replaceAll("\\", "/")
+  const driveRelative = (absolute ?? normalized).replace(/^[A-Za-z]:\//, "")
+  return [...new Set([normalized, absolute, driveRelative].filter((item): item is string => !!item))]
 }
 
 export * as SessionPath from "./path"

@@ -1,5 +1,4 @@
 import { Effect, ScopedCache, Scope } from "effect"
-import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import type { InstanceContext } from "@/project/instance-context"
 import { InstanceRef, WorkspaceRef } from "./instance-ref"
 import { registerDisposer } from "./instance-registry"
@@ -28,16 +27,17 @@ export const make = <A, E = never, R = never>(
   init: (ctx: InstanceContext) => Effect.Effect<A, E, R | Scope.Scope>,
 ): Effect.Effect<InstanceState<A, E, Exclude<R, Scope.Scope>>, never, R | Scope.Scope> =>
   Effect.gen(function* () {
+    const capturedContext = yield* Effect.context<R | Scope.Scope>()
     const cache = yield* ScopedCache.make<string, A, E, R>({
       capacity: Number.POSITIVE_INFINITY,
       lookup: () =>
-        Effect.gen(function* () {
-          return yield* init(yield* context)
-        }),
+      Effect.gen(function* () {
+        return yield* init(yield* context)
+      }),
     })
 
     const off = registerDisposer((directory) =>
-      Effect.runPromise(ScopedCache.invalidate(cache, directory).pipe(Effect.provide(EffectLogger.layer))),
+      Effect.runPromise(ScopedCache.invalidate(cache, directory).pipe(Effect.provide(capturedContext))),
     )
     yield* Effect.addFinalizer(() => Effect.sync(off))
 

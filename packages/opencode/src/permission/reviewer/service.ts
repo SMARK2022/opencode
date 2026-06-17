@@ -17,6 +17,7 @@ import { PermissionReviewerPrompt } from "./prompt"
 import { Assessment, ReviewerRequest } from "./schema"
 import { PermissionReviewerTranscript } from "./transcript"
 import type { PermissionAuto } from "../auto"
+import { Database } from "@opencode-ai/core/database/database"
 
 export class ReviewerDisabled extends Schema.TaggedErrorClass<ReviewerDisabled>()("PermissionReviewerDisabled", {}) {
   override get message() {
@@ -78,6 +79,9 @@ const PROTOCOL_RETRY_USER_ITEM = {
   text: "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.",
 }
 
+type ReviewedTool = { sessionID: SessionID; messageID: MessageID; callID: string }
+type PersistedReview = { sessionID: SessionID; messageID: MessageID; reviewID: string; reviewedTool?: ReviewedTool }
+
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
 
@@ -92,6 +96,7 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const provider = yield* Provider.Service
     const sessions = yield* Session.Service
+    const database = yield* Database.Service
     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
 
     const review: Interface["review"] = (input) =>
@@ -161,6 +166,10 @@ export const layer = Layer.effect(
                 reviewID: input.reviewID,
                 parentID: reviewerUser?.id,
                 messages,
+                reviewedTool:
+                  input.sessionID && input.tool
+                    ? { sessionID: input.sessionID, messageID: input.tool.messageID, callID: input.tool.callID }
+                    : undefined,
               }).pipe(
                 Effect.tapError((error) => {
                   if (!hideProtocolFailure || !reviewerSession || !reviewerUser || !isReviewerDecisionProtocolError(error)) {
@@ -235,7 +244,7 @@ export const layer = Layer.effect(
           Effect.catchDefect((defect) => Effect.fail(defect)),
           Effect.catch(handleReviewerFailure),
         )
-      })
+      }).pipe(Effect.provideService(Database.Service, database))
 
     return Service.of({ review })
 
@@ -307,6 +316,7 @@ export const layer = Layer.effect(
       reviewID: string
       parentID: MessageID | undefined
       messages: readonly ModelMessage[]
+      reviewedTool?: ReviewedTool
     }) {
       const session = input.session
       const parentID = input.parentID
@@ -331,6 +341,7 @@ export const layer = Layer.effect(
           sessionID: session.id,
           messageID: message.id,
           reviewID: input.reviewID,
+          reviewedTool: input.reviewedTool,
         }).pipe(
           Effect.tapError((error) =>
             Effect.gen(function* () {
@@ -350,7 +361,7 @@ export const layer = Layer.effect(
     function runReviewerStream(
       messages: readonly ModelMessage[],
       model: Provider.Model,
-      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
+      persist?: PersistedReview,
     ) {
       return Effect.acquireUseRelease(
         Effect.sync(() => new AbortController()),
@@ -556,6 +567,9 @@ export const layer = Layer.effect(
                   return
                 }
                 if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+                  if (persist.reviewedTool && !(yield* isReviewedToolActive(persist.reviewedTool, persist.reviewID))) {
+                    return yield* Effect.interrupt
+                  }
                   assessment = assessmentFromUnknown(event.input)
                   if (!assessment) return
                   const existing = toolParts.get(event.toolCallId)
@@ -619,6 +633,9 @@ export const layer = Layer.effect(
                 // no-side-effect tool part preserves the same audit shape as the
                 // function-call path. Consumers should read `source` before
                 // treating the part as a provider-emitted tool call.
+                if (persist?.reviewedTool && !(yield* isReviewedToolActive(persist.reviewedTool, persist.reviewID))) {
+                  return yield* Effect.interrupt
+                }
                 if (persist) yield* recordJsonFallbackDecision(sessions, persist, fallback)
                 return fallback
               }
@@ -724,6 +741,22 @@ export const layer = Layer.effect(
         Effect.catchDefect(() => Effect.void),
       )
     }
+
+    function isReviewedToolActive(tool: ReviewedTool, reviewID: string) {
+      return Effect.gen(function* () {
+        const message = yield* MessageV2.get({ sessionID: tool.sessionID, messageID: tool.messageID })
+        const part = message.parts.find(
+          (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === tool.callID,
+        )
+        if (!part || part.state.status !== "running") return false
+        const autoReview = part.state.metadata?.autoReview
+        if (!autoReview || typeof autoReview !== "object" || Array.isArray(autoReview)) return false
+        return autoReview.reviewID === reviewID && autoReview.status === "reviewing"
+      }).pipe(
+        Effect.catch(() => Effect.succeed(false)),
+        Effect.catchDefect(() => Effect.succeed(false)),
+      )
+    }
   }),
 )
 
@@ -804,6 +837,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
     Layer.provide(Provider.defaultLayer),
+    Layer.provide(Database.defaultLayer),
   ),
 )
 
@@ -846,7 +880,7 @@ function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: Ses
     // visible attempt prevents users from reading a malformed JSON/prose answer
     // as an approved decision before the protocol repair completes.
     yield* sessions.updateMessage({ ...request.info, hidden })
-    const assistant = Array.from(MessageV2.stream(sessionID, { includeHidden: true })).find(
+    const assistant = (yield* MessageV2.stream(sessionID, { includeHidden: true })).find(
       (msg) => msg.info.role === "assistant" && msg.info.parentID === requestID,
     )
     if (assistant?.info.role === "assistant") {
@@ -857,7 +891,7 @@ function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: Ses
 
 function recordJsonFallbackDecision(
   sessions: Session.Interface,
-  persist: { sessionID: SessionID; messageID: MessageID; reviewID: string },
+  persist: PersistedReview,
   assessment: Schema.Schema.Type<typeof Assessment>,
 ) {
   return Effect.gen(function* () {

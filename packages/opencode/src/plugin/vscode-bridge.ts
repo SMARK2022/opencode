@@ -1,4 +1,3 @@
-import { Effect } from "effect"
 import { tool, type ToolContext } from "@opencode-ai/plugin"
 import { createTwoFilesPatch } from "diff"
 import { z } from "zod"
@@ -366,14 +365,12 @@ function booleanValue(value: unknown) {
 
 async function ask(context: ToolContext, permission: string, args: Record<string, unknown>) {
   const pattern = typeof args.filePath === "string" ? args.filePath : "*"
-  await Effect.runPromise(
-    context.ask({
-      permission,
-      patterns: [pattern],
-      always: [pattern],
-      metadata: { args },
-    }),
-  )
+  await context.ask({
+    permission,
+    patterns: [pattern],
+    always: [pattern],
+    metadata: { args },
+  })
 }
 
 export const VscodeBridgePlugin = async () => ({

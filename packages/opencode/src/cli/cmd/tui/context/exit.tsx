@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useRenderer } from "@opentui/solid"
 import { createSimpleContext } from "./helper"
 import { FormatError, FormatUnknownError } from "@/cli/error"

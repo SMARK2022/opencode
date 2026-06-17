@@ -1,47 +1,50 @@
 import { afterEach, describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, PartID, type SessionID } from "@/session/schema"
-import { ModelID, ProviderID } from "@/provider/schema"
-import * as Log from "@opencode-ai/core/util/log"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { SessionMessage } from "@opencode-ai/core/session-message"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { disposeAllInstances, provideInstance, TestInstance } from "../fixture/fixture"
 import { mkdir, mkdtemp, realpath, rm } from "fs/promises"
 import path from "path"
 import os from "os"
-import { Database } from "@/storage/db"
-import { SessionMessageTable, SessionTable } from "@/session/session.sql"
-import { ProjectTable } from "@/project/project.sql"
-import { ProjectID } from "@/project/schema"
+import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { Project } from "@opencode-ai/core/project"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 import { eq } from "drizzle-orm"
 import { SessionPath } from "@/session/path"
 import { testEffect } from "../lib/effect"
-import { Bus } from "@/bus"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { Storage } from "@/storage/storage"
-import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
 import { InstanceRef } from "@/effect/instance-ref"
 import { $ } from "bun"
 
-void Log.init({ print: false })
-const it = testEffect(
-  SessionNs.layer.pipe(
-    Layer.provide(Bus.layer),
-    Layer.provide(Storage.defaultLayer),
-    Layer.provide(SyncEvent.defaultLayer),
-    Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
-    Layer.provide(BackgroundJob.defaultLayer),
-  ),
-)
+const layer = (experimentalWorkspaces: boolean) =>
+  Layer.mergeAll(
+    Database.defaultLayer,
+    SessionNs.layer.pipe(
+      Layer.provide(EventV2Bridge.defaultLayer),
+      Layer.provide(Storage.defaultLayer),
+      Layer.provide(Database.defaultLayer),
+      Layer.provide(EventV2Bridge.defaultLayer),
+      Layer.provide(SessionProjector.defaultLayer),
+      Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces })),
+      Layer.provide(BackgroundJob.defaultLayer),
+    ),
+  )
+const it = testEffect(layer(false))
+const itWorkspaces = testEffect(layer(true))
 
 const withSession = (input?: Parameters<SessionNs.Interface["create"]>[0]) =>
-  Effect.acquireRelease(
-    SessionNs.Service.use((session) => session.create(input)),
-    (created) => SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
+  Effect.acquireRelease(SessionNs.use.create(input), (created) =>
+    SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
   )
 
 // 搜索回归测试只通过 Session service 写入 v1 消息，再通过 list({ search })
@@ -55,7 +58,7 @@ const createSearchUserMessage = Effect.fn("SessionListTest.createSearchUserMessa
     role: "user",
     time: { created: Date.now() },
     agent: "test",
-    model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+    model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
     tools: {},
   }
   yield* SessionNs.Service.use((session) => session.updateMessage(message))
@@ -76,8 +79,8 @@ const createSearchAssistantMessage = Effect.fn("SessionListTest.createSearchAssi
     role: "assistant",
     time: { created: Date.now() },
     parentID,
-    modelID: ModelID.make("test"),
-    providerID: ProviderID.make("test"),
+    modelID: ModelV2.ID.make("test"),
+    providerID: ProviderV2.ID.make("test"),
     mode: "",
     agent: "test",
     path: { cwd: "/", root: "/" },
@@ -188,7 +191,7 @@ describe("session.list", () => {
           provideInstance(path.join(test.directory, "packages", "app")),
         )
 
-        const ids = (yield* SessionNs.Service.use((session) => session.list())).map((session) => session.id)
+        const ids = (yield* SessionNs.use.list()).map((session) => session.id)
         expect(ids).toContain(root.id)
         expect(ids).toContain(parent.id)
         expect(ids).toContain(current.id)
@@ -223,6 +226,57 @@ describe("session.list", () => {
         expect(ids).not.toContain(parent.id)
         expect(ids).toContain(current.id)
         expect(ids).not.toContain(sibling.id)
+      }),
+    { git: true },
+  )
+
+  itWorkspaces.instance(
+    "filters by directory when experimental workspaces are enabled",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* Effect.promise(() => mkdir(path.join(test.directory, "packages", "opencode"), { recursive: true }))
+        yield* Effect.promise(() => mkdir(path.join(test.directory, "packages", "app"), { recursive: true }))
+
+        const current = yield* withSession({ title: "current" }).pipe(
+          provideInstance(path.join(test.directory, "packages", "opencode")),
+        )
+        const sibling = yield* withSession({ title: "sibling" }).pipe(
+          provideInstance(path.join(test.directory, "packages", "app")),
+        )
+
+        const ids = (yield* SessionNs.Service.use((session) =>
+          session.list({ directory: path.join(test.directory, "packages", "opencode") }),
+        )).map((session) => session.id)
+        expect(ids).toContain(current.id)
+        expect(ids).not.toContain(sibling.id)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "matches a session regardless of directory separator on Windows",
+    () =>
+      Effect.gen(function* () {
+        if (process.platform !== "win32") return
+        const test = yield* TestInstance
+        const dir = path.join(test.directory, "packages", "opencode")
+        yield* Effect.promise(() => mkdir(dir, { recursive: true }))
+
+        const created = yield* withSession({ title: "separator" }).pipe(provideInstance(dir))
+
+        // A forward-slash query (e.g. from the SDK/HTTP layer) must still find it —
+        // this is the regression: backslash-stored vs forward-slash-queried.
+        const forwardIDs = (yield* SessionNs.Service.use((session) =>
+          session.list({ directory: dir.replaceAll("\\", "/") }),
+        )).map((session) => session.id)
+        expect(forwardIDs).toContain(created.id)
+
+        // The native form must keep matching too.
+        const nativeIDs = (yield* SessionNs.Service.use((session) => session.list({ directory: dir }))).map(
+          (session) => session.id,
+        )
+        expect(nativeIDs).toContain(created.id)
       }),
     { git: true },
   )
@@ -262,6 +316,14 @@ describe("session.list", () => {
         expect(pathIDs).toContain(current.id)
         expect(pathIDs).toContain(deeper.id)
         expect(pathIDs).not.toContain(sibling.id)
+
+        if (process.platform === "win32") {
+          const windowsPathIDs = (yield* SessionNs.Service.use((session) =>
+            session.list({ path: "packages\\opencode\\src" }),
+          )).map((session) => session.id)
+          expect(windowsPathIDs).toContain(current.id)
+          expect(windowsPathIDs).toContain(deeper.id)
+        }
       }),
     { git: true },
   )
@@ -391,52 +453,61 @@ describe("session.list", () => {
 
   it.instance("path-scoped home matching treats Windows home spellings as equivalent", () =>
     Effect.gen(function* () {
-      const homeProjectID = ProjectID.make("proj_windows_home")
-      const otherProjectID = ProjectID.make("proj_windows_other")
+      const homeProjectID = Project.ID.make("proj_windows_home")
+      const otherProjectID = Project.ID.make("proj_windows_other")
       const home = yield* withSession({ title: "windows-home-switch" })
       const other = yield* withSession({ title: "windows-other-switch" })
 
       yield* Effect.addFinalizer(() =>
-        Effect.sync(() =>
-          Database.use((db) => {
-            db.delete(ProjectTable).where(eq(ProjectTable.id, homeProjectID)).run()
-            db.delete(ProjectTable).where(eq(ProjectTable.id, otherProjectID)).run()
-          }),
-        ),
+        Database.Service.use(({ db }) =>
+          Effect.all(
+            [
+              db.delete(ProjectTable).where(eq(ProjectTable.id, homeProjectID)).run(),
+              db.delete(ProjectTable).where(eq(ProjectTable.id, otherProjectID)).run(),
+            ],
+            { discard: true },
+          ),
+        ).pipe(Effect.ignore),
       )
 
-      yield* Effect.sync(() =>
-        Database.use((db) => {
-          db.insert(ProjectTable)
-            .values([
-              {
-                id: homeProjectID,
-                worktree: "C:/Users/Alice",
-                vcs: "git",
-                time_created: Date.now(),
-                time_updated: Date.now(),
-                sandboxes: [],
-              },
-              {
-                id: otherProjectID,
-                worktree: "D:/Work/Repo",
-                vcs: "git",
-                time_created: Date.now(),
-                time_updated: Date.now(),
-                sandboxes: [],
-              },
-            ])
-            .run()
-          db.update(SessionTable)
-            .set({ project_id: homeProjectID, directory: "C:\\Users\\Alice", path: "" })
-            .where(eq(SessionTable.id, home.id))
-            .run()
-          db.update(SessionTable)
-            .set({ project_id: otherProjectID, directory: "D:/Work/Repo", path: "" })
-            .where(eq(SessionTable.id, other.id))
-            .run()
-        }),
-      )
+      yield* Database.Service.use(({ db }) =>
+        Effect.all(
+          [
+            db
+              .insert(ProjectTable)
+              .values([
+                {
+                  id: homeProjectID,
+                  worktree: AbsolutePath.make("C:/Users/Alice"),
+                  vcs: "git",
+                  time_created: Date.now(),
+                  time_updated: Date.now(),
+                  sandboxes: [],
+                },
+                {
+                  id: otherProjectID,
+                  worktree: AbsolutePath.make("D:/Work/Repo"),
+                  vcs: "git",
+                  time_created: Date.now(),
+                  time_updated: Date.now(),
+                  sandboxes: [],
+                },
+              ])
+              .run(),
+            db
+              .update(SessionTable)
+              .set({ project_id: homeProjectID, directory: "C:\\Users\\Alice", path: "" })
+              .where(eq(SessionTable.id, home.id))
+              .run(),
+            db
+              .update(SessionTable)
+              .set({ project_id: otherProjectID, directory: "D:/Work/Repo", path: "" })
+              .where(eq(SessionTable.id, other.id))
+              .run(),
+          ],
+          { discard: true },
+        ),
+      ).pipe(Effect.orDie)
 
       const ctx = {
         directory: "c:/users/alice/",
@@ -560,16 +631,19 @@ describe("session.list", () => {
           provideInstance(path.join(test.directory, "packages", "app")),
         )
 
-        yield* Effect.sync(() =>
-          Database.use((db) =>
-            db.update(SessionTable).set({ path: null }).where(eq(SessionTable.id, current.id)).run(),
-          ),
-        )
-        yield* Effect.sync(() =>
-          Database.use((db) =>
-            db.update(SessionTable).set({ path: null }).where(eq(SessionTable.id, sibling.id)).run(),
-          ),
-        )
+        const { db } = yield* Database.Service
+        yield* db
+          .update(SessionTable)
+          .set({ path: null })
+          .where(eq(SessionTable.id, current.id))
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .update(SessionTable)
+          .set({ path: null })
+          .where(eq(SessionTable.id, sibling.id))
+          .run()
+          .pipe(Effect.orDie)
 
         const pathIDs = (yield* SessionNs.Service.use((session) =>
           session.list({
@@ -590,7 +664,7 @@ describe("session.list", () => {
         const root = yield* withSession({ title: "root-session" })
         const child = yield* withSession({ title: "child-session", parentID: root.id })
 
-        const sessions = yield* SessionNs.Service.use((session) => session.list({ roots: true }))
+        const sessions = yield* SessionNs.use.list({ roots: true })
         const ids = sessions.map((session) => session.id)
 
         expect(ids).toContain(root.id)
@@ -617,7 +691,7 @@ describe("session.list", () => {
         yield* withSession({ title: "unique-search-term-abc" })
         yield* withSession({ title: "other-session-xyz" })
 
-        const sessions = yield* SessionNs.Service.use((session) => session.list({ search: "unique-search" }))
+        const sessions = yield* SessionNs.use.list({ search: "unique-search" })
         const titles = sessions.map((session) => session.title)
 
         expect(titles).toContain("unique-search-term-abc")
@@ -814,97 +888,98 @@ describe("session.list", () => {
         // 这里直接插入投影行，是为了只验证公开 list(search) 行为，并覆盖已经
         // 落库的历史投影数据；不启动 streaming/event pipeline，避免测试变成
         // 对消息生成流程的集成测试。
-        yield* Effect.sync(() =>
-          Database.use((db) =>
-            db
-              .insert(SessionMessageTable)
-              .values([
+        yield* Database.Service.use(({ db }) =>
+          db
+            .insert(SessionMessageTable)
+            .values([
                 {
                   id: SessionMessage.ID.create(),
                   session_id: session.id,
                   type: "user",
+                  seq: 1,
                   time_created: 1,
-                  data: {
-                    text: "v2-user-visible-needle",
-                    files: [
-                      {
-                        uri: "file:///tmp/v2-visible-file.ts",
-                        mime: "text/plain",
-                        name: "v2-file-visible-needle",
-                        description: "v2-file-description-needle",
-                      },
-                      {
-                        uri: "data:text/plain,v2-data-uri-hidden-needle",
-                        mime: "text/plain",
-                        name: "v2-data-name-visible-needle",
-                      },
-                    ],
-                    agents: [{ name: "v2-agent-visible-needle" }],
-                    references: [
-                      {
-                        name: "v2-reference-visible-needle",
-                        kind: "local",
-                        uri: "file:///tmp/v2-reference.ts",
-                        repository: "v2-repository-visible-needle",
-                        branch: "v2-branch-visible-needle",
-                        target: "v2-target-visible-needle",
-                        targetUri: "file:///tmp/v2-target-visible.ts",
-                      },
-                    ],
-                    time: { created: 1 },
-                  } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
-                },
+                data: {
+                  text: "v2-user-visible-needle",
+                  files: [
+                    {
+                      uri: "file:///tmp/v2-visible-file.ts",
+                      mime: "text/plain",
+                      name: "v2-file-visible-needle",
+                      description: "v2-file-description-needle",
+                    },
+                    {
+                      uri: "data:text/plain,v2-data-uri-hidden-needle",
+                      mime: "text/plain",
+                      name: "v2-data-name-visible-needle",
+                    },
+                  ],
+                  agents: [{ name: "v2-agent-visible-needle" }],
+                  references: [
+                    {
+                      name: "v2-reference-visible-needle",
+                      kind: "local",
+                      uri: "file:///tmp/v2-reference.ts",
+                      repository: "v2-repository-visible-needle",
+                      branch: "v2-branch-visible-needle",
+                      target: "v2-target-visible-needle",
+                      targetUri: "file:///tmp/v2-target-visible.ts",
+                    },
+                  ],
+                  time: { created: 1 },
+                } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+              },
                 {
                   id: SessionMessage.ID.create(),
                   session_id: session.id,
                   type: "assistant",
+                  seq: 2,
                   time_created: 2,
-                  data: {
-                    agent: "build",
-                    model: {
-                      id: ModelV2.ID.make("model"),
-                      providerID: ProviderV2.ID.make("provider"),
-                      variant: ModelV2.VariantID.make("default"),
-                    },
-                    content: [
-                      { type: "text", text: "v2-assistant-visible-needle" },
-                      { type: "reasoning", id: "v2-reasoning", text: "v2-thinking-hidden-needle" },
-                      {
-                        type: "tool",
-                        id: "v2-tool-call",
-                        name: "bash",
-                        provider: {
-                          executed: false,
-                          metadata: { secret: "v2-provider-hidden-needle" },
-                        },
-                        state: {
-                          status: "completed",
-                          input: { command: toolCommand, nested: { path: "v2 folder/file.ts" }, empty: "" },
-                          content: [{ type: "text", text: "v2-tool-result-hidden-needle" }],
-                          structured: { secret: "v2-structured-hidden-needle" },
-                        },
-                        time: { created: 3, completed: 4 },
+                data: {
+                  agent: "build",
+                  model: {
+                    id: ModelV2.ID.make("model"),
+                    providerID: ProviderV2.ID.make("provider"),
+                    variant: ModelV2.VariantID.make("default"),
+                  },
+                  content: [
+                    { type: "text", text: "v2-assistant-visible-needle" },
+                    { type: "reasoning", id: "v2-reasoning", text: "v2-thinking-hidden-needle" },
+                    {
+                      type: "tool",
+                      id: "v2-tool-call",
+                      name: "bash",
+                      provider: {
+                        executed: false,
+                        metadata: { secret: "v2-provider-hidden-needle" },
                       },
-                    ],
-                    time: { created: 2 },
-                  } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
-                },
+                      state: {
+                        status: "completed",
+                        input: { command: toolCommand, nested: { path: "v2 folder/file.ts" }, empty: "" },
+                        content: [{ type: "text", text: "v2-tool-result-hidden-needle" }],
+                        structured: { secret: "v2-structured-hidden-needle" },
+                      },
+                      time: { created: 3, completed: 4 },
+                    },
+                  ],
+                  time: { created: 2 },
+                } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+              },
                 {
                   id: SessionMessage.ID.create(),
                   session_id: session.id,
                   type: "shell",
+                  seq: 3,
                   time_created: 5,
-                  data: {
-                    callID: "v2-shell-call",
-                    command: shellCommand,
-                    output: "v2-shell-result-hidden-needle",
-                    time: { created: 5, completed: 6 },
-                  } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
-                },
-              ])
-              .run(),
-          ),
-        )
+                data: {
+                  callID: "v2-shell-call",
+                  command: shellCommand,
+                  output: "v2-shell-result-hidden-needle",
+                  time: { created: 5, completed: 6 },
+                } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+              },
+            ])
+            .run(),
+        ).pipe(Effect.orDie)
 
         // v2 保留与 v1 一致的用户可见语义：user/assistant 文本、工具名、工具输入
         // 以及 shell command；复杂命令字符必须按原值参与搜索，不能被 JSON 键名替代。
@@ -965,8 +1040,24 @@ describe("session.list", () => {
         yield* withSession({ title: "session-2" })
         yield* withSession({ title: "session-3" })
 
-        const sessions = yield* SessionNs.Service.use((session) => session.list({ limit: 2 }))
+        const sessions = yield* SessionNs.use.list({ limit: 2 })
         expect(sessions.length).toBe(2)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "includes metadata in listed sessions",
+    () =>
+      Effect.gen(function* () {
+        const meta = { source: "sdk", trace: { id: "abc" } }
+        const created = yield* withSession({ title: "meta-session", metadata: meta })
+
+        const listed = (yield* SessionNs.Service.use((session) => session.list({ search: "meta-session" }))).find(
+          (item) => item.id === created.id,
+        )
+
+        expect(listed?.metadata).toEqual(meta)
       }),
     { git: true },
   )

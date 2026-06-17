@@ -328,7 +328,9 @@ describe("context usage", () => {
 
     expect(data.details.toolDefs.length).toBeGreaterThan(10)
     expect(data.details.toolDefs.find((item) => item.name === "task")?.tokens).toBeGreaterThan(20)
-    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(1000)
+    const toolDefinitionTokens = data.details.toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBe(toolDefinitionTokens)
+    expect(toolDefinitionTokens).toBeGreaterThan(100)
   })
 
   test("explicit false tools disable definitions without turning true tools into a subset", async () => {

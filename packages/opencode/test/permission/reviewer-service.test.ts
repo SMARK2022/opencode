@@ -5,8 +5,10 @@ import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
 import { PermissionReviewer } from "../../src/permission/reviewer/service"
 import { Plugin } from "../../src/plugin"
-import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session/session"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { Database } from "@opencode-ai/core/database/database"
 import { testEffect } from "../lib/effect"
 import { TestConfig } from "../fixture/config"
 import { ProviderTest } from "../fake/provider"
@@ -37,8 +39,8 @@ type CapturedReviewerRequest = {
   headers: Headers
 }
 
-const OPENAI_PROVIDER_ID = ProviderID.make("openai")
-const CUSTOM_PROVIDER_ID = ProviderID.make("custom-openai")
+const OPENAI_PROVIDER_ID = ProviderV2.ID.make("openai")
+const CUSTOM_PROVIDER_ID = ProviderV2.ID.make("custom-openai")
 // This header is a test sentinel, not a production contract. It proves the
 // reviewer path sends its provider request through the existing chat.headers
 // compatibility seam without asserting on implementation structure or hook names
@@ -157,7 +159,7 @@ function reviewerFixture(
   authInfo: Auth.Info | undefined,
   options: {
     requireInstructions: boolean
-    providerID?: ProviderID
+    providerID?: ProviderV2.ID
     rejectMaxOutputTokens?: boolean
     plugin?: Layer.Layer<Plugin.Service>
     permission?: Config.Info["permission"]
@@ -217,6 +219,7 @@ function reviewerFixture(
       Layer.provide(authLayer(authInfo)),
       Layer.provide(options.plugin ?? pluginLayer()),
       Layer.provide(sessionLayer),
+      Layer.provide(Database.defaultLayer),
     ),
   }
 }
@@ -247,9 +250,9 @@ function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string 
   )
 }
 
-function reviewerModel(providerID: ProviderID) {
+function reviewerModel(providerID: ProviderV2.ID) {
   return ProviderTest.model({
-    id: ModelID.make("gpt-5"),
+    id: ModelV2.ID.make("gpt-5"),
     providerID,
     api: { id: "gpt-5", url: "https://api.openai.test/v1", npm: "@ai-sdk/openai" },
   })
@@ -291,7 +294,7 @@ function reviewInput(reviewID: string, metadata?: Readonly<Record<string, unknow
   }
 }
 
-function config(providerID: ProviderID, permission?: Config.Info["permission"]): Config.Info {
+function config(providerID: ProviderV2.ID, permission?: Config.Info["permission"]): Config.Info {
   return {
     permission: permission ?? {
       approvals_reviewer: "auto_review",

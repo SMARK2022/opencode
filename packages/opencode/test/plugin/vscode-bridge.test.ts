@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
-import { Effect } from "effect"
 import type { ToolContext } from "@opencode-ai/plugin"
 import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
 import * as VscodeBridge from "@/ide/vscode-bridge"
@@ -32,7 +31,7 @@ describe("vscode bridge plugin", () => {
         })
         // 这个错误是测试哨兵：权限层拒绝后，工具必须停止在本地，
         // 不能继续进入真实的 127.0.0.1 VS Code bridge 调用。
-        return Effect.die(new Error(stop))
+        return Promise.reject(new Error(stop))
       },
     })
 
@@ -108,7 +107,7 @@ describe("vscode bridge plugin", () => {
           metadata: () => undefined,
           ask(input) {
             calls.push(input.permission)
-            return input.permission === "edit" ? Effect.die(new Error(stop)) : Effect.void
+            return input.permission === "edit" ? Promise.reject(new Error(stop)) : Promise.resolve()
           },
         },
       ),
@@ -152,7 +151,7 @@ describe("vscode bridge plugin", () => {
             expect(input.patterns).toEqual([filePath])
             expect(input.always).toEqual([filePath])
             expect(input.metadata.args).toMatchObject({ filePath, operation: "save" })
-            return input.permission === "edit" ? Effect.die(new Error(stop)) : Effect.void
+            return input.permission === "edit" ? Promise.reject(new Error(stop)) : Promise.resolve()
           },
         },
       ),
@@ -495,7 +494,7 @@ function allowContext(filePath: string): ToolContext {
     metadata: () => undefined,
     ask(input) {
       expect(input.patterns).toEqual([filePath])
-      return Effect.void
+      return Promise.resolve()
     },
   }
 }

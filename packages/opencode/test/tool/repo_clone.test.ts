@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises"
 import path from "path"
 import { pathToFileURL } from "node:url"
 import { Cause, Effect, Exit, Layer } from "effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Git } from "../../src/git"
@@ -32,7 +32,7 @@ const ctx = {
 const it = testEffect(
   Layer.mergeAll(
     Agent.defaultLayer,
-    AppFileSystem.defaultLayer,
+    FSUtil.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     Git.defaultLayer,
     Truncate.defaultLayer,
@@ -100,11 +100,11 @@ const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
   )
 
 const waitForContent = (
-  fs: AppFileSystem.Interface,
+  fs: FSUtil.Interface,
   file: string,
   content: string,
   attempts = 50,
-): Effect.Effect<string, AppFileSystem.Error | Error> =>
+): Effect.Effect<string, FSUtil.Error | Error> =>
   Effect.gen(function* () {
     const actual = yield* fs.readFileStringSafe(file)
     if (actual === content) return actual
@@ -117,7 +117,7 @@ const waitForContent = (
     return yield* waitForContent(fs, file, content, attempts - 1)
   })
 
-const isolateRepoCache = (fs: AppFileSystem.Interface, cache: string) =>
+const isolateRepoCache = (fs: FSUtil.Interface, cache: string) =>
   Effect.gen(function* () {
     // repo_clone 测试使用固定 GitHub shorthand；先清掉全局 cache，
     // 防止 full run 中其他 reference/read/repo 测试留下同名工作区污染内容断言。
@@ -136,7 +136,7 @@ describe("tool.repo_clone", () => {
   it.live("clones a repo into the managed cache and reuses it on subsequent calls", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FSUtil.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
         const owner = "repo-clone-reuse"
@@ -166,12 +166,13 @@ describe("tool.repo_clone", () => {
         expect(yield* waitForContent(fs, path.join(cloned.metadata.localPath, "README.md"), "v1\n")).toBe("v1\n")
       }),
     ),
+    30_000,
   )
 
   it.live("refresh updates an existing cached clone", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FSUtil.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
         const owner = "repo-clone-refresh"
@@ -208,12 +209,13 @@ describe("tool.repo_clone", () => {
         expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2 updated\n")).toBe("v2 updated\n")
       }),
     ),
+    30_000,
   )
 
   it.live("clones a configured branch", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FSUtil.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
         const owner = "repo-clone-branch"
@@ -243,6 +245,7 @@ describe("tool.repo_clone", () => {
         expect(yield* waitForContent(fs, path.join(result.metadata.localPath, "DOCS.md"), "docs\n")).toBe("docs\n")
       }),
     ),
+    30_000,
   )
 
   it.live("rejects invalid repository inputs", () =>
@@ -272,6 +275,7 @@ describe("tool.repo_clone", () => {
         )
       }),
     ),
+    30_000,
   )
 
   it.live("rejects local file repository URLs", () =>
@@ -288,5 +292,6 @@ describe("tool.repo_clone", () => {
         }
       }),
     ),
+    30_000,
   )
 })

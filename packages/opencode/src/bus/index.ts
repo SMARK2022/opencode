@@ -8,7 +8,7 @@ import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { makeRuntime } from "@/effect/run-service"
 import { Identifier } from "@/id/id"
 import type { InstanceContext } from "@/project/instance"
-import type { WorkspaceID } from "@/control-plane/schema"
+import type { WorkspaceV2 } from "@opencode-ai/core/workspace"
 
 const log = Log.create({ service: "bus" })
 
@@ -36,7 +36,7 @@ type PublishOptions = {
   id?: string
   context?: {
     instance: InstanceContext
-    workspace?: WorkspaceID
+    workspace?: WorkspaceV2.ID
   }
 }
 

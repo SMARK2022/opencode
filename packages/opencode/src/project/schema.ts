@@ -1,13 +1,4 @@
-import { Schema } from "effect"
+import { Project } from "@opencode-ai/core/project"
 
-import { withStatics } from "@opencode-ai/core/schema"
-
-const projectIdSchema = Schema.String.pipe(Schema.brand("ProjectID"))
-
-export type ProjectID = typeof projectIdSchema.Type
-
-export const ProjectID = projectIdSchema.pipe(
-  withStatics((schema: typeof projectIdSchema) => ({
-    global: schema.make("global"),
-  })),
-)
+export const ProjectID = Project.ID
+export type ProjectID = Project.ID

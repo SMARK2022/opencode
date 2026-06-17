@@ -1,11 +1,12 @@
-import { BusEvent } from "@/bus/bus-event"
+import { EventV2 } from "@opencode-ai/core/event"
 import { SessionID, MessageID, PartID } from "./schema"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type ProviderMetadata, type UIMessage } from "ai"
 import { LSP } from "@/lsp/lsp"
 import { Snapshot } from "@/snapshot"
-import { SyncEvent } from "../sync"
-import { Database } from "@/storage/db"
+import { Database } from "@opencode-ai/core/database/database"
 import { NotFoundError } from "@/storage/storage"
 import { and } from "drizzle-orm"
 import { desc } from "drizzle-orm"
@@ -13,17 +14,16 @@ import { eq } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
-import { MessageTable, PartTable, SessionTable } from "./session.sql"
-import * as ProviderError from "@/provider/error"
+import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
-import { ModelID, ProviderID } from "@/provider/schema"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { Effect, Schema, Types } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
-import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
 import { AuthError, OutputLengthError } from "./message-error"
 import { formatCompactionClearedNotice } from "@/util/output-notice"
@@ -104,6 +104,7 @@ export const ContextOverflowError = NamedError.create("ContextOverflowError", {
   message: Schema.String,
   responseBody: Schema.optional(Schema.String),
 })
+export const ContentFilterError = SessionV1.ContentFilterError
 
 export class OutputFormatText extends Schema.Class<OutputFormatText>("OutputFormatText")({
   type: Schema.Literal("text"),
@@ -260,8 +261,8 @@ export const SubtaskPart = Schema.Struct({
   agent: Schema.String,
   model: Schema.optional(
     Schema.Struct({
-      providerID: ProviderID,
-      modelID: ModelID,
+      providerID: ProviderV2.ID,
+      modelID: ModelV2.ID,
     }),
   ),
   command: Schema.optional(Schema.String),
@@ -450,8 +451,8 @@ export const User = Schema.Struct({
   ),
   agent: Schema.String,
   model: Schema.Struct({
-    providerID: ProviderID,
-    modelID: ModelID,
+    providerID: ProviderV2.ID,
+    modelID: ModelV2.ID,
     variant: Schema.optional(Schema.String),
   }),
   system: Schema.optional(Schema.String),
@@ -492,6 +493,7 @@ const AssistantErrorSchema = Schema.Union([
   AbortedError.EffectSchema,
   StructuredOutputError.EffectSchema,
   ContextOverflowError.EffectSchema,
+  ContentFilterError.EffectSchema,
   APIError.EffectSchema,
 ]).annotate({ discriminator: "name" })
 type AssistantError = Schema.Schema.Type<typeof AssistantErrorSchema>
@@ -551,8 +553,8 @@ export const SubtaskPartInput = Schema.Struct({
   agent: Schema.String,
   model: Schema.optional(
     Schema.Struct({
-      providerID: ProviderID,
-      modelID: ModelID,
+      providerID: ProviderV2.ID,
+      modelID: ModelV2.ID,
     }),
   ),
   command: Schema.optional(Schema.String),
@@ -568,8 +570,8 @@ export const Assistant = Schema.Struct({
   }),
   error: Schema.optional(AssistantErrorSchema),
   parentID: MessageID,
-  modelID: ModelID,
-  providerID: ProviderID,
+  modelID: ModelV2.ID,
+  providerID: ProviderV2.ID,
   /**
    * @deprecated
    */
@@ -612,65 +614,6 @@ export type Assistant = Omit<Types.DeepMutable<Schema.Schema.Type<typeof Assista
 export const Info = Schema.Union([User, Assistant]).annotate({ discriminator: "role", identifier: "Message" })
 export type Info = User | Assistant
 
-const UpdatedEventSchema = Schema.Struct({
-  sessionID: SessionID,
-  info: Info,
-})
-
-const RemovedEventSchema = Schema.Struct({
-  sessionID: SessionID,
-  messageID: MessageID,
-})
-
-const PartUpdatedEventSchema = Schema.Struct({
-  sessionID: SessionID,
-  part: Part,
-  time: NonNegativeInt,
-})
-
-const PartRemovedEventSchema = Schema.Struct({
-  sessionID: SessionID,
-  messageID: MessageID,
-  partID: PartID,
-})
-
-export const Event = {
-  Updated: SyncEvent.define({
-    type: "message.updated",
-    version: 1,
-    aggregate: "sessionID",
-    schema: UpdatedEventSchema,
-  }),
-  Removed: SyncEvent.define({
-    type: "message.removed",
-    version: 1,
-    aggregate: "sessionID",
-    schema: RemovedEventSchema,
-  }),
-  PartUpdated: SyncEvent.define({
-    type: "message.part.updated",
-    version: 1,
-    aggregate: "sessionID",
-    schema: PartUpdatedEventSchema,
-  }),
-  PartDelta: BusEvent.define(
-    "message.part.delta",
-    Schema.Struct({
-      sessionID: SessionID,
-      messageID: MessageID,
-      partID: PartID,
-      field: Schema.String,
-      delta: Schema.String,
-    }),
-  ),
-  PartRemoved: SyncEvent.define({
-    type: "message.part.removed",
-    version: 1,
-    aggregate: "sessionID",
-    schema: PartRemovedEventSchema,
-  }),
-}
-
 export const WithParts = Schema.Struct({
   info: Info,
   parts: Schema.Array(Part),
@@ -678,6 +621,23 @@ export const WithParts = Schema.Struct({
 export type WithParts = {
   info: Info
   parts: Part[]
+}
+
+export const Event = {
+  Updated: SessionV1.Event.MessageUpdated,
+  Removed: SessionV1.Event.MessageRemoved,
+  PartUpdated: SessionV1.Event.PartUpdated,
+  PartDelta: EventV2.define({
+    type: "message.part.delta",
+    schema: {
+      sessionID: SessionID,
+      messageID: MessageID,
+      partID: PartID,
+      field: Schema.String,
+      delta: Schema.String,
+    },
+  }),
+  PartRemoved: SessionV1.Event.PartRemoved,
 }
 
 const RECENT_USER_MEMENTO_INTRO =
@@ -735,30 +695,31 @@ const part = (row: typeof PartTable.$inferSelect) =>
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
-function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
+function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
   const ids = rows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
-  if (ids.length > 0) {
-    const partRows = Database.use((db) =>
-      db
+  return Effect.gen(function* () {
+    if (ids.length > 0) {
+      const partRows = yield* db
         .select()
         .from(PartTable)
         .where(inArray(PartTable.message_id, ids))
         .orderBy(PartTable.message_id, PartTable.id)
-        .all(),
-    )
-    for (const row of partRows) {
-      const next = part(row)
-      const list = partByMessage.get(row.message_id)
-      if (list) list.push(next)
-      else partByMessage.set(row.message_id, [next])
+        .all()
+        .pipe(Effect.orDie)
+      for (const row of partRows) {
+        const next = part(row)
+        const list = partByMessage.get(row.message_id)
+        if (list) list.push(next)
+        else partByMessage.set(row.message_id, [next])
+      }
     }
-  }
 
-  return rows.map((row) => ({
-    info: info(row),
-    parts: partByMessage.get(row.id) ?? [],
-  }))
+    return rows.map((row) => ({
+      info: info(row),
+      parts: partByMessage.get(row.id) ?? [],
+    }))
+  })
 }
 
 function providerMeta(metadata: Record<string, unknown> | undefined): ProviderMetadata | undefined {
@@ -796,7 +757,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   const supportsMediaInToolResult = (attachment: { mime: string }) => {
     if (model.api.npm === "@ai-sdk/anthropic") return true
     if (model.api.npm === "@ai-sdk/openai") return true
+    if (model.api.npm === "@ai-sdk/amazon-bedrock/mantle") return true
     if (model.api.npm === "@ai-sdk/amazon-bedrock") return attachment.mime.startsWith("image/")
+    if (model.api.npm === "@ai-sdk/xai") return attachment.mime.startsWith("image/")
     if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
     if (model.api.npm === "@ai-sdk/google") {
       const id = model.api.id.toLowerCase()
@@ -1078,7 +1041,7 @@ export function toModelMessages(
   model: Provider.Model,
   options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
 ): Promise<ModelMessage[]> {
-  return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
+  return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }
 
 // [local-smark] page function with includeHidden support
@@ -1088,23 +1051,26 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
   includeHidden?: boolean
 }) {
+  const { db } = yield* Database.Service
   const before = input.before ? cursor.decode(input.before) : undefined
   const where = before
     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
     : eq(MessageTable.session_id, input.sessionID)
-  const rows = Database.use((db) =>
-    db
-      .select()
-      .from(MessageTable)
-      .where(where)
-      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-      .limit(input.limit + 1)
-      .all(),
-  )
+  const rows = yield* db
+    .select()
+    .from(MessageTable)
+    .where(where)
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+    .limit(input.limit + 1)
+    .all()
+    .pipe(Effect.orDie)
   if (rows.length === 0) {
-    const row = Database.use((db) =>
-      db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
-    )
+    const row = yield* db
+      .select({ id: SessionTable.id })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, input.sessionID))
+      .get()
+      .pipe(Effect.orDie)
     if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
     return {
       items: [] as WithParts[],
@@ -1114,7 +1080,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
-  const items = hydrate(slice)
+  const items = yield* hydrate(db, slice)
   items.reverse()
   if (!input.includeHidden) {
     for (let i = items.length - 1; i >= 0; i--) {
@@ -1133,57 +1099,58 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   }
 })
 
-export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
+export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
   const size = 50
-  let before: string | undefined
-  // Compaction recovery needs hidden structural anchors; callers that build a
-  // visible transcript pass includeHidden=false and let page() apply that filter.
-  const includeHidden = opts?.includeHidden ?? true
-  while (true) {
-    const next = Effect.runSync(
-      page({ sessionID, limit: size, before, includeHidden }).pipe(
+  return Effect.gen(function* () {
+    const result = [] as WithParts[]
+    let before: string | undefined
+    // Compaction recovery needs hidden structural anchors; callers that build a
+    // visible transcript pass includeHidden=false and let page() apply that filter.
+    const includeHidden = opts?.includeHidden ?? true
+    while (true) {
+      const next = yield* page({ sessionID, limit: size, before, includeHidden }).pipe(
         Effect.catchIf(NotFoundError.isInstance, () =>
           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
         ),
-      ),
-    )
-    if (next.items.length === 0) break
-    for (let i = next.items.length - 1; i >= 0; i--) {
-      const msg = next.items[i]
-      yield msg
+      )
+      if (next.items.length === 0) break
+      for (let i = next.items.length - 1; i >= 0; i--) {
+        const item = next.items[i]
+        if (item) result.push(item)
+      }
+      if (!next.more || !next.cursor) break
+      before = next.cursor
     }
-    if (!next.more || !next.cursor) break
-    before = next.cursor
-  }
+    return result
+  })
 }
 
-export function parts(message_id: MessageID) {
-  const rows = Database.use((db) =>
-    db.select().from(PartTable).where(eq(PartTable.message_id, message_id)).orderBy(PartTable.id).all(),
-  )
-  return rows.map(
-    (row) =>
-      ({
-        ...row.data,
-        id: row.id,
-        sessionID: row.session_id,
-        messageID: row.message_id,
-      }) as Part,
-  )
+export function parts(messageID: MessageID) {
+  return Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const rows = yield* db
+      .select()
+      .from(PartTable)
+      .where(eq(PartTable.message_id, messageID))
+      .orderBy(PartTable.id)
+      .all()
+      .pipe(Effect.orDie)
+    return rows.map(part)
+  })
 }
 
 export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
-  const row = Database.use((db) =>
-    db
-      .select()
-      .from(MessageTable)
-      .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
-      .get(),
-  )
+  const { db } = yield* Database.Service
+  const row = yield* db
+    .select()
+    .from(MessageTable)
+    .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+    .get()
+    .pipe(Effect.orDie)
   if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
   return {
     info: info(row),
-    parts: parts(input.messageID),
+    parts: yield* parts(input.messageID),
   }
 })
 
@@ -1290,7 +1257,7 @@ function visibleCompactions(items: WithParts[]) {
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  return filterCompacted(stream(sessionID))
+  return filterCompacted(yield* stream(sessionID))
 })
 
 // filterCompacted reorders messages for model consumption
@@ -1320,7 +1287,7 @@ export function latest(msgs: WithParts[]) {
 
 export function fromError(
   e: unknown,
-  ctx: { providerID: ProviderID; aborted?: boolean },
+  ctx: { providerID: ProviderV2.ID; aborted?: boolean },
 ): NonNullable<Assistant["error"]> {
   if (!ctx.aborted) {
     const retried = retryErrorCause(e)
@@ -1389,6 +1356,29 @@ export function fromError(
           metadata: {
             code: (e as FetchDecompressionError).code,
             message: e.message,
+          },
+        },
+        { cause: e },
+      ).toObject()
+    case e instanceof ProviderError.HeaderTimeoutError:
+      return new APIError(
+        {
+          message: e.message,
+          isRetryable: true,
+          metadata: {
+            code: e.name,
+            timeoutMs: String(e.ms),
+          },
+        },
+        { cause: e },
+      ).toObject()
+    case e instanceof ProviderError.ResponseStreamError:
+      return new APIError(
+        {
+          message: e.message,
+          isRetryable: true,
+          metadata: {
+            code: e.name,
           },
         },
         { cause: e },

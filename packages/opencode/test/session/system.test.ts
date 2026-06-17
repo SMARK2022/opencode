@@ -5,9 +5,9 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { Skill } from "../../src/skill"
 import { Permission } from "../../src/permission"
 import { SystemPrompt } from "../../src/session/system"
-import { Git } from "../../src/git"
-import { ToolRegistry } from "../../src/tool/registry"
+import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { testEffect } from "../lib/effect"
+import { Git } from "@/git"
 
 const skills: Skill.Info[] = [
   {
@@ -44,46 +44,22 @@ const build: Agent.Info = {
 
 const it = testEffect(
   SystemPrompt.layer.pipe(
+    Layer.provide(Git.defaultLayer),
+    Layer.provide(LocationServiceMap.layer),
     Layer.provide(
-      Layer.mergeAll(
-        Layer.succeed(
-          Skill.Service,
-          Skill.Service.of({
-            get: (name) => Effect.succeed(skills.find((skill) => skill.name === name)),
-            all: () => Effect.succeed(skills),
-            dirs: () => Effect.succeed([]),
-            available: () => Effect.succeed(skills),
-          }),
-        ),
-        Layer.succeed(
-          Git.Service,
-          Git.Service.of({
-            run: () => Effect.die("unused"),
-            branch: () => Effect.die("unused"),
-            prefix: () => Effect.die("unused"),
-            defaultBranch: () => Effect.die("unused"),
-            hasHead: () => Effect.die("unused"),
-            mergeBase: () => Effect.die("unused"),
-            show: () => Effect.die("unused"),
-            status: () => Effect.die("unused"),
-            diff: () => Effect.die("unused"),
-            stats: () => Effect.die("unused"),
-            patch: () => Effect.die("unused"),
-            patchAll: () => Effect.die("unused"),
-            patchUntracked: () => Effect.die("unused"),
-            statUntracked: () => Effect.die("unused"),
-            applyPatch: () => Effect.die("unused"),
-          }),
-        ),
-        Layer.succeed(
-          ToolRegistry.Service,
-          ToolRegistry.Service.of({
-            ids: () => Effect.succeed([]),
-            all: () => Effect.succeed([]),
-            named: () => Effect.die("unused"),
-            tools: () => Effect.succeed([]),
-          }),
-        ),
+      Layer.succeed(
+        Skill.Service,
+        Skill.Service.of({
+          get: (name) => Effect.succeed(skills.find((skill) => skill.name === name)),
+          require: (name) => {
+            const info = skills.find((skill) => skill.name === name)
+            if (info) return Effect.succeed(info)
+            return Effect.fail(new Skill.NotFoundError({ name, available: skills.map((skill) => skill.name) }))
+          },
+          all: () => Effect.succeed(skills),
+          dirs: () => Effect.succeed([]),
+          available: () => Effect.succeed(skills),
+        }),
       ),
     ),
   ),

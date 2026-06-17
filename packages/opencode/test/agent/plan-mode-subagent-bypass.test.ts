@@ -1,23 +1,3 @@
-/**
- * Reproducer for opencode issue #26514:
- *
- * In Plan Mode (the `plan` agent), the main agent's edit/write tools are
- * blocked by the plan agent's permission ruleset (`edit: { "*": "deny" }`).
- * However, when the plan agent spawns a subagent via the `task` tool, the
- * subagent retains full file modification capabilities — a security bypass.
- *
- * This test replicates the permission ruleset that would govern a
- * `general` subagent when launched from a `plan` parent session, mirroring
- * the logic in `src/tool/task.ts` (filtered parent permissions ++ runtime
- * subagent agent permissions, evaluated as in `session/prompt.ts`).
- *
- * The expected (secure) behavior is that the subagent inherits the plan
- * mode read-only restriction and `edit`/`write` resolve to `deny`. On
- * origin/dev this assertion fails because the parent **agent** permissions
- * are not propagated to the subagent — only the parent **session**
- * permissions are passed through, and Plan Mode's restrictions live on the
- * agent, not the session.
- */
 import { expect } from "bun:test"
 import { Effect } from "effect"
 import { Agent } from "../../src/agent/agent"
@@ -97,7 +77,6 @@ it.instance("[#26514] explore subagent launched from plan mode also stays read-o
     })
     const effective = Permission.merge(explore!.permission, subagentSessionPermission)
 
-    // Already deny — sanity check.
     expect(Permission.evaluate("edit", "/x.ts", effective).action).toBe("deny")
   }),
 )
@@ -457,7 +436,6 @@ it.effect("subagent inherits parent session deny rules as hard runtime ceilings"
       executor.permission,
       deriveSubagentSessionPermission({
         parentSessionPermission: Permission.fromConfig({ bash: "deny" }),
-        parentAgent: undefined,
         subagent: executor,
       }),
     )

@@ -1,6 +1,6 @@
 import { Context, Effect, Exit, Fiber } from "effect"
 import { WorkspaceContext } from "@/control-plane/workspace-context"
-import type { WorkspaceID } from "@/control-plane/schema"
+import type { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { InstanceRef, WorkspaceRef } from "./instance-ref"
 import { attachWith } from "./run-service"
 
@@ -11,7 +11,7 @@ export interface Shape {
   readonly bind: <Args extends readonly unknown[], Result>(fn: (...args: Args) => Result) => (...args: Args) => Result
 }
 
-function restoreWorkspace<R>(workspace: WorkspaceID | undefined, fn: () => R): R {
+function restoreWorkspace<R>(workspace: WorkspaceV2.ID | undefined, fn: () => R): R {
   if (workspace !== undefined) return WorkspaceContext.restore(workspace, fn)
   return fn()
 }
@@ -67,11 +67,11 @@ export function make(): Effect.Effect<Shape> {
         restoreWorkspace(workspace, () => Effect.runFork(wrap(effect))),
       run: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         Effect.callback<A, E>((resume) => {
-          restoreWorkspace(workspace, () =>
-            Effect.runPromiseExit(wrap(effect)).then((exit) =>
+          restoreWorkspace(workspace, () => {
+            void Effect.runPromiseExit(wrap(effect)).then((exit) =>
               resume(Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause)),
-            ),
-          )
+            )
+          })
         }),
       bind:
         <Args extends readonly unknown[], Result>(fn: (...args: Args) => Result) =>

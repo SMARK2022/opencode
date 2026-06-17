@@ -4,7 +4,7 @@ import { createInterface } from "readline"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as path from "path"
 import * as Tool from "./tool"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { LSP } from "@/lsp/lsp"
 import DESCRIPTION from "./read.txt"
 import { InstanceState } from "@/effect/instance-state"
@@ -14,16 +14,13 @@ import { Instruction } from "../session/instruction"
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
 import { readOutline, type Outline } from "./read-outline"
-import { Reference } from "@/reference/reference"
 import { Image } from "@/image/image"
 import { PartID } from "@/session/schema"
 
-const DEFAULT_READ_LIMIT = 200
-const MAX_BYTES = 16 * 1024
+const DEFAULT_READ_LIMIT = 400
+const MAX_BYTES = 24 * 1024
 const SAMPLE_BYTES = 4096
 const MAX_CONTENT_TOKENS = 16000
-const MAX_LINE_LENGTH = 2000
-const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const OVERLAP_MIN_LINES = 20
 const OVERLAP_MIN_RATIO = 0.3
 
@@ -90,6 +87,7 @@ type ReadToolMetadata = {
   truncated: boolean
   loaded: string[]
   read?: ReadMetadata
+  display?: Display
 }
 
 // // 恶意代码提醒
@@ -148,7 +146,7 @@ function fileSize(stat: { size: unknown }) {
 function resolveReadPath(input: string, directory: string) {
   if (process.platform !== "win32") return path.isAbsolute(input) ? input : path.resolve(directory, input)
 
-  const normalized = AppFileSystem.normalizePath(input)
+  const normalized = FSUtil.normalizePath(input)
   if (/^[A-Za-z]:[\\/]/.test(input)) return normalized
 
   // Windows treats "\foo" and "/foo" as rooted on the current process drive.
@@ -156,14 +154,14 @@ function resolveReadPath(input: string, directory: string) {
   // path, so anchor them to the active project drive before stat/permission.
   if (/^[\\/](?![\\/])/.test(input)) {
     const parsed = path.win32.parse(directory)
-    return AppFileSystem.normalizePath(path.win32.join(parsed.root, input.slice(1)))
+    return FSUtil.normalizePath(path.win32.join(parsed.root, input.slice(1)))
   }
 
-  return AppFileSystem.normalizePath(path.resolve(directory, input))
+  return FSUtil.normalizePath(path.resolve(directory, input))
 }
 
 function canonicalReadPath(filepath: string) {
-  const normalized = AppFileSystem.normalizePath(filepath).replaceAll("\\", "/")
+  const normalized = FSUtil.normalizePath(filepath).replaceAll("\\", "/")
   return process.platform === "win32" ? normalized.toLowerCase() : normalized
 }
 
@@ -254,8 +252,7 @@ function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
     .map((line, i) => {
       // Keep source text verbatim. Only structural wrapper fields are escaped;
       // content lines must match what edit/write would operate on.
-      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${line}`
-      return `${i + file.offset}: ${line.slice(0, MAX_LINE_LENGTH)} (line truncated to ${MAX_LINE_LENGTH} chars)`
+      return `${i + file.offset}: ${line}`
     })
     .join("\n")
 }
@@ -332,13 +329,43 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-export const ReadTool = Tool.define(
+type Display =
+  | {
+      type: "directory"
+      path: string
+      entries: string[]
+      offset: number
+      totalEntries: number
+      truncated: boolean
+    }
+  | {
+      type: "file"
+      path: string
+      text: string
+      lineStart: number
+      lineEnd: number
+      totalLines: number
+      truncated: boolean
+    }
+
+type Metadata = {
+  preview: string
+  truncated: boolean
+  loaded: string[]
+  read?: ReadMetadata
+  display?: Display
+}
+
+export const ReadTool = Tool.define<
+  typeof Parameters,
+  Metadata,
+  FSUtil.Service | Instruction.Service | LSP.Service | Scope.Scope | Image.Service
+>(
   "read",
   Effect.gen(function* () {
-    const fs = yield* AppFileSystem.Service
+    const fs = yield* FSUtil.Service
     const instruction = yield* Instruction.Service
     const lsp = yield* LSP.Service
-    const reference = yield* Reference.Service
     const image = yield* Image.Service
     const scope = yield* Scope.Scope
 
@@ -384,7 +411,8 @@ export const ReadTool = Tool.define(
     })
 
     const warm = Effect.fn("ReadTool.warm")(function* (filepath: string) {
-      yield* lsp.touchFile(filepath).pipe(Effect.ignore, Effect.forkIn(scope))
+      // LSP warm-up is optional; do not let a background defect fail an otherwise successful read.
+      yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
     })
 
     const readSample = Effect.fn("ReadTool.readSample")(function* (
@@ -451,7 +479,7 @@ export const ReadTool = Tool.define(
 
     const run = Effect.fn("ReadTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
-      ctx: Tool.Context,
+      ctx: Tool.Context<Metadata>,
     ) {
       const instance = yield* InstanceState.context
       const filepath = resolveReadPath(params.filePath, instance.directory)
@@ -463,7 +491,6 @@ export const ReadTool = Tool.define(
         )
       }
 
-      yield* reference.ensure(filepath)
       const title = path.relative(instance.worktree, filepath)
 
       const stat = yield* fs.stat(filepath).pipe(
@@ -474,7 +501,7 @@ export const ReadTool = Tool.define(
       )
 
       yield* assertExternalDirectoryEffect(ctx, filepath, {
-        bypass: Boolean(ctx.extra?.["bypassCwdCheck"]) || (yield* reference.contains(filepath)),
+        bypass: Boolean(ctx.extra?.["bypassCwdCheck"]),
         kind: stat?.type === "Directory" ? "directory" : "file",
         // Tool-origin evidence lets Auto review this external_directory gate
         // without treating path-only requests as enough authorization context.
@@ -515,6 +542,14 @@ export const ReadTool = Tool.define(
             preview: sliced.slice(0, 20).join("\n"),
             truncated,
             loaded: [] as string[],
+            display: {
+              type: "directory" as const,
+              path: filepath,
+              entries: sliced,
+              offset,
+              totalEntries: items.length,
+              truncated,
+            },
           }),
         }
       }
@@ -525,14 +560,15 @@ export const ReadTool = Tool.define(
       const modified = formatModified(versionMs)
       const sample = yield* readSample(filepath, size, SAMPLE_BYTES)
 
-      const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
+      const filesystemMime = FSUtil.mimeType(filepath)
+      const mime = sniffAttachmentMime(sample, filesystemMime)
       const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
 
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
 
         // 图片走 Image.Service，确保 read、粘贴和 tool-result 共享同一套尺寸与预算边界。
-        if (isImageAttachment(mime)) {
+        if (isImageAttachment(mime) && isImageAttachment(filesystemMime)) {
           const input = {
             id: PartID.ascending(),
             messageID: ctx.messageID,
@@ -697,6 +733,15 @@ export const ReadTool = Tool.define(
           truncated,
           loaded: loaded.map((item) => item.filepath),
           read: current,
+          display: {
+            type: "file" as const,
+            path: filepath,
+            text: file.raw.join("\n"),
+            lineStart: file.offset,
+            lineEnd: end,
+            totalLines: file.count,
+            truncated,
+          },
         }),
       }
     })
@@ -704,7 +749,7 @@ export const ReadTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
         run(params, ctx).pipe(Effect.orDie),
     }
   }),

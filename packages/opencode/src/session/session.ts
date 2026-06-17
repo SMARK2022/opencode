@@ -1,13 +1,20 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
 import { BackgroundJob } from "@/background/job"
-import { BusEvent } from "@/bus/bus-event"
-import { Bus } from "@/bus"
 import { Decimal } from "decimal.js"
-import { type ProviderMetadata, type LanguageModelUsage } from "ai"
+import type { ProviderMetadata, Usage } from "@opencode-ai/llm"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { Database } from "@opencode-ai/core/database/database"
+import { makeRuntime } from "@opencode-ai/core/effect/runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionExecution } from "@opencode-ai/core/session/execution"
 
-import { Database } from "@/storage/db"
 import { NotFoundError } from "@/storage/storage"
 import { eq } from "drizzle-orm"
 import { and } from "drizzle-orm"
@@ -15,38 +22,35 @@ import { gte } from "drizzle-orm"
 import { isNull } from "drizzle-orm"
 import { desc } from "drizzle-orm"
 import { like } from "drizzle-orm"
+import { sql } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
-import { sql } from "drizzle-orm"
-import { SyncEvent } from "../sync"
 import type { SQL } from "drizzle-orm"
-import { PartTable, SessionTable } from "./session.sql"
-import { ProjectTable } from "../project/project.sql"
-import { Storage } from "@/storage/storage"
-import * as Log from "@opencode-ai/core/util/log"
+import { PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { MessageV2 } from "./message-v2"
 import type { InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import { Snapshot } from "@/snapshot"
-import { ProjectID } from "../project/schema"
-import { WorkspaceID } from "../control-plane/schema"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { SessionID, MessageID, PartID } from "./schema"
-import { ModelID, ProviderID } from "@/provider/schema"
 
 import type { Provider } from "@/provider/provider"
 import { Permission } from "@/permission"
 import { Global } from "@opencode-ai/core/global"
 import { Effect, Layer, Option, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
-import { NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
+import { AbsolutePath, NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-// [local-smark] session path management
-import { searchCondition } from "./search"
+import { searchCondition } from "@opencode-ai/core/session/search"
 import { SessionPath } from "./path"
 import { createDefaultTitle, isDefaultTitle } from "./title"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
-const log = Log.create({ service: "session" })
+const runtime = makeRuntime(Database.Service, Database.defaultLayer)
 
 export { isDefaultTitle }
 
@@ -76,8 +80,8 @@ export function fromRow(row: SessionRow): Info {
     agent: row.agent ?? undefined,
     model: row.model
       ? {
-          id: ModelID.make(row.model.id),
-          providerID: ProviderID.make(row.model.providerID),
+          id: ModelV2.ID.make(row.model.id),
+          providerID: ProviderV2.ID.make(row.model.providerID),
           variant: row.model.variant,
         }
       : undefined,
@@ -94,8 +98,9 @@ export function fromRow(row: SessionRow): Info {
       },
     },
     share,
+    metadata: row.metadata ?? undefined,
     revert,
-    permission: row.permission ?? undefined,
+    permission: row.permission ? [...row.permission] : undefined,
     time: {
       created: row.time_created,
       updated: row.time_updated,
@@ -123,6 +128,7 @@ export function toRow(info: Info) {
     summary_deletions: info.summary?.deletions,
     summary_files: info.summary?.files,
     summary_diffs: info.summary?.diffs,
+    metadata: info.metadata,
     cost: info.cost ?? 0,
     tokens_input: (info.tokens ?? EmptyTokens).input,
     tokens_output: (info.tokens ?? EmptyTokens).output,
@@ -202,13 +208,9 @@ function isHomeDirectory(directory: string | undefined) {
   return comparableDirectoryValue(directory) === comparableDirectoryValue(Global.Path.home)
 }
 
-function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
-  if (!input.directory) return false
-  const project = Database.use((db) =>
-    db.select({ worktree: ProjectTable.worktree }).from(ProjectTable).where(eq(ProjectTable.id, input.projectID)).get(),
-  )
-  if (!project) return false
-  const left = SessionPath.relative(project.worktree, input.directory)
+function directoryMatchesPath(input: { directory?: string; path: string; worktree?: string }) {
+  if (!input.directory || !input.worktree) return false
+  const left = SessionPath.relative(input.worktree, input.directory)
   const right = input.path.replaceAll("\\", "/")
   return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
 }
@@ -255,16 +257,18 @@ const Revert = Schema.Struct({
 })
 
 const Model = Schema.Struct({
-  id: ModelID,
-  providerID: ProviderID,
+  id: ModelV2.ID,
+  providerID: ProviderV2.ID,
   variant: optionalOmitUndefined(Schema.String),
 })
+
+export const Metadata = Schema.Record(Schema.String, Schema.Any)
 
 export const Info = Schema.Struct({
   id: SessionID,
   slug: Schema.String,
-  projectID: ProjectID,
-  workspaceID: optionalOmitUndefined(WorkspaceID),
+  projectID: ProjectV2.ID,
+  workspaceID: optionalOmitUndefined(WorkspaceV2.ID),
   directory: Schema.String,
   path: optionalOmitUndefined(Schema.String),
   parentID: optionalOmitUndefined(SessionID),
@@ -276,14 +280,15 @@ export const Info = Schema.Struct({
   agent: optionalOmitUndefined(Schema.String),
   model: optionalOmitUndefined(Model),
   version: Schema.String,
+  metadata: optionalOmitUndefined(Metadata),
   time: Time,
-  permission: optionalOmitUndefined(Permission.Ruleset),
+  permission: optionalOmitUndefined(PermissionV1.Ruleset),
   revert: optionalOmitUndefined(Revert),
 }).annotate({ identifier: "Session" })
 export type Info = Types.DeepMutable<Schema.Schema.Type<typeof Info>>
 
 export const ProjectInfo = Schema.Struct({
-  id: ProjectID,
+  id: ProjectV2.ID,
   name: optionalOmitUndefined(Schema.String),
   worktree: Schema.String,
 }).annotate({ identifier: "ProjectSummary" })
@@ -301,8 +306,9 @@ export const CreateInput = Schema.optional(
     title: Schema.optional(Schema.String),
     agent: Schema.optional(Schema.String),
     model: Schema.optional(Model),
-    permission: Schema.optional(Permission.Ruleset),
-    workspaceID: Schema.optional(WorkspaceID),
+    metadata: Schema.optional(Metadata),
+    permission: Schema.optional(PermissionV1.Ruleset),
+    workspaceID: Schema.optional(WorkspaceV2.ID),
   }),
 )
 export type CreateInput = Types.DeepMutable<Schema.Schema.Type<typeof CreateInput>>
@@ -319,9 +325,13 @@ export const SetArchivedInput = Schema.Struct({
   sessionID: SessionID,
   time: Schema.optional(ArchivedTimestamp),
 })
+export const SetMetadataInput = Schema.Struct({
+  sessionID: SessionID,
+  metadata: Metadata,
+})
 export const SetPermissionInput = Schema.Struct({
   sessionID: SessionID,
-  permission: Permission.Ruleset,
+  permission: PermissionV1.Ruleset,
 })
 export const SetRevertInput = Schema.Struct({
   sessionID: SessionID,
@@ -336,11 +346,21 @@ export type ListInput = {
   directory?: string
   scope?: "project"
   path?: string
-  workspaceID?: WorkspaceID
+  workspaceID?: WorkspaceV2.ID
   roots?: boolean
   start?: number
   search?: string
   limit?: number
+}
+
+export type GlobalListInput = {
+  directory?: string
+  roots?: boolean
+  start?: number
+  cursor?: number
+  search?: string
+  limit?: number
+  archived?: boolean
 }
 
 const CreatedEventSchema = Schema.Struct({
@@ -362,8 +382,8 @@ const UpdatedTime = Schema.Struct({
 const UpdatedInfo = Schema.Struct({
   id: Schema.optional(Schema.NullOr(SessionID)),
   slug: Schema.optional(Schema.NullOr(Schema.String)),
-  projectID: Schema.optional(Schema.NullOr(ProjectID)),
-  workspaceID: Schema.optional(Schema.NullOr(WorkspaceID)),
+  projectID: Schema.optional(Schema.NullOr(ProjectV2.ID)),
+  workspaceID: Schema.optional(Schema.NullOr(WorkspaceV2.ID)),
   directory: Schema.optional(Schema.NullOr(Schema.String)),
   path: Schema.optional(Schema.NullOr(Schema.String)),
   parentID: Schema.optional(Schema.NullOr(SessionID)),
@@ -375,8 +395,9 @@ const UpdatedInfo = Schema.Struct({
   agent: Schema.optional(Schema.NullOr(Schema.String)),
   model: Schema.optional(Schema.NullOr(Model)),
   version: Schema.optional(Schema.NullOr(Schema.String)),
+  metadata: Schema.optional(Schema.NullOr(Metadata)),
   time: Schema.optional(UpdatedTime),
-  permission: Schema.optional(Schema.NullOr(Permission.Ruleset)),
+  permission: Schema.optional(Schema.NullOr(PermissionV1.Ruleset)),
   revert: Schema.optional(Schema.NullOr(Revert)),
 })
 
@@ -386,41 +407,25 @@ const UpdatedEventSchema = Schema.Struct({
 })
 
 export const Event = {
-  Created: SyncEvent.define({
-    type: "session.created",
-    version: 1,
-    aggregate: "sessionID",
-    schema: CreatedEventSchema,
-  }),
-  Updated: SyncEvent.define({
-    type: "session.updated",
-    version: 1,
-    aggregate: "sessionID",
-    schema: UpdatedEventSchema,
-    busSchema: CreatedEventSchema,
-  }),
-  Deleted: SyncEvent.define({
-    type: "session.deleted",
-    version: 1,
-    aggregate: "sessionID",
-    schema: CreatedEventSchema,
-  }),
-  Diff: BusEvent.define(
-    "session.diff",
-    Schema.Struct({
+  Created: SessionV1.Event.Created,
+  Updated: SessionV1.Event.Updated,
+  Deleted: SessionV1.Event.Deleted,
+  Diff: EventV2.define({
+    type: "session.diff",
+    schema: {
       sessionID: SessionID,
       diff: Schema.Array(Snapshot.FileDiff),
-    }),
-  ),
-  Error: BusEvent.define(
-    "session.error",
-    Schema.Struct({
+    },
+  }),
+  Error: EventV2.define({
+    type: "session.error",
+    schema: {
       sessionID: Schema.optional(SessionID),
-      // Reuses MessageV2.Assistant.fields.error (already Schema.optional) so
-      // the derived zod keeps the same discriminated-union shape on the bus.
-      error: MessageV2.Assistant.fields.error,
-    }),
-  ),
+      // Reuses SessionV1.Assistant.fields.error (already Schema.optional) so
+      // the derived schema keeps the same discriminated-union shape on the event stream.
+      error: SessionV1.Assistant.fields.error,
+    },
+  }),
 }
 
 export function plan(input: { slug: string; time: { created: number } }, instance: InstanceContext) {
@@ -430,21 +435,19 @@ export function plan(input: { slug: string; time: { created: number } }, instanc
   return path.join(base, [input.time.created, input.slug].join("-") + ".md")
 }
 
-export const getUsage = (input: { model: Provider.Model; usage: LanguageModelUsage; metadata?: ProviderMetadata }) => {
+export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?: ProviderMetadata }) => {
   const safe = (value: number) => {
     if (!Number.isFinite(value)) return 0
     return Math.max(0, value)
   }
   const inputTokens = safe(input.usage.inputTokens ?? 0)
   const outputTokens = safe(input.usage.outputTokens ?? 0)
-  const reasoningTokens = safe(input.usage.outputTokenDetails?.reasoningTokens ?? input.usage.reasoningTokens ?? 0)
+  const reasoningTokens = safe(input.usage.reasoningTokens ?? 0)
 
-  const cacheReadInputTokens = safe(
-    input.usage.inputTokenDetails?.cacheReadTokens ?? input.usage.cachedInputTokens ?? 0,
-  )
+  const cacheReadInputTokens = safe(input.usage.cacheReadInputTokens ?? 0)
   const cacheWriteInputTokens = safe(
     Number(
-      input.usage.inputTokenDetails?.cacheWriteTokens ??
+      input.usage.cacheWriteInputTokens ??
         input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
         // google-vertex-anthropic returns metadata under "vertex" key
         // (AnthropicMessagesLanguageModel custom provider key from 'vertex.anthropic.messages')
@@ -483,18 +486,22 @@ export const getUsage = (input: { model: Provider.Model; usage: LanguageModelUsa
     (input.model.cost?.experimentalOver200K && contextTokens > 200_000
       ? input.model.cost.experimentalOver200K
       : input.model.cost)
+  const totalNanoAiu = input.metadata?.["copilot"]?.["totalNanoAiu"]
   return {
-    cost: safe(
-      new Decimal(0)
-        .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
-        .add(new Decimal(tokens.output).mul(costInfo?.output ?? 0).div(1_000_000))
-        .add(new Decimal(tokens.cache.read).mul(costInfo?.cache?.read ?? 0).div(1_000_000))
-        .add(new Decimal(tokens.cache.write).mul(costInfo?.cache?.write ?? 0).div(1_000_000))
-        // TODO: update models.dev to have better pricing model, for now:
-        // charge reasoning tokens at the same rate as output tokens
-        .add(new Decimal(tokens.reasoning).mul(costInfo?.output ?? 0).div(1_000_000))
-        .toNumber(),
-    ),
+    cost:
+      typeof totalNanoAiu === "number" && Number.isFinite(totalNanoAiu) && totalNanoAiu >= 0
+        ? new Decimal(totalNanoAiu).div(100_000_000_000).toNumber()
+        : safe(
+            new Decimal(0)
+              .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
+              .add(new Decimal(tokens.output).mul(costInfo?.output ?? 0).div(1_000_000))
+              .add(new Decimal(tokens.cache.read).mul(costInfo?.cache?.read ?? 0).div(1_000_000))
+              .add(new Decimal(tokens.cache.write).mul(costInfo?.cache?.write ?? 0).div(1_000_000))
+              // TODO: update models.dev to have better pricing model, for now:
+              // charge reasoning tokens at the same rate as output tokens
+              .add(new Decimal(tokens.reasoning).mul(costInfo?.output ?? 0).div(1_000_000))
+              .toNumber(),
+          ),
     tokens,
   }
 }
@@ -505,22 +512,31 @@ export class BusyError extends Schema.TaggedErrorClass<BusyError>()("SessionBusy
 
 export type NotFound = NotFoundError
 
+type MessagePage = {
+  readonly items: SessionV1.WithParts[]
+  readonly more: boolean
+  readonly cursor?: string
+}
+
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
+  readonly listGlobal: (input?: GlobalListInput) => Effect.Effect<GlobalInfo[]>
   readonly create: (input?: {
     parentID?: SessionID
     title?: string
     agent?: string
     model?: Schema.Schema.Type<typeof Model>
-    permission?: Permission.Ruleset
-    workspaceID?: WorkspaceID
+    metadata?: typeof Metadata.Type
+    permission?: PermissionV1.Ruleset
+    workspaceID?: WorkspaceV2.ID
   }) => Effect.Effect<Info>
   readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
   readonly setArchived: (input: { sessionID: SessionID; time?: number }) => Effect.Effect<void>
-  readonly setPermission: (input: { sessionID: SessionID; permission: Permission.Ruleset }) => Effect.Effect<void>
+  readonly setMetadata: (input: typeof SetMetadataInput.Type) => Effect.Effect<void>
+  readonly setPermission: (input: { sessionID: SessionID; permission: PermissionV1.Ruleset }) => Effect.Effect<void>
   readonly setRevert: (input: {
     sessionID: SessionID
     revert: Info["revert"]
@@ -528,19 +544,22 @@ export interface Interface {
   }) => Effect.Effect<void>
   readonly clearRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly setSummary: (input: { sessionID: SessionID; summary: Info["summary"] }) => Effect.Effect<void>
+  readonly setShare: (input: { sessionID: SessionID; share: Info["share"] }) => Effect.Effect<void>
+  readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
-  readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<MessageV2.WithParts[], NotFound>
+  readonly page: (input: { sessionID: SessionID; limit: number; before?: string }) => Effect.Effect<MessagePage, NotFound>
+  readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
-  readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
+  readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
   readonly removePart: (input: { sessionID: SessionID; messageID: MessageID; partID: PartID }) => Effect.Effect<PartID>
   readonly getPart: (input: {
     sessionID: SessionID
     messageID: MessageID
     partID: PartID
-  }) => Effect.Effect<MessageV2.Part | undefined>
-  readonly updatePart: <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
+  }) => Effect.Effect<SessionV1.Part | undefined>
+  readonly updatePart: <T extends SessionV1.Part>(part: T) => Effect.Effect<T>
   readonly updatePartDelta: (input: {
     sessionID: SessionID
     messageID: MessageID
@@ -551,28 +570,33 @@ export interface Interface {
   /** Finds the first message matching the predicate, searching newest-first. */
   readonly findMessage: (
     sessionID: SessionID,
-    predicate: (msg: MessageV2.WithParts) => boolean,
-  ) => Effect.Effect<Option.Option<MessageV2.WithParts>, NotFound>
+    predicate: (msg: SessionV1.WithParts) => boolean,
+  ) => Effect.Effect<Option.Option<SessionV1.WithParts>, NotFound>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Session") {}
 
-export type Patch = Types.DeepMutable<SyncEvent.Event<typeof Event.Updated>["data"]["info"]>
+export const use = serviceUse(Service)
 
-const db = <T>(fn: (d: Parameters<typeof Database.use>[0] extends (trx: infer D) => any ? D : never) => T) =>
-  Effect.sync(() => Database.use(fn))
+export type Patch = Omit<Partial<Info>, "time" | "share" | "summary" | "revert" | "permission"> & {
+  time?: Partial<Info["time"]>
+  share?: Partial<NonNullable<Info["share"]>> | null
+  summary?: Info["summary"] | null
+  revert?: Info["revert"] | null
+  permission?: Info["permission"] | null
+}
 
 export const layer: Layer.Layer<
   Service,
   never,
-  BackgroundJob.Service | Bus.Service | Storage.Service | SyncEvent.Service | RuntimeFlags.Service
+  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const database = yield* Database.Service
     const background = yield* BackgroundJob.Service
-    const bus = yield* Bus.Service
-    const storage = yield* Storage.Service
-    const sync = yield* SyncEvent.Service
+    const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
 
     const createNext = Effect.fn("Session.createNext")(function* (input: {
@@ -581,10 +605,11 @@ export const layer: Layer.Layer<
       agent?: string
       model?: Schema.Schema.Type<typeof Model>
       parentID?: SessionID
-      workspaceID?: WorkspaceID
+      workspaceID?: WorkspaceV2.ID
       directory: string
       path?: string
-      permission?: Permission.Ruleset
+      metadata?: typeof Metadata.Type
+      permission?: PermissionV1.Ruleset
     }) {
       const ctx = yield* InstanceState.context
       const result: Info = {
@@ -596,10 +621,11 @@ export const layer: Layer.Layer<
         path: input.path,
         workspaceID: input.workspaceID,
         parentID: input.parentID,
-        title: input.title ?? createDefaultTitle(!!input.parentID),
+        title: input.title ?? createDefaultTitle(Boolean(input.parentID)),
         agent: input.agent,
         model: input.model,
-        permission: input.permission,
+        metadata: input.metadata,
+        permission: input.permission ? [...input.permission] : undefined,
         cost: 0,
         tokens: EmptyTokens,
         time: {
@@ -607,43 +633,96 @@ export const layer: Layer.Layer<
           updated: Date.now(),
         },
       }
-      log.info("created", result)
+      yield* Effect.logInfo("created", result)
 
-      yield* sync.run(Event.Created, { sessionID: result.id, info: result })
-
-      if (!flags.experimentalWorkspaces) {
-        // This only exist for backwards compatibility. We should not be
-        // manually publishing this event; it is a sync event now
-        yield* bus.publish(Event.Updated, {
-          sessionID: result.id,
-          info: result,
+      yield* db
+        .insert(ProjectTable)
+        .values({
+          id: ctx.project.id,
+          worktree: AbsolutePath.make(ctx.project.worktree),
+          vcs: ctx.project.vcs ?? null,
+          name: ctx.project.name,
+          icon_url: ctx.project.icon?.url,
+          icon_url_override: ctx.project.icon?.override,
+          icon_color: ctx.project.icon?.color,
+          time_created: ctx.project.time.created,
+          time_updated: ctx.project.time.updated,
+          time_initialized: ctx.project.time.initialized,
+          sandboxes: ctx.project.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
+          commands: ctx.project.commands,
         })
-      }
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+
+      yield* events.publish(SessionV1.Event.Created, { sessionID: result.id, info: result })
 
       return result
     })
 
     const get = Effect.fn("Session.get")(function* (id: SessionID) {
-      const row = yield* db((d) => d.select().from(SessionTable).where(eq(SessionTable.id, id)).get())
+      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
     })
 
     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
       const ctx = yield* InstanceState.context
-      return Array.from(
-        listByProject({ projectID: ctx.project.id, experimentalWorkspaces: flags.experimentalWorkspaces, ...input }),
-      )
+      return yield* listByProject(db, {
+        projectID: ctx.project.id,
+        experimentalWorkspaces: flags.experimentalWorkspaces,
+        ...input,
+      })
+    })
+
+    const listGlobal = Effect.fn("Session.listGlobal")(function* (input?: GlobalListInput) {
+      const conditions: SQL[] = []
+      if (input?.directory) conditions.push(eq(SessionTable.directory, input.directory))
+      if (input?.roots) conditions.push(isNull(SessionTable.parent_id))
+      if (input?.start) conditions.push(gte(SessionTable.time_updated, input.start))
+      if (input?.cursor) conditions.push(lt(SessionTable.time_updated, input.cursor))
+      if (input?.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
+      if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
+
+      const query =
+        conditions.length > 0
+          ? db
+              .select()
+              .from(SessionTable)
+              .where(and(...conditions))
+          : db.select().from(SessionTable)
+      const rows = yield* query
+        .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+        .limit(input?.limit ?? 100)
+        .all()
+        .pipe(Effect.orDie)
+      const ids = [...new Set(rows.map((row) => row.project_id))]
+      const projects = new Map<string, ProjectInfo>()
+      if (ids.length > 0) {
+        const items = yield* db
+          .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: ProjectTable.worktree })
+          .from(ProjectTable)
+          .where(inArray(ProjectTable.id, ids))
+          .all()
+          .pipe(Effect.orDie)
+        for (const item of items) {
+          projects.set(item.id, {
+            id: item.id,
+            name: item.name ?? undefined,
+            worktree: item.worktree,
+          })
+        }
+      }
+      return rows.map((row) => ({ ...fromRow(row), project: projects.get(row.project_id) ?? null }))
     })
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
-      const rows = yield* db((d) =>
-        d
-          .select()
-          .from(SessionTable)
-          .where(and(eq(SessionTable.parent_id, parentID)))
-          .all(),
-      )
+      const rows = yield* db
+        .select()
+        .from(SessionTable)
+        .where(and(eq(SessionTable.parent_id, parentID)))
+        .all()
+        .pipe(Effect.orDie)
       return rows.map(fromRow)
     })
 
@@ -663,22 +742,22 @@ export const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
-        yield* sync.run(Event.Deleted, { sessionID, info: session }, { publish: hasInstance })
-        yield* sync.remove(sessionID)
-      } catch (e) {
-        log.error(e)
+        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
+        yield* events.remove(sessionID)
+      } catch (error) {
+        yield* Effect.logError("failed to remove session", { sessionID, error })
       }
     })
 
-    const updateMessage = <T extends MessageV2.Info>(msg: T): Effect.Effect<T> =>
+    const updateMessage = <T extends SessionV1.Info>(msg: T): Effect.Effect<T> =>
       Effect.gen(function* () {
-        yield* sync.run(MessageV2.Event.Updated, { sessionID: msg.sessionID, info: msg })
+        yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID: msg.sessionID, info: msg })
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
 
-    const updatePart = <T extends MessageV2.Part>(part: T): Effect.Effect<T> =>
+    const updatePart = <T extends SessionV1.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
-        yield* sync.run(MessageV2.Event.PartUpdated, {
+        yield* events.publish(SessionV1.Event.PartUpdated, {
           sessionID: part.sessionID,
           part: structuredClone(part),
           time: Date.now(),
@@ -687,26 +766,25 @@ export const layer: Layer.Layer<
       }).pipe(Effect.withSpan("Session.updatePart"))
 
     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
-      const row = Database.use((db) =>
-        db
-          .select()
-          .from(PartTable)
-          .where(
-            and(
-              eq(PartTable.session_id, input.sessionID),
-              eq(PartTable.message_id, input.messageID),
-              eq(PartTable.id, input.partID),
-            ),
-          )
-          .get(),
-      )
+      const row = yield* db
+        .select()
+        .from(PartTable)
+        .where(
+          and(
+            eq(PartTable.session_id, input.sessionID),
+            eq(PartTable.message_id, input.messageID),
+            eq(PartTable.id, input.partID),
+          ),
+        )
+        .get()
+        .pipe(Effect.orDie)
       if (!row) return
       return {
         ...row.data,
         id: row.id,
         sessionID: row.session_id,
         messageID: row.message_id,
-      } as MessageV2.Part
+      } as SessionV1.Part
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
@@ -714,21 +792,26 @@ export const layer: Layer.Layer<
       title?: string
       agent?: string
       model?: Schema.Schema.Type<typeof Model>
-      permission?: Permission.Ruleset
-      workspaceID?: WorkspaceID
+      metadata?: typeof Metadata.Type
+      permission?: PermissionV1.Ruleset
+      workspaceID?: WorkspaceV2.ID
     }) {
       const ctx = yield* InstanceState.context
       const workspace = yield* InstanceState.workspaceID
-      return yield* createNext({
+      const created = yield* createNext({
         parentID: input?.parentID,
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
         title: input?.title,
         agent: input?.agent,
         model: input?.model,
+        metadata: input?.metadata,
         permission: input?.permission,
         workspaceID: input?.workspaceID ?? workspace,
       })
+      if (!input?.permission) return created
+      yield* patch(created.id, { permission: [...input.permission] }).pipe(Effect.orDie)
+      return { ...created, permission: [...input.permission] }
     })
 
     const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
@@ -740,6 +823,7 @@ export const layer: Layer.Layer<
         path: sessionPath(ctx.worktree, ctx.directory),
         workspaceID: original.workspaceID,
         title,
+        metadata: structuredClone(original.metadata),
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
@@ -758,7 +842,7 @@ export const layer: Layer.Layer<
         })
 
         for (const part of msg.parts) {
-          const p: MessageV2.Part = {
+          const p: SessionV1.Part = {
             ...part,
             id: PartID.ascending(),
             messageID: cloned.id,
@@ -773,25 +857,44 @@ export const layer: Layer.Layer<
       return session
     })
 
-    const patch = (sessionID: SessionID, info: Patch) => sync.run(Event.Updated, { sessionID, info })
+    const patch = (sessionID: SessionID, info: Patch) =>
+      Effect.gen(function* () {
+        const current = yield* get(sessionID)
+        const next = {
+          ...current,
+          ...info,
+          time: info.time ? { ...current.time, ...info.time } : current.time,
+          share: info.share === null ? undefined : info.share ? { ...current.share, ...info.share } : current.share,
+          summary: info.summary === null ? undefined : (info.summary ?? current.summary),
+          revert: info.revert === null ? undefined : (info.revert ?? current.revert),
+          permission: info.permission === null ? undefined : (info.permission ?? current.permission),
+        } as Info
+        yield* events.publish(SessionV1.Event.Updated, { sessionID, info: next })
+      })
 
     const touch = Effect.fn("Session.touch")(function* (sessionID: SessionID) {
-      yield* patch(sessionID, { time: { updated: Date.now() } })
+      yield* patch(sessionID, { time: { updated: Date.now() } }).pipe(Effect.orDie)
     })
 
     const setTitle = Effect.fn("Session.setTitle")(function* (input: { sessionID: SessionID; title: string }) {
-      yield* patch(input.sessionID, { title: input.title })
+      yield* patch(input.sessionID, { title: input.title }).pipe(Effect.orDie)
     })
 
     const setArchived = Effect.fn("Session.setArchived")(function* (input: { sessionID: SessionID; time?: number }) {
-      yield* patch(input.sessionID, { time: { archived: input.time } })
+      yield* patch(input.sessionID, { time: { archived: input.time } }).pipe(Effect.orDie)
+    })
+
+    const setMetadata = Effect.fn("Session.setMetadata")(function* (input: typeof SetMetadataInput.Type) {
+      yield* patch(input.sessionID, { metadata: input.metadata, time: { updated: Date.now() } }).pipe(Effect.orDie)
     })
 
     const setPermission = Effect.fn("Session.setPermission")(function* (input: {
       sessionID: SessionID
-      permission: Permission.Ruleset
+      permission: PermissionV1.Ruleset
     }) {
-      yield* patch(input.sessionID, { permission: input.permission, time: { updated: Date.now() } })
+      yield* patch(input.sessionID, { permission: [...input.permission], time: { updated: Date.now() } }).pipe(
+        Effect.orDie,
+      )
     })
 
     const setRevert = Effect.fn("Session.setRevert")(function* (input: {
@@ -799,43 +902,63 @@ export const layer: Layer.Layer<
       revert: Info["revert"]
       summary: Info["summary"]
     }) {
-      yield* patch(input.sessionID, { summary: input.summary, time: { updated: Date.now() }, revert: input.revert })
+      yield* patch(input.sessionID, {
+        summary: input.summary,
+        time: { updated: Date.now() },
+        revert: input.revert,
+      }).pipe(Effect.orDie)
     })
 
     const clearRevert = Effect.fn("Session.clearRevert")(function* (sessionID: SessionID) {
-      yield* patch(sessionID, { time: { updated: Date.now() }, revert: null })
+      yield* patch(sessionID, { time: { updated: Date.now() }, revert: null }).pipe(Effect.orDie)
     })
 
     const setSummary = Effect.fn("Session.setSummary")(function* (input: {
       sessionID: SessionID
       summary: Info["summary"]
     }) {
-      yield* patch(input.sessionID, { time: { updated: Date.now() }, summary: input.summary })
+      yield* patch(input.sessionID, { time: { updated: Date.now() }, summary: input.summary }).pipe(Effect.orDie)
+    })
+
+    const setShare = Effect.fn("Session.setShare")(function* (input: { sessionID: SessionID; share: Info["share"] }) {
+      yield* patch(input.sessionID, { share: input.share ?? null, time: { updated: Date.now() } }).pipe(Effect.orDie)
+    })
+
+    const setWorkspace = Effect.fn("Session.setWorkspace")(function* (input: {
+      sessionID: SessionID
+      workspaceID: Info["workspaceID"]
+    }) {
+      yield* patch(input.sessionID, { workspaceID: input.workspaceID, time: { updated: Date.now() } }).pipe(
+        Effect.orDie,
+      )
     })
 
     const diff = Effect.fn("Session.diff")(function* (sessionID: SessionID) {
-      return yield* storage
-        .read<Snapshot.FileDiff[]>(["session_diff", sessionID])
-        .pipe(Effect.orElseSucceed((): Snapshot.FileDiff[] => []))
+      void sessionID
+      return [] as Snapshot.FileDiff[]
+    })
+
+    const page: Interface["page"] = Effect.fn("Session.page")(function* (input) {
+      return yield* MessageV2.page(input).pipe(Effect.provideService(Database.Service, database))
     })
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
       if (input.limit) {
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit })).items
+        return (yield* page({ sessionID: input.sessionID, limit: input.limit })).items
       }
 
       const size = 50
-      const result = [] as MessageV2.WithParts[]
+      const result = [] as SessionV1.WithParts[]
       let before: string | undefined
       while (true) {
-        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before })
-        if (page.items.length === 0) break
-        for (let i = page.items.length - 1; i >= 0; i--) {
-          const item = page.items[i]
+        const next = yield* page({ sessionID: input.sessionID, limit: size, before })
+        if (next.items.length === 0) break
+        for (let i = next.items.length - 1; i >= 0; i--) {
+          const item = next.items[i]
           if (item) result.push(item)
         }
-        if (!page.more || !page.cursor) break
-        before = page.cursor
+        if (!next.more || !next.cursor) break
+        before = next.cursor
       }
       return result.reverse()
     })
@@ -844,7 +967,7 @@ export const layer: Layer.Layer<
       sessionID: SessionID
       messageID: MessageID
     }) {
-      yield* sync.run(MessageV2.Event.Removed, {
+      yield* events.publish(SessionV1.Event.MessageRemoved, {
         sessionID: input.sessionID,
         messageID: input.messageID,
       })
@@ -856,7 +979,7 @@ export const layer: Layer.Layer<
       messageID: MessageID
       partID: PartID
     }) {
-      yield* sync.run(MessageV2.Event.PartRemoved, {
+      yield* events.publish(SessionV1.Event.PartRemoved, {
         sessionID: input.sessionID,
         messageID: input.messageID,
         partID: input.partID,
@@ -871,7 +994,7 @@ export const layer: Layer.Layer<
       field: string
       delta: string
     }) {
-      yield* bus.publish(MessageV2.Event.PartDelta, input)
+      yield* events.publish(MessageV2.Event.PartDelta, input)
     })
 
     /** Finds the first message matching the predicate, searching newest-first. */
@@ -879,7 +1002,9 @@ export const layer: Layer.Layer<
       const size = 50
       let before: string | undefined
       while (true) {
-        const page = yield* MessageV2.page({ sessionID, limit: size, before })
+        const page = yield* MessageV2.page({ sessionID, limit: size, before }).pipe(
+          Effect.provideService(Database.Service, database),
+        )
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
           const item = page.items[i]
@@ -888,22 +1013,27 @@ export const layer: Layer.Layer<
         if (!page.more || !page.cursor) break
         before = page.cursor
       }
-      return Option.none<MessageV2.WithParts>()
+      return Option.none<SessionV1.WithParts>()
     })
 
     return Service.of({
       list,
+      listGlobal,
       create,
       fork,
       touch,
       get,
       setTitle,
       setArchived,
+      setMetadata,
       setPermission,
       setRevert,
       clearRevert,
       setSummary,
+      setShare,
+      setWorkspace,
       diff,
+      page,
       messages,
       children,
       remove,
@@ -920,9 +1050,10 @@ export const layer: Layer.Layer<
 
 export const defaultLayer = layer.pipe(
   Layer.provide(BackgroundJob.defaultLayer),
-  Layer.provide(Bus.layer),
-  Layer.provide(Storage.defaultLayer),
-  Layer.provide(SyncEvent.defaultLayer),
+  Layer.provide(Database.defaultLayer),
+  Layer.provide(EventV2Bridge.defaultLayer),
+  Layer.provide(SessionExecution.noopLayer),
+  Layer.provide(SessionV2.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
 )
 
@@ -943,102 +1074,88 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
   )
 })
 
-function* listByProject(
+function listByProject(
+  db: Database.Interface["db"],
   input: ListInput & {
-    projectID: ProjectID
+    projectID: ProjectV2.ID
     experimentalWorkspaces: boolean
   },
 ) {
-  const conditions: SQL[] = []
+  return Effect.gen(function* () {
+    const conditions: SQL[] = []
 
-  if (input.workspaceID) {
-    conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
-  }
-  if (input.path !== undefined) {
-    const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
-    // The TUI session switcher uses `directory + path` queries to show the
-    // existing current/parent/child path range. Treat `~` as the user's global
-    // switching hub: when the request itself is home, do not add any project or
-    // path predicate so search/start/limit apply across all sessions; otherwise
-    // union in only the exact home-directory sessions. Directory-only calls stay
-    // below in the legacy branch, preserving reset/delete/archive-style exact
-    // directory behavior.
-    if (includeHomeSwitchScope && isHomeDirectory(input.directory)) {
-      // The surrounding workspace/start/search/roots/limit predicates remain in
-      // force. Only the path/project boundary is widened for `~` switching.
-    } else {
-      const projectPath = or(
-        ...relatedPathConditions({
-          path: input.path,
+    if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
+    if (input.path !== undefined) {
+      const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
+      if (!includeHomeSwitchScope || !isHomeDirectory(input.directory)) {
+        const projectPath = or(
+          ...relatedPathConditions({
+            path: input.path,
+            directory: input.directory,
+            global: input.projectID === ProjectV2.ID.global,
+            root: true,
+          }),
+        )!
+        const project = input.directory
+          ? yield* db
+              .select({ worktree: ProjectTable.worktree })
+              .from(ProjectTable)
+              .where(eq(ProjectTable.id, input.projectID))
+              .get()
+              .pipe(Effect.orDie)
+          : undefined
+        const useDirectoryFallback = directoryMatchesPath({
           directory: input.directory,
-          global: input.projectID === ProjectID.global,
-          root: true,
-        }),
-      )!
-      const useDirectoryFallback = directoryMatchesPath({
-        directory: input.directory,
-        path: input.path,
-        projectID: input.projectID,
-      })
-      const globalPath = useDirectoryFallback && input.directory
-        ? or(
-            ...relatedPathConditions({
-              path: SessionPath.relative("/", input.directory),
-              directory: input.directory,
-              global: true,
-            }),
-          )
-        : undefined
-      const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
+          path: input.path,
+          worktree: project?.worktree,
+        })
+        const globalPath = useDirectoryFallback && input.directory
+          ? or(
+              ...relatedPathConditions({
+                path: SessionPath.relative("/", input.directory),
+                directory: input.directory,
+                global: true,
+              }),
+            )
+          : undefined
+        const nullPath = input.directory
+          ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
+          : undefined
 
-      // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
-      conditions.push(
-        or(
-          and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
-          ...(globalPath && input.projectID !== ProjectID.global
-            ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
-            : []),
-          ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
-          ...(includeHomeSwitchScope ? [homeDirectoryCondition()] : []),
-        )!,
-      )
+        conditions.push(
+          or(
+            and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
+            ...(globalPath && input.projectID !== ProjectV2.ID.global
+              ? [and(eq(SessionTable.project_id, ProjectV2.ID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
+              : []),
+            ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
+            ...(includeHomeSwitchScope ? [homeDirectoryCondition()] : []),
+          )!,
+        )
+      }
+  } else if (input.scope !== "project") {
+      conditions.push(eq(SessionTable.project_id, input.projectID))
+      if (input.directory) conditions.push(eq(SessionTable.directory, input.directory))
+    } else {
+      conditions.push(eq(SessionTable.project_id, input.projectID))
     }
-  } else if (input.scope !== "project" && !input.experimentalWorkspaces) {
-    conditions.push(eq(SessionTable.project_id, input.projectID))
-    if (input.directory) {
-      conditions.push(eq(SessionTable.directory, input.directory))
+    if (input.roots) conditions.push(isNull(SessionTable.parent_id))
+    if (input.start) conditions.push(gte(SessionTable.time_updated, input.start))
+    if (input.search) {
+      const condition = searchCondition(input.search)
+      if (condition) conditions.push(condition)
     }
-  } else {
-    conditions.push(eq(SessionTable.project_id, input.projectID))
-  }
-  if (input.roots) {
-    conditions.push(isNull(SessionTable.parent_id))
-  }
-  if (input.start) {
-    conditions.push(gte(SessionTable.time_updated, input.start))
-  }
-  if (input.search) {
-    const condition = searchCondition(input.search)
-    if (condition) conditions.push(condition)
-  }
 
-  const limit = input.limit ?? 100
-
-  const rows = Database.use((db) =>
-    db
+    const rows = yield* db
       .select()
       .from(SessionTable)
-      // A home path-scoped switch query intentionally has no project/path
-      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
-      // only filters instead of inventing a dummy true condition.
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(SessionTable.time_updated))
-      .limit(limit)
-      .all(),
-  )
-  for (const row of rows) {
-    yield fromRow(row)
-  }
+      .limit(input.limit ?? 100)
+      .all()
+      .pipe(Effect.orDie)
+    return rows.map(fromRow)
+  })
 }
 
 export function* listGlobal(input?: {
@@ -1074,7 +1191,7 @@ export function* listGlobal(input?: {
 
   const limit = input?.limit ?? 100
 
-  const rows = Database.use((db) => {
+  const rows = runtime.runSync(({ db }) => {
     const query =
       conditions.length > 0
         ? db
@@ -1082,19 +1199,20 @@ export function* listGlobal(input?: {
             .from(SessionTable)
             .where(and(...conditions))
         : db.select().from(SessionTable)
-    return query.orderBy(desc(SessionTable.time_updated), desc(SessionTable.id)).limit(limit).all()
+    return query.orderBy(desc(SessionTable.time_updated), desc(SessionTable.id)).limit(limit).all().pipe(Effect.orDie)
   })
 
   const ids = [...new Set(rows.map((row) => row.project_id))]
   const projects = new Map<string, ProjectInfo>()
 
   if (ids.length > 0) {
-    const items = Database.use((db) =>
+    const items = runtime.runSync(({ db }) =>
       db
         .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: ProjectTable.worktree })
         .from(ProjectTable)
         .where(inArray(ProjectTable.id, ids))
-        .all(),
+        .all()
+        .pipe(Effect.orDie),
     )
     for (const item of items) {
       projects.set(item.id, {
@@ -1110,5 +1228,7 @@ export function* listGlobal(input?: {
     yield { ...fromRow(row), project }
   }
 }
+
+export const node = LayerNode.make(layer, [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node])
 
 export * as Session from "./session"

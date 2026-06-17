@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { ExitSignals } from "../../../../src/cli/cmd/tui/context/exit"
+import { ExitSignals } from "@opencode-ai/tui/context/exit"
 
 test("ExitProvider listens for terminal-driven exit signals", () => {
   expect(ExitSignals).toContain("SIGINT")

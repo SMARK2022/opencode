@@ -1,3 +1,6 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
+import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { PlanExitTool } from "./plan"
 import { PermissionReviewDecisionTool } from "./permission_review_decision"
 import { Session } from "@/session/session"
@@ -8,7 +11,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
-import { TaskStatusTool } from "./task_status"
+import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -22,11 +25,8 @@ import { Schema } from "effect"
 import z from "zod"
 import { Plugin } from "../plugin"
 import { Provider } from "@/provider/provider"
-import { ProviderID, type ModelID } from "../provider/schema"
+
 import { WebSearchTool } from "./websearch"
-import { RepoCloneTool } from "./repo_clone"
-import { RepoOverviewTool } from "./repo_overview"
-import * as Log from "@opencode-ai/core/util/log"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
@@ -37,30 +37,26 @@ import { Effect, Layer, Context } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Ripgrep } from "../file/ripgrep"
 import { Format } from "../format"
 import { InstanceState } from "@/effect/instance-state"
+import { EffectBridge } from "@/effect/bridge"
 import { Question } from "../question"
 import { Todo } from "../session/todo"
 import { LSP } from "@/lsp/lsp"
 import { Instruction } from "../session/instruction"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { Bus } from "../bus"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { Agent } from "../agent/agent"
-import { Git } from "@/git"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
-import { Reference } from "@/reference/reference"
 import { BackgroundJob } from "@/background/job"
-import { SessionStatus } from "@/session/status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { EffectBridge } from "@/effect/bridge"
 import { Image } from "@/image/image"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
-const log = Log.create({ service: "tool.registry" })
-
-export function webSearchEnabled(providerID: ProviderID, flags = { exa: false, parallel: false }) {
-  return providerID === ProviderID.opencode || flags.exa || flags.parallel
+export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
+  return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
 }
 
 type TaskDef = Tool.InferDef<typeof TaskTool>
@@ -77,50 +73,26 @@ export interface Interface {
   readonly ids: () => Effect.Effect<string[]>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
-  readonly tools: (model: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info }) => Effect.Effect<Tool.Def[]>
+  readonly tools: (model: {
+    providerID: ProviderV2.ID
+    modelID: ModelV2.ID
+    agent: Agent.Info
+  }) => Effect.Effect<Tool.Def[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ToolRegistry") {}
 
-export const layer: Layer.Layer<
-  Service,
-  never,
-  | Config.Service
-  | Plugin.Service
-  | Question.Service
-  | Todo.Service
-  | Agent.Service
-  | Skill.Service
-  | Session.Service
-  | SessionStatus.Service
-  | BackgroundJob.Service
-  | Provider.Service
-  | Git.Service
-  | Reference.Service
-  | LSP.Service
-  | Instruction.Service
-  | AppFileSystem.Service
-  | Image.Service
-  | Bus.Service
-  | HttpClient.HttpClient
-  | ChildProcessSpawner
-  | Ripgrep.Service
-  | Format.Service
-  | Truncate.Service
-  | RuntimeFlags.Service
-> = Layer.effect(
+export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
     const plugin = yield* Plugin.Service
     const agents = yield* Agent.Service
-    const skill = yield* Skill.Service
     const truncate = yield* Truncate.Service
     const flags = yield* RuntimeFlags.Service
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
-    const taskStatus = yield* TaskStatusTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
@@ -129,8 +101,6 @@ export const layer: Layer.Layer<
     const permissionReviewDecision = yield* PermissionReviewDecisionTool
     const webfetch = yield* WebFetchTool
     const websearch = yield* WebSearchTool
-    const repoClone = yield* RepoCloneTool
-    const repoOverview = yield* RepoOverviewTool
     const shell = yield* ShellTool
     const globtool = yield* GlobTool
     const writetool = yield* WriteTool
@@ -151,9 +121,12 @@ export const layer: Layer.Layer<
         function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
           // Plugin tools still expose Zod args publicly; keep that compatibility
           // boxed at the registry boundary and give the LLM the original JSON Schema.
-          const entries = Object.entries(def.args)
+          // Normalize missing args to `{}` once — pre-1.14.49 the code was
+          // `z.object(def.args)` and Zod silently tolerated undefined (#27451, #27630).
+          const args = def.args ?? {}
+          const entries = Object.entries(args)
           const allZod = entries.every((entry) => isZodType(entry[1]))
-          const zodParams = allZod ? z.object(def.args) : undefined
+          const zodParams = allZod ? z.object(args) : undefined
           const jsonSchema = zodParams ? zodJsonSchema(zodParams) : legacyJsonSchema(entries)
           const parameters = zodParams
             ? Schema.declare<unknown>((u): u is unknown => zodParams.safeParse(u).success)
@@ -165,12 +138,12 @@ export const layer: Layer.Layer<
             description: def.description,
             execute: (args, toolCtx) =>
               Effect.gen(function* () {
+                // Bridge the host's Effect-based `ask` into a Promise-returning
+                // function for the plugin to make sure context persists
+                const bridge = yield* EffectBridge.make()
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
-                  // 保持 @opencode-ai/plugin 的 ask 仍返回 Effect，同时把它绑定到
-                  // 当前 tool execution 的实例上下文；插件可以继续用
-                  // Effect.runPromise(context.ask(...))，但不会绕开项目级权限状态。
-                  ask: (req) => bridge.run(toolCtx.ask(req)),
+                  ask: (req) => bridge.promise(toolCtx.ask(req)),
                   directory: ctx.directory,
                   worktree: ctx.worktree,
                 }
@@ -238,12 +211,9 @@ export const layer: Layer.Layer<
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
-          task_status: Tool.init(taskStatus),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
-          repo_clone: Tool.init(repoClone),
-          repo_overview: Tool.init(repoOverview),
           skill: Tool.init(skilltool),
           patch: Tool.init(patchtool),
           question: Tool.init(question),
@@ -264,11 +234,9 @@ export const layer: Layer.Layer<
             tool.edit,
             tool.write,
             tool.task,
-            ...(flags.experimentalBackgroundSubagents ? [tool.task_status] : []),
             tool.fetch,
             tool.todo,
             tool.search,
-            ...(flags.experimentalScout ? [tool.repo_clone, tool.repo_overview] : []),
             tool.skill,
             tool.patch,
             tool.permission_review_decision,
@@ -291,25 +259,6 @@ export const layer: Layer.Layer<
       // it registered so the hidden reviewer can receive it, but do not advertise
       // it as a public tool id for permissions, plugins, or normal agents.
       return (yield* all()).map((tool) => tool.id).filter((id) => id !== PermissionReviewDecisionTool.id)
-    })
-
-    const describeSkill = Effect.fn("ToolRegistry.describeSkill")(function* (agent: Agent.Info) {
-      const list = yield* skill.available(agent)
-      if (list.length === 0) return "No skills are currently available."
-      return [
-        "Load a specialized skill that provides domain-specific instructions and workflows.",
-        "",
-        "When you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.",
-        "",
-        "The skill will inject detailed instructions, workflows, and access to bundled resources (scripts, references, templates) into the conversation context.",
-        "",
-        'Tool output includes a `<skill_content name="...">` block with the loaded content.',
-        "",
-        "The following skills provide specialized sets of instructions for particular tasks",
-        "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
-        "",
-        Skill.fmt(list, { verbose: false }),
-      ].join("\n")
     })
 
     const describeTask = Effect.fn("ToolRegistry.describeTask")(function* (agent: Agent.Info) {
@@ -353,7 +302,6 @@ export const layer: Layer.Layer<
       return yield* Effect.forEach(
         filtered,
         Effect.fnUntraced(function* (tool: Tool.Def) {
-          using _ = log.time(tool.id)
           const output = {
             description: tool.description,
             parameters: tool.parameters,
@@ -366,11 +314,7 @@ export const layer: Layer.Layer<
               : undefined
           return {
             id: tool.id,
-            description: [
-              output.description,
-              tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,
-              tool.id === SkillTool.id ? yield* describeSkill(input.agent) : undefined,
-            ]
+            description: [output.description, tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined]
               .filter(Boolean)
               .join("\n"),
             parameters: output.parameters,
@@ -402,21 +346,19 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Skill.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, Image.defaultLayer)),
+      Layer.provide(BackgroundJob.defaultLayer),
+      Layer.provide(Image.defaultLayer),
       Layer.provide(Provider.defaultLayer),
-      Layer.provide(Git.defaultLayer),
-      Layer.provide(Reference.defaultLayer),
       Layer.provide(LSP.defaultLayer),
       Layer.provide(Instruction.defaultLayer),
-      Layer.provide(AppFileSystem.defaultLayer),
-      Layer.provide(Bus.layer),
+      Layer.provide(FSUtil.defaultLayer),
+      Layer.provide(EventV2Bridge.defaultLayer),
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(Format.defaultLayer),
       Layer.provide(CrossSpawnSpawner.defaultLayer),
-      Layer.provide(Ripgrep.defaultLayer),
       Layer.provide(Truncate.defaultLayer),
     )
-    .pipe(Layer.provide(RuntimeFlags.defaultLayer)),
+    .pipe(Layer.provide(Database.defaultLayer), Layer.provide(RuntimeFlags.defaultLayer)),
 )
 
 function isZodType(value: unknown): value is z.ZodType {
@@ -494,5 +436,28 @@ function normalizeZodJsonSchema(value: unknown): unknown {
 function isJsonSchemaObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
+
+export const node = LayerNode.make(layer.pipe(Layer.provide(Ripgrep.defaultLayer)), [
+  Config.node,
+  Plugin.node,
+  Question.node,
+  Todo.node,
+  Agent.node,
+  Skill.node,
+  Session.node,
+  BackgroundJob.node,
+  Image.node,
+  Provider.node,
+  LSP.node,
+  Instruction.node,
+  FSUtil.node,
+  EventV2Bridge.node,
+  httpClient,
+  CrossSpawnSpawner.node,
+  Format.node,
+  Truncate.node,
+  RuntimeFlags.node,
+  Database.node,
+])
 
 export * as ToolRegistry from "./registry"

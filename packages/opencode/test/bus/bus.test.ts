@@ -5,7 +5,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { Deferred, Effect, Layer, Schema } from "effect"
 import { Bus } from "../../src/bus"
 import { BusEvent } from "../../src/bus/bus-event"
-import { disposeAllInstances, provideInstance, tmpdirScoped } from "../fixture/fixture"
+import { disposeAllInstances, disposeAllInstancesEffect, provideInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 const TestEvent = {
@@ -213,7 +213,7 @@ describe("Bus", () => {
   })
 
   describe("instance isolation", () => {
-    it.live("events in one directory do not reach subscribers in another", () =>
+    it.instance("events in one directory do not reach subscribers in another", () =>
       Effect.gen(function* () {
         const tmpA = yield* tmpdirScoped()
         const tmpB = yield* tmpdirScoped()
@@ -258,7 +258,7 @@ describe("Bus", () => {
   })
 
   describe("instance disposal", () => {
-    it.live("InstanceDisposed is delivered to wildcard subscribers before stream ends", () =>
+    it.instance("InstanceDisposed is delivered to wildcard subscribers before stream ends", () =>
       Effect.gen(function* () {
         const tmp = yield* tmpdirScoped()
         const received: string[] = []
@@ -276,7 +276,7 @@ describe("Bus", () => {
           yield* Deferred.await(seen).pipe(Effect.timeout("2 seconds"))
         }).pipe(provideInstance(tmp))
 
-        yield* Effect.promise(disposeAllInstances)
+        yield* disposeAllInstancesEffect
         yield* Deferred.await(disposed).pipe(Effect.timeout("2 seconds"))
 
         expect(received).toContain("test.ping")

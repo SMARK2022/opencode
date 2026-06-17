@@ -2,8 +2,8 @@ Read a file or directory from the local filesystem. If the path does not exist, 
 
 Usage:
 - The filePath parameter should be an absolute path.
-- By default, this tool returns up to 200 lines from the start of the file.
-- Text file content is capped at 16 KB per read; use offset/limit to page large files.
+- By default, this tool returns up to 400 lines from the start of the file.
+- Text file content is capped at 24 KB per read; use offset/limit to page large files.
 - The offset parameter is the line number to start from (1-indexed).
 - To read later sections, call this tool again with a larger offset.
 - Use the grep tool to find specific content in large files or files with long lines.

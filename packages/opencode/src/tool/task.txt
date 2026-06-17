@@ -33,6 +33,7 @@ Usage notes:
 - Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
 - Each invocation starts with a fresh context unless you provide task_id to resume the same subagent session (which continues with its previous messages and tool outputs). When starting fresh, your prompt should contain a highly detailed task description and specify exactly what information the agent should return.
 - Reuse task_id only when continuing the same subagent context is useful.
+- For background tasks, you will be notified automatically when the result is ready. Do not duplicate the delegated work while it runs.
 
 Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
 

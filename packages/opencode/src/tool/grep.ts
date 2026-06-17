@@ -1,16 +1,13 @@
 import path from "path"
-import { Schema } from "effect"
-import { Effect, Option } from "effect"
+import { Effect, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { PositiveInt } from "@opencode-ai/core/schema"
-import { Ripgrep } from "../file/ripgrep"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
-import { Reference } from "@/reference/reference"
 
-const MAX_LINE_LENGTH = 2000
 const RESULT_LIMIT = 64
 // 默认 10 秒覆盖常规代码库检索；它替代 grep 工具原先的 5000 文件硬拒绝，
 // 让“小文件很多但搜索很快”的仓库能完成，同时仍给低命中大扫描一个确定边界。
@@ -50,10 +47,8 @@ function patterns(input?: string | readonly string[]) {
 export const GrepTool = Tool.define(
   "grep",
   Effect.gen(function* () {
-    const fs = yield* AppFileSystem.Service
-    const rg = yield* Ripgrep.Service
-    const reference = yield* Reference.Service
-
+    const fs = yield* FSUtil.Service
+    const ripgrep = yield* Ripgrep.Service
     return {
       description: DESCRIPTION,
       parameters: Parameters,
@@ -85,22 +80,17 @@ export const GrepTool = Tool.define(
           const requested = path.isAbsolute(params.path ?? ins.directory)
             ? (params.path ?? ins.directory)
             : path.join(ins.directory, params.path ?? ".")
-          yield* reference.ensure(requested)
           const requestedInfo = yield* fs.stat(requested).pipe(Effect.catch(() => Effect.succeed(undefined)))
           yield* assertExternalDirectoryEffect(ctx, requested, {
-            bypass: yield* reference.contains(requested),
+            bypass: false,
             kind: requestedInfo?.type === "Directory" ? "directory" : "file",
           })
 
-          const search = AppFileSystem.resolve(requested)
+          const search = FSUtil.resolve(requested)
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
           const cwd = info?.type === "Directory" ? search : path.dirname(search)
           const file = info?.type === "Directory" ? undefined : [path.relative(cwd, search)]
           const timeout = params.timeout ?? DEFAULT_TIMEOUT
-          const glob = [
-            ...patterns(params.include),
-            ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
-          ]
           const emptyTimedOut = () => ({
             title: params.pattern,
             metadata: { matches: 0, truncated: true, timedOut: true },
@@ -110,12 +100,13 @@ export const GrepTool = Tool.define(
             ].join("\n"),
           })
 
-          const result = yield* rg.search({
+          const result = yield* ripgrep.search({
             cwd,
             pattern: params.pattern,
-            glob: glob.length ? glob : undefined,
+            include: patterns(params.include),
+            exclude: patterns(params.exclude),
             file,
-            limit: RESULT_LIMIT + 1,
+            limit: RESULT_LIMIT,
             // grep 用真实执行时间做保护，不再用候选文件数粗暴拒绝；
             // 小文件多的仓库应允许快速完成，低命中大搜索由 timeout 受控终止。
             maxFiles: false,
@@ -128,40 +119,14 @@ export const GrepTool = Tool.define(
           if (result.items.length === 0) return empty
 
           const rows = result.items.map((item) => ({
-            path: AppFileSystem.resolve(
-              path.isAbsolute(item.path.text) ? item.path.text : path.join(cwd, item.path.text),
-            ),
-            line: item.line_number,
-            text: item.lines.text,
+            path: path.resolve(cwd, item.entry.path),
+            line: item.line,
+            text: item.text,
           }))
-          const times = new Map(
-            (yield* Effect.forEach(
-              [...new Set(rows.map((row) => row.path))],
-              Effect.fnUntraced(function* (file) {
-                const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
-                if (!info || info.type === "Directory") return undefined
-                return [
-                  file,
-                  info.mtime.pipe(
-                    Option.map((time) => time.getTime()),
-                    Option.getOrElse(() => 0),
-                  ) ?? 0,
-                ] as const
-              }),
-              { concurrency: 16 },
-            )).filter((entry): entry is readonly [string, number] => Boolean(entry)),
-          )
-          const matches = rows.flatMap((row) => {
-            const mtime = times.get(row.path)
-            if (mtime === undefined) return []
-            return [{ ...row, mtime }]
-          })
 
-          matches.sort((a, b) => b.mtime - a.mtime)
-
-          const resultLimitTruncated = result.truncated || matches.length > RESULT_LIMIT
+          const resultLimitTruncated = result.truncated || rows.length > RESULT_LIMIT
           const truncated = resultLimitTruncated || result.timedOut === true
-          const final = resultLimitTruncated ? matches.slice(0, RESULT_LIMIT) : matches
+          const final = resultLimitTruncated ? rows.slice(0, RESULT_LIMIT) : rows
           // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
           // 阶段不可用，也不能把未完成搜索降级成确定性的 “No files found”。
           if (final.length === 0 && result.timedOut) return emptyTimedOut()
@@ -180,16 +145,12 @@ export const GrepTool = Tool.define(
               current = match.path
               output.push(`${match.path}:`)
             }
-            const text =
-              match.text.length > MAX_LINE_LENGTH ? match.text.substring(0, MAX_LINE_LENGTH) + "..." : match.text
-            output.push(`  Line ${match.line}: ${text}`)
+            output.push(`  Line ${match.line}: ${match.text}`)
           }
 
           if (resultLimitTruncated) {
             output.push("")
-            output.push(
-              `(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`,
-            )
+            output.push("(Results truncated. Consider using a more specific path or pattern.)")
           }
 
           if (result.timedOut) {

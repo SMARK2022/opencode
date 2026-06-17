@@ -3,7 +3,8 @@ import { PermissionReviewerTranscript } from "../../src/permission/reviewer/tran
 import { PermissionReviewerPrompt } from "../../src/permission/reviewer/prompt"
 import { ReviewerRequest } from "../../src/permission/reviewer/schema"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
-import { ModelID, ProviderID } from "../../src/provider/schema"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import type { MessageV2 } from "../../src/session/message-v2"
 
 const sessionID = SessionID.make("ses_reviewer_prompt")
@@ -13,7 +14,7 @@ const userInfo = (id: string): MessageV2.User => ({
   role: "user",
   time: { created: 0 },
   agent: "auto",
-  model: { providerID: ProviderID.make("test"), modelID: ModelID.make("model") },
+  model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("model") },
 })
 const assistantInfo = (id: string, parentID = "msg_user_0"): MessageV2.Assistant => ({
   id: MessageID.make(id),
@@ -21,8 +22,8 @@ const assistantInfo = (id: string, parentID = "msg_user_0"): MessageV2.Assistant
   role: "assistant",
   time: { created: 0 },
   parentID: MessageID.make(parentID),
-  modelID: ModelID.make("model"),
-  providerID: ProviderID.make("test"),
+  modelID: ModelV2.ID.make("model"),
+  providerID: ProviderV2.ID.make("test"),
   mode: "build",
   agent: "auto",
   path: { cwd: "/repo", root: "/repo" },

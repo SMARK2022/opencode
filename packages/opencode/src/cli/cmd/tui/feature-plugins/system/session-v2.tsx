@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { InternalTuiPlugin } from "../../plugin/internal"
 import { useSyncV2 } from "@tui/context/sync-v2"

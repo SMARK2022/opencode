@@ -23,7 +23,7 @@ async function withModelsServer<T>(body: unknown, fn: (baseURL: string) => Promi
 }
 
 test("preserves temperature support from existing provider models", async () => {
-  const models = await withModelsServer(
+  const result = await withModelsServer(
     {
       data: [
         {
@@ -116,13 +116,78 @@ test("preserves temperature support from existing provider models", async () => 
       },
     }),
   )
+  const models = result.models
 
   expect(models["gpt-4o"].capabilities.temperature).toBe(true)
   expect(models["brand-new"].capabilities.temperature).toBe(true)
 })
 
+test("converts Copilot AIC token prices to USD per million tokens", async () => {
+  const result = await withModelsServer(
+    {
+      data: [
+        {
+          model_picker_enabled: true,
+          id: "gpt-5",
+          name: "GPT-5",
+          version: "gpt-5-2026-06-01",
+          billing: {
+            token_prices: {
+              batch_size: 500000,
+              default: {
+                input_price: 500,
+                output_price: 3000,
+                cache_price: 50,
+              },
+            },
+          },
+          capabilities: {
+            family: "gpt",
+            limits: {
+              max_context_window_tokens: 200000,
+              max_output_tokens: 16384,
+              max_prompt_tokens: 200000,
+            },
+            supports: {
+              streaming: true,
+              tool_calls: true,
+            },
+          },
+        },
+        {
+          model_picker_enabled: true,
+          id: "incomplete-internal-model",
+          name: "Incomplete Internal Model",
+          version: "incomplete-internal-model-2026-06-01",
+          capabilities: {
+            family: "internal",
+            supports: {},
+          },
+        },
+        {
+          model_picker_enabled: false,
+          id: "ignored-non-chat-record",
+        },
+      ],
+    },
+    (baseURL) => CopilotModels.get(baseURL),
+  )
+  const models = result.models
+
+  expect(models["gpt-5"].cost).toEqual({
+    input: 10,
+    output: 60,
+    cache: {
+      read: 1,
+      write: 0,
+    },
+  })
+  expect(models["incomplete-internal-model"]).toBeUndefined()
+  expect(models["ignored-non-chat-record"]).toBeUndefined()
+})
+
 test("clears existing variants so refreshed models calculate provider-specific variants", async () => {
-  const models = await withModelsServer(
+  const result = await withModelsServer(
     {
       data: [
         {
@@ -204,6 +269,7 @@ test("clears existing variants so refreshed models calculate provider-specific v
       },
     }),
   )
+  const models = result.models
 
   expect(models["claude-opus-4.7"].api.npm).toBe("@ai-sdk/anthropic")
   expect(models["claude-opus-4.7"].variants).toBeUndefined()

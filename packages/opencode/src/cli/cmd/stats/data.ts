@@ -3,8 +3,9 @@ import { Session } from "@/session/session"
 import type { MessageV2 } from "@/session/message-v2"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
 import { NotFoundError } from "@/storage/storage"
-import { Database, eq, gte } from "@/storage/db"
-import { SessionTable } from "@/session/session.sql"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { eq, gte } from "drizzle-orm"
 import type { Project } from "@/project/project"
 import type { SessionID } from "@/session/schema"
 
@@ -498,14 +499,14 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
   }))
 
 const getSessions = (cutoff: number) =>
-  Effect.sync(() =>
-    Database.use((db) => {
-      const rows = cutoff > 0
-        ? db.select().from(SessionTable).where(gte(SessionTable.time_updated, cutoff)).all()
-        : db.select().from(SessionTable).all()
-      return rows.map((row) => Session.fromRow(row))
-    }),
-  )
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const rows = yield* (cutoff > 0
+      ? db.select().from(SessionTable).where(gte(SessionTable.time_updated, cutoff)).all()
+      : db.select().from(SessionTable).all()
+    ).pipe(Effect.orDie)
+    return rows.map((row) => Session.fromRow(row))
+  })
 
 const cutoffFromDays = (days?: number) => {
   if (days === undefined) return 0
@@ -652,12 +653,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
   const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
   const messagesByID = new Map(visibleMessages.map((message) => [message.info.id, message]))
-  const requestUsageRows = Database.use((db) =>
-    db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
-  )
-  const assistantUsageRows = Database.use((db) =>
-    db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all(),
-  )
+  const { db } = yield* Database.Service
+  const requestUsageRows = yield* db
+    .select()
+    .from(RequestUsageTable)
+    .where(eq(RequestUsageTable.session_id, session.id))
+    .all()
+    .pipe(Effect.orDie)
+  const assistantUsageRows = yield* db
+    .select()
+    .from(RequestUsageAssistantTable)
+    .where(eq(RequestUsageAssistantTable.session_id, session.id))
+    .all()
+    .pipe(Effect.orDie)
   const totalEvents: UsageEvent[] = []
   const breakdownEvents: UsageEvent[] = []
   const toolEvents: ToolUsageEvent[] = []

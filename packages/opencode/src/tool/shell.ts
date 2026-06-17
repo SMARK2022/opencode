@@ -4,17 +4,16 @@ import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
 import path from "path"
-import * as Log from "@opencode-ai/core/util/log"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import { lazy } from "@/util/lazy"
 import { Language, type Node } from "web-tree-sitter"
 
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { Shell } from "@/shell/shell"
+import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
 
 import * as Truncate from "./truncate"
@@ -153,9 +152,6 @@ type Range = {
 type Segment = Range & {
   text: string
 }
-
-export const log = Log.create({ service: "shell-tool" })
-
 const resolveWasm = (asset: string) => {
   if (asset.startsWith("file://")) return fileURLToPath(asset)
   if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
@@ -366,11 +362,12 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
 const ask = Effect.fn("ShellTool.ask")(function* (
   ctx: Tool.Context,
   scan: Scan,
-  metadata: { command: string; cwd: string; shell: string },
+  input: { command: string; cwd: string; shell: string; description: string },
 ) {
   if (scan.dirs.size > 0) {
-    const globs = Array.from(scan.dirs).map((dir) => {
-      if (process.platform === "win32") return AppFileSystem.normalizePathPattern(path.join(dir, "*"))
+    const directories = Array.from(scan.dirs)
+    const globs = directories.map((dir) => {
+      if (process.platform === "win32") return FSUtil.normalizePathPattern(path.join(dir, "*"))
       return path.join(dir, "*")
     })
     yield* ctx.ask({
@@ -382,10 +379,13 @@ const ask = Effect.fn("ShellTool.ask")(function* (
       // 门禁 deterministic deny，其他外部路径则进入同一条 cautious review 边界。
       metadata: {
         action_kind: "shell",
-        command: metadata.command,
-        cwd: metadata.cwd,
-        shell: metadata.shell,
+        command: input.command,
+        cwd: input.cwd,
+        shell: input.shell,
         agent: ctx.agent,
+        description: input.description,
+        directories,
+        patterns: globs,
       },
     })
   }
@@ -401,15 +401,16 @@ const ask = Effect.fn("ShellTool.ask")(function* (
     // not infer security decisions from presentation strings.
     metadata: {
       action_kind: "shell",
-      command: metadata.command,
+      command: input.command,
       // raw_patterns is deny-only compatibility evidence. Canonical patterns
       // deliberately omit POSIX env assignments so `git push --force*` still
       // matches; the raw form remains available to explicit hard-deny rules
       // such as `GITHUB_TOKEN=*` without affecting allow/ask/auto routing.
       ...(scan.raw.size ? { raw_patterns: Array.from(scan.raw) } : {}),
-      cwd: metadata.cwd,
-      shell: metadata.shell,
+      cwd: input.cwd,
+      shell: input.shell,
       agent: ctx.agent,
+      description: input.description,
     },
   })
 })
@@ -720,11 +721,11 @@ export const ShellTool = Tool.define(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const spawner = yield* ChildProcessSpawner
-    const fs = yield* AppFileSystem.Service
+    const fs = yield* FSUtil.Service
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
     const flags = yield* RuntimeFlags.Service
-    const defaultTimeout = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
+    const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
 
     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -732,23 +733,23 @@ export const ShellTool = Tool.define(
         .pipe(Effect.catch(() => Effect.succeed([] as string[])))
       const file = lines[0]?.trim()
       if (!file) return
-      return AppFileSystem.normalizePath(file)
+      return FSUtil.normalizePath(file)
     })
 
     const resolvePath = Effect.fn("ShellTool.resolvePath")(function* (text: string, root: string, shell: string) {
       if (process.platform === "win32") {
-        if (Shell.posix(shell) && text.startsWith("/") && AppFileSystem.windowsPath(text) === text) {
+        if (Shell.posix(shell) && text.startsWith("/") && FSUtil.windowsPath(text) === text) {
           const file = yield* cygpath(shell, text)
           if (file) return file
         }
-        const textPath = AppFileSystem.windowsPath(text)
+        const textPath = FSUtil.windowsPath(text)
         // PowerShell drive-relative paths like `C:../file` are scoped to the
         // shell's current location on that drive. Node resolves them against the
         // process-level per-drive cwd, which is unrelated to the command cwd and
         // can request the wrong external_directory. Permission scanning keeps the
         // visible command cwd as the only trust boundary while preserving absolute
         // drive paths such as `C:/file` and `C:\\file`.
-        return AppFileSystem.normalizePath(path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath))
+        return FSUtil.normalizePath(path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath))
       }
       return path.resolve(root, text)
     })
@@ -785,7 +786,7 @@ export const ShellTool = Tool.define(
         if (cmd && (FILES.has(cmd) || (shellKind === "cmd" && CMD_FILES.has(cmd)))) {
           for (const arg of pathArgs(command, ps, shellKind === "cmd")) {
             const resolved = yield* argPath(arg, cwd, ps, shell)
-            log.info("resolved path", { arg, resolved })
+            yield* Effect.logInfo("resolved path", { arg, resolved })
             if (!resolved || containsPath(resolved, instance)) continue
             const dir = (yield* fs.isDir(resolved)) ? resolved : path.dirname(resolved)
             scan.dirs.add(dir)
@@ -1090,8 +1091,8 @@ export const ShellTool = Tool.define(
         const shell = Shell.acceptable(cfg.shell)
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
-        const prompt = ShellPrompt.render(name, process.platform, limits)
-        log.info("shell tool using shell", { shell })
+        const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
+        yield* Effect.logInfo("shell tool using shell", { shell })
 
         const userCompressionEnabled = bashCompressionEnabled(cfg)
         const compressionGuidance = userCompressionEnabled
@@ -1118,7 +1119,7 @@ export const ShellTool = Tool.define(
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
               }
-              const timeout = params.timeout ?? defaultTimeout
+              const timeout = params.timeout ?? defaultTimeoutMs
               const ps = Shell.ps(shell)
               yield* Effect.scoped(
                 Effect.gen(function* () {
@@ -1130,7 +1131,7 @@ export const ShellTool = Tool.define(
                   if (compatibility) throw new Error(compatibility)
                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
-                  yield* ask(ctx, scan, { command: params.command, cwd, shell: name })
+                  yield* ask(ctx, scan, { command: params.command, cwd, shell: name, description: params.description })
                 }),
               )
 

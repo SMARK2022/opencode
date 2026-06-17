@@ -1,9 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
+import { Global } from "@opencode-ai/core/global"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { createSignal, onCleanup, onMount } from "solid-js"
-import { DialogSelect, type DialogSelectOption } from "@/cli/cmd/tui/ui/dialog-select"
+import { DialogSelect, type DialogSelectOption } from "@opencode-ai/tui/ui/dialog-select"
 import { TuiConfigProvider } from "@/cli/cmd/tui/context/tui-config"
 import { ThemeProvider } from "@/cli/cmd/tui/context/theme"
 import { KVProvider } from "@/cli/cmd/tui/context/kv"
@@ -11,6 +12,7 @@ import { ToastProvider } from "@/cli/cmd/tui/ui/toast"
 import { DialogProvider } from "@/cli/cmd/tui/ui/dialog"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "@/cli/cmd/tui/keymap"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import { TestTuiContexts } from "../../fixture/tui-environment"
 
 async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, text: string) {
   const timeout = Date.now() + 1000
@@ -35,9 +37,10 @@ function DialogSelectHarness(props: {
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
   return (
-    <OpencodeKeymapProvider keymap={keymap}>
-      <TuiConfigProvider config={config}>
-        <KVProvider>
+    <TestTuiContexts paths={{ state: Global.Path.state }}>
+      <OpencodeKeymapProvider keymap={keymap}>
+        <TuiConfigProvider config={config}>
+          <KVProvider>
           <ThemeProvider mode="dark">
             <ToastProvider>
               <DialogProvider>
@@ -52,9 +55,10 @@ function DialogSelectHarness(props: {
               </DialogProvider>
             </ToastProvider>
           </ThemeProvider>
-        </KVProvider>
-      </TuiConfigProvider>
-    </OpencodeKeymapProvider>
+          </KVProvider>
+        </TuiConfigProvider>
+      </OpencodeKeymapProvider>
+    </TestTuiContexts>
   )
 }
 

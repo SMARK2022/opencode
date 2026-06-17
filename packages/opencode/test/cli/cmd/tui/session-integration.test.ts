@@ -12,12 +12,12 @@ import { readFileSync } from "fs"
 import path from "path"
 
 const sessionSource = readFileSync(
-  path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/routes/session/index.tsx"),
+  path.resolve(import.meta.dir, "../../../../../tui/src/routes/session/index.tsx"),
   "utf-8",
 )
 
 const promptSource = readFileSync(
-  path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/component/prompt/index.tsx"),
+  path.resolve(import.meta.dir, "../../../../../tui/src/component/prompt/index.tsx"),
   "utf-8",
 )
 
@@ -197,12 +197,12 @@ describe("Session route integration points", () => {
 
   describe("event dispatch", () => {
     test("global and explicit project event matches return before workspace fallback", () => {
-      const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
+      const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../../tui/src/context/event.ts"), "utf-8")
       expect(eventSource).toMatch(
-        /if \(event\.directory === "global"\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
+        /if \(event\.directory === "global"\) \{\s*handler\(event\.payload, \{ directory: event\.directory, workspace: event\.workspace \}\)\s*return\s*\}/,
       )
       expect(eventSource).toMatch(
-        /if \(event\.project\) \{\s*if \(event\.project === project\.project\(\)\) handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
+        /if \(event\.project && project\.project\(\)\) \{\s*if \(event\.project === project\.project\(\)\) handler\(event\.payload, \{ directory: event\.directory, workspace: event\.workspace \}\)\s*return\s*\}/,
       )
     })
   })

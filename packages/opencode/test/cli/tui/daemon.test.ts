@@ -12,6 +12,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir } from "fs/promises"
+import { connect } from "node:net"
 import path from "path"
 import { fileURLToPath } from "url"
 import { tmpdir } from "../../fixture/fixture"
@@ -152,6 +153,62 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
     seen += next.value
   }
   return seen
+}
+
+function openSseClient(url: string) {
+  return new Promise<{ first: string; close: () => void }>((resolve, reject) => {
+    const target = new URL(url)
+    let settled = false
+    let seen = ""
+    const socket = connect(Number(target.port), target.hostname)
+    socket.setEncoding("utf8")
+
+    const timeout = setTimeout(() => fail(new Error("timed out waiting for SSE connection")), 5_000)
+
+    function cleanup() {
+      clearTimeout(timeout)
+      socket.off("connect", onConnect)
+      socket.off("data", onData)
+      socket.off("error", fail)
+      socket.off("close", onClose)
+    }
+
+    function fail(error: Error) {
+      if (settled) return
+      settled = true
+      cleanup()
+      socket.destroy()
+      reject(error)
+    }
+
+    function onConnect() {
+      socket.write(
+        `GET ${target.pathname}${target.search} HTTP/1.1\r\nHost: ${target.host}\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n`,
+      )
+    }
+
+    function onData(chunk: string) {
+      seen += chunk
+      if (!seen.includes("server.connected")) return
+      settled = true
+      cleanup()
+      resolve({
+        first: seen,
+        close() {
+          socket.destroy()
+        },
+      })
+    }
+
+    function onClose() {
+      fail(new Error("SSE connection closed before server.connected"))
+    }
+
+    socket.on("connect", onConnect)
+    socket.on("data", onData)
+    socket.on("error", fail)
+    socket.on("close", onClose)
+  })
 }
 
 describe("daemon lifecycle", () => {
@@ -474,21 +531,13 @@ describe("daemon lifecycle", () => {
       const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
 
       try {
-        const ctrl = new AbortController()
-        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
-        expect(res.ok).toBe(true)
-        if (!res.body) throw new Error("missing SSE body")
-
-        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+        const client = await openSseClient(`http://127.0.0.1:${lock.port}/global/event`)
         try {
-          const first = await reader.read()
-          expect(first.value).toContain("server.connected")
+          expect(client.first).toContain("server.connected")
           await Bun.sleep(750)
           expect(ServerLockModule.alive(proc.pid)).toBe(true)
         } finally {
-          ctrl.abort()
-          await reader.cancel().catch(() => undefined)
-          reader.releaseLock()
+          client.close()
         }
 
         const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])

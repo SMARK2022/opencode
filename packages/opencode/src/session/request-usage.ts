@@ -1,6 +1,7 @@
 import z from "zod"
 import { Context, Effect, Layer } from "effect"
-import { and, Database, desc, eq, lt } from "../storage"
+import { and, desc, eq, lt } from "drizzle-orm"
+import { Database } from "@opencode-ai/core/database/database"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID } from "./schema"
 import { RequestUsageAssistantTable, RequestUsageTable } from "./request-usage.sql"
@@ -210,19 +211,24 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
+    const database = yield* Database.Service
+    const { db } = database
+
     const begin: Interface["begin"] = Effect.fn("RequestUsage.begin")(function* (input) {
       const now = Date.now()
       const created = input.timeCreated ?? now
       const root = input.rootRequestID ?? input.requestID
-      yield* Effect.sync(() => {
-        Database.transaction((db) => {
+      yield* db
+        .transaction((tx) =>
+          Effect.gen(function* () {
           const where = and(
             eq(RequestUsageTable.session_id, input.sessionID),
             eq(RequestUsageTable.request_id, input.requestID),
           )
-          const row = db.select().from(RequestUsageTable).where(where).get()
+          const row = yield* tx.select().from(RequestUsageTable).where(where).get()
           if (!row) {
-            db.insert(RequestUsageTable)
+            yield* tx
+              .insert(RequestUsageTable)
               .values({
                 session_id: input.sessionID,
                 request_id: input.requestID,
@@ -239,7 +245,8 @@ export const layer = Layer.effect(
               .run()
             return
           }
-          db.update(RequestUsageTable)
+          yield* tx
+            .update(RequestUsageTable)
             .set({
               root_request_id: row.root_request_id || root,
               source: input.source,
@@ -254,32 +261,29 @@ export const layer = Layer.effect(
             })
             .where(where)
             .run()
-        })
-      })
+          }),
+        )
+        .pipe(Effect.orDie)
     })
 
     const complete: Interface["complete"] = Effect.fn("RequestUsage.complete")(function* (input) {
       const now = Date.now()
-      yield* Effect.sync(() => {
-        Database.use((db) => {
-          db.update(RequestUsageTable)
-            .set({
-              status: input.status ?? "completed",
-              error_message: input.error ?? null,
-              time_updated: now,
-              time_completed: input.timeCompleted ?? now,
-            })
-            .where(
-              and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)),
-            )
-            .run()
+      yield* db
+        .update(RequestUsageTable)
+        .set({
+          status: input.status ?? "completed",
+          error_message: input.error ?? null,
+          time_updated: now,
+          time_completed: input.timeCompleted ?? now,
         })
-      })
+        .where(and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)))
+        .run()
+        .pipe(Effect.orDie)
     })
 
     const recordAssistant: Interface["recordAssistant"] = Effect.fn("RequestUsage.recordAssistant")(function* (input) {
       // 中文说明：assistant 粒度单独落表，便于同一 request 下多模型/多回合统计。
-      const stepTotals = MessageV2.parts(input.assistant.id).reduce(
+      const stepTotals = (yield* MessageV2.parts(input.assistant.id).pipe(Effect.provideService(Database.Service, database))).reduce(
         (acc, part) => {
           if (part.type !== "step-finish") return acc
           return {
@@ -310,17 +314,19 @@ export const layer = Layer.effect(
       const status = assistantStatus(input.assistant)
       const now = Date.now()
 
-      yield* Effect.sync(() => {
-        Database.transaction((db) => {
+      yield* db
+        .transaction((tx) =>
+          Effect.gen(function* () {
           const requestWhere = and(
             eq(RequestUsageTable.session_id, input.sessionID),
             eq(RequestUsageTable.request_id, input.requestID),
           )
-          const request = db.select().from(RequestUsageTable).where(requestWhere).get()
+          const request = yield* tx.select().from(RequestUsageTable).where(requestWhere).get()
 
           // 中文说明：优先使用 begin 已创建的请求；若异常缺失，则兜底创建 unknown 请求，保证计费数据不丢。
           if (!request) {
-            db.insert(RequestUsageTable)
+            yield* tx
+              .insert(RequestUsageTable)
               .values({
                 session_id: input.sessionID,
                 request_id: input.requestID,
@@ -337,14 +343,16 @@ export const layer = Layer.effect(
               .run()
           }
 
-          const requestRow = db.select().from(RequestUsageTable).where(requestWhere).get()!
+          const requestRow = yield* tx.select().from(RequestUsageTable).where(requestWhere).get()
+          if (!requestRow) return yield* Effect.die("request usage row missing after insert")
           const assistantWhere = and(
             eq(RequestUsageAssistantTable.session_id, input.sessionID),
             eq(RequestUsageAssistantTable.assistant_message_id, input.assistant.id),
           )
-          const assistantRow = db.select().from(RequestUsageAssistantTable).where(assistantWhere).get()
+          const assistantRow = yield* tx.select().from(RequestUsageAssistantTable).where(assistantWhere).get()
           if (!assistantRow) {
-            db.insert(RequestUsageAssistantTable)
+            yield* tx
+              .insert(RequestUsageAssistantTable)
               .values({
                 session_id: input.sessionID,
                 request_id: input.requestID,
@@ -370,7 +378,8 @@ export const layer = Layer.effect(
               .run()
           }
           if (assistantRow) {
-            db.update(RequestUsageAssistantTable)
+            yield* tx
+              .update(RequestUsageAssistantTable)
               .set({
                 request_id: input.requestID,
                 root_request_id: requestRow.root_request_id,
@@ -394,7 +403,7 @@ export const layer = Layer.effect(
               .run()
           }
 
-          const assistantRows = db
+          const assistantRows = yield* tx
             .select()
             .from(RequestUsageAssistantTable)
             .where(
@@ -447,7 +456,8 @@ export const layer = Layer.effect(
                 ? "aborted"
                 : "completed"
 
-          db.update(RequestUsageTable)
+          yield* tx
+            .update(RequestUsageTable)
             .set({
               assistant_count: aggregate.assistantCount,
               step_count: aggregate.stepCount,
@@ -465,59 +475,48 @@ export const layer = Layer.effect(
             })
             .where(requestWhere)
             .run()
-        })
-      })
+          }),
+        )
+        .pipe(Effect.orDie)
     })
 
     const get: Interface["get"] = Effect.fn("RequestUsage.get")(function* (input) {
-      const row = yield* Effect.sync(() =>
-        Database.use((db) =>
-          db
-            .select()
-            .from(RequestUsageTable)
-            .where(and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)))
-            .get(),
-        ),
-      )
+      const row = yield* db
+        .select()
+        .from(RequestUsageTable)
+        .where(and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)))
+        .get()
+        .pipe(Effect.orDie)
       if (!row) return
       return rowToRequest(row)
     })
 
     const list: Interface["list"] = Effect.fn("RequestUsage.list")(function* (input) {
-      const rows = yield* Effect.sync(() => {
-        const conditions = [eq(RequestUsageTable.session_id, input.sessionID)]
-        if (input.before) conditions.push(lt(RequestUsageTable.time_created, input.before))
-        if (input.rootRequestID) conditions.push(eq(RequestUsageTable.root_request_id, input.rootRequestID))
-        if (input.source) conditions.push(eq(RequestUsageTable.source, input.source))
-        return Database.use((db) =>
-          db
-            .select()
-            .from(RequestUsageTable)
-            .where(and(...conditions))
-            .orderBy(desc(RequestUsageTable.time_created), desc(RequestUsageTable.request_id))
-            .limit(input.limit ?? 100)
-            .all(),
-        )
-      })
+      const conditions = [eq(RequestUsageTable.session_id, input.sessionID)]
+      if (input.before) conditions.push(lt(RequestUsageTable.time_created, input.before))
+      if (input.rootRequestID) conditions.push(eq(RequestUsageTable.root_request_id, input.rootRequestID))
+      if (input.source) conditions.push(eq(RequestUsageTable.source, input.source))
+      const rows = yield* db
+        .select()
+        .from(RequestUsageTable)
+        .where(and(...conditions))
+        .orderBy(desc(RequestUsageTable.time_created), desc(RequestUsageTable.request_id))
+        .limit(input.limit ?? 100)
+        .all()
+        .pipe(Effect.orDie)
       return rows.map(rowToRequest)
     })
 
     const assistants: Interface["assistants"] = Effect.fn("RequestUsage.assistants")(function* (input) {
-      const rows = yield* Effect.sync(() =>
-        Database.use((db) =>
-          db
-            .select()
-            .from(RequestUsageAssistantTable)
-            .where(
-              and(
-                eq(RequestUsageAssistantTable.session_id, input.sessionID),
-                eq(RequestUsageAssistantTable.request_id, input.requestID),
-              ),
-            )
-            .orderBy(desc(RequestUsageAssistantTable.time_created), desc(RequestUsageAssistantTable.assistant_message_id))
-            .all(),
-        ),
-      )
+      const rows = yield* db
+        .select()
+        .from(RequestUsageAssistantTable)
+        .where(
+          and(eq(RequestUsageAssistantTable.session_id, input.sessionID), eq(RequestUsageAssistantTable.request_id, input.requestID)),
+        )
+        .orderBy(desc(RequestUsageAssistantTable.time_created), desc(RequestUsageAssistantTable.assistant_message_id))
+        .all()
+        .pipe(Effect.orDie)
       return rows.map(rowToAssistant)
     })
 
@@ -532,6 +531,6 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer
+export const defaultLayer = layer.pipe(Layer.provide(Database.defaultLayer))
 
 export * as SessionRequestUsage from "./request-usage"

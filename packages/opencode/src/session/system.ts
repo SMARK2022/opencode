@@ -1,3 +1,4 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
 import { type as osType, release as osRelease } from "os"
 
@@ -21,7 +22,12 @@ import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { Git } from "@/git"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { Shell } from "@/shell/shell"
+import { Shell } from "@opencode-ai/core/shell"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { Location } from "@opencode-ai/core/location"
+import { LocationServiceMap } from "@opencode-ai/core/location-layer"
+import { PluginBoot } from "@opencode-ai/core/plugin/boot"
+import { Reference } from "@opencode-ai/core/reference"
 
 // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
 const MAX_STATUS_CHARS = 2000
@@ -177,6 +183,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const git = yield* Git.Service
+    const locations = yield* LocationServiceMap
 
     // 该缓存是会话级快照，按 cwd 作为键。
     // 为保持“快照语义”，会话内不主动失效。
@@ -293,6 +300,10 @@ export const layer = Layer.effect(
         const { shellNotes, osVersion } = yield* getEnvExtras()
         const isWorktree = ctx.worktree !== ctx.directory
         const cutoff = getKnowledgeCutoff(model.api.id)
+        const references = yield* Effect.gen(function* () {
+          yield* (yield* PluginBoot.Service).wait()
+          return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+        }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
         const envLines: string[] = [
           `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
           `Here is some useful information about the environment you are running in:`,
@@ -316,7 +327,25 @@ export const layer = Layer.effect(
           toolUsageSection(registeredTools),
           ...staticSections(),
           envLines.join("\n"),
-        ]
+          references.length === 0
+            ? undefined
+            : [
+                "Project references provide additional directories that can be accessed when relevant.",
+                "<available_references>",
+                ...references
+                  .toSorted((a, b) => a.name.localeCompare(b.name))
+                  .flatMap((reference) => [
+                    "  <reference>",
+                    `    <name>${reference.name}</name>`,
+                    `    <path>${reference.path}</path>`,
+                    ...(reference.description === undefined
+                      ? []
+                      : [`    <description>${reference.description}</description>`]),
+                    "  </reference>",
+                  ]),
+                "</available_references>",
+              ].join("\n"),
+        ].filter((part): part is string => part !== undefined)
       }),
 
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
@@ -336,6 +365,11 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(
   Layer.provide(Skill.defaultLayer),
   Layer.provide(Git.defaultLayer),
+  Layer.provide(LocationServiceMap.layer),
 )
+
+const locationServiceMapNode = LayerNode.make(LocationServiceMap.layer, [])
+
+export const node = LayerNode.make(layer, [Skill.node, Git.node, locationServiceMapNode])
 
 export * as SystemPrompt from "./system"

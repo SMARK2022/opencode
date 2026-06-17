@@ -12,9 +12,9 @@ import { Process } from "@/util/process"
 import { NotFoundError } from "@/storage/storage"
 import { EOL } from "os"
 import path from "path"
-import { which } from "../../util/which"
-import { AppRuntime } from "@/effect/app-runtime"
-import { Database, eq, sql } from "@/storage"
+import { which } from "@opencode-ai/core/util/which"
+import { Database } from "@opencode-ai/core/database/database"
+import { eq, sql } from "drizzle-orm"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
 import { formatNumber } from "../format"
 import { Instance } from "@/project/instance"
@@ -111,17 +111,17 @@ export const SessionListCommand = effectCmd({
     // Batch-load cost/token totals if requested.
     let costBySession: Map<string, { costMicros: number; tokensTotal: number }> | undefined
     if (args.cost && args.format !== "json") {
-      const rows = Database.use((db) =>
-        db
-          .select({
-            sessionId: RequestUsageTable.session_id,
-            costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`,
-            tokensTotal: sql<number>`sum(${RequestUsageTable.tokens_total})`,
-          })
-          .from(RequestUsageTable)
-          .groupBy(RequestUsageTable.session_id)
-          .all(),
-      )
+      const { db } = yield* Database.Service
+      const rows = yield* db
+        .select({
+          sessionId: RequestUsageTable.session_id,
+          costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`,
+          tokensTotal: sql<number>`sum(${RequestUsageTable.tokens_total})`,
+        })
+        .from(RequestUsageTable)
+        .groupBy(RequestUsageTable.session_id)
+        .all()
+        .pipe(Effect.orDie)
       costBySession = new Map(rows.map((r) => [r.sessionId, { costMicros: r.costMicros, tokensTotal: r.tokensTotal }]))
     }
 
@@ -172,24 +172,24 @@ export const SessionInfoCommand = effectCmd({
     )
 
     // Per-model breakdown from request_usage_assistant.
-    const rows = Database.use((db) =>
-      db
-        .select({
-          providerId: RequestUsageAssistantTable.provider_id,
-          modelId: RequestUsageAssistantTable.model_id,
-          calls: sql<number>`count(*)`,
-          tokensInput: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
-          tokensOutput: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
-          tokensReasoning: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
-          tokensCacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
-          tokensCacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
-          costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
-        })
-        .from(RequestUsageAssistantTable)
-        .where(eq(RequestUsageAssistantTable.session_id, sessionID))
-        .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
-        .all(),
-    )
+    const { db } = yield* Database.Service
+    const rows = yield* db
+      .select({
+        providerId: RequestUsageAssistantTable.provider_id,
+        modelId: RequestUsageAssistantTable.model_id,
+        calls: sql<number>`count(*)`,
+        tokensInput: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
+        tokensOutput: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
+        tokensReasoning: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
+        tokensCacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
+        tokensCacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
+        costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
+      })
+      .from(RequestUsageAssistantTable)
+      .where(eq(RequestUsageAssistantTable.session_id, sessionID))
+      .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
+      .all()
+      .pipe(Effect.orDie)
 
     displaySessionInfo(session, rows)
   }),

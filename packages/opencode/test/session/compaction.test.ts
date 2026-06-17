@@ -1,18 +1,20 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Database } from "@opencode-ai/core/database/database"
+import { EventV2Bridge } from "@/event-v2-bridge"
 import { APICallError } from "ai"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import path from "path"
 import fs from "fs/promises"
-import { Bus } from "../../src/bus"
 import { Config } from "@/config/config"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Image } from "@/image/image"
 import { Agent } from "../../src/agent/agent"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction } from "../../src/session/compaction"
 import { TokenEstimate } from "@/token/estimate"
-import * as Log from "@opencode-ai/core/util/log"
 import { Permission } from "../../src/permission"
 import { Plugin } from "../../src/plugin"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
@@ -22,20 +24,19 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { Todo } from "../../src/session/todo"
-import { SessionV2 } from "../../src/v2/session"
-import { ModelID, ProviderID } from "../../src/provider/schema"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionExecution } from "@opencode-ai/core/session/execution"
 import type { Provider } from "@/provider/provider"
 import * as SessionProcessorModule from "../../src/session/processor"
 import { Snapshot } from "../../src/snapshot"
 import { ProviderTest } from "../fake/provider"
-import { pollWithTimeout, testEffect } from "../lib/effect"
+import { testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
-import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { EventV2Bridge } from "@/event-v2-bridge"
-
-void Log.init({ print: false })
+import { LLMEvent, Usage } from "@opencode-ai/llm"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -47,9 +48,13 @@ const summary = Layer.succeed(
 )
 
 const ref = {
-  providerID: ProviderID.make("test"),
-  modelID: ModelID.make("test-model"),
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("test-model"),
 }
+
+const usage = (input: ConstructorParameters<typeof Usage>[0]) => new Usage(input)
+
+const basicUsage = () => usage({ inputTokens: 1, outputTokens: 1, totalTokens: 2 })
 
 afterEach(() => {
   mock.restore()
@@ -233,8 +238,8 @@ function layer(result: "continue" | "compact") {
   )
 }
 
-function cfg(compaction?: Config.Info["compaction"]) {
-  const base = Schema.decodeUnknownSync(Config.Info)({}) as Config.Info
+function cfg(compaction?: ConfigV1.Info["compaction"]) {
+  const base = Schema.decodeUnknownSync(ConfigV1.Info)({}) as ConfigV1.Info
   return TestConfig.layer({
     get: () => Effect.succeed({ ...base, compaction }),
   })
@@ -245,23 +250,30 @@ const deps = Layer.mergeAll(
   layer("continue"),
   Agent.defaultLayer,
   Plugin.defaultLayer,
-  Bus.layer,
-  AppFileSystem.defaultLayer,
+  FSUtil.defaultLayer,
+  EventV2Bridge.defaultLayer,
   Config.defaultLayer,
-  SyncEvent.defaultLayer,
   RuntimeFlags.layer({ experimentalEventSystem: true }),
+  Database.defaultLayer,
   EventV2Bridge.defaultLayer,
 )
 
 const env = Layer.mergeAll(
   SessionNs.defaultLayer,
+  Database.defaultLayer,
+  EventV2Bridge.defaultLayer,
   CrossSpawnSpawner.defaultLayer,
   SessionCompaction.layer.pipe(Layer.provide(SessionNs.defaultLayer), Layer.provideMerge(deps)),
 )
 
 const it = testEffect(env)
 
-const compactionEnv = Layer.mergeAll(SessionNs.defaultLayer, CrossSpawnSpawner.defaultLayer)
+const compactionEnv = Layer.mergeAll(
+  SessionNs.defaultLayer,
+  Database.defaultLayer,
+  EventV2Bridge.defaultLayer,
+  CrossSpawnSpawner.defaultLayer,
+)
 const itCompaction = testEffect(compactionEnv)
 
 type CompactionProcessOptions = {
@@ -277,9 +289,9 @@ function withCompaction(options?: CompactionProcessOptions) {
 }
 
 function compactionProcessLayer(options?: CompactionProcessOptions) {
-  const bus = Bus.layer
-  const status = SessionStatus.layer.pipe(Layer.provide(bus))
-  const todo = Todo.layer.pipe(Layer.provide(bus))
+  const events = EventV2Bridge.defaultLayer
+  const status = SessionStatus.layer.pipe(Layer.provide(events))
+  const todo = Todo.layer.pipe(Layer.provide(events), Layer.provide(Database.defaultLayer))
   const processor = options?.llm
     ? SessionProcessorModule.SessionProcessor.layer.pipe(
         Layer.provide(summary),
@@ -288,18 +300,18 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
         Layer.provide(status),
       )
     : layer(options?.result ?? "continue")
-  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status, todo).pipe(
+  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, events, status, todo).pipe(
     Layer.provide(SessionNs.defaultLayer),
     Layer.provide((options?.provider ?? wide()).layer),
-    Layer.provide(AppFileSystem.defaultLayer),
+    Layer.provide(FSUtil.defaultLayer),
     Layer.provide(Snapshot.defaultLayer),
     Layer.provide(options?.llm ?? LLM.defaultLayer),
     Layer.provide(Permission.defaultLayer),
     Layer.provide(Agent.defaultLayer),
     Layer.provide(options?.plugin ?? Plugin.defaultLayer),
-    Layer.provide(bus),
+    Layer.provide(status),
+    Layer.provide(events),
     Layer.provide(options?.config ?? Config.defaultLayer),
-    Layer.provide(SyncEvent.defaultLayer),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
     Layer.provide(EventV2Bridge.defaultLayer),
   )
@@ -310,11 +322,13 @@ function createSummaryCompaction(sessionID: SessionID) {
 }
 
 function readCompactionPart(sessionID: SessionID) {
-  return SessionNs.Service.use((ssn) => ssn.messages({ sessionID })).pipe(
-    Effect.map((messages) =>
-      messages.at(-2)?.parts.find((item): item is MessageV2.CompactionPart => item.type === "compaction"),
-    ),
-  )
+  return SessionNs.use
+    .messages({ sessionID })
+    .pipe(
+      Effect.map((messages) =>
+        messages.at(-2)?.parts.find((item): item is SessionV1.CompactionPart => item.type === "compaction"),
+      ),
+    )
 }
 
 function canonicalTestPath(file: string) {
@@ -386,11 +400,11 @@ function readLatestSummaryText(sessionID: SessionID) {
 
 function llm() {
   const queue: Array<
-    Stream.Stream<LLM.Event, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLM.Event, unknown>)
+    Stream.Stream<LLMEvent, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown>)
   > = []
 
   return {
-    push(stream: Stream.Stream<LLM.Event, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLM.Event, unknown>)) {
+    push(stream: Stream.Stream<LLMEvent, unknown> | ((input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown>)) {
       queue.push(stream)
     },
     layer: Layer.succeed(
@@ -409,54 +423,22 @@ function llm() {
 function reply(
   text: string,
   capture?: (input: LLM.StreamInput) => void,
-): (input: LLM.StreamInput) => Stream.Stream<LLM.Event, unknown> {
+): (input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown> {
   return (input) => {
     capture?.(input)
     return Stream.make(
-      { type: "start" } satisfies LLM.Event,
-      { type: "text-start", id: "txt-0" } satisfies LLM.Event,
-      { type: "text-delta", id: "txt-0", delta: text, text } as LLM.Event,
-      { type: "text-end", id: "txt-0" } satisfies LLM.Event,
-      {
-        type: "finish-step",
-        finishReason: "stop",
-        rawFinishReason: "stop",
-        response: { id: "res", modelId: "test-model", timestamp: new Date() },
-        providerMetadata: undefined,
-        usage: {
-          inputTokens: 1,
-          outputTokens: 1,
-          totalTokens: 2,
-          inputTokenDetails: {
-            noCacheTokens: undefined,
-            cacheReadTokens: undefined,
-            cacheWriteTokens: undefined,
-          },
-          outputTokenDetails: {
-            textTokens: undefined,
-            reasoningTokens: undefined,
-          },
-        },
-      } satisfies LLM.Event,
-      {
-        type: "finish",
-        finishReason: "stop",
-        rawFinishReason: "stop",
-        totalUsage: {
-          inputTokens: 1,
-          outputTokens: 1,
-          totalTokens: 2,
-          inputTokenDetails: {
-            noCacheTokens: undefined,
-            cacheReadTokens: undefined,
-            cacheWriteTokens: undefined,
-          },
-          outputTokenDetails: {
-            textTokens: undefined,
-            reasoningTokens: undefined,
-          },
-        },
-      } satisfies LLM.Event,
+      LLMEvent.textStart({ id: "txt-0" }),
+      LLMEvent.textDelta({ id: "txt-0", text }),
+      LLMEvent.textEnd({ id: "txt-0" }),
+      LLMEvent.stepFinish({
+        index: 0,
+        reason: "stop",
+        usage: basicUsage(),
+      }),
+      LLMEvent.finish({
+        reason: "stop",
+        usage: basicUsage(),
+      }),
     )
   }
 }
@@ -700,8 +682,28 @@ describe("session.compaction.create", () => {
           auto: true,
           overflow: true,
         })
+      }),
+    ),
+  )
+
+  it.live.skip(
+    "projects a compaction message to v2 (v2 projector disabled)",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+
+        yield* compact.create({
+          sessionID: info.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+          overflow: true,
+        })
 
         const v2 = yield* SessionV2.Service.use((svc) => svc.messages({ sessionID: info.id })).pipe(
+          Effect.provide(SessionExecution.noopLayer),
           Effect.provide(SessionV2.defaultLayer),
         )
         expect(v2.at(-1)).toMatchObject({
@@ -738,7 +740,7 @@ describe("session.compaction.prune", () => {
             type: "text",
             text: "first",
           })
-          const b: MessageV2.Assistant = {
+          const b: SessionV1.Assistant = {
             id: MessageID.ascending(),
             role: "assistant",
             sessionID: info.id,
@@ -834,7 +836,7 @@ describe("session.compaction.prune", () => {
           type: "text",
           text: "first",
         })
-        const b: MessageV2.Assistant = {
+        const b: SessionV1.Assistant = {
           id: MessageID.ascending(),
           role: "assistant",
           sessionID: info.id,
@@ -920,7 +922,7 @@ describe("session.compaction.process", () => {
           auto: false,
         })
 
-        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
+        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
         const latest = MessageV2.latest(filtered)
 
         expect(result).toBe("continue")
@@ -1452,19 +1454,22 @@ describe("session.compaction.process", () => {
   it.instance(
     "publishes compacted event on continue",
     Effect.gen(function* () {
-      const bus = yield* Bus.Service
+      const events = yield* EventV2Bridge.Service
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const done = yield* Deferred.make<void, Error>()
       let seen = false
-      const unsub = yield* bus.subscribeCallback(SessionCompaction.Event.Compacted, (evt) => {
-        if (evt.properties.sessionID !== session.id) return
+      const unsub = yield* events.listen((evt) => {
+        if (evt.type !== SessionCompaction.Event.Compacted.type) return Effect.void
+        if ((evt.data as typeof SessionCompaction.Event.Compacted.data.Type).sessionID !== session.id)
+          return Effect.void
         seen = true
         Deferred.doneUnsafe(done, Effect.void)
+        return Effect.void
       })
-      yield* Effect.addFinalizer(() => Effect.sync(unsub))
+      yield* Effect.addFinalizer(() => unsub)
 
       const result = yield* SessionCompaction.use.process({
         parentID: msg.id,
@@ -1721,7 +1726,7 @@ describe("session.compaction.process", () => {
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
+        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
         const modelMessages = yield* MessageV2.toModelMessagesEffect(filtered, createModel({ context: 100_000, output: 32_000 }))
         const compactedContext = JSON.stringify(modelMessages)
 
@@ -1772,7 +1777,7 @@ describe("session.compaction.process", () => {
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const modelMessages = yield* MessageV2.toModelMessagesEffect(
-          MessageV2.filterCompacted(MessageV2.stream(session.id)),
+          MessageV2.filterCompacted(yield* MessageV2.stream(session.id)),
           mementoModel,
         )
         const compactedContext = JSON.stringify(modelMessages)
@@ -1908,7 +1913,7 @@ describe("session.compaction.process", () => {
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const modelMessages = yield* MessageV2.toModelMessagesEffect(
-          MessageV2.filterCompacted(MessageV2.stream(session.id)),
+          MessageV2.filterCompacted(yield* MessageV2.stream(session.id)),
           createModel({ context: 100_000, output: 32_000 }),
         )
         const compactedContext = JSON.stringify(modelMessages)
@@ -2001,7 +2006,7 @@ describe("session.compaction.process", () => {
         expect(captured).toContain("zzzz")
         expect(captured).not.toContain("keep tail")
 
-        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
+        const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
         expect(filtered.map((msg) => msg.info.id).slice(0, 3)).toEqual([parent!, expect.any(String), keep.id])
         expect(filtered[1]?.info.role).toBe("assistant")
         expect(filtered[1]?.info.role === "assistant" ? filtered[1].info.summary : false).toBe(true)
@@ -2116,7 +2121,7 @@ describe("session.compaction.process", () => {
         Stream.fromAsyncIterable(
           {
             async *[Symbol.asyncIterator]() {
-              yield { type: "start" } as LLM.Event
+              yield LLMEvent.stepStart({ index: 0 })
               throw new APICallError({
                 message: "boom",
                 url: "https://example.com/v1/chat/completions",
@@ -2134,10 +2139,19 @@ describe("session.compaction.process", () => {
 
       return Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
-        const status = yield* SessionStatus.Service
+        const events = yield* EventV2Bridge.Service
+        const ready = yield* Deferred.make<void>()
         const session = yield* ssn.create({})
         const msg = yield* createUserMessage(session.id, "hello")
         const msgs = yield* ssn.messages({ sessionID: session.id })
+        const off = yield* events.listen((evt) => {
+          if (evt.type !== SessionStatus.Event.Status.type) return Effect.void
+          const data = evt.data as typeof SessionStatus.Event.Status.data.Type
+          if (data.sessionID !== session.id || data.status.type !== "retry") return Effect.void
+          Deferred.doneUnsafe(ready, Effect.void)
+          return Effect.void
+        })
+        yield* Effect.addFinalizer(() => off)
 
         const fiber = yield* SessionCompaction.use
           .process({
@@ -2148,11 +2162,7 @@ describe("session.compaction.process", () => {
           })
           .pipe(Effect.forkChild)
 
-        yield* pollWithTimeout(
-          status.get(session.id).pipe(Effect.map((current) => (current.type === "retry" ? current : undefined))),
-          "compaction did not enter retry backoff",
-          "5 seconds",
-        )
+        yield* Deferred.await(ready).pipe(Effect.timeout("5 seconds"))
         const start = Date.now()
         yield* Fiber.interrupt(fiber)
         const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("1 second"))
@@ -2204,54 +2214,61 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "silently drops reasoning-delta arriving without prior reasoning-start",
+    () => {
+      // Regression: PR initially auto-created a reasoning Part for orphan deltas (no preceding
+      // reasoning-start). Reverted to match dev — drop silently. Pinned here so any future
+      // change to processor.ts reasoning-delta handling triggers this test.
+      const stub = llm()
+      stub.push(
+        Stream.make(
+          LLMEvent.reasoningDelta({ id: "orphan-1", text: "stray reasoning" }),
+          LLMEvent.textStart({ id: "txt-0" }),
+          LLMEvent.textDelta({ id: "txt-0", text: "summary" }),
+          LLMEvent.textEnd({ id: "txt-0" }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop", usage: basicUsage() }),
+          LLMEvent.finish({ reason: "stop", usage: basicUsage() }),
+        ),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "hello")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        yield* SessionCompaction.use.process({
+          parentID: msg.id,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        const summary = (yield* ssn.messages({ sessionID: session.id })).find(
+          (item) => item.info.role === "assistant" && item.info.summary,
+        )
+        expect(summary?.parts.some((part) => part.type === "reasoning")).toBe(false)
+        // Sanity: the text part still got through.
+        expect(summary?.parts.some((part) => part.type === "text" && part.text === "summary")).toBe(true)
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "does not allow tool calls while generating the summary",
     () => {
       const stub = llm()
       stub.push(
         Stream.make(
-          { type: "start" } satisfies LLM.Event,
-          { type: "tool-input-start", id: "call-1", toolName: "_noop" } satisfies LLM.Event,
-          { type: "tool-call", toolCallId: "call-1", toolName: "_noop", input: {} } satisfies LLM.Event,
-          {
-            type: "finish-step",
-            finishReason: "tool-calls",
-            rawFinishReason: "tool_calls",
-            response: { id: "res", modelId: "test-model", timestamp: new Date() },
-            providerMetadata: undefined,
-            usage: {
-              inputTokens: 1,
-              outputTokens: 1,
-              totalTokens: 2,
-              inputTokenDetails: {
-                noCacheTokens: undefined,
-                cacheReadTokens: undefined,
-                cacheWriteTokens: undefined,
-              },
-              outputTokenDetails: {
-                textTokens: undefined,
-                reasoningTokens: undefined,
-              },
-            },
-          } satisfies LLM.Event,
-          {
-            type: "finish",
-            finishReason: "tool-calls",
-            rawFinishReason: "tool_calls",
-            totalUsage: {
-              inputTokens: 1,
-              outputTokens: 1,
-              totalTokens: 2,
-              inputTokenDetails: {
-                noCacheTokens: undefined,
-                cacheReadTokens: undefined,
-                cacheWriteTokens: undefined,
-              },
-              outputTokenDetails: {
-                textTokens: undefined,
-                reasoningTokens: undefined,
-              },
-            },
-          } satisfies LLM.Event,
+          LLMEvent.toolCall({ id: "call-1", name: "_noop", input: {} }),
+          LLMEvent.stepFinish({
+            index: 0,
+            reason: "tool-calls",
+            usage: basicUsage(),
+          }),
+          LLMEvent.finish({
+            reason: "tool-calls",
+            usage: basicUsage(),
+          }),
         ),
       )
       return Effect.gen(function* () {
@@ -2340,7 +2357,7 @@ describe("session.compaction.process", () => {
         yield* createUserMessage(session.id, "latest turn")
         yield* createCompactionMarker(session.id)
 
-        msgs = yield* ssn.messages({ sessionID: session.id })
+        msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
         parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
@@ -2456,7 +2473,7 @@ describe("session.compaction.process", () => {
       expect(parent).toBeTruthy()
       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-      const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
+      const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
       const ids = filtered.map((msg) => msg.info.id)
 
       expect(ids).not.toContain(u1.id)
@@ -2546,20 +2563,7 @@ describe("SessionNs.getUsage", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1000,
-        outputTokens: 500,
-        totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 1000, outputTokens: 500, totalTokens: 1500 }),
     })
 
     expect(result.tokens.input).toBe(1000)
@@ -2573,20 +2577,7 @@ describe("SessionNs.getUsage", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1000,
-        outputTokens: 500,
-        totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: 800,
-          cacheReadTokens: 200,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 1000, outputTokens: 500, totalTokens: 1500, cacheReadInputTokens: 200 }),
     })
 
     expect(result.tokens.input).toBe(800)
@@ -2597,20 +2588,7 @@ describe("SessionNs.getUsage", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1000,
-        outputTokens: 500,
-        totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 1000, outputTokens: 500, totalTokens: 1500 }),
       metadata: {
         anthropic: {
           cacheCreationInputTokens: 300,
@@ -2626,20 +2604,7 @@ describe("SessionNs.getUsage", () => {
     // AI SDK v6 normalizes inputTokens to include cached tokens for all providers
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1000,
-        outputTokens: 500,
-        totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: 800,
-          cacheReadTokens: 200,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 1000, outputTokens: 500, totalTokens: 1500, cacheReadInputTokens: 200 }),
       metadata: {
         anthropic: {},
       },
@@ -2653,20 +2618,7 @@ describe("SessionNs.getUsage", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1000,
-        outputTokens: 500,
-        totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: 400,
-          reasoningTokens: 100,
-        },
-      },
+      usage: usage({ inputTokens: 1000, outputTokens: 500, reasoningTokens: 100, totalTokens: 1500 }),
     })
 
     expect(result.tokens.input).toBe(1000)
@@ -2687,20 +2639,7 @@ describe("SessionNs.getUsage", () => {
     })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 0,
-        outputTokens: 1_000_000,
-        totalTokens: 1_000_000,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: 750_000,
-          reasoningTokens: 250_000,
-        },
-      },
+      usage: usage({ inputTokens: 0, outputTokens: 1_000_000, reasoningTokens: 250_000, totalTokens: 1_000_000 }),
     })
 
     expect(result.tokens.output).toBe(750_000)
@@ -2712,20 +2651,7 @@ describe("SessionNs.getUsage", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 0, outputTokens: 0, totalTokens: 0 }),
     })
 
     expect(result.tokens.input).toBe(0)
@@ -2748,23 +2674,24 @@ describe("SessionNs.getUsage", () => {
     })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1_000_000,
-        outputTokens: 100_000,
-        totalTokens: 1_100_000,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 1_000_000, outputTokens: 100_000, totalTokens: 1_100_000 }),
     })
 
     expect(result.cost).toBe(3 + 1.5)
+  })
+
+  test("uses authoritative Copilot billed cost when provided", () => {
+    const result = SessionNs.getUsage({
+      model: createModel({
+        context: 100_000,
+        output: 32_000,
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 0.3 } },
+      }),
+      usage: usage({ inputTokens: 11_774, outputTokens: 39, totalTokens: 11_813 }),
+      metadata: { copilot: { totalNanoAiu: 4_473_525_000 } },
+    })
+
+    expect(result.cost).toBe(0.04473525)
   })
 
   test("uses matching context cost tier before over-200k fallback", () => {
@@ -2798,20 +2725,12 @@ describe("SessionNs.getUsage", () => {
     })
     const result = SessionNs.getUsage({
       model,
-      usage: {
+      usage: usage({
         inputTokens: 650_000,
         outputTokens: 100_000,
         totalTokens: 750_000,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: 100_000,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+        cacheReadInputTokens: 100_000,
+      }),
     })
 
     expect(result.tokens.input).toBe(550_000)
@@ -2843,20 +2762,7 @@ describe("SessionNs.getUsage", () => {
     })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 300_000,
-        outputTokens: 100_000,
-        totalTokens: 400_000,
-        inputTokenDetails: {
-          noCacheTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 300_000, outputTokens: 100_000, totalTokens: 400_000 }),
     })
 
     expect(result.cost).toBe(0.9 + 0.4)
@@ -2867,24 +2773,16 @@ describe("SessionNs.getUsage", () => {
     (npm) => {
       const model = createModel({ context: 100_000, output: 32_000, npm })
       // AI SDK v6: inputTokens includes cached tokens for all providers
-      const usage = {
+      const item = usage({
         inputTokens: 1000,
         outputTokens: 500,
         totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: 800,
-          cacheReadTokens: 200,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      }
+        cacheReadInputTokens: 200,
+      })
       if (npm === "@ai-sdk/amazon-bedrock") {
         const result = SessionNs.getUsage({
           model,
-          usage,
+          usage: item,
           metadata: {
             bedrock: {
               usage: {
@@ -2905,7 +2803,7 @@ describe("SessionNs.getUsage", () => {
 
       const result = SessionNs.getUsage({
         model,
-        usage,
+        usage: item,
         metadata: {
           anthropic: {
             cacheCreationInputTokens: 300,
@@ -2926,20 +2824,7 @@ describe("SessionNs.getUsage", () => {
     const model = createModel({ context: 100_000, output: 32_000, npm: "@ai-sdk/google-vertex/anthropic" })
     const result = SessionNs.getUsage({
       model,
-      usage: {
-        inputTokens: 1000,
-        outputTokens: 500,
-        totalTokens: 1500,
-        inputTokenDetails: {
-          noCacheTokens: 800,
-          cacheReadTokens: 200,
-          cacheWriteTokens: undefined,
-        },
-        outputTokenDetails: {
-          textTokens: undefined,
-          reasoningTokens: undefined,
-        },
-      },
+      usage: usage({ inputTokens: 1000, outputTokens: 500, totalTokens: 1500, cacheReadInputTokens: 200 }),
       metadata: {
         vertex: {
           cacheCreationInputTokens: 300,

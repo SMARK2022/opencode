@@ -176,8 +176,13 @@ export const make = <A, E = never>(
         return [
           Effect.gen(function* () {
             yield* idleIfCurrent()
-            yield* Fiber.interrupt(st.run.fiber)
-            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
+            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
+            yield* Effect.sleep("10 seconds").pipe(
+              Effect.andThen(Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)),
+              Effect.ignore,
+              Effect.forkIn(scope),
+              Effect.asVoid,
+            )
           }),
           { _tag: "Idle" } as const,
         ] as const

@@ -5,7 +5,9 @@ import { basename } from "node:path"
 const TIMEOUT = 5_000
 
 type Probe = { type: "Loaded"; value: Record<string, string> } | { type: "Timeout" } | { type: "Unavailable" }
-type Logger = { log: (...args: unknown[]) => void }
+type ShellEnvLogger = {
+  log: (...args: unknown[]) => void
+}
 
 export function resolveUserShell(envShell: string | undefined, loginShell: string | null | undefined) {
   const resolvedLoginShell = loginShell && loginShell !== "unknown" ? loginShell : undefined
@@ -65,7 +67,7 @@ export function isNushell(shell: string) {
   return name === "nu" || name === "nu.exe" || raw.endsWith("\\nu.exe")
 }
 
-export function loadShellEnv(shell: string, logger: Logger = console) {
+export function loadShellEnv(shell: string, logger: ShellEnvLogger = console) {
   // shell-env 的解析 helper 会被 Bun 单元测试直接导入；不要在模块顶层加载
   // electron-log，否则没有安装 Electron binary 的 CI 测试环境会在 import 阶段失败。
   if (isNushell(shell)) {

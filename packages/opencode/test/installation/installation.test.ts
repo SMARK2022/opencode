@@ -15,19 +15,23 @@ function mockHttpClient(handler: (request: HttpClientRequest.HttpClientRequest) 
   return Layer.succeed(HttpClient.HttpClient, client)
 }
 
-function mockSpawner(handler: (cmd: string, args: readonly string[]) => string = () => "") {
+function mockSpawner(
+  handler: (cmd: string, args: readonly string[]) => string | { code: number; stdout?: string; stderr?: string } = () =>
+    "",
+) {
   const spawner = ChildProcessSpawner.make((command) => {
     const std = ChildProcess.isStandardCommand(command) ? command : undefined
-    const output = handler(std?.command ?? "", std?.args ?? [])
+    const result = handler(std?.command ?? "", std?.args ?? [])
+    const output = typeof result === "string" ? { code: 0, stdout: result, stderr: "" } : result
     return Effect.succeed(
       ChildProcessSpawner.makeHandle({
         pid: ChildProcessSpawner.ProcessId(0),
-        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(output.code)),
         isRunning: Effect.succeed(false),
         kill: () => Effect.void,
         stdin: { [Symbol.for("effect/Sink/TypeId")]: Symbol.for("effect/Sink/TypeId") } as any,
-        stdout: output ? Stream.make(encoder.encode(output)) : Stream.empty,
-        stderr: Stream.empty,
+        stdout: output.stdout ? Stream.make(encoder.encode(output.stdout)) : Stream.empty,
+        stderr: output.stderr ? Stream.make(encoder.encode(output.stderr)) : Stream.empty,
         all: Stream.empty,
         getInputFd: () => ({ [Symbol.for("effect/Sink/TypeId")]: Symbol.for("effect/Sink/TypeId") }) as any,
         getOutputFd: () => Stream.empty,
@@ -47,7 +51,7 @@ function jsonResponse(body: unknown) {
 
 function testLayer(
   httpHandler: (request: HttpClientRequest.HttpClientRequest) => Response,
-  spawnHandler?: (cmd: string, args: readonly string[]) => string,
+  spawnHandler?: (cmd: string, args: readonly string[]) => string | { code: number; stdout?: string; stderr?: string },
 ) {
   const appProcess = AppProcess.layer.pipe(Layer.provide(mockSpawner(spawnHandler)))
   return Installation.layer.pipe(Layer.provide(mockHttpClient(httpHandler)), Layer.provide(appProcess))
@@ -59,7 +63,7 @@ describe("installation", () => {
       "reads release version from GitHub releases",
       () =>
         Effect.gen(function* () {
-          const result = yield* Installation.Service.use((svc) => svc.latest("unknown"))
+          const result = yield* Installation.use.latest("unknown")
           expect(result).toBe("1.2.3")
         }),
     )
@@ -68,7 +72,7 @@ describe("installation", () => {
       "strips v prefix from GitHub release tag",
       () =>
         Effect.gen(function* () {
-          const result = yield* Installation.Service.use((svc) => svc.latest("curl"))
+          const result = yield* Installation.use.latest("curl")
           expect(result).toBe("4.0.0-beta.1")
         }),
     )
@@ -81,7 +85,7 @@ describe("installation", () => {
       }),
     ).effect("reads npm versions via registry", () =>
       Effect.gen(function* () {
-        const result = yield* Installation.Service.use((svc) => svc.latest("npm"))
+        const result = yield* Installation.use.latest("npm")
         expect(result).toBe("1.5.0")
         // Installation.latest intentionally follows NpmConfig.registry so local
         // npm mirrors and OPENCODE_NPM_REGISTRY overrides are honored. The test
@@ -98,7 +102,7 @@ describe("installation", () => {
       }),
     ).effect("reads bun versions via registry", () =>
       Effect.gen(function* () {
-        const result = yield* Installation.Service.use((svc) => svc.latest("bun"))
+        const result = yield* Installation.use.latest("bun")
         expect(result).toBe("1.6.0")
         // Same registry contract as npm: bun installs query the registry chosen
         // by NpmConfig, which may be a configured mirror in offline/China setups.
@@ -114,7 +118,7 @@ describe("installation", () => {
       }),
     ).effect("reads pnpm versions via registry", () =>
       Effect.gen(function* () {
-        const result = yield* Installation.Service.use((svc) => svc.latest("pnpm"))
+        const result = yield* Installation.use.latest("pnpm")
         expect(result).toBe("1.7.0")
         // Keep pnpm aligned with npm/bun so all Node package managers respect
         // the same registry selection and avoid environment-dependent failures.
@@ -124,7 +128,7 @@ describe("installation", () => {
 
     testEffect(testLayer(() => jsonResponse({ version: "2.3.4" }))).effect("reads scoop manifest versions", () =>
       Effect.gen(function* () {
-        const result = yield* Installation.Service.use((svc) => svc.latest("scoop"))
+        const result = yield* Installation.use.latest("scoop")
         expect(result).toBe("2.3.4")
       }),
     )
@@ -133,7 +137,7 @@ describe("installation", () => {
       "reads chocolatey feed versions",
       () =>
         Effect.gen(function* () {
-          const result = yield* Installation.Service.use((svc) => svc.latest("choco"))
+          const result = yield* Installation.use.latest("choco")
           expect(result).toBe("3.4.5")
         }),
     )
@@ -150,7 +154,7 @@ describe("installation", () => {
       ),
     ).effect("reads brew formulae API versions", () =>
       Effect.gen(function* () {
-        const result = yield* Installation.Service.use((svc) => svc.latest("brew"))
+        const result = yield* Installation.use.latest("brew")
         expect(result).toBe("2.0.0")
       }),
     )
@@ -169,8 +173,65 @@ describe("installation", () => {
       ),
     ).effect("reads brew tap info JSON via CLI", () =>
       Effect.gen(function* () {
-        const result = yield* Installation.Service.use((svc) => svc.latest("brew"))
+        const result = yield* Installation.use.latest("brew")
         expect(result).toBe("2.1.0")
+      }),
+    )
+  })
+
+  describe("upgrade", () => {
+    testEffect(
+      testLayer(
+        () => jsonResponse({}),
+        (cmd) => {
+          if (cmd === "npm") return { code: 1, stderr: "token=secret command output" }
+          return ""
+        },
+      ),
+    ).effect("returns sanitized typed errors for failed package upgrades", () =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(Installation.use.upgrade("npm", "9.9.9"))
+        expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
+        expect(error.stderr).toBe("Upgrade failed for npm (exit code 1).")
+        expect(error.message).toBe(error.stderr)
+        expect(error.stderr).not.toContain("secret")
+        expect(error.stderr).not.toContain("command output")
+      }),
+    )
+
+    testEffect(
+      testLayer(
+        () => new Response("install script with token=secret", { status: 200 }),
+        (cmd, args) => {
+          if (cmd === "bash" && args[0] === "--version") return "GNU bash"
+          if (cmd === "bash" || cmd === "sh") return { code: 1, stderr: "script output with token=secret" }
+          return ""
+        },
+      ),
+    ).effect("returns sanitized typed errors when the curl install script fails", () =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(Installation.use.upgrade("curl", "9.9.9"))
+        expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
+        expect(error.stderr).toBe("Upgrade failed for curl (exit code 1).")
+        expect(error.message).toBe(error.stderr)
+        expect(error.stderr).not.toContain("secret")
+        expect(error.stderr).not.toContain("script output")
+      }),
+    )
+
+    testEffect(
+      testLayer(
+        () => new Response("install script", { status: 200 }),
+        (cmd, args) => {
+          if (cmd === "bash" && args[0] === "--version") return { code: 1, stderr: "missing" }
+          if (cmd === "bash") return { code: 1, stderr: "should not execute installer with bash" }
+          if (cmd === "sh") return "ok"
+          return ""
+        },
+      ),
+    ).effect("falls back to sh when bash is unavailable during curl upgrade", () =>
+      Effect.gen(function* () {
+        yield* Installation.use.upgrade("curl", "9.9.9")
       }),
     )
   })

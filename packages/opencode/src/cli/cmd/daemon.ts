@@ -1,7 +1,7 @@
 import { cmd } from "./cmd"
 import { UI } from "../ui"
 import { errorMessage } from "@/util/error"
-import { ServerLock, type ServerLock as ServerLockInfo } from "./tui/server-lock"
+import { ServerLock, type ServerLock as ServerLockInfo } from "@opencode-ai/tui/server-lock"
 
 // stop 只等待 worker 既有 graceful shutdown 完成，不升级为 SIGKILL；
 // 10 秒足够覆盖实例 dispose、server close 和数据库 close，超时则保留现场让用户人工判断。

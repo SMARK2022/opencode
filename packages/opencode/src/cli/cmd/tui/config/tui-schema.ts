@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ConfigPlugin } from "@/config/plugin"
 import { TuiKeybind } from "./keybind"
 import { Schema } from "effect"

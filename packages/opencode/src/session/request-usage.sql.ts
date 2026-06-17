@@ -1,7 +1,7 @@
 import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { SessionTable } from "./session.sql"
+import { SessionTable } from "@opencode-ai/core/session/sql"
 import type { MessageID, SessionID } from "./schema"
-import { Timestamps } from "../storage/schema.sql"
+import { Timestamps } from "@opencode-ai/core/database/schema.sql"
 
 export const RequestUsageTable = sqliteTable(
   "request_usage",

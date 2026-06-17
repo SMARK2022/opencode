@@ -9,10 +9,13 @@ import path from "path"
 import { onCleanup, onMount } from "solid-js"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
+import { TestTuiContexts } from "../../../fixture/tui-environment"
 import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
 import { CommandPaletteProvider } from "../../../../src/cli/cmd/tui/context/command-palette"
 import { EditorContextProvider } from "../../../../src/cli/cmd/tui/context/editor"
-import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
+import { DataProvider } from "@opencode-ai/tui/context/data"
+import { EpilogueProvider } from "@opencode-ai/tui/context/epilogue"
+import { ExitProvider } from "@opencode-ai/tui/context/exit"
 import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
 import { LocalProvider } from "../../../../src/cli/cmd/tui/context/local"
 import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
@@ -30,6 +33,7 @@ import { OpencodeKeymapProvider, registerOpencodeKeymap, useOpencodeKeymap } fro
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { DialogExportOptions } from "../../../../src/cli/cmd/tui/ui/dialog-export-options"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
+import { createPluginRuntime, PluginRuntimeProvider } from "@opencode-ai/tui/plugin/runtime"
 import * as Editor from "../../../../src/cli/cmd/tui/util/editor"
 import { createEventSource, createFetch, directory, json } from "./sync-fixture"
 
@@ -200,50 +204,59 @@ function ExportHarness(props: {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
+  const pluginRuntime = createPluginRuntime()
   // Session command 通过 OpenTUI keymap 注册；测试必须挂完整 provider 链，才能从用户入口触发 export。
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
   return (
-    <OpencodeKeymapProvider keymap={keymap}>
-      <ArgsProvider>
-        <ExitProvider>
-          <KVProvider>
+    <TestTuiContexts directory={directory} cwd={Global.Path.state} paths={{ state: Global.Path.state }}>
+      <OpencodeKeymapProvider keymap={keymap}>
+        <ArgsProvider>
+          <ExitProvider exit={() => {}}>
+            <KVProvider>
             <ToastProvider>
               <RouteProvider initialRoute={{ type: "session", sessionID }}>
                 <TuiConfigProvider config={config}>
-                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
-                    <ProjectProvider>
-                      <SyncProvider>
-                        <ThemeProvider mode="dark">
-                          <LocalProvider>
-                            <PromptStashProvider>
-                              <DialogProvider>
-                                <CommandPaletteProvider>
-                                  <FrecencyProvider>
-                                    <PromptHistoryProvider>
-                                      <PromptRefProvider>
-                                        <EditorContextProvider>
-                                          <Session />
-                                          <ExportProbe onReady={props.onReady} />
-                                        </EditorContextProvider>
-                                      </PromptRefProvider>
-                                    </PromptHistoryProvider>
-                                  </FrecencyProvider>
-                                </CommandPaletteProvider>
-                              </DialogProvider>
-                            </PromptStashProvider>
-                          </LocalProvider>
-                        </ThemeProvider>
-                      </SyncProvider>
-                    </ProjectProvider>
-                  </SDKProvider>
+                  <PluginRuntimeProvider value={pluginRuntime}>
+                    <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
+                      <ProjectProvider>
+                        <SyncProvider>
+                          <DataProvider>
+                            <ThemeProvider mode="dark">
+                              <LocalProvider>
+                                <PromptStashProvider>
+                                  <DialogProvider>
+                                    <CommandPaletteProvider>
+                                      <FrecencyProvider>
+                                        <PromptHistoryProvider>
+                                          <PromptRefProvider>
+                                            <EditorContextProvider>
+                                              <EpilogueProvider set={() => {}}>
+                                                <Session />
+                                                <ExportProbe onReady={props.onReady} />
+                                              </EpilogueProvider>
+                                            </EditorContextProvider>
+                                          </PromptRefProvider>
+                                        </PromptHistoryProvider>
+                                      </FrecencyProvider>
+                                    </CommandPaletteProvider>
+                                  </DialogProvider>
+                                </PromptStashProvider>
+                              </LocalProvider>
+                            </ThemeProvider>
+                          </DataProvider>
+                        </SyncProvider>
+                      </ProjectProvider>
+                    </SDKProvider>
+                  </PluginRuntimeProvider>
                 </TuiConfigProvider>
               </RouteProvider>
             </ToastProvider>
-          </KVProvider>
-        </ExitProvider>
-      </ArgsProvider>
-    </OpencodeKeymapProvider>
+            </KVProvider>
+          </ExitProvider>
+        </ArgsProvider>
+      </OpencodeKeymapProvider>
+    </TestTuiContexts>
   )
 }
 

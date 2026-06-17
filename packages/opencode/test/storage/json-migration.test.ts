@@ -1,12 +1,14 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { Database } from "bun:sqlite"
 import { drizzle, SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
-import { migrate } from "drizzle-orm/bun-sqlite/migrator"
+import { Effect } from "effect"
 import path from "path"
 import fs from "fs/promises"
-import { readFileSync, readdirSync } from "fs"
+import { readFileSync } from "fs"
 import { JsonMigration } from "@/storage/json-migration"
 import { Global } from "@opencode-ai/core/global"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import schema from "@opencode-ai/core/database/schema.gen"
 import { ProjectTable } from "../../src/project/project.sql"
 import { ProjectID } from "../../src/project/schema"
 import { SessionTable, MessageTable, PartTable, TodoTable, PermissionTable } from "../../src/session/session.sql"
@@ -77,21 +79,15 @@ async function writeSession(storageDir: string, projectID: string, session: Reco
 function createTestDb() {
   const sqlite = new Database(":memory:")
   sqlite.exec("PRAGMA foreign_keys = ON")
-
-  // Apply schema migrations using drizzle migrate
-  const dir = path.join(import.meta.dirname, "../../migration")
-  const entries = readdirSync(dir, { withFileTypes: true })
-  const migrations = entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => ({
-      sql: readFileSync(path.join(dir, entry.name, "migration.sql"), "utf-8"),
-      timestamp: Number(entry.name.split("_")[0]),
-      name: entry.name,
-    }))
-    .sort((a, b) => a.timestamp - b.timestamp)
-
+  Effect.runSync(
+    schema.up({
+      run: (statement: string) =>
+        Effect.sync(() => {
+          sqlite.exec(statement)
+        }),
+    } as unknown as Parameters<typeof schema.up>[0]),
+  )
   const db = drizzle({ client: sqlite })
-  migrate(db, migrations)
 
   return [sqlite, db] as const
 }
@@ -136,9 +132,9 @@ describe("JSON to SQLite migration", () => {
     const projects = db.select().from(ProjectTable).all()
     expect(projects.length).toBe(1)
     expect(projects[0].id).toBe(ProjectID.make("proj_test123abc"))
-    expect(projects[0].worktree).toBe("/test/path")
+    expect(projects[0].worktree).toBe(AbsolutePath.make("/test/path"))
     expect(projects[0].name).toBe("Test Project")
-    expect(projects[0].sandboxes).toEqual(["/test/sandbox"])
+    expect(projects[0].sandboxes).toEqual([AbsolutePath.make("/test/sandbox")])
   })
 
   test("uses filename for project id when JSON has different value", async () => {
@@ -572,9 +568,20 @@ describe("JSON to SQLite migration", () => {
     expect(stats?.permissions).toBe(1)
 
     const permissions = db.select().from(PermissionTable).all()
-    expect(permissions.length).toBe(1)
-    expect(permissions[0].project_id).toBe("proj_test123abc")
-    expect(permissions[0].data).toEqual(permissionData)
+    expect(permissions.length).toBe(3)
+    expect(
+      permissions.map((permission) => ({
+        project_id: permission.project_id,
+        action: permission.action,
+        resource: permission.resource,
+      })),
+    ).toEqual(
+      permissionData.map((permission) => ({
+        project_id: ProjectID.make("proj_test123abc"),
+        action: permission.permission,
+        resource: permission.pattern,
+      })),
+    )
   })
 
   test("migrates session shares", async () => {
@@ -872,8 +879,8 @@ describe("SQLite data migrations", () => {
         2,
         '{"role":"assistant","time":{"created":2},"parentID":"msg_user_review","mode":"review","agent":"review","path":{"cwd":"/tmp/review","root":"/tmp/review"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"test-model","providerID":"test"}'
       );
-      INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
-      VALUES ('sm_review', 'ses_review', 'agent-switched', 1, 1, '{"agent":"review"}');
+      INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+      VALUES ('sm_review', 'ses_review', 'agent-switched', 1, 1, 1, '{"agent":"review"}');
       INSERT INTO event_sequence (aggregate_id, seq) VALUES ('ses_review', 1);
       INSERT INTO event (id, aggregate_id, seq, type, data)
       VALUES ('evt_review', 'ses_review', 1, 'session.next.agent.switched', '{"agent":"review"}');

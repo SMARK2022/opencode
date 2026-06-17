@@ -1,437 +1,272 @@
-import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
-import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite"
-import { Global } from "@opencode-ai/core/global"
-import * as Log from "@opencode-ai/core/util/log"
-import { ProjectTable } from "../project/project.sql"
-import { SessionTable, MessageTable, PartTable, TodoTable, PermissionTable } from "../session/session.sql"
-import { SessionShareTable } from "../share/share.sql"
+import fs from "fs/promises"
 import path from "path"
-import { existsSync } from "fs"
-import { Filesystem } from "@/util/filesystem"
-import { Glob } from "@opencode-ai/core/util/glob"
+import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
+import { AbsolutePath } from "@opencode-ai/core/schema"
+import { Project } from "@opencode-ai/core/project"
+import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { MessageTable, PartTable, SessionTable, TodoTable } from "@opencode-ai/core/session/sql"
+import { PermissionTable } from "@opencode-ai/core/permission/sql"
+import { SessionShareTable } from "@opencode-ai/core/share/sql"
+import { PermissionSaved } from "@opencode-ai/core/permission/saved"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Global } from "@opencode-ai/core/global"
+import { SessionID } from "@/session/schema"
 
-const log = Log.create({ service: "json-migration" })
-
-export type Progress = {
-  current: number
-  total: number
-  label: string
+export type Stats = {
+  projects: number
+  sessions: number
+  messages: number
+  parts: number
+  todos: number
+  permissions: number
+  shares: number
+  errors: string[]
 }
 
-type Options = {
-  progress?: (event: Progress) => void
-}
+type Db = SQLiteBunDatabase
 
-export async function run(db: SQLiteBunDatabase<any, any> | NodeSQLiteDatabase<any, any>, options?: Options) {
-  const storageDir = path.join(Global.Path.data, "storage")
+export async function run(db: Db): Promise<Stats> {
+  const stats: Stats = { projects: 0, sessions: 0, messages: 0, parts: 0, todos: 0, permissions: 0, shares: 0, errors: [] }
+  const root = path.join(Global.Path.data, "storage")
+  if (!(await exists(root))) return stats
 
-  if (!existsSync(storageDir)) {
-    log.info("storage directory does not exist, skipping migration")
-    return {
-      projects: 0,
-      sessions: 0,
-      messages: 0,
-      parts: 0,
-      todos: 0,
-      permissions: 0,
-      shares: 0,
-      errors: [] as string[],
-    }
-  }
-
-  log.info("starting json to sqlite migration", { storageDir })
-  const start = performance.now()
-
-  // const db = drizzle({ client: sqlite })
-
-  // Optimize SQLite for bulk inserts
-  db.run("PRAGMA journal_mode = WAL")
-  db.run("PRAGMA synchronous = OFF")
-  db.run("PRAGMA cache_size = 10000")
-  db.run("PRAGMA temp_store = MEMORY")
-  const stats = {
-    projects: 0,
-    sessions: 0,
-    messages: 0,
-    parts: 0,
-    todos: 0,
-    permissions: 0,
-    shares: 0,
-    errors: [] as string[],
-  }
-  const orphans = {
-    sessions: 0,
-    todos: 0,
-    permissions: 0,
-    shares: 0,
-  }
-  const errs = stats.errors
-
-  const batchSize = 1000
-  const now = Date.now()
-
-  async function list(pattern: string) {
-    return Glob.scan(pattern, { cwd: storageDir, absolute: true })
-  }
-
-  async function read(files: string[], start: number, end: number) {
-    const count = end - start
-    // oxlint-disable-next-line unicorn/no-new-array -- pre-allocated for index-based batch fill
-    const tasks = new Array(count)
-    for (let i = 0; i < count; i++) {
-      tasks[i] = Filesystem.readJson(files[start + i])
-    }
-    const results = await Promise.allSettled(tasks)
-    // oxlint-disable-next-line unicorn/no-new-array -- pre-allocated for index-based batch fill
-    const items = new Array(count)
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i]
-      if (result.status === "fulfilled") {
-        items[i] = result.value
-        continue
-      }
-      errs.push(`failed to read ${files[start + i]}: ${result.reason}`)
-    }
-    return items
-  }
-
-  function insert(values: unknown[], table: Parameters<typeof db.insert>[0], label: string) {
-    if (values.length === 0) return 0
-    try {
-      db.insert(table).values(values).onConflictDoNothing().run()
-      return values.length
-    } catch (e) {
-      errs.push(`failed to migrate ${label} batch: ${e}`)
-      return 0
-    }
-  }
-
-  // Pre-scan all files upfront to avoid repeated glob operations
-  log.info("scanning files...")
-  const [projectFiles, sessionFiles, messageFiles, partFiles, todoFiles, permFiles, shareFiles] = await Promise.all([
-    list("project/*.json"),
-    list("session/*/*.json"),
-    list("message/*/*.json"),
-    list("part/*/*.json"),
-    list("todo/*.json"),
-    list("permission/*.json"),
-    list("session_share/*.json"),
-  ])
-
-  log.info("file scan complete", {
-    projects: projectFiles.length,
-    sessions: sessionFiles.length,
-    messages: messageFiles.length,
-    parts: partFiles.length,
-    todos: todoFiles.length,
-    permissions: permFiles.length,
-    shares: shareFiles.length,
-  })
-
-  const total = Math.max(
-    1,
-    projectFiles.length +
-      sessionFiles.length +
-      messageFiles.length +
-      partFiles.length +
-      todoFiles.length +
-      permFiles.length +
-      shareFiles.length,
-  )
-  const progress = options?.progress
-  let current = 0
-  const step = (label: string, count: number) => {
-    current = Math.min(total, current + count)
-    progress?.({ current, total, label })
-  }
-
-  progress?.({ current, total, label: "starting" })
-
-  db.run("BEGIN TRANSACTION")
-
-  // Migrate projects first (no FK deps)
-  // Derive all IDs from file paths, not JSON content
-  const projectIds = new Set<string>()
-  const projectValues: unknown[] = []
-  for (let i = 0; i < projectFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, projectFiles.length)
-    const batch = await read(projectFiles, i, end)
-    projectValues.length = 0
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const id = path.basename(projectFiles[i + j], ".json")
-      projectIds.add(id)
-      projectValues.push({
-        id,
-        worktree: data.worktree ?? "/",
-        vcs: data.vcs,
-        name: data.name ?? undefined,
-        icon_url: data.icon?.url,
-        icon_url_override: data.icon?.override,
-        icon_color: data.icon?.color,
-        time_created: data.time?.created ?? now,
-        time_updated: data.time?.updated ?? now,
-        time_initialized: data.time?.initialized,
-        sandboxes: data.sandboxes ?? [],
-        commands: data.commands,
-      })
-    }
-    stats.projects += insert(projectValues, ProjectTable, "project")
-    step("projects", end - i)
-  }
-  log.info("migrated projects", { count: stats.projects, duration: Math.round(performance.now() - start) })
-
-  // Migrate sessions (depends on projects)
-  // Derive all IDs from directory/file paths, not JSON content, since earlier
-  // migrations may have moved sessions to new directories without updating the JSON
-  const sessionProjects = sessionFiles.map((file) => path.basename(path.dirname(file)))
-  const sessionIds = new Set<string>()
-  const sessionValues: unknown[] = []
-  for (let i = 0; i < sessionFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, sessionFiles.length)
-    const batch = await read(sessionFiles, i, end)
-    sessionValues.length = 0
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const id = path.basename(sessionFiles[i + j], ".json")
-      const projectID = sessionProjects[i + j]
-      if (!projectIds.has(projectID)) {
-        orphans.sessions++
-        continue
-      }
-      sessionIds.add(id)
-      sessionValues.push({
-        id,
-        project_id: projectID,
-        parent_id: data.parentID ?? null,
-        slug: data.slug ?? "",
-        directory: data.directory ?? "",
-        path: data.path ?? null,
-        title: data.title ?? "",
-        version: data.version ?? "",
-        share_url: data.share?.url ?? null,
-        summary_additions: data.summary?.additions ?? null,
-        summary_deletions: data.summary?.deletions ?? null,
-        summary_files: data.summary?.files ?? null,
-        summary_diffs: data.summary?.diffs ?? null,
-        cost: 0,
-        tokens_input: 0,
-        tokens_output: 0,
-        tokens_reasoning: 0,
-        tokens_cache_read: 0,
-        tokens_cache_write: 0,
-        revert: data.revert ?? null,
-        permission: data.permission ?? null,
-        time_created: data.time?.created ?? now,
-        time_updated: data.time?.updated ?? now,
-        time_compacting: data.time?.compacting ?? null,
-        time_archived: data.time?.archived ?? null,
-      })
-    }
-    stats.sessions += insert(sessionValues, SessionTable, "session")
-    step("sessions", end - i)
-  }
-  log.info("migrated sessions", { count: stats.sessions })
-  if (orphans.sessions > 0) {
-    log.warn("skipped orphaned sessions", { count: orphans.sessions })
-  }
-
-  // Migrate messages using pre-scanned file map
-  const allMessageFiles = [] as string[]
-  const allMessageSessions = [] as string[]
-  const messageSessions = new Map<string, string>()
-  for (const file of messageFiles) {
-    const sessionID = path.basename(path.dirname(file))
-    if (!sessionIds.has(sessionID)) continue
-    allMessageFiles.push(file)
-    allMessageSessions.push(sessionID)
-  }
-
-  for (let i = 0; i < allMessageFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, allMessageFiles.length)
-    const batch = await read(allMessageFiles, i, end)
-    // oxlint-disable-next-line unicorn/no-new-array -- pre-allocated for index-based batch fill
-    const values = new Array(batch.length)
-    let count = 0
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const file = allMessageFiles[i + j]
-      const id = path.basename(file, ".json")
-      const sessionID = allMessageSessions[i + j]
-      messageSessions.set(id, sessionID)
-      const rest = data
-      delete rest.id
-      delete rest.sessionID
-      values[count++] = {
-        id,
-        session_id: sessionID,
-        time_created: data.time?.created ?? now,
-        time_updated: data.time?.updated ?? now,
-        data: rest,
-      }
-    }
-    values.length = count
-    stats.messages += insert(values, MessageTable, "message")
-    step("messages", end - i)
-  }
-  log.info("migrated messages", { count: stats.messages })
-
-  // Migrate parts using pre-scanned file map
-  for (let i = 0; i < partFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, partFiles.length)
-    const batch = await read(partFiles, i, end)
-    // oxlint-disable-next-line unicorn/no-new-array -- pre-allocated for index-based batch fill
-    const values = new Array(batch.length)
-    let count = 0
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const file = partFiles[i + j]
-      const id = path.basename(file, ".json")
-      const messageID = path.basename(path.dirname(file))
-      const sessionID = messageSessions.get(messageID)
-      if (!sessionID) {
-        errs.push(`part missing message session: ${file}`)
-        continue
-      }
-      if (!sessionIds.has(sessionID)) continue
-      const rest = data
-      delete rest.id
-      delete rest.messageID
-      delete rest.sessionID
-      values[count++] = {
-        id,
-        message_id: messageID,
-        session_id: sessionID,
-        time_created: data.time?.created ?? now,
-        time_updated: data.time?.updated ?? now,
-        data: rest,
-      }
-    }
-    values.length = count
-    stats.parts += insert(values, PartTable, "part")
-    step("parts", end - i)
-  }
-  log.info("migrated parts", { count: stats.parts })
-
-  // Migrate todos
-  const todoSessions = todoFiles.map((file) => path.basename(file, ".json"))
-  for (let i = 0; i < todoFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, todoFiles.length)
-    const batch = await read(todoFiles, i, end)
-    const values: unknown[] = []
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const sessionID = todoSessions[i + j]
-      if (!sessionIds.has(sessionID)) {
-        orphans.todos++
-        continue
-      }
-      if (!Array.isArray(data)) {
-        errs.push(`todo not an array: ${todoFiles[i + j]}`)
-        continue
-      }
-      for (let position = 0; position < data.length; position++) {
-        const todo = data[position]
-        if (!todo?.content || !todo?.status || !todo?.priority) continue
-        values.push({
-          session_id: sessionID,
-          content: todo.content,
-          status: todo.status,
-          priority: todo.priority,
-          position,
-          time_created: now,
-          time_updated: now,
-        })
-      }
-    }
-    stats.todos += insert(values, TodoTable, "todo")
-    step("todos", end - i)
-  }
-  log.info("migrated todos", { count: stats.todos })
-  if (orphans.todos > 0) {
-    log.warn("skipped orphaned todos", { count: orphans.todos })
-  }
-
-  // Migrate permissions
-  const permProjects = permFiles.map((file) => path.basename(file, ".json"))
-  const permValues: unknown[] = []
-  for (let i = 0; i < permFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, permFiles.length)
-    const batch = await read(permFiles, i, end)
-    permValues.length = 0
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const projectID = permProjects[i + j]
-      if (!projectIds.has(projectID)) {
-        orphans.permissions++
-        continue
-      }
-      permValues.push({ project_id: projectID, data })
-    }
-    stats.permissions += insert(permValues, PermissionTable, "permission")
-    step("permissions", end - i)
-  }
-  log.info("migrated permissions", { count: stats.permissions })
-  if (orphans.permissions > 0) {
-    log.warn("skipped orphaned permissions", { count: orphans.permissions })
-  }
-
-  // Migrate session shares
-  const shareSessions = shareFiles.map((file) => path.basename(file, ".json"))
-  const shareValues: unknown[] = []
-  for (let i = 0; i < shareFiles.length; i += batchSize) {
-    const end = Math.min(i + batchSize, shareFiles.length)
-    const batch = await read(shareFiles, i, end)
-    shareValues.length = 0
-    for (let j = 0; j < batch.length; j++) {
-      const data = batch[j]
-      if (!data) continue
-      const sessionID = shareSessions[i + j]
-      if (!sessionIds.has(sessionID)) {
-        orphans.shares++
-        continue
-      }
-      if (!data?.id || !data?.secret || !data?.url) {
-        errs.push(`session_share missing id/secret/url: ${shareFiles[i + j]}`)
-        continue
-      }
-      shareValues.push({ session_id: sessionID, id: data.id, secret: data.secret, url: data.url })
-    }
-    stats.shares += insert(shareValues, SessionShareTable, "session_share")
-    step("shares", end - i)
-  }
-  log.info("migrated session shares", { count: stats.shares })
-  if (orphans.shares > 0) {
-    log.warn("skipped orphaned session shares", { count: orphans.shares })
-  }
-
-  db.run("COMMIT")
-
-  log.info("json migration complete", {
-    projects: stats.projects,
-    sessions: stats.sessions,
-    messages: stats.messages,
-    parts: stats.parts,
-    todos: stats.todos,
-    permissions: stats.permissions,
-    shares: stats.shares,
-    errorCount: stats.errors.length,
-    duration: Math.round(performance.now() - start),
-  })
-
-  if (stats.errors.length > 0) {
-    log.warn("migration errors", { errors: stats.errors.slice(0, 20) })
-  }
-
-  progress?.({ current: total, total, label: "complete" })
-
+  await migrateProjects(db, root, stats)
+  await migrateSessions(db, root, stats)
+  await migrateMessages(db, root, stats)
+  await migrateParts(db, root, stats)
+  await migrateTodos(db, root, stats)
+  await migratePermissions(db, root, stats)
+  await migrateShares(db, root, stats)
   return stats
 }
 
-export * as JsonMigration from "./json-migration"
+async function migrateProjects(db: Db, root: string, stats: Stats) {
+  for (const file of await jsonFiles(path.join(root, "project"))) {
+    const data = await readJson(file, stats)
+    if (!data) continue
+    const id = path.basename(file, ".json")
+    await db
+      .insert(ProjectTable)
+      .values({
+        id: Project.ID.make(id),
+        worktree: AbsolutePath.make(string(data.worktree, "/")),
+        vcs: typeof data.vcs === "string" ? data.vcs : undefined,
+        name: typeof data.name === "string" ? data.name : undefined,
+        time_created: time(data, "created"),
+        time_updated: time(data, "updated"),
+        sandboxes: stringArray(data.sandboxes).map((item) => AbsolutePath.make(item)),
+        commands: record(data.commands) as { start?: string } | undefined,
+      })
+      .onConflictDoNothing()
+      .run()
+    stats.projects++
+  }
+}
+
+async function migrateSessions(db: Db, root: string, stats: Stats) {
+  for (const projectDir of await directories(path.join(root, "session"))) {
+    const projectID = path.basename(projectDir)
+    if (!(await hasProject(db, projectID))) continue
+    for (const file of await jsonFiles(projectDir)) {
+      const data = await readJson(file, stats)
+      if (!data) continue
+      const summary = record(data.summary)
+      const share = record(data.share)
+      await db
+        .insert(SessionTable)
+        .values({
+          id: SessionID.make(path.basename(file, ".json")),
+          project_id: Project.ID.make(projectID),
+          slug: string(data.slug, ""),
+          directory: string(data.directory, "/"),
+          path: typeof data.path === "string" ? data.path : undefined,
+          title: string(data.title, ""),
+          version: string(data.version, ""),
+          share_url: typeof share?.url === "string" ? share.url : undefined,
+          summary_additions: number(summary?.additions),
+          summary_deletions: number(summary?.deletions),
+          summary_files: number(summary?.files),
+          time_created: time(data, "created"),
+          time_updated: time(data, "updated"),
+        })
+        .onConflictDoNothing()
+        .run()
+      stats.sessions++
+    }
+  }
+}
+
+async function migrateMessages(db: Db, root: string, stats: Stats) {
+  for (const sessionDir of await directories(path.join(root, "message"))) {
+    const sessionID = path.basename(sessionDir)
+    if (!(await hasSession(db, sessionID))) continue
+    for (const file of await jsonFiles(sessionDir)) {
+      const data = await readJson(file, stats)
+      if (!data) continue
+      const row: typeof MessageTable.$inferInsert = {
+        id: messageID(path.basename(file, ".json")),
+        session_id: SessionID.make(sessionID),
+        data: omit(data, ["id", "sessionID"]) as typeof MessageTable.$inferInsert.data,
+        time_created: time(data, "created"),
+        time_updated: time(data, "updated"),
+      }
+      await db
+        .insert(MessageTable)
+        .values(row)
+        .onConflictDoNothing()
+        .run()
+      stats.messages++
+    }
+  }
+}
+
+async function migrateParts(db: Db, root: string, stats: Stats) {
+  for (const messageDir of await directories(path.join(root, "part"))) {
+    const legacyMessageID = path.basename(messageDir)
+    const sessionID = await messageSession(db, legacyMessageID)
+    if (!sessionID) continue
+    for (const file of await jsonFiles(messageDir)) {
+      const data = await readJson(file, stats)
+      if (!data) continue
+      const row: typeof PartTable.$inferInsert = {
+        id: partID(path.basename(file, ".json")),
+        message_id: messageID(legacyMessageID),
+        session_id: SessionID.make(sessionID),
+        data: omit(data, ["id", "messageID", "sessionID"]) as typeof PartTable.$inferInsert.data,
+        time_created: time(data, "created"),
+        time_updated: time(data, "updated"),
+      }
+      await db
+        .insert(PartTable)
+        .values(row)
+        .onConflictDoNothing()
+        .run()
+      stats.parts++
+    }
+  }
+}
+
+async function migrateTodos(db: Db, root: string, stats: Stats) {
+  for (const file of await jsonFiles(path.join(root, "todo"))) {
+    const sessionID = path.basename(file, ".json")
+    const data = await readJsonArray(file, stats)
+    if (!(await hasSession(db, sessionID))) continue
+    for (const [position, item] of data.entries()) {
+      if (!record(item) || typeof item.content !== "string" || typeof item.status !== "string" || typeof item.priority !== "string") continue
+      await db.insert(TodoTable).values({ session_id: SessionID.make(sessionID), content: item.content, status: item.status, priority: item.priority, position }).onConflictDoNothing().run()
+      stats.todos++
+    }
+  }
+}
+
+async function migratePermissions(db: Db, root: string, stats: Stats) {
+  for (const file of await jsonFiles(path.join(root, "permission"))) {
+    const projectID = path.basename(file, ".json")
+    const data = await readJsonArray(file, stats)
+    if (!(await hasProject(db, projectID))) continue
+    let count = 0
+    for (const item of data) {
+      if (!record(item) || typeof item.permission !== "string") continue
+      await db.insert(PermissionTable).values({ id: PermissionSaved.ID.create(), project_id: Project.ID.make(projectID), action: item.permission, resource: string(item.pattern, "*") }).onConflictDoNothing().run()
+      count++
+    }
+    if (count) stats.permissions++
+  }
+}
+
+async function migrateShares(db: Db, root: string, stats: Stats) {
+  for (const file of await jsonFiles(path.join(root, "session_share"))) {
+    const sessionID = path.basename(file, ".json")
+    const data = await readJson(file, stats)
+    if (!(await hasSession(db, sessionID))) continue
+    if (!data) continue
+    await db.insert(SessionShareTable).values({ session_id: SessionID.make(sessionID), id: string(data.id, ""), secret: string(data.secret, ""), url: string(data.url, "") }).onConflictDoNothing().run()
+    stats.shares++
+  }
+}
+
+async function hasProject(db: Db, id: string) {
+  return db.select().from(ProjectTable).all().some((row) => row.id === Project.ID.make(id))
+}
+
+async function hasSession(db: Db, id: string) {
+  return db.select().from(SessionTable).all().some((row) => row.id === SessionID.make(id))
+}
+
+async function messageSession(db: Db, id: string) {
+  return db.select().from(MessageTable).all().find((row) => row.id === messageID(id))?.session_id
+}
+
+function messageID(id: string) {
+  return id as SessionV1.MessageID
+}
+
+function partID(id: string) {
+  return id as SessionV1.PartID
+}
+
+async function jsonFiles(dir: string) {
+  if (!(await exists(dir))) return []
+  return (await fs.readdir(dir, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => path.join(dir, entry.name))
+}
+
+async function directories(dir: string) {
+  if (!(await exists(dir))) return []
+  return (await fs.readdir(dir, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(dir, entry.name))
+}
+
+async function exists(file: string) {
+  return fs.stat(file).then(() => true, () => false)
+}
+
+async function readJson(file: string, stats: Stats) {
+  try {
+    const value = JSON.parse(await fs.readFile(file, "utf8"))
+    return record(value)
+  } catch (error) {
+    stats.errors.push(`failed to read ${file}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function readJsonArray(file: string, stats: Stats) {
+  try {
+    const value = JSON.parse(await fs.readFile(file, "utf8"))
+    return Array.isArray(value) ? value : []
+  } catch (error) {
+    stats.errors.push(`failed to read ${file}: ${error instanceof Error ? error.message : String(error)}`)
+    return []
+  }
+}
+
+function record(input: unknown): Record<string, unknown> | undefined {
+  return input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : undefined
+}
+
+function omit(input: Record<string, unknown>, keys: string[]) {
+  const output = { ...input }
+  for (const key of keys) delete output[key]
+  return output
+}
+
+function string(input: unknown, fallback: string) {
+  return typeof input === "string" ? input : fallback
+}
+
+function number(input: unknown) {
+  return typeof input === "number" ? input : undefined
+}
+
+function stringArray(input: unknown) {
+  return Array.isArray(input) ? input.filter((item): item is string => typeof item === "string") : []
+}
+
+function time(input: Record<string, unknown>, key: "created" | "updated") {
+  const value = record(input.time)?.[key]
+  return typeof value === "number" ? value : Date.now()
+}
+
+export const JsonMigration = { run }

@@ -1,4 +1,4 @@
-import type { Permission } from "../permission"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import type { Agent } from "./agent"
 import { Wildcard } from "@/util/wildcard"
 
@@ -20,10 +20,10 @@ import { Wildcard } from "@/util/wildcard"
  *    doesn't already permit them.
  */
 export function deriveSubagentSessionPermission(input: {
-  parentSessionPermission: Permission.Ruleset
-  parentAgent: Agent.Info | undefined
+  parentAgent?: Agent.Info
+  parentSessionPermission: PermissionV1.Ruleset
   subagent: Agent.Info
-}): Permission.Ruleset {
+}): PermissionV1.Ruleset {
   const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
   const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
   const parentHasCatchAllDeny = input.parentAgent?.permission.some(
@@ -42,7 +42,11 @@ export function deriveSubagentSessionPermission(input: {
   ]
 }
 
-function parentAgentCeiling(rule: Permission.Rule, subagent: Permission.Ruleset, parentHasCatchAllDeny: boolean | undefined) {
+function parentAgentCeiling(
+  rule: PermissionV1.Rule,
+  subagent: PermissionV1.Ruleset,
+  parentHasCatchAllDeny: boolean | undefined,
+) {
   // Catch-all parent rules are self-execution defaults. Forwarding `*: deny`
   // would erase controller/executor style agents that intentionally delegate
   // work to a narrower subagent despite being personally tool-restricted.
@@ -66,7 +70,14 @@ function parentAgentCeiling(rule: Permission.Rule, subagent: Permission.Ruleset,
   return [{ ...rule, action }]
 }
 
-function forwardParentSessionRule(rule: Permission.Rule, subagent: Permission.Ruleset) {
+function forwardParentSessionRule(rule: PermissionV1.Rule, subagent: PermissionV1.Ruleset) {
+  // Session-level external directory allows are runtime grants from the active
+  // conversation. Forward them so delegated work can use paths the parent has
+  // already admitted without broadening the subagent's built-in tool surface.
+  if (rule.action === "allow" && rule.permission === "external_directory") {
+    const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
+    return childAction === "allow" || childAction === "ask" ? [rule] : []
+  }
   // Session allow rules are forwarded only as shared exceptions. They cannot
   // relax a child agent that would otherwise ask, auto-review, or deny.
   if (rule.action === "allow")
@@ -79,7 +90,7 @@ function forwardParentSessionRule(rule: Permission.Rule, subagent: Permission.Ru
   return [{ ...rule, action }]
 }
 
-function childSpecificCeilings(parent: Permission.Rule, subagent: Permission.Ruleset) {
+function childSpecificCeilings(parent: PermissionV1.Rule, subagent: PermissionV1.Ruleset) {
   // A child may expose narrow capabilities behind a `*: deny` fallback. When a
   // broad parent ceiling meets that fallback, derive ceilings for the narrow
   // child patterns instead of widening everything or dropping the parent ceiling.
@@ -94,7 +105,7 @@ function childSpecificCeilings(parent: Permission.Rule, subagent: Permission.Rul
   })
 }
 
-function subagentDenyOverrides(subagent: Permission.Ruleset, ceilings: Permission.Ruleset) {
+function subagentDenyOverrides(subagent: PermissionV1.Ruleset, ceilings: PermissionV1.Ruleset) {
   if (ceilings.length === 0) return []
   // A child-specific deny must stay terminal when a broader parent auto/ask
   // ceiling was appended after the child agent rules. Do not repeat wildcard
@@ -110,6 +121,6 @@ function subagentDenyOverrides(subagent: Permission.Ruleset, ceilings: Permissio
   )
 }
 
-function evaluateSubagentRule(ruleset: Permission.Ruleset, permission: string, pattern: string) {
+function evaluateSubagentRule(ruleset: PermissionV1.Ruleset, permission: string, pattern: string) {
   return ruleset.findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern))
 }

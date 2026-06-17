@@ -1,5 +1,5 @@
-import { BusEvent } from "@/bus/bus-event"
 import { AsyncQueue } from "@/util/queue"
+import { EventV2 } from "@opencode-ai/core/event"
 import { Schema } from "effect"
 import type { Context } from "hono"
 
@@ -8,8 +8,8 @@ export const DisposedReason = {
 } as const
 
 export const Event = {
-  Connected: BusEvent.define("server.connected", Schema.Struct({})),
-  Disposed: BusEvent.define("global.disposed", Schema.Struct({ reason: Schema.optional(Schema.String) })),
+  Connected: EventV2.define({ type: "server.connected", schema: {} }),
+  Disposed: EventV2.define({ type: "global.disposed", schema: { reason: Schema.optional(Schema.String) } }),
 }
 
 const encoder = new TextEncoder()
@@ -84,3 +84,9 @@ export function streamEventSource(
   c.header("X-Content-Type-Options", "nosniff")
   return c.newResponse(body)
 }
+
+export const InstanceDisposed = Schema.Struct({
+  id: Schema.String,
+  type: Schema.Literal("server.instance.disposed"),
+  properties: Schema.Struct({ directory: Schema.String }),
+}).annotate({ identifier: "Event.server.instance.disposed" })

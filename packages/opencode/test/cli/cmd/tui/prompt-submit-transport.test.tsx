@@ -7,6 +7,7 @@ import { onCleanup } from "solid-js"
 import type { Agent, Model, Provider } from "@opencode-ai/sdk/v2"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
+import { TestTuiContexts } from "../../../fixture/tui-environment"
 import { Prompt, type PromptRef } from "../../../../src/cli/cmd/tui/component/prompt"
 import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
 import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
@@ -14,7 +15,8 @@ import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/promp
 import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
 import { CommandPaletteProvider } from "../../../../src/cli/cmd/tui/context/command-palette"
 import { EditorContextProvider } from "../../../../src/cli/cmd/tui/context/editor"
-import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
+import { DataProvider } from "@opencode-ai/tui/context/data"
+import { ExitProvider } from "@opencode-ai/tui/context/exit"
 import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
 import { LocalProvider, useLocal } from "../../../../src/cli/cmd/tui/context/local"
 import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
@@ -25,6 +27,7 @@ import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
 import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
 import { TuiConfigProvider } from "../../../../src/cli/cmd/tui/context/tui-config"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
+import { createPluginRuntime, PluginRuntimeProvider } from "@opencode-ai/tui/plugin/runtime"
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
 import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
@@ -460,53 +463,60 @@ function PromptHarness(props: {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
+  const pluginRuntime = createPluginRuntime()
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
   return (
-    <OpencodeKeymapProvider keymap={keymap}>
-      <ArgsProvider>
-        <ExitProvider>
-          <KVProvider>
+    <TestTuiContexts directory={directory} paths={{ state: Global.Path.state }}>
+      <OpencodeKeymapProvider keymap={keymap}>
+        <ArgsProvider>
+          <ExitProvider exit={() => {}}>
+            <KVProvider>
             <ToastProvider>
               <RouteProvider initialRoute={props.initialRoute}>
                 <TuiConfigProvider config={config}>
-                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
-                    <ProjectProvider>
-                      <SyncProvider>
-                        <ThemeProvider mode="dark">
-                          <LocalProvider>
-                            <PromptStashProvider>
-                              <DialogProvider>
-                                <CommandPaletteProvider>
-                                  <FrecencyProvider>
-                                    <PromptHistoryProvider>
-                                      <PromptRefProvider>
-                                        <EditorContextProvider>
-                                          <PromptProbe
-                                            sessionID={props.promptSessionID}
-                                            onContext={props.onContext}
-                                            onRoute={props.onRoute}
-                                            onPrompt={props.onPrompt}
-                                          />
-                                        </EditorContextProvider>
-                                      </PromptRefProvider>
-                                    </PromptHistoryProvider>
-                                  </FrecencyProvider>
-                                </CommandPaletteProvider>
-                              </DialogProvider>
-                            </PromptStashProvider>
-                          </LocalProvider>
-                        </ThemeProvider>
-                      </SyncProvider>
-                    </ProjectProvider>
-                  </SDKProvider>
+                  <PluginRuntimeProvider value={pluginRuntime}>
+                    <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
+                      <ProjectProvider>
+                        <SyncProvider>
+                          <DataProvider>
+                            <ThemeProvider mode="dark">
+                              <LocalProvider>
+                                <PromptStashProvider>
+                                  <DialogProvider>
+                                    <CommandPaletteProvider>
+                                      <FrecencyProvider>
+                                        <PromptHistoryProvider>
+                                          <PromptRefProvider>
+                                            <EditorContextProvider>
+                                              <PromptProbe
+                                                sessionID={props.promptSessionID}
+                                                onContext={props.onContext}
+                                                onRoute={props.onRoute}
+                                                onPrompt={props.onPrompt}
+                                              />
+                                            </EditorContextProvider>
+                                          </PromptRefProvider>
+                                        </PromptHistoryProvider>
+                                      </FrecencyProvider>
+                                    </CommandPaletteProvider>
+                                  </DialogProvider>
+                                </PromptStashProvider>
+                              </LocalProvider>
+                            </ThemeProvider>
+                          </DataProvider>
+                        </SyncProvider>
+                      </ProjectProvider>
+                    </SDKProvider>
+                  </PluginRuntimeProvider>
                 </TuiConfigProvider>
               </RouteProvider>
             </ToastProvider>
-          </KVProvider>
-        </ExitProvider>
-      </ArgsProvider>
-    </OpencodeKeymapProvider>
+            </KVProvider>
+          </ExitProvider>
+        </ArgsProvider>
+      </OpencodeKeymapProvider>
+    </TestTuiContexts>
   )
 }
 

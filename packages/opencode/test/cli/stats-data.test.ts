@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
+import { sql } from "drizzle-orm"
 import { aggregateStats } from "@/cli/cmd/stats/data"
 import { renderBreakdown } from "@/cli/cmd/stats/render"
 import { Session } from "@/session/session"
 import { MessageID, PartID } from "@/session/schema"
-import { ModelID, ProviderID } from "@/provider/schema"
-import { Database } from "@/storage/db"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { Database } from "@opencode-ai/core/database/database"
 import { resetDatabase } from "../fixture/db"
 import { testEffect } from "../lib/effect"
 
-const it = testEffect(Session.defaultLayer)
+const it = testEffect(Layer.mergeAll(Session.defaultLayer, Database.defaultLayer))
 
 beforeEach(async () => {
   await resetDatabase()
@@ -28,7 +30,7 @@ const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean } = {}) 
       sessionID: info.id,
       role: "user",
       agent: "build",
-      model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") },
+      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
       time: { created: Date.now() },
     })
     const assistant = yield* session.updateMessage({
@@ -36,8 +38,8 @@ const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean } = {}) 
       sessionID: info.id,
       role: "assistant",
       parentID: user.id,
-      modelID: ModelID.make("test"),
-      providerID: ProviderID.make("test"),
+      modelID: ModelV2.ID.make("test"),
+      providerID: ProviderV2.ID.make("test"),
       mode: "build",
       agent: "build",
       path: { cwd: "/tmp/project", root: "/tmp/project" },
@@ -92,11 +94,9 @@ const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean } = {}) 
       // Some 1.15.3 local rows persisted the `messages` object without the per-category counters.
       // Mutating the stored JSON keeps this test at the stats boundary: current writes remain schema-shaped,
       // while reads must stay compatible with historical rows copied from user databases.
-      yield* Effect.sync(() =>
-        Database.Client().$client.run("update part set data = ? where id = ?", [
-          JSON.stringify({ ...stepData, inputBreakdown: { ...stepData.inputBreakdown, messages: {} } }),
-          stepPartID,
-        ]),
+      const { db } = yield* Database.Service
+      yield* db.run(
+        sql`update part set data = ${JSON.stringify({ ...stepData, inputBreakdown: { ...stepData.inputBreakdown, messages: {} } })} where id = ${stepPartID}`,
       )
     }
 

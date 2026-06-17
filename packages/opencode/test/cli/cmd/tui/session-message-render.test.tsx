@@ -13,10 +13,13 @@ import type {
 import { onCleanup } from "solid-js"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
+import { TestTuiContexts } from "../../../fixture/tui-environment"
 import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
 import { CommandPaletteProvider } from "../../../../src/cli/cmd/tui/context/command-palette"
 import { EditorContextProvider } from "../../../../src/cli/cmd/tui/context/editor"
-import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
+import { DataProvider } from "@opencode-ai/tui/context/data"
+import { EpilogueProvider } from "@opencode-ai/tui/context/epilogue"
+import { ExitProvider } from "@opencode-ai/tui/context/exit"
 import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
 import { LocalProvider } from "../../../../src/cli/cmd/tui/context/local"
 import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
@@ -35,6 +38,7 @@ import parsers from "../../../../parsers-config"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
 import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
 import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
+import { createPluginRuntime, PluginRuntimeProvider } from "@opencode-ai/tui/plugin/runtime"
 import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
 
 const sessionID = "ses_render"
@@ -243,7 +247,7 @@ test("session follows streaming growth when the viewport is visually at the bott
       // below the prompt until another terminal/sidebar reflow recalculates it.
       app.mockInput.pressKey("y", { ctrl: true, meta: true })
       await app.renderOnce()
-      expect(rows(app.captureCharFrame()).some((line) => line.includes("OLD_BOTTOM"))).toBe(false)
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Build · model"))).toBe(false)
 
       emit(
         partDeltaEvent("evt_bottom_growth", "msg_bottom", "part_bottom", `${" new content".repeat(80)} NEW_BOTTOM`, "text"),
@@ -802,7 +806,7 @@ test("completed oversized notebook insert renders inserted source preview when t
       expect(frame.some((line) => line.includes("Diff omitted"))).toBe(false)
     },
     {},
-    { height: 24 },
+    { height: 36 },
   )
 })
 
@@ -1070,7 +1074,7 @@ test("notebook source, run, and output tools render rich notebook cards", async 
       expect(frame.some((line) => line.includes("vscode_notebook_source ["))).toBe(false)
     },
     {},
-    { height: 24 },
+    { height: 42 },
   )
 })
 
@@ -1772,6 +1776,8 @@ test("permission review decision renders as a reviewer cell", async () => {
       )
       expect(frame.some((line) => line.includes("! Permission review decision"))).toBe(false)
     },
+    {},
+    { height: 24 },
   )
 })
 
@@ -1905,52 +1911,61 @@ function SessionHarness(props: {
   const renderer = useRenderer()
   const config = createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
+  const pluginRuntime = createPluginRuntime()
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
   return (
-    <OpencodeKeymapProvider keymap={keymap}>
-      <ArgsProvider>
-        <ExitProvider>
-          <KVProvider>
+    <TestTuiContexts directory={directory} paths={{ state: Global.Path.state }}>
+      <OpencodeKeymapProvider keymap={keymap}>
+        <ArgsProvider>
+          <ExitProvider exit={() => {}}>
+            <KVProvider>
             <ToastProvider>
               <RouteProvider initialRoute={{ type: "session", sessionID }}>
                 <TuiConfigProvider config={config}>
-                  <SDKProvider
-                    url="http://test"
-                    directory={directory}
-                    testTransport={{ fetch: props.fetch, events: props.events }}
-                  >
-                    <ProjectProvider>
-                      <SyncProvider>
-                        <ThemeProvider mode="dark">
-                          <LocalProvider>
-                            <PromptStashProvider>
-                              <DialogProvider>
-                                <CommandPaletteProvider>
-                                  <FrecencyProvider>
-                                    <PromptHistoryProvider>
-                                      <PromptRefProvider>
-                                        <EditorContextProvider>
-                                          <Session />
-                                        </EditorContextProvider>
-                                      </PromptRefProvider>
-                                    </PromptHistoryProvider>
-                                  </FrecencyProvider>
-                                </CommandPaletteProvider>
-                              </DialogProvider>
-                            </PromptStashProvider>
-                          </LocalProvider>
-                        </ThemeProvider>
-                      </SyncProvider>
-                    </ProjectProvider>
-                  </SDKProvider>
+                  <PluginRuntimeProvider value={pluginRuntime}>
+                    <SDKProvider
+                      url="http://test"
+                      directory={directory}
+                      testTransport={{ fetch: props.fetch, events: props.events }}
+                    >
+                      <ProjectProvider>
+                        <SyncProvider>
+                          <DataProvider>
+                            <ThemeProvider mode="dark">
+                              <LocalProvider>
+                                <PromptStashProvider>
+                                  <DialogProvider>
+                                    <CommandPaletteProvider>
+                                      <FrecencyProvider>
+                                        <PromptHistoryProvider>
+                                          <PromptRefProvider>
+                                            <EditorContextProvider>
+                                              <EpilogueProvider set={() => {}}>
+                                                <Session />
+                                              </EpilogueProvider>
+                                            </EditorContextProvider>
+                                          </PromptRefProvider>
+                                        </PromptHistoryProvider>
+                                      </FrecencyProvider>
+                                    </CommandPaletteProvider>
+                                  </DialogProvider>
+                                </PromptStashProvider>
+                              </LocalProvider>
+                            </ThemeProvider>
+                          </DataProvider>
+                        </SyncProvider>
+                      </ProjectProvider>
+                    </SDKProvider>
+                  </PluginRuntimeProvider>
                 </TuiConfigProvider>
               </RouteProvider>
             </ToastProvider>
-          </KVProvider>
-        </ExitProvider>
-      </ArgsProvider>
-    </OpencodeKeymapProvider>
+            </KVProvider>
+          </ExitProvider>
+        </ArgsProvider>
+      </OpencodeKeymapProvider>
+    </TestTuiContexts>
   )
 }
 

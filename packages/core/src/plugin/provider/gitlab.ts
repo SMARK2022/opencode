@@ -1,23 +1,34 @@
 import os from "os"
 import { InstallationVersion } from "../../installation/version"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
+import { Credential } from "../../credential"
+import { Integration } from "../../integration"
 import { PluginV2 } from "../../plugin"
 import { ProviderV2 } from "../../provider"
 
 export const GitLabPlugin = PluginV2.define({
   id: PluginV2.ID.make("gitlab"),
   effect: Effect.gen(function* () {
+    const credentials = Option.getOrUndefined(yield* Effect.serviceOption(Credential.Service))
+    const accountToken = Effect.fnUntraced(function* () {
+      if (!credentials) return undefined
+      const account = (yield* credentials.list(Integration.ID.make("gitlab"))).at(-1)?.value
+      if (account?.type === "key") return account.key
+      if (account?.type === "oauth") return account.access
+      return undefined
+    })
     return {
       "aisdk.sdk": Effect.fn(function* (evt) {
         if (evt.package !== "gitlab-ai-provider") return
         const mod = yield* Effect.promise(() => import("gitlab-ai-provider"))
+        const token = yield* accountToken()
         evt.sdk = mod.createGitLab({
           ...evt.options,
           instanceUrl:
             typeof evt.options.instanceUrl === "string"
               ? evt.options.instanceUrl
               : (process.env.GITLAB_INSTANCE_URL ?? "https://gitlab.com"),
-          apiKey: typeof evt.options.apiKey === "string" ? evt.options.apiKey : process.env.GITLAB_TOKEN,
+          apiKey: typeof evt.options.apiKey === "string" ? evt.options.apiKey : (token ?? process.env.GITLAB_TOKEN),
           aiGatewayHeaders: {
             "User-Agent": `opencode/${InstallationVersion} gitlab-ai-provider/${mod.VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`,
             "anthropic-beta": "context-1m-2025-08-07",
@@ -34,18 +45,16 @@ export const GitLabPlugin = PluginV2.define({
         if (evt.model.providerID !== ProviderV2.ID.gitlab) return
         const featureFlags =
           typeof evt.options.featureFlags === "object" && evt.options.featureFlags ? evt.options.featureFlags : {}
-        if (evt.model.apiID.startsWith("duo-workflow-")) {
+        if (evt.model.api.id.startsWith("duo-workflow-")) {
           const gitlab = yield* Effect.promise(() => import("gitlab-ai-provider")).pipe(Effect.orDie)
           const workflowRef =
-            typeof evt.model.options.aisdk.request.workflowRef === "string"
-              ? evt.model.options.aisdk.request.workflowRef
-              : undefined
+            typeof evt.model.request.body.workflowRef === "string" ? evt.model.request.body.workflowRef : undefined
           const workflowDefinition =
-            typeof evt.model.options.aisdk.request.workflowDefinition === "string"
-              ? evt.model.options.aisdk.request.workflowDefinition
+            typeof evt.model.request.body.workflowDefinition === "string"
+              ? evt.model.request.body.workflowDefinition
               : undefined
           const language = evt.sdk.workflowChat(
-            gitlab.isWorkflowModel(evt.model.apiID) ? evt.model.apiID : "duo-workflow",
+            gitlab.isWorkflowModel(evt.model.api.id) ? evt.model.api.id : "duo-workflow",
             {
               featureFlags,
               workflowDefinition,
@@ -55,7 +64,7 @@ export const GitLabPlugin = PluginV2.define({
           evt.language = language
           return
         }
-        evt.language = evt.sdk.agenticChat(evt.model.apiID, {
+        evt.language = evt.sdk.agenticChat(evt.model.api.id, {
           aiGatewayHeaders: evt.options.aiGatewayHeaders,
           featureFlags,
         })

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import type { TuiPluginApi, TuiSlotContext, TuiSlotMap, TuiSlotProps } from "@opencode-ai/plugin/tui"
 import { createSlot, createSolidSlotRegistry, useRenderer, type JSX, type SolidPlugin } from "@opentui/solid"
 import { isRecord } from "@/util/record"

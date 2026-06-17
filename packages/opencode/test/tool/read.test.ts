@@ -1,27 +1,34 @@
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { afterEach, describe, expect } from "bun:test"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Effect, Exit, Layer, Stream } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { Git } from "@/git"
+import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { LSP } from "@/lsp/lsp"
 import { Permission } from "../../src/permission"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
-import { ModelID, ProviderID } from "../../src/provider/schema"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Instruction } from "../../src/session/instruction"
 import { ReadTool } from "../../src/tool/read"
 import { readOutline } from "../../src/tool/read-outline"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { Filesystem } from "@/util/filesystem"
-import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+import {
+  disposeAllInstances,
+  provideInstance,
+  testInstanceStoreLayer,
+  TestInstance,
+  tmpdirScoped,
+} from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
-import { Reference } from "@/reference/reference"
 import { Image } from "@/image/image"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
@@ -41,24 +48,17 @@ const ctx = {
   ask: () => Effect.void,
 }
 
-const referenceLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
-  Reference.layer.pipe(
-    Layer.provide(Config.defaultLayer),
-    Layer.provide(AppFileSystem.defaultLayer),
-    Layer.provide(Git.defaultLayer),
-    Layer.provide(RuntimeFlags.layer(flags)),
-  )
-
 const readLayer = (flags: Partial<RuntimeFlags.Info> = {}, imageLayer = Image.defaultLayer) =>
   Layer.mergeAll(
     Agent.defaultLayer,
-    AppFileSystem.defaultLayer,
+    FSUtil.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     Instruction.defaultLayer,
     LSP.defaultLayer,
-    referenceLayer(flags),
+    Ripgrep.defaultLayer,
     Truncate.defaultLayer,
     imageLayer,
+    testInstanceStoreLayer,
   )
 
 const it = testEffect(readLayer())
@@ -147,20 +147,20 @@ const git = Effect.fn("ReadToolTest.git")(function* (cwd: string, args: string[]
   })
 })
 const put = Effect.fn("ReadToolTest.put")(function* (p: string, content: string | Buffer | Uint8Array) {
-  const fs = yield* AppFileSystem.Service
+  const fs = yield* FSUtil.Service
   yield* fs.writeWithDirs(p, content)
 })
 const load = Effect.fn("ReadToolTest.load")(function* (p: string) {
-  const fs = yield* AppFileSystem.Service
+  const fs = yield* FSUtil.Service
   return yield* fs.readFileString(p)
 })
 const asks = () => {
-  const items: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+  const items: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
   return {
     items,
     next: {
       ...ctx,
-      ask: (req: Omit<Permission.Request, "id" | "sessionID" | "tool">) =>
+      ask: (req: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">) =>
         Effect.sync(() => {
           items.push(req)
         }),
@@ -181,8 +181,8 @@ function readMessage(
       role: "assistant",
       time: { created: 0 },
       parentID: MessageID.make("msg-user"),
-      modelID: ModelID.make("test-model"),
-      providerID: ProviderID.make("test-provider"),
+      modelID: ModelV2.ID.make("test-model"),
+      providerID: ProviderV2.ID.make("test-provider"),
       mode: "default",
       agent: "build",
       path: { cwd: "/", root: "/" },
@@ -319,44 +319,6 @@ describe("tool.read external_directory permission", () => {
       expect(ext).toBeUndefined()
     }),
   )
-
-  scout.live("does not ask for external_directory permission when reading configured references", () =>
-    Effect.gen(function* () {
-      const fs = yield* AppFileSystem.Service
-      const cache = path.join(Global.Path.repos, "github.com", "opencode-read-reference", "repo")
-      yield* fs.remove(cache, { recursive: true }).pipe(Effect.ignore)
-      yield* Effect.addFinalizer(() => fs.remove(cache, { recursive: true }).pipe(Effect.ignore))
-
-      const source = yield* tmpdirScoped({ git: true })
-      const remoteRoot = yield* tmpdirScoped()
-      const remoteDir = path.join(remoteRoot, "opencode-read-reference")
-      const remoteRepo = path.join(remoteDir, "repo.git")
-      yield* put(path.join(source, "notes.md"), "reference notes")
-      yield* git(source, ["add", "."])
-      yield* git(source, ["commit", "-m", "add notes"])
-      yield* fs.makeDirectory(remoteDir, { recursive: true }).pipe(Effect.orDie)
-      yield* git(remoteRoot, ["clone", "--bare", source, remoteRepo])
-
-      const dir = yield* tmpdirScoped({
-        git: true,
-        config: {
-          reference: {
-            docs: "opencode-read-reference/repo",
-          },
-        },
-      })
-
-      const { items, next } = asks()
-      const result = yield* githubBase(
-        `file://${remoteRoot}/`,
-        exec(dir, { filePath: path.join(cache, "notes.md") }, next),
-      )
-      const ext = items.find((item) => item.permission === "external_directory")
-
-      expect(result.output).toContain("reference notes")
-      expect(ext).toBeUndefined()
-    }),
-  )
 })
 
 describe("tool.read env file permissions", () => {
@@ -385,7 +347,7 @@ describe("tool.read env file permissions", () => {
                 let asked = false
                 const next = {
                   ...ctx,
-                  ask: (req: Omit<Permission.Request, "id" | "sessionID" | "tool">) =>
+                  ask: (req: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">) =>
                     Effect.sync(() => {
                       for (const pattern of req.patterns) {
                         const rule = Permission.evaluate(req.permission, pattern, info.permission)
@@ -393,7 +355,7 @@ describe("tool.read env file permissions", () => {
                           asked = true
                         }
                         if (rule.action === "deny") {
-                          throw new Permission.DeniedError({ ruleset: info.permission })
+                          throw new PermissionV1.DeniedError({ ruleset: info.permission })
                         }
                       }
                     }),
@@ -449,6 +411,36 @@ describe("tool.read truncation", () => {
     }),
   )
 
+  it.instance("stops streaming after the byte cap", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filepath = path.join(test.directory, "huge.txt")
+      const content = `${"x".repeat(200)}\n`.repeat(50_000)
+      yield* put(filepath, content)
+      const fs = yield* FSUtil.Service
+      const counter = { bytes: 0 }
+      const result = yield* run({ filePath: filepath }).pipe(
+        Effect.provideService(
+          FSUtil.Service,
+          FSUtil.Service.of({
+            ...fs,
+            stream: (file, options) =>
+              fs.stream(file, options).pipe(
+                Stream.tap((chunk) =>
+                  Effect.sync(() => {
+                    counter.bytes += chunk.length
+                  }),
+                ),
+              ),
+          }),
+        ),
+      )
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain("reason=\"byte_limit\"")
+      expect(counter.bytes).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
+    }),
+  )
+
   it.instance("truncates large file by bytes and sets truncated metadata", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -481,6 +473,39 @@ describe("tool.read truncation", () => {
     }),
   )
 
+  it.instance("uses 400 lines as the default read limit", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const lines = Array.from({ length: 450 }, (_, i) => `line${String(i + 1).padStart(3, "0")}`).join("\n")
+      yield* put(path.join(test.directory, "default-lines.txt"), lines)
+
+      const result = yield* run({ filePath: path.join(test.directory, "default-lines.txt") })
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain('<range start="1" end="400" total="450" returned="400" />')
+      expect(result.output).toContain('<more offset="401" reason="line_limit" />')
+      expect(result.output).toContain("400: line400")
+      expect(result.output).not.toContain("401: line401")
+    }),
+  )
+
+  it.instance("uses a 24 KiB default byte budget", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const chunk = `${"x".repeat(1023)}\n`
+      yield* put(path.join(test.directory, "twenty-kib.txt"), chunk.repeat(20))
+      yield* put(path.join(test.directory, "twenty-six-kib.txt"), chunk.repeat(26))
+
+      const withinBudget = yield* run({ filePath: path.join(test.directory, "twenty-kib.txt") })
+      expect(withinBudget.metadata.truncated).toBe(false)
+      expect(withinBudget.output).toContain('<range start="1" end="20" total="20" returned="20" />')
+      expect(withinBudget.output).not.toContain("<more")
+
+      const overBudget = yield* run({ filePath: path.join(test.directory, "twenty-six-kib.txt") })
+      expect(overBudget.metadata.truncated).toBe(true)
+      expect(overBudget.output).toContain('reason="byte_limit"')
+    }),
+  )
+
   it.instance("does not truncate small file", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -490,6 +515,15 @@ describe("tool.read truncation", () => {
       expect(result.metadata.truncated).toBe(false)
       expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
       expect(result.output).not.toContain("<more")
+      expect(result.metadata.display).toMatchObject({
+        type: "file",
+        path: path.join(test.directory, "small.txt"),
+        text: "hello world",
+        lineStart: 1,
+        lineEnd: 1,
+        totalLines: 1,
+        truncated: false,
+      })
     }),
   )
 
@@ -558,6 +592,14 @@ describe("tool.read truncation", () => {
       const result = yield* exec(dir, { filePath: path.join(dir, "dir"), offset: 6, limit: 5 })
       expect(result.metadata.truncated).toBe(false)
       expect(result.output).not.toContain("Showing 5 of 10 entries")
+      expect(result.metadata.display).toMatchObject({
+        type: "directory",
+        path: path.join(dir, "dir"),
+        entries: ["file-5.txt", "file-6.txt", "file-7.txt", "file-8.txt", "file-9.txt"],
+        offset: 6,
+        totalEntries: 10,
+        truncated: false,
+      })
     }),
   )
 
@@ -572,14 +614,14 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  it.live("truncates long lines", () =>
+  it.live("preserves long lines within the read byte budget", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       yield* put(path.join(dir, "long-line.txt"), "x".repeat(3000))
 
       const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
-      expect(result.output).toContain("(line truncated to 2000 chars)")
-      expect(result.output.length).toBeLessThan(3000)
+      expect(result.output).toContain("x".repeat(3000))
+      expect(result.output).not.toContain("line truncated")
     }),
   )
 

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
 import { tmpdir } from "../../fixture/fixture"
-import * as App from "../../../src/cli/cmd/tui/app"
 import { UI } from "../../../src/cli/ui"
 import * as Win32 from "../../../src/cli/cmd/tui/win32"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
@@ -31,7 +30,7 @@ function setup() {
   // to module mocks, later suites can see mocked @/config/tui and fail (e.g.
   // plugin-loader tests expecting real TuiConfig.waitForDependencies). See:
   // https://github.com/oven-sh/bun/issues/7823 and #12823.
-  spyOn(App, "tui").mockImplementation(async (input) => {
+  ThreadModule._setRun(async (input) => {
     if (input.directory) seen.tui.push(input.directory)
     seen.tuiUrls.push(input.url)
     throw stop
@@ -48,6 +47,7 @@ function setup() {
 
 describe("tui thread", () => {
   afterEach(() => {
+    ThreadModule._setRun(undefined)
     ThreadModule._setSpawn(undefined)
     mock.restore()
     ServerLockModule._setLockPath(undefined)
@@ -80,6 +80,14 @@ describe("tui thread", () => {
     }
     return TuiThreadCommand.handler(args)
   }
+
+  test("loads the TUI integration lazily", async () => {
+    const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
+
+    expect(source).toContain('await import("../tui/layer")')
+    expect(source).toMatch(/await import\(["']@\/plugin\/tui\/runtime["']\)/)
+    expect(source).not.toContain('import("./app")')
+  })
 
   async function check(project?: string) {
     await using tmp = await tmpdir({ git: true })
@@ -304,7 +312,7 @@ describe("tui thread", () => {
       const order: string[] = []
       setup()
       mock.restore()
-      spyOn(App, "tui").mockImplementation(async () => {
+      ThreadModule._setRun(async () => {
         order.push("tui")
         throw stop
       })
@@ -353,7 +361,7 @@ describe("tui thread", () => {
       setup()
       mock.restore()
       seen.printlns.length = 0
-      spyOn(App, "tui").mockImplementation(async () => undefined)
+      ThreadModule._setRun(async () => undefined)
       spyOn(UI, "error").mockImplementation(() => {})
       spyOn(UI, "println").mockImplementation((...message) => {
         seen.printlns.push(message.join(" "))
@@ -398,7 +406,7 @@ describe("tui thread", () => {
       setup()
       mock.restore()
       seen.printlns.length = 0
-      spyOn(App, "tui").mockImplementation(async () => undefined)
+      ThreadModule._setRun(async () => undefined)
       spyOn(UI, "error").mockImplementation(() => {})
       spyOn(UI, "println").mockImplementation((...message) => {
         seen.printlns.push(message.join(" "))
@@ -440,7 +448,7 @@ describe("tui thread", () => {
       const order: string[] = []
       setup()
       mock.restore()
-      spyOn(App, "tui").mockImplementation(async () => {
+      ThreadModule._setRun(async () => {
         order.push("tui")
         throw stop
       })

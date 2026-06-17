@@ -124,7 +124,9 @@ describe("cross-spawn spawner", () => {
       "fails for invalid cwd",
       Effect.gen(function* () {
         const exit = yield* Effect.exit(
-          ChildProcess.make("echo", ["test"], { cwd: "/nonexistent/directory/path" }).asEffect(),
+          ChildProcessSpawner.ChildProcessSpawner.use((svc) =>
+            svc.spawn(ChildProcess.make("echo", ["test"], { cwd: "/nonexistent/directory/path" })),
+          ),
         )
         expect(Exit.isFailure(exit)).toBe(true)
       }),
@@ -197,7 +199,7 @@ describe("cross-spawn spawner", () => {
     fx.effect(
       "captures stdout via .all when no stderr",
       Effect.gen(function* () {
-        const handle = yield* ChildProcess.make("echo", ["hello from stdout"])
+        const handle = yield* js('process.stdout.write("hello from stdout")')
         const all = yield* decodeByteStream(handle.all)
         expect(all).toBe("hello from stdout")
       }),

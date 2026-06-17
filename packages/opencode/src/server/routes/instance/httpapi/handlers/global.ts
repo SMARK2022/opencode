@@ -1,19 +1,18 @@
 import { Config } from "@/config/config"
 import { GlobalBus, type GlobalEvent as GlobalBusEvent } from "@/bus/global"
 import { EffectBridge } from "@/effect/bridge"
-import { Bus } from "@/bus"
+import { EventV2 } from "@opencode-ai/core/event"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import * as Log from "@opencode-ai/core/util/log"
-import { Effect, Schema } from "effect"
+import { Effect, Queue, Schema } from "effect"
+import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { NodeHttpServerRequest } from "@effect/platform-node"
+import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
-import { PassThrough } from "node:stream"
-
-const log = Log.create({ service: "server" })
 
 let sseClientCount = 0
 let onSseCountChange: ((n: number) => void) | undefined
@@ -22,8 +21,19 @@ export function onSseClientCountChange(cb: (n: number) => void) {
   onSseCountChange = cb
 }
 
-function eventData(data: unknown) {
-  return `data: ${JSON.stringify(data)}\n\n`
+function eventData(data: unknown): Sse.Event {
+  return {
+    _tag: "Event",
+    event: "message",
+    id: undefined,
+    data: JSON.stringify(data),
+  }
+}
+
+function updateSseClientCount(delta: 1 | -1) {
+  sseClientCount = delta === 1 ? sseClientCount + 1 : Math.max(0, sseClientCount - 1)
+  onSseCountChange?.(sseClientCount)
+  return sseClientCount
 }
 
 function parseBody(body: string) {
@@ -34,77 +44,68 @@ function parseBody(body: string) {
   }
 }
 
-type AbortSource = {
-  once: (event: "aborted", listener: () => void) => unknown
-  off: (event: "aborted", listener: () => void) => unknown
+function onNodeClose(input: unknown, event: string, listener: () => void) {
+  if (!input || typeof input !== "object") return
+  const candidate = input as { once?: unknown }
+  if (typeof candidate.once !== "function") return
+  candidate.once(event, listener)
 }
 
-function abortSource(source: object): AbortSource | undefined {
-  const candidate = source as { once?: unknown; off?: unknown }
-  if (typeof candidate.once !== "function" || typeof candidate.off !== "function") return
-  return candidate as AbortSource
-}
+function eventResponse() {
+  return Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const incoming = NodeHttpServerRequest.toIncomingMessage(request)
+    const response = NodeHttpServerRequest.toServerResponse(request)
+    let disconnected = false
+    const disconnect = () => {
+      if (disconnected) return
+      disconnected = true
+      return updateSseClientCount(-1)
+    }
+    onNodeClose(incoming, "aborted", disconnect)
+    onNodeClose(incoming, "close", disconnect)
+    onNodeClose(incoming.socket, "close", disconnect)
+    onNodeClose(incoming.socket, "end", disconnect)
+    onNodeClose(response, "close", disconnect)
 
-function onRequestAbort(request: HttpServerRequest.HttpServerRequest, close: () => void) {
-  if (request.source instanceof Request) {
-    request.source.signal.addEventListener("abort", close, { once: true })
-    return () => request.source instanceof Request && request.source.signal.removeEventListener("abort", close)
-  }
+    const connectedCount = yield* Effect.sync(() => updateSseClientCount(1))
+    yield* Effect.logInfo("global event connected", { sseClientCount: connectedCount })
+    const events = Stream.callback<GlobalBusEvent>((queue) => {
+      const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+      return Effect.acquireRelease(
+        Effect.sync(() => GlobalBus.on("event", handler)),
+        () => Effect.sync(() => GlobalBus.off("event", handler)),
+      )
+    })
+    const heartbeat = Stream.tick("10 seconds").pipe(
+      Stream.drop(1),
+      Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
+    )
 
-  const source = abortSource(request.source)
-  if (!source) return () => {}
-  source.once("aborted", close)
-  return () => source.off("aborted", close)
-}
-
-function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-  // [local-smark] Track SSE client count for daemon idle-timeout
-  sseClientCount++
-  onSseCountChange?.(sseClientCount)
-  log.info("global event connected", { sseClientCount })
-
-  const stream = new PassThrough()
-  const write = (event: GlobalBusEvent) => {
-    if (stream.destroyed) return
-    stream.write(eventData(event))
-  }
-  const handler = (event: GlobalBusEvent) => write(event)
-  const heartbeat = setInterval(
-    () => write({ payload: { id: Bus.createID(), type: "server.heartbeat", properties: {} } }),
-    10_000,
-  )
-  let closed = false
-  let unsubscribeRequestAbort = () => {}
-  const close = () => {
-    if (closed) return
-    closed = true
-    clearInterval(heartbeat)
-    GlobalBus.off("event", handler)
-    unsubscribeRequestAbort()
-    if (!stream.destroyed) stream.end()
-    sseClientCount = Math.max(0, sseClientCount - 1)
-    onSseCountChange?.(sseClientCount)
-    log.info("global event disconnected", { sseClientCount })
-  }
-
-  heartbeat.unref?.()
-  GlobalBus.on("event", handler)
-  unsubscribeRequestAbort = onRequestAbort(request, close)
-  stream.once("close", close)
-  stream.once("error", close)
-  write({ payload: { id: Bus.createID(), type: "server.connected", properties: {} } })
-
-  return HttpServerResponse.raw(
-    stream,
-    {
-      contentType: "text/event-stream",
-      headers: {
-        "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-        "X-Content-Type-Options": "nosniff",
+    return HttpServerResponse.stream(
+      Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
+        Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+        Stream.map(eventData),
+        Stream.pipeThroughChannel(Sse.encode()),
+        Stream.encodeText,
+        Stream.ensuring(
+          Effect.gen(function* () {
+            const disconnectedCount = yield* Effect.sync(() => disconnect())
+            if (disconnectedCount !== undefined)
+              yield* Effect.logInfo("global event disconnected", { sseClientCount: disconnectedCount })
+          }),
+        ),
+      ),
+      {
+        contentType: "text/event-stream",
+        headers: {
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+          "X-Content-Type-Options": "nosniff",
+        },
       },
-    },
-  )
+    )
+  })
 }
 
 export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handlers) =>
@@ -118,7 +119,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return eventResponse(yield* HttpServerRequest.HttpServerRequest)
+      return yield* eventResponse()
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {

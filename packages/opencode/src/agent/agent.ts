@@ -1,6 +1,9 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Config } from "@/config/config"
+import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Provider } from "@/provider/provider"
-import { ModelID, ProviderID } from "../provider/schema"
+
 import { generateObject, streamObject, type ModelMessage } from "ai"
 import { Truncate } from "@/tool/truncate"
 import { Auth } from "../auth"
@@ -21,13 +24,19 @@ import { Plugin } from "@/plugin"
 import { Skill } from "../skill"
 import { Effect, Context, Layer, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 // [local-smark] provider alias support
-import { zod } from "@/util/effect-zod"
 import { isOpenaiOauthProvider, buildBaseProviderMap } from "@/provider/alias"
-import { type DeepMutable } from "@opencode-ai/core/schema"
+import { AbsolutePath, type DeepMutable } from "@opencode-ai/core/schema"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { LocationServiceMap } from "@opencode-ai/core/location-layer"
+import { Database } from "@opencode-ai/core/database/database"
+import { PluginBoot } from "@opencode-ai/core/plugin/boot"
+import { Reference } from "@opencode-ai/core/reference"
+import { Location } from "@opencode-ai/core/location"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 
 export const Info = Schema.Struct({
   name: Schema.String,
@@ -38,11 +47,11 @@ export const Info = Schema.Struct({
   topP: Schema.optional(Schema.Finite),
   temperature: Schema.optional(Schema.Finite),
   color: Schema.optional(Schema.String),
-  permission: Permission.Ruleset,
+  permission: PermissionV1.Ruleset,
   model: Schema.optional(
     Schema.Struct({
-      modelID: ModelID,
-      providerID: ProviderID,
+      modelID: ModelV2.ID,
+      providerID: ProviderV2.ID,
     }),
   ),
   variant: Schema.optional(Schema.String),
@@ -65,14 +74,14 @@ export interface Interface {
   readonly defaultAgent: () => Effect.Effect<string>
   readonly generate: (input: {
     description: string
-    model?: { providerID: ProviderID; modelID: ModelID }
+    model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
   }) => Effect.Effect<
     {
       identifier: string
       whenToUse: string
       systemPrompt: string
     },
-    Provider.ModelNotFoundError
+    Provider.DefaultModelError
   >
 }
 
@@ -89,6 +98,8 @@ const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["auto"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
+export const use = serviceUse(Service)
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -97,16 +108,27 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const skill = yield* Skill.Service
     const provider = yield* Provider.Service
+    const locations = yield* LocationServiceMap
     const flags = yield* RuntimeFlags.Service
-
     const state = yield* InstanceState.make<State>(
       Effect.fn("Agent.state")(function* (ctx) {
         const cfg = yield* config.get()
         const skillDirs = yield* skill.dirs()
+        const referenceDirs = Object.keys(cfg.references ?? {}).length
+          ? yield* Effect.gen(function* () {
+              yield* (yield* PluginBoot.Service).wait()
+              return (yield* (yield* Reference.Service).list()).map((reference) => reference.path)
+            }).pipe(
+              Effect.provide(
+                locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) })).pipe(Layer.provide(Database.defaultLayer)),
+              ),
+            )
+          : []
         const whitelistedDirs = [
           Truncate.GLOB,
           path.join(Global.Path.tmp, "*"),
           ...skillDirs.map((dir) => path.join(dir, "*")),
+          ...referenceDirs.map((dir) => path.join(dir, "*")),
         ]
         const readonlyExternalDirectory = {
           "*": "ask",
@@ -214,6 +236,9 @@ export const layer = Layer.effect(
               Permission.fromConfig({
                 question: "allow",
                 plan_exit: "allow",
+                task: {
+                  general: "deny",
+                },
                 external_directory: {
                   [path.join(Global.Path.data, "plans", "*")]: "allow",
                 },
@@ -481,7 +506,7 @@ export const layer = Layer.effect(
       }),
       generate: Effect.fn("Agent.generate")(function* (input: {
         description: string
-        model?: { providerID: ProviderID; modelID: ModelID }
+        model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
       }) {
         const cfg = yield* config.get()
         const model = input.model ?? (yield* provider.defaultModel())
@@ -559,7 +584,21 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Auth.defaultLayer),
   Layer.provide(Config.defaultLayer),
   Layer.provide(Skill.defaultLayer),
+  Layer.provide(LocationServiceMap.layer.pipe(Layer.provide(Database.defaultLayer))),
+  Layer.provide(Database.defaultLayer),
   Layer.provide(RuntimeFlags.defaultLayer),
 )
+
+const locationServiceMapNode = LayerNode.make(LocationServiceMap.layer, [Database.node])
+
+export const node = LayerNode.make(layer, [
+  Config.node,
+  Auth.node,
+  Plugin.node,
+  Skill.node,
+  Provider.node,
+  locationServiceMapNode,
+  RuntimeFlags.node,
+])
 
 export * as Agent from "./agent"
