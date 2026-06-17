@@ -23,6 +23,11 @@ type ExecutionNotice = {
 
 type Notice = Record<string, string | number | undefined>
 
+// 这是模型可见的恢复原话：先grep保存文件，再read offset/limit读取局部，避免无必要整读。
+// 单个attribute复用既有notice转义和展示，不改变shell/tool截断正文的前后位置。
+const OUTPUT_TRUNCATED_GUIDANCE =
+  "Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."
+
 export function outputStats(text: string): Required<OutputAmount> {
   return {
     // #282：工具输出经常以最终换行结束；按人类查看保存文件时的行数统计，
@@ -41,6 +46,7 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
     total: formatOutputAmount(input.total),
     shown: [input.shown.direction, formatOutputAmount(input.shown)].filter(Boolean).join(" "),
     path: input.path,
+    guidance: OUTPUT_TRUNCATED_GUIDANCE,
   })
 }
 

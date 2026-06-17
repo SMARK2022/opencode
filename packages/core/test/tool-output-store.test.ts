@@ -74,7 +74,9 @@ describe("ToolOutputStore", () => {
         // total对应归档，shown只对应head/tail正文，不将notice自身算入预览。
         const visible = result.output.content[0].text
         expect(visible).toContain('type="output_truncated" source="tool"')
-        expect(visible).toContain(`path="${result.outputPaths[0]}" />`)
+        expect(visible).toContain(`path="${result.outputPaths[0]}" guidance="`)
+        // 真实Native结算正文必须带完整原话，新增指导仍占用既有notice预算而不是吞掉原文恢复入口。
+        expect(visible).toContain('guidance="Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."')
         expect(visible).toMatch(/total="2L\/59KB"/)
         const excerpt = visible.replace(/\n\n<opencode_notice[^>]+ \/>\n\n/, "\n")
         expect(visible).toContain(`shown="head+tail ${excerpt.split("\n").length}L/`)
@@ -191,7 +193,7 @@ describe("ToolOutputStore", () => {
         const notice = captured.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
         expect(notice).toContain('total="78KB"')
         expect(notice).not.toContain('total="1L/')
-        expect(notice).toContain(`path="${captured.outputPaths[0]}" />`)
+        expect(notice).toContain(`path="${captured.outputPaths[0]}" guidance="`)
         expect(Buffer.byteLength(notice)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
       }),
     ),
@@ -359,7 +361,7 @@ describe("ToolOutputStore", () => {
           // 恢复地址即使超过极小预算也必须完整；空预览不能报成原文丢失。
           const text = result.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
           expect(text).toContain('total="3L/13B" shown="head 0L/0B"')
-          expect(text).toContain(`path="${result.outputPaths[0]}" />`)
+          expect(text).toContain(`path="${result.outputPaths[0]}" guidance="`)
           expect(text).toStartWith("<opencode_notice ")
           expect(yield* fs.readFileString(result.outputPaths[0])).toBe("one\ntwo\nthree")
         }),
