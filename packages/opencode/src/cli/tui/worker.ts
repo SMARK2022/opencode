@@ -14,6 +14,7 @@ import { SessionActivity } from "@/session/activity"
 import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
 import { GlobalBus } from "@/bus/global"
 import { DisposedReason, Event } from "@/server/event"
+import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
 
 Heap.start()
 
@@ -34,6 +35,15 @@ if (isDaemon) {
   const log = {
     info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
   }
+  // printLogs 判定与 daemon.ts launcher 端（argv 决定 stdio + env 透传）保持语义一致：
+  // worker 端再看 argv||env。若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
+  // argv，launcher 的 stdio 仍为 ignore——此时 worker 不调 FreeConsole（保留 console）
+  // 但日志无法输出到 stderr，是 pre-existing 死区，非本次引入。
+  const printLogs = process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1"
+  // Windows: 让 daemon worker 脱离共享 console，使 Ctrl+C 的 CTRL_C_EVENT 不再
+  // 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前调用；
+  // --print-logs 调试模式保留 console 以便 stderr 日志输出（有意降级）。
+  if (!printLogs) win32DetachConsole()
   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
   let internalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
 

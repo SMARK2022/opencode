@@ -15,6 +15,7 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import { ServerLock } from "../../../src/cli/tui/server-lock"
+import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
 // stop 的命令注册和参数解析必须通过真实 CLI 入口保留回归覆盖。
@@ -397,6 +398,59 @@ describe("daemon lifecycle", () => {
     },
     DAEMON_START_TIMEOUT_MS + 5_000,
   )
+  test.skipIf(process.platform === "win32")("win32DetachConsole is a no-op on non-Windows platforms", () => {
+    // win32DetachConsole 在非 win32 平台必须静默返回，不抛错、不依赖 kernel32。
+    // 这是跨平台安全边界：worker.ts 无条件 import win32 模块，函数内自检平台。
+    expect(() => win32DetachConsole()).not.toThrow()
+  })
+
+  test(
+    "Windows daemon detaches from the shared console yet keeps serving HTTP, SSE and control port",
+    async () => {
+      if (process.platform !== "win32") return
+
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      // 给 daemon 较长 idle 超时，避免测试期间因 SSE 断开而退出；
+      // 这里验证 worker 调用 FreeConsole 脱离 console 后，所有服务通道仍功能正常。
+      //
+      // 注意：无法在 bun:test 内安全发送真实 CTRL_C_EVENT 来断言「daemon 存活」——
+      // GenerateConsoleCtrlEvent(0,0) 会广播给当前 console 全部进程并杀掉测试 runner
+      // 自身，且 SetConsoleCtrlHandler(NULL,TRUE) 在 Bun 上无法保护发送进程。
+      // Ctrl+C 免疫行为已通过独立进程拓扑实测确认（daemon 心跳在事件广播后持续）。
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "30000" })
+
+      try {
+        const health = await fetch(`http://127.0.0.1:${lock.port}/global/health`, { headers: ServerLock.headers(credentials) })
+        expect(health.ok).toBe(true)
+
+        const ctrl = new AbortController()
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal, headers: ServerLock.headers(credentials) })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+        try {
+          expect((await reader.read()).value).toContain("server.connected")
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
+
+        if (!lock.controlPort) throw new Error("missing control port")
+        const status = await fetch(
+          `http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`,
+          { headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token } },
+        )
+        expect(status.ok).toBe(true)
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
 
   test(
     "SIGTERM triggers graceful shutdown and clears the lock file",
