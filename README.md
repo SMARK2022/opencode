@@ -119,7 +119,7 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 ### Optional MCP Integration
 
-If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode; installation, authorization, and browser-state handling remain governed by that project's README.
+If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode. This branch records that project as the `thirdparty/chatgpt-browser-agent` submodule; after a fresh checkout, run `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`, then run `npm ci` inside that directory. Login, authorization, and browser-state handling remain governed by that project's README.
 
 ### Session Management
 

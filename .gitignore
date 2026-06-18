@@ -36,6 +36,4 @@ logs/
 tsconfig.tsbuildinfo
 # #176：物化/scratch 目录不入 VCS
 .temp/*
-!.temp/chatgpt-browser-agent/
-!.temp/chatgpt-browser-agent/**
 /artifacts/
