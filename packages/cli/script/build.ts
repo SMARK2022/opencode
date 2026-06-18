@@ -5,6 +5,7 @@ import { rm } from "fs/promises"
 import path from "path"
 import { Script } from "@opencode-ai/script"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
 import pkg from "../package.json"
 import { modelsData } from "./generate"
 
@@ -64,7 +65,9 @@ for (const item of targets) {
   const name = target.replace(binary, "cli")
   console.log(`building ${name}`)
   const result = await Bun.build({
-    entrypoints: ["./src/index.ts"],
+    // Native与旧入口嵌入同一资源表，不复制录音器或引入源码包路径回退。
+    files: { "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir) },
+    entrypoints: ["./src/index.ts", "opencode-pvrecorder.gen.ts"],
     tsconfig: "./tsconfig.json",
     plugins: [plugin],
     external: ["node-gyp"],
@@ -84,6 +87,7 @@ for (const item of targets) {
     },
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_COMPILED: "true",
       OPENCODE_CLI_NAME: `'${binary}'`,
       OPENCODE_MODELS_DEV: modelsData,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
