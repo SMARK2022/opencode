@@ -494,8 +494,10 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
       expect(config.keybinds.get("dialog.mcp.toggle")?.[0]?.key).toBe("ctrl+t")
       expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
       expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
-      // voice 默认值属于 TUI 配置解析结果，必须和其它 canonical keybind 一起进入 lookup。
-      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
+      // voice 默认值属于 TUI 配置解析结果；macOS 单独避开 Option/Alt 和粘贴键，其它平台保持既有 Alt+V。
+      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(
+        process.platform === "darwin" ? "f8" : "alt+v",
+      )
       // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
       expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
       // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
@@ -650,6 +652,39 @@ winIt("keeps explicit input undo overrides on Windows", () =>
       expect(config.keybinds.get("terminal.suspend")).toEqual([])
       expect(config.keybinds.get("input.undo")?.[0]?.key).toBe("ctrl+y")
     }),
+  ),
+)
+
+it.instance("uses a macOS voice shortcut that avoids Option and paste chords", () =>
+  withCleanState(
+    withPlatform(
+      "darwin",
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const config = yield* getTuiConfig(test.directory)
+
+        // macOS 终端常把 Option/Alt 变成文本输入；F8 也避开 V 粘贴语义和既有 Ctrl+R。
+        // 断言落在解析后的 command lookup 上，保证真实 TUI 看到的是最终快捷键而不是中间配置对象。
+        expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("f8")
+      }),
+    ),
+  ),
+)
+
+it.instance("keeps explicit voice shortcut overrides on macOS", () =>
+  withCleanState(
+    withPlatform(
+      "darwin",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const test = yield* TestInstance
+        yield* fs.writeJson(path.join(test.directory, "tui.json"), { keybinds: { prompt_voice_toggle: "alt+v" } })
+
+        const config = yield* getTuiConfig(test.directory)
+        // 用户显式覆盖必须优先于平台默认值，否则已有 macOS 配置会在升级后被静默改写。
+        expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
+      }),
+    ),
   ),
 )
 

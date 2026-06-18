@@ -169,6 +169,8 @@ export function Prompt(props: PromptProps) {
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
   const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+  // 正常情况下 shortcut 来自 TuiConfig；fallback 只用于配置缺失/解析异常时保持 footer 和平台默认一致。
+  const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
   const renderer = useRenderer()
   const dimensions = useTerminalDimensions()
   // The bottom-right token meter shares space with prompt chrome and can be
@@ -435,8 +437,8 @@ export function Prompt(props: PromptProps) {
   // busy 覆盖 starting/stopping/transcribing，避免用户在语音文本尚未落入 prompt 前提交旧草稿。
   const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
   const voiceInputStatusText = createMemo(() =>
-    // shortcut 来自 keymap；缺省 alt+v 只用于展示兜底，实际绑定仍由 TuiKeybind 解析。
-    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || "alt+v", now()),
+    // shortcut 来自 keymap；兜底值只影响展示，不注册额外 keybind。
+    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now()),
   )
   const voiceInput = PromptVoiceInput.createVoiceInputController({
     // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
@@ -2065,7 +2067,7 @@ export function Prompt(props: PromptProps) {
                   </text>
                   <Show when={tuiConfig.voice?.transcriber}>
                     <text fg={theme.text}>
-                      {voiceShortcut() || "alt+v"} <span style={{ fg: theme.textMuted }}>voice</span>
+                      {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
                     </text>
                   </Show>
                 </Match>

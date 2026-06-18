@@ -318,6 +318,11 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
     const inputUndo = TuiKeybind.defaultValue("input_undo")
     keybinds.input_undo ??= unique(["ctrl+z", ...(typeof inputUndo === "string" ? inputUndo.split(",") : [])]).join(",")
   }
+  if (process.platform === "darwin") {
+    // macOS 终端里 Option/Alt 常被当作文本输入，Ctrl+Shift+字母也可能退化成 Ctrl+字母；F8 避开粘贴键和既有 Ctrl+R。
+    // 只在用户未配置 prompt_voice_toggle 时填默认值，避免破坏已有自定义 keybind。
+    keybinds.prompt_voice_toggle ??= "f8"
+  }
   const parsedKeybinds = TuiKeybind.parse(keybinds)
   const result: Resolved = {
     ...acc.result,

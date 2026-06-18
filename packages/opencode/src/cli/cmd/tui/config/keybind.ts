@@ -138,8 +138,8 @@ export const Definitions = {
   prompt_stash: keybind("none", "Stash prompt"),
   prompt_stash_pop: keybind("none", "Pop stashed prompt"),
   prompt_stash_list: keybind("none", "List stashed prompts"),
-  // 语音输入的默认键必须能在终端 textarea 内可靠收到，同时不能抢用户常用于 undo/redo 的 Ctrl+Y。
-  // Alt+V 当前未被 TUI 默认绑定占用，且 V 与 voice 语义相连；不依赖终端通常收不到的系统级 Win+H 听写快捷键。
+  // 这里保留非 macOS 的 Alt+V 默认值；macOS 会在 TuiConfig 解析阶段覆盖，避免 Option/Alt 和粘贴键冲突。
+  // Alt+V 当前未被其它非 macOS TUI 默认绑定占用，且不依赖终端通常收不到的系统级 Win+H 听写快捷键。
   prompt_voice_toggle: keybind("alt+v", "Toggle voice input recording"),
   workspace_set: keybind("none", "Set workspace"),
 

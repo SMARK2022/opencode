@@ -3,12 +3,14 @@
 import { $ } from "bun"
 import fs from "fs"
 import path from "path"
+import { createRequire } from "module"
 import { fileURLToPath } from "url"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const dir = path.resolve(__dirname, "..")
+const require = createRequire(import.meta.url)
 
 process.chdir(dir)
 
@@ -176,6 +178,49 @@ const targets = singleFlag
   ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false && (!archFilter || item.arch === archFilter))
   : allTargets
 
+// PvRecorder 的 `.node` 必须按目标平台嵌入；运行时再释放到真实 cache 文件，避免 Bun compile 中 `__dirname` 指向 CI 构建路径。
+const pvRecorderNativeFilesForTarget = (item: (typeof allTargets)[number]) => {
+  if (item.os === "win32") {
+    // Picovoice 在 Windows x64 包目录里使用 `amd64` 命名；这里不能直接复用 Bun target 的 `x64` 字符串。
+    if (item.arch === "x64") return ["windows/amd64/pv_recorder.node"]
+    // Windows arm64 与 Node/Bun 的 arch 名称一致，保持包内 lib 相对路径即可。
+    if (item.arch === "arm64") return ["windows/arm64/pv_recorder.node"]
+  }
+  if (item.os === "darwin") {
+    // macOS Intel 包路径沿用 Picovoice 的 `x86_64`，和 release target 的 `x64` 不同。
+    if (item.arch === "x64") return ["mac/x86_64/pv_recorder.node"]
+    // Apple Silicon 使用单独 native addon，不能和 x64 通过 Rosetta 路径混用。
+    if (item.arch === "arm64") return ["mac/arm64/pv_recorder.node"]
+  }
+  if (item.os === "linux") {
+    // Linux x64 只有 glibc/musl 外层 Bun runtime 不同；Picovoice native 路径本身不区分 libc。
+    if (item.arch === "x64") return ["linux/x86_64/pv_recorder.node"]
+    if (item.arch === "arm64")
+      // 官方包只提供 Raspberry Pi CPU 变体；全部嵌入后运行时再按 /proc/cpuinfo 精确选择。
+      return [
+        "raspberry-pi/cortex-a53-aarch64/pv_recorder.node",
+        "raspberry-pi/cortex-a72-aarch64/pv_recorder.node",
+        "raspberry-pi/cortex-a76-aarch64/pv_recorder.node",
+      ]
+  }
+  return []
+}
+
+function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
+  // `with { type: "file" }` 让 Bun 把 native 二进制作为资源嵌入 exe，而不是让 Picovoice 自己从 node_modules 相对路径加载。
+  const pvRecorderLib = path.join(path.dirname(require.resolve("@picovoice/pvrecorder-node/package.json")), "lib")
+  const imports = pvRecorderNativeFilesForTarget(item).map((file, index) => {
+    // require.resolve 兼容 hoisted workspace 安装；spec 再转成相对路径，交给 Bun.build 嵌入真实 native 文件。
+    const spec = path
+      .relative(dir, path.join(pvRecorderLib, ...file.split("/")))
+      .replaceAll("\\", "/")
+    return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
+  })
+  // key 保持 Picovoice 包内 lib 的相对路径，运行时只需按当前 platform/arch 选同一个稳定字符串。
+  const entries = pvRecorderNativeFilesForTarget(item).map((file, index) => `  ${JSON.stringify(file)}: file_${index},`)
+  return [...imports, "export default {", ...entries, "}"].join("\n")
+}
+
 await $`rm -rf dist`
 
 const binaries: Record<string, string> = {}
@@ -225,8 +270,19 @@ for (const item of targets) {
       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
-    files: embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {},
-    entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
+    files: {
+      ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
+      // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
+      "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
+    },
+    entrypoints: [
+      "./src/index.ts",
+      parserWorker,
+      workerPath,
+      ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+      // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
+      "opencode-pvrecorder.gen.ts",
+    ],
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
@@ -234,6 +290,8 @@ for (const item of targets) {
       OPENCODE_WORKER_PATH: workerPath,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
+      // 运行时用该常量禁止回退到 @picovoice 的 node_modules 相对路径，防止重新暴露 CI 绝对路径 bug。
+      OPENCODE_COMPILED: "true",
     },
   })
 

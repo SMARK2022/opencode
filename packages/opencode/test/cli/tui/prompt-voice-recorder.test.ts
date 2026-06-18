@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test"
+import { randomUUID } from "crypto"
+import fs from "fs/promises"
+import path from "path"
+import { Global } from "@opencode-ai/core/global"
 
 class FakePvRecorder {
   static last: FakePvRecorder | undefined
@@ -70,6 +74,46 @@ describe("prompt voice recorder", () => {
     FakePvRecorder.queuedReadDelayMs = 0
     FakePvRecorder.liveReadDelayMs = 40
     FakePvRecorder.liveFrameValue = 321
+    delete (globalThis as { OPENCODE_COMPILED?: boolean }).OPENCODE_COMPILED
+  })
+
+  // 崩溃或强杀会绕过 handle.abort()，因此下一次真实录音启动前要清理很久以前的 prompt WAV。
+  // 新近 WAV 可能来自另一个仍在停止/转写中的 Prompt，不能只按文件名前缀粗暴删除。
+  test("removes stale prompt voice files without deleting recent recordings", async () => {
+    const dir = path.join(Global.Path.tmp, "voice")
+    await fs.mkdir(dir, { recursive: true })
+    const stale = path.join(dir, `prompt-stale-${randomUUID()}.wav`)
+    const recent = path.join(dir, `prompt-recent-${randomUUID()}.wav`)
+    await Bun.write(stale, "old voice")
+    await Bun.write(recent, "recent voice")
+    // 48 小时足够越过 24 小时清理窗口，同时避免依赖文件系统秒级 mtime 精度。
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1_000)
+    await fs.utimes(stale, old, old)
+
+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+    const recorder = await startPromptVoiceRecorder()
+    try {
+      await waitForFakeRead()
+      await waitForMissing(stale)
+
+      // 新近文件代表另一个可能仍在转写的 Prompt，清理任务不能按 prompt-*.wav 前缀全部删除。
+      expect(await Bun.file(recent).exists()).toBe(true)
+      // start 阶段只创建目标路径，不应在用户 stop 前留下当前录音 WAV。
+      expect(await Bun.file(recorder.file).exists()).toBe(false)
+    } finally {
+      await recorder.abort()
+      await fs.rm(recent, { force: true })
+    }
+  })
+
+  // compiled exe 不能在 native 资源缺失时回退到 @picovoice 包路径，否则会重新触发 CI 绝对路径加载错误。
+  // 这里保留 @picovoice 的 fake mock：如果实现错误地 fallback，测试会进入录音成功路径而不是用户可见错误。
+  test("compiled builds fail clearly when the embedded recorder addon is unavailable", async () => {
+    const globals = globalThis as { OPENCODE_COMPILED?: boolean }
+    globals.OPENCODE_COMPILED = true
+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+
+    await expect(startPromptVoiceRecorder()).rejects.toThrow(/native addon is missing/)
   })
 
   // 这个正常路径证明录音实现完全在 Bun 进程内完成，不依赖系统 node 可执行文件。
@@ -192,6 +236,22 @@ describe("prompt voice recorder", () => {
 function waitForFakeRead() {
   if (FakePvRecorder.readCount > 0) return Promise.resolve()
   return waitForFakeReadCount(1, 1_000)
+}
+
+function waitForMissing(file: string) {
+  return new Promise<void>((resolve, reject) => {
+    // 清理在录音启动路径上异步 fire-and-forget；轮询文件结果比检查内部 Promise 更贴近用户可见行为。
+    const timer = setTimeout(() => reject(new Error(`file still exists: ${file}`)), 1_000)
+    const wait = async () => {
+      if (!(await Bun.file(file).exists())) {
+        clearTimeout(timer)
+        resolve()
+        return
+      }
+      setTimeout(wait, 10)
+    }
+    void wait()
+  })
 }
 
 function waitForFakeReadCount(count: number, timeout: number) {
