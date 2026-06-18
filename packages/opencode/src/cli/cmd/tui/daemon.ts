@@ -201,9 +201,13 @@ export async function ensure(args: Args) {
       stdin: "ignore",
       stdout: printLogs ? "inherit" : "ignore",
       stderr: printLogs ? "inherit" : "ignore",
-      // Unix Ctrl+C is delivered to the foreground process group.  Detaching the
+      // Unix Ctrl+C is delivered to the foreground process group. Detaching the
       // worker gives it its own group so TUI exits do not accidentally take down
-      // the shared daemon.  Windows keeps the existing console-mode guard path.
+      // the shared daemon.
+      // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
+      // parent 退出即杀）。Windows 的 daemon Ctrl+C 免疫改由 worker 进程内
+      // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
+      // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
       detached: process.platform !== "win32",
     })
     proc.unref()

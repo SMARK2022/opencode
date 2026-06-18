@@ -16,6 +16,7 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
+import * as Win32Module from "../../../src/cli/cmd/tui/win32"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", import.meta.url))
 // `daemon stop` 是用户可见的 CLI 行为，测试必须从真实入口验证，而不是直接调用内部 helper；
@@ -617,6 +618,62 @@ describe("daemon lifecycle", () => {
       expect(lock).toBeDefined()
     },
     DAEMON_START_TIMEOUT_MS + 5_000,
+  )
+
+  test("win32DetachConsole is a no-op on non-Windows platforms", () => {
+    // win32DetachConsole 在非 win32 平台必须静默返回，不抛错、不依赖 kernel32。
+    // 这是跨平台安全边界：worker.ts 无条件 import win32 模块，函数内自检平台。
+    expect(() => Win32Module.win32DetachConsole()).not.toThrow()
+  })
+
+  test(
+    "Windows daemon detaches from the shared console yet keeps serving HTTP, SSE and control port",
+    async () => {
+      if (process.platform !== "win32") return
+
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      // 给 daemon 较长 idle 超时，避免测试期间因 SSE 断开而退出；
+      // 这里验证 worker 调用 FreeConsole 脱离 console 后，所有服务通道仍功能正常。
+      //
+      // 注意：无法在 bun:test 内安全发送真实 CTRL_C_EVENT 来断言「daemon 存活」——
+      // GenerateConsoleCtrlEvent(0,0) 会广播给当前 console 全部进程并杀掉测试 runner
+      // 自身，且 SetConsoleCtrlHandler(NULL,TRUE) 在 Bun 上无法保护发送进程。
+      // Ctrl+C 免疫行为已通过独立进程拓扑实测确认（daemon 心跳在事件广播后持续）。
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "30000" })
+
+      try {
+        // 1. 公共 HTTP 健康检查
+        const health = await fetch(`http://127.0.0.1:${lock.port}/global/health`)
+        expect(health.ok).toBe(true)
+
+        // 2. SSE 事件流：FreeConsole 不影响 HTTP 长连接和 server.connected 推送
+        const ctrl = new AbortController()
+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
+        expect(res.ok).toBe(true)
+        if (!res.body) throw new Error("missing SSE body")
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+        try {
+          expect((await reader.read()).value).toContain("server.connected")
+        } finally {
+          ctrl.abort()
+          await reader.cancel().catch(() => undefined)
+          reader.releaseLock()
+        }
+
+        // 3. 私有控制端口：opencode daemon stop 的安全通道仍可用
+        if (!lock.controlPort) throw new Error("missing control port")
+        const status = await fetch(
+          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_STATUS_PATH}`,
+          { headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token } },
+        )
+        expect(status.ok).toBe(true)
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
   )
 
   test(
