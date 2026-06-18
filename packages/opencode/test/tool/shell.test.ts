@@ -203,9 +203,12 @@ const withShell = <A, E, R>(item: { label: string; shell: string }, self: Effect
 const each = (
   name: string,
   fn: (item: { label: string; shell: string }) => Effect.Effect<void, unknown, ShellTestServices>,
+  // #315：basic 用例贯穿 shell+fixture 完整链路，Windows CI 需要显式更大预算；
+  // 其余用例不传 timeout，保持 it.live 默认行为不变。
+  timeout?: number,
 ) => {
   for (const item of shells) {
-    it.live(`${name} [${item.label}]`, () => withShell(item, fn(item)))
+    it.live(`${name} [${item.label}]`, () => withShell(item, fn(item)), timeout)
   }
 }
 
@@ -294,6 +297,7 @@ describe("tool.shell", () => {
 
       }),
     ),
+    60_000,
   )
 
   it.live("falls back from terminal-only configured shell", () =>
