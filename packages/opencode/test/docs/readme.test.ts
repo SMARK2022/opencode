@@ -20,7 +20,7 @@ const readmes = [
     },
   },
   {
-    file: "README.en.md",
+    file: "docs/readme/README.en.md",
     // 三语种 README 结构保持一致，所以每份文档都用本地化安装标题切分“安装前”区域。
     installHeading: "## Quick Install",
     concepts: {
@@ -35,7 +35,7 @@ const readmes = [
     },
   },
   {
-    file: "README.zht.md",
+    file: "docs/readme/README.zht.md",
     // 繁中 README 是用户入口之一，不能只让简中/英文满足风险提示和可选 MCP 说明。
     installHeading: "## 快速安裝",
     concepts: {

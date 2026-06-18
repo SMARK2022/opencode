@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
     </picture>
   </a>
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> |
+  <a href="../../README.md">简体中文</a> |
   <a href="README.en.md">English</a> |
   <a href="README.zht.md">繁體中文</a> |
   <a href="README.ko.md">한국어</a> |
@@ -40,7 +40,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -292,7 +292,7 @@ OpenCode включает несколько встроенных primary agents
 | --- | --- |
 | Official docs | https://opencode.ai/docs |
 | Release | https://github.com/SMARK2022/opencode/releases |
-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
 
 ---
 
@@ -318,7 +318,7 @@ Installer доверяет только target install path. Даже если `
 
 ## Contributing
 
-Прочитайте [contributing guide](./CONTRIBUTING.md) перед отправкой PR. Если имя вашего собственного проекта использует `opencode`, укажите в его README, что это не официальный проект OpenCode team и он не аффилирован с OpenCode team.
+Прочитайте [contributing guide](../../CONTRIBUTING.md) перед отправкой PR. Если имя вашего собственного проекта использует `opencode`, укажите в его README, что это не официальный проект OpenCode team и он не аффилирован с OpenCode team.
 
 ---
 

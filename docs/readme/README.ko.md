@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
     </picture>
   </a>
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> |
+  <a href="../../README.md">简体中文</a> |
   <a href="README.en.md">English</a> |
   <a href="README.zht.md">繁體中文</a> |
   <a href="README.ko.md">한국어</a> |
@@ -40,7 +40,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -292,7 +292,7 @@ OpenCode에는 `Tab`으로 전환할 수 있는 여러 built-in primary agents�
 | --- | --- |
 | Official docs | https://opencode.ai/docs |
 | Release | https://github.com/SMARK2022/opencode/releases |
-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
 
 ---
 
@@ -318,7 +318,7 @@ Installer는 target install path만 신뢰합니다. `/usr/local/bin/opencode`�
 
 ## 기여하기
 
-PR을 제출하기 전에 [contributing guide](./CONTRIBUTING.md)를 읽어주세요. 자신의 project name에 `opencode`를 사용하는 경우, README에 해당 project가 공식 OpenCode team project가 아니며 OpenCode team과 제휴되어 있지 않다고 명시하세요.
+PR을 제출하기 전에 [contributing guide](../../CONTRIBUTING.md)를 읽어주세요. 자신의 project name에 `opencode`를 사용하는 경우, README에 해당 project가 공식 OpenCode team project가 아니며 OpenCode team과 제휴되어 있지 않다고 명시하세요.
 
 ---
 

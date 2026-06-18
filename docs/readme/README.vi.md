@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
     </picture>
   </a>
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> |
+  <a href="../../README.md">简体中文</a> |
   <a href="README.en.md">English</a> |
   <a href="README.zht.md">繁體中文</a> |
   <a href="README.ko.md">한국어</a> |
@@ -40,7 +40,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -292,7 +292,7 @@ OpenCode bao gom nhieu built-in primary agents co the chuyen bang `Tab`. Agent m
 | --- | --- |
 | Tai lieu chinh thuc | https://opencode.ai/docs |
 | Release | https://github.com/SMARK2022/opencode/releases |
-| Huong dan dong gop | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| Huong dan dong gop | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
 
 ---
 
@@ -318,7 +318,7 @@ Installer chi tin vao duong dan cai dat dich. Ngay ca khi `/usr/local/bin/openco
 
 ## Dong Gop
 
-Doc [huong dan dong gop](./CONTRIBUTING.md) truoc khi gui PR. Neu ten du an rieng cua ban dung `opencode`, hay neu trong README cua du an do rang no khong phai du an chinh thuc cua doi ngu OpenCode va khong lien ket voi doi ngu OpenCode.
+Doc [huong dan dong gop](../../CONTRIBUTING.md) truoc khi gui PR. Neu ten du an rieng cua ban dung `opencode`, hay neu trong README cua du an do rang no khong phai du an chinh thuc cua doi ngu OpenCode va khong lien ket voi doi ngu OpenCode.
 
 ---
 

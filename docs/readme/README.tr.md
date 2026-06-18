@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
     </picture>
   </a>
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> |
+  <a href="../../README.md">简体中文</a> |
   <a href="README.en.md">English</a> |
   <a href="README.zht.md">繁體中文</a> |
   <a href="README.ko.md">한국어</a> |
@@ -40,7 +40,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -292,7 +292,7 @@ OpenCode, `Tab` ile geçiş yapılabilen birden çok yerleşik primary agent iç
 | --- | --- |
 | Resmi dokümanlar | https://opencode.ai/docs |
 | Release | https://github.com/SMARK2022/opencode/releases |
-| Katkı rehberi | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| Katkı rehberi | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
 
 ---
 
@@ -318,7 +318,7 @@ Installer yalnızca hedef kurulum yoluna güvenir. `/usr/local/bin/opencode` ayn
 
 ## Katkıda Bulunma
 
-PR göndermeden önce [katkı rehberini](./CONTRIBUTING.md) okuyun. Kendi proje adınız `opencode` kullanıyorsa README dosyasında bunun resmi bir OpenCode team projesi olmadığını ve OpenCode team ile bağlantılı olmadığını belirtin.
+PR göndermeden önce [katkı rehberini](../../CONTRIBUTING.md) okuyun. Kendi proje adınız `opencode` kullanıyorsa README dosyasında bunun resmi bir OpenCode team projesi olmadığını ve OpenCode team ile bağlantılı olmadığını belirtin.
 
 ---
 

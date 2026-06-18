@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
     </picture>
   </a>
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> |
+  <a href="../../README.md">简体中文</a> |
   <a href="README.en.md">English</a> |
   <a href="README.zht.md">繁體中文</a> |
   <a href="README.ko.md">한국어</a> |
@@ -40,7 +40,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -292,7 +292,7 @@ OpenCode inclut plusieurs agents primary intégrés que vous pouvez changer avec
 | --- | --- |
 | Docs officielles | https://opencode.ai/docs |
 | Release | https://github.com/SMARK2022/opencode/releases |
-| Guide de contribution | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| Guide de contribution | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
 
 ---
 
@@ -318,7 +318,7 @@ L'installateur ne fait confiance qu'au chemin d'installation cible. Même si `/u
 
 ## Contribuer
 
-Lisez le [guide de contribution](./CONTRIBUTING.md) avant de soumettre une PR. Si le nom de votre propre projet utilise `opencode`, indiquez dans son README qu'il ne s'agit pas d'un projet officiel de l'équipe OpenCode et qu'il n'est pas affilié à l'équipe OpenCode.
+Lisez le [guide de contribution](../../CONTRIBUTING.md) avant de soumettre une PR. Si le nom de votre propre projet utilise `opencode`, indiquez dans son README qu'il ne s'agit pas d'un projet officiel de l'équipe OpenCode et qu'il n'est pas affilié à l'équipe OpenCode.
 
 ---
 

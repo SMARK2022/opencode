@@ -1,9 +1,9 @@
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
     </picture>
   </a>
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> |
+  <a href="../../README.md">简体中文</a> |
   <a href="README.en.md">English</a> |
   <a href="README.zht.md">繁體中文</a> |
   <a href="README.ko.md">한국어</a> |
@@ -40,7 +40,7 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
@@ -299,7 +299,7 @@ OpenCode 內建多種 primary agent，可用 `Tab` 快速切換。預設 agent �
 | --- | --- |
 | 官方文件 | https://opencode.ai/docs |
 | Release | https://github.com/SMARK2022/opencode/releases |
-| 貢獻指南 | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| 貢獻指南 | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
 
 ---
 
@@ -325,7 +325,7 @@ OpenCode 內建多種 primary agent，可用 `Tab` 快速切換。預設 agent �
 
 ## 參與貢獻
 
-提交 PR 前請閱讀 [貢獻指南](./CONTRIBUTING.md)。如果你在自己的專案名中使用 `opencode`，請在 README 中說明該專案並非 OpenCode 團隊官方專案，也不與 OpenCode 團隊存在關聯。
+提交 PR 前請閱讀 [貢獻指南](../../CONTRIBUTING.md)。如果你在自己的專案名中使用 `opencode`，請在 README 中說明該專案並非 OpenCode 團隊官方專案，也不與 OpenCode 團隊存在關聯。
 
 ---
 
