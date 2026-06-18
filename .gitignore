@@ -33,5 +33,3 @@ logs/
 **/.artifacts/
 tsconfig.tsbuildinfo
 .temp/*
-!.temp/chatgpt-browser-agent/
-!.temp/chatgpt-browser-agent/**

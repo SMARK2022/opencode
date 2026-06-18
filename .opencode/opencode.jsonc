@@ -7,7 +7,7 @@
       "type": "local",
       "command": [
         "D:\\Program Files\\nodejs\\node.exe",
-        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\chatgpt-browser-agent\\mcp-server.js"
+        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\chatgpt-browser-agent\\mcp-server.js"
       ],
       "enabled": true,
       // opencode 当前同一个 timeout 同时约束连接与工具调用；这里优先保证长回答不会被宿主提前切断。

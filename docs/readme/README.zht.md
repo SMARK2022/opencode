@@ -234,7 +234,7 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。�
 
 ### 可選 MCP 整合
 
-如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力；安裝、授權與瀏覽器狀態管理以該專案 README 為準。
+如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力。本分支已將該專案記錄為 `thirdparty/chatgpt-browser-agent` submodule；首次 checkout 後請執行 `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`，再進入該目錄執行 `npm ci` 安裝依賴。登入、授權與瀏覽器狀態管理仍以該專案 README 為準。
 
 ### Provider 與模型
 

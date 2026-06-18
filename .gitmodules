@@ -1,0 +1,4 @@
+[submodule "thirdparty/chatgpt-browser-agent"]
+	path = thirdparty/chatgpt-browser-agent
+	url = https://github.com/SMARK2022/chatgpt-browser-agent-smark.git
+	branch = smark/main
