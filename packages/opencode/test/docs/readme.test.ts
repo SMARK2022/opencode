@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 const readmes = [
-  { file: "README.zh.md",
+  { file: "docs/readme/README.zh.md",
     // 安装标题是用户执行命令前的边界；数据库风险必须落在这个边界之前，才算真正的安装前提示。
     installHeading: "### 安装",
     concepts: {
@@ -32,7 +32,7 @@ const readmes = [
       mcp: [/chatgpt-browser-agent-smark/i, /ChatGPT[^\n]{0,20}ask|ask[^\n]{0,20}ChatGPT/i, /image generation/i],
     },
   },
-  { file: "README.zht.md",
+  { file: "docs/readme/README.zht.md",
     // 繁中 README 是用户入口之一，不能只让简中/英文满足风险提示和可选 MCP 说明。
     installHeading: "### 安裝",
     concepts: {
