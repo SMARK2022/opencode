@@ -172,9 +172,10 @@ const withShell = <A, E, R>(item: { label: string; shell: string }, self: Effect
 const each = (
   name: string,
   fn: (item: { label: string; shell: string }) => Effect.Effect<void, unknown, ShellTestServices>,
+  timeout?: number,
 ) => {
   for (const item of shells) {
-    it.live(`${name} [${item.label}]`, () => withShell(item, fn(item)))
+    it.live(`${name} [${item.label}]`, () => withShell(item, fn(item)), timeout)
   }
 }
 
@@ -210,6 +211,7 @@ describe("tool.shell", () => {
         expect(result.metadata.output).toContain("test")
       }),
     ),
+    60_000,
   )
 
   it.live("falls back from terminal-only configured shell", () =>

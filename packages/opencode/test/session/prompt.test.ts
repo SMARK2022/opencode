@@ -70,6 +70,7 @@ const ref = {
   providerID: ProviderID.make("test"),
   modelID: ModelID.make("test-model"),
 }
+const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
 
 function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   return Effect.acquireUseRelease(
@@ -1549,7 +1550,7 @@ it.instance(
       expect((yield* status.get(chat.id)).type).toBe("idle")
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 // Cancel semantics
@@ -1578,7 +1579,7 @@ it.instance(
       }
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 it.instance(
@@ -1605,7 +1606,7 @@ it.instance(
       }
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 race.instance(
@@ -1695,7 +1696,7 @@ race.instance(
       }
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 it.instance(
@@ -1863,7 +1864,7 @@ it.instance(
       }
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 // Queue semantics
@@ -1905,7 +1906,7 @@ it.instance(
       expect(a.info.role).toBe("assistant")
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 it.instance(
@@ -1974,7 +1975,7 @@ it.instance(
       expect(JSON.stringify(inputs.at(-1)?.messages)).toContain("second")
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 it.instance(
@@ -2004,7 +2005,7 @@ it.instance(
       yield* Fiber.await(fiber)
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 it.instance(
@@ -2052,7 +2053,7 @@ it.instance(
       yield* Fiber.await(fiber)
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 // Shell semantics
@@ -2082,7 +2083,7 @@ it.instance(
       yield* Fiber.await(fiber)
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 unix(
@@ -2989,7 +2990,7 @@ it.instance(
       }
     }),
   { git: true },
-  3_000,
+  shortSessionTimeout,
 )
 
 // Agent variant

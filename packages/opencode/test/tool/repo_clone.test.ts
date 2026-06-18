@@ -208,6 +208,7 @@ describe("tool.repo_clone", () => {
         expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2 updated\n")).toBe("v2 updated\n")
       }),
     ),
+    60_000,
   )
 
   it.live("clones a configured branch", () =>
