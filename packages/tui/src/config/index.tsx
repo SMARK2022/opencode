@@ -112,6 +112,10 @@ export type ResolveOptions = Schema.Schema.Type<typeof ResolveOptions>
 
 export function resolve(input: Info, options: ResolveOptions): Resolved {
   const keybinds: TuiKeybind.KeybindOverrides = { ...input.keybinds }
+  if (process.platform === "darwin") {
+    // 两个host均在合并完成后进入这里；只补缺省值，显式none/false/空绑定数组不能被F8重新打开。
+    keybinds.prompt_voice_toggle ??= "f8"
+  }
   if (!options.terminalSuspend) {
     keybinds.terminal_suspend = "none"
     if (keybinds.input_undo === undefined) {
