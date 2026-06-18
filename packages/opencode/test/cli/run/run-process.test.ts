@@ -282,7 +282,8 @@ describe("opencode run (non-interactive subprocess)", () => {
         expect(explicitlyDenied.stdout).toContain("continued after explicit denial")
         expect(yield* Effect.promise(() => Bun.file(`${home}/explicitly-denied`).exists())).toBe(false)
       }),
-    60_000,
+    // 三次冷启动各自仍受 30s 限制；Windows 总预算不能先截断第三次权限断言。
+    process.platform === "win32" ? 120_000 : 60_000,
   )
 
   cliIt.live(

@@ -88,7 +88,8 @@ const SUBCOMMANDS = [
 // Fixed wrap width so a developer's terminal doesn't affect snapshots.
 // yargs honors COLUMNS; CI runners typically default to 80 which produces
 // different wraps from a 200-col local terminal.
-const SNAPSHOT_ENV = { COLUMNS: "120" }
+// 快照约定英文；LC_ALL 优先于宿主的其他语言变量，不改变真实 CLI 的本地化行为。
+const SNAPSHOT_ENV = { COLUMNS: "120", LC_ALL: "en_US.UTF-8" }
 
 describe("opencode CLI help-text snapshots", () => {
   cliIt.live("session info keeps the source required option shape", ({ opencode }) =>

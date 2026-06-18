@@ -98,6 +98,9 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   )
 }
 
+// #315：短会话用例在 Windows CI 上冷启动开销大；win32 放宽到 15s，其他平台保持 3s 快速反馈。
+const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
+
 function shortShellDelayCommand() {
   // Windows 的默认 shell 会把 `sleep 0.2` 解析成 PowerShell 命令，CI 冷启动时足以吃掉 3s 用例预算。
   // 这里使用测试进程已依赖的 PATH 内 `bun` 执行短延迟脚本，避免 PowerShell 对引号路径需要 `&` 的差异。
@@ -2582,7 +2585,7 @@ it.instance(
       yield* Fiber.await(fiber)
       expect((yield* status.get(chat.id)).type).toBe("idle")
     }),
-  3_000,
+  shortSessionTimeout,
 )
 
 it.instance("cancel aborts all visible unfinished assistants", () =>
@@ -2779,7 +2782,7 @@ raceNoLLMServer.instance(
       }
     }),
   { config: cfg },
-  3_000,
+  shortSessionTimeout,
 )
 
 noLLMServer.instance(
