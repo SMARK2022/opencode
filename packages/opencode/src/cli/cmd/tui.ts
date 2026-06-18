@@ -247,7 +247,11 @@ export async function discoverOrSpawnDaemon(
         applyProxyEnv(env)
         // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
         const proc = deps.spawn([process.execPath, daemonFile], {
-        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon
+        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon。
+        // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
+        // parent 退出即杀）。Windows 的 daemon Ctrl+C 免疫改由 worker 进程内
+        // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
+        // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
         detached: process.platform !== "win32",
           env: {
             ...env,
