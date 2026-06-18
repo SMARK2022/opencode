@@ -19,7 +19,7 @@
       "type": "local",
       "command": [
         "D:\\Program Files\\nodejs\\node.exe",
-        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\chatgpt-browser-agent\\mcp-server.js"
+        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\chatgpt-browser-agent\\mcp-server.js"
       ],
       // #278：enabled 显式开启；timeout 覆盖 MCP 连接与工具调用的总上限，
       // 与 CHATGPT_*_TIMEOUT_MS 阶梯一致：daemon 启动 < CLI 调用 < 响应
