@@ -47,6 +47,11 @@ function format(input: unknown) {
   return /^[^\s="\\]+$/.test(value) ? value : JSON.stringify(value)
 }
 
+// Source 0321 snapshots the log directory into a local variable before any async work and
+// self-heals a missing directory, guarding against Global.Path.log being swapped mid-run.
+// The Effect-based fileLogger here captures `file` eagerly at call time and Logger.toFile is a
+// pure Effect with no mutable stream/logpath state, so the same race cannot occur; the
+// directory self-heal itself was already ported by source 0304's makeDirectory adaptation.
 export function fileLogger(file = path.join(Global.Path.log, "opencode.log"), id: string = runID) {
   // Do not set batchWindow to 0; it causes high idle CPU usage.
   // #304：测试会把 Global.Path.log 临时切到 scoped tmpdir，生产环境用户也可能删除日志目录；
