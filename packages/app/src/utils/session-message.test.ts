@@ -181,7 +181,10 @@ describe("normalizeSessionMessages", () => {
 
   test("adapts current edit fields for the legacy edit renderer", () => {
     const source = [
-      { id: "msg_user", type: "user", text: "edit it", time: { created: 1 } },
+      // 已持久化摘要进入原有每prompt修改列表，不能只在单工具面板看见diff。
+      { id: "msg_user", type: "user", text: "edit it", time: { created: 1 }, ...{ summary: { diffs: [
+        { file: "README.md", patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1, status: "modified" as const },
+      ] } } },
       {
         id: "msg_assistant",
         type: "assistant",
@@ -217,6 +220,7 @@ describe("normalizeSessionMessages", () => {
     ] satisfies SessionMessageInfo[]
 
     const result = normalizeSessionMessages("ses_1", source)
+    expect(result.messages[0]).toMatchObject({ summary: { diffs: [{ file: "README.md", additions: 1, deletions: 1 }] } })
 
     expect(result.parts.get("msg_assistant")).toEqual([
       expect.objectContaining({

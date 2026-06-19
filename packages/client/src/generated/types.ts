@@ -705,6 +705,15 @@ export type SessionsContextOutput = {
           readonly name: string
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
+        readonly summary?: {
+          readonly diffs: ReadonlyArray<{
+            readonly file?: string
+            readonly patch?: string
+            readonly additions: number
+            readonly deletions: number
+            readonly status?: "added" | "deleted" | "modified"
+          }>
+        }
         readonly type: "user"
       }
     | {
@@ -1172,6 +1181,16 @@ export type SessionsHistoryOutput = {
           }
           readonly snapshot?: string
           readonly files?: ReadonlyArray<string>
+          readonly summary?: {
+            readonly messageID: string
+            readonly diffs: ReadonlyArray<{
+              readonly file?: string
+              readonly patch?: string
+              readonly additions: number
+              readonly deletions: number
+              readonly status?: "added" | "deleted" | "modified"
+            }>
+          }
         }
       }
     | {
@@ -1790,6 +1809,16 @@ export type SessionsEventsOutput =
         }
         readonly snapshot?: string
         readonly files?: ReadonlyArray<string>
+        readonly summary?: {
+          readonly messageID: string
+          readonly diffs: ReadonlyArray<{
+            readonly file?: string
+            readonly patch?: string
+            readonly additions: number
+            readonly deletions: number
+            readonly status?: "added" | "deleted" | "modified"
+          }>
+        }
       }
     }
   | {
@@ -2141,6 +2170,15 @@ export type SessionsMessageOutput = {
           readonly name: string
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
+        readonly summary?: {
+          readonly diffs: ReadonlyArray<{
+            readonly file?: string
+            readonly patch?: string
+            readonly additions: number
+            readonly deletions: number
+            readonly status?: "added" | "deleted" | "modified"
+          }>
+        }
         readonly type: "user"
       }
     | {
@@ -2351,6 +2389,15 @@ export type MessagesListOutput = {
           readonly name: string
           readonly source?: { readonly start: number; readonly end: number; readonly text: string }
         }>
+        readonly summary?: {
+          readonly diffs: ReadonlyArray<{
+            readonly file?: string
+            readonly patch?: string
+            readonly additions: number
+            readonly deletions: number
+            readonly status?: "added" | "deleted" | "modified"
+          }>
+        }
         readonly type: "user"
       }
     | {
