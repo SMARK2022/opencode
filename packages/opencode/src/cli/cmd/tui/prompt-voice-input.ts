@@ -27,7 +27,8 @@ export type VoiceRecorderHandle = {
 export function createVoiceInputController(input: {
   transcriber: () => VoiceTranscriber | undefined
   startRecorder: () => Promise<VoiceRecorderHandle>
-  transcribe?: (file: string, transcriber: VoiceTranscriber) => Promise<string>
+  // signal 让外部 controller 可以中断长时间挂起的转写（如空音频导致浏览器 hang）。
+  transcribe?: (file: string, transcriber: VoiceTranscriber, signal: AbortSignal) => Promise<string>
   insertText: (text: string) => void
   onStatus?: (status: VoiceInputStatus) => void
   onError?: (message: string) => void
@@ -37,7 +38,9 @@ export function createVoiceInputController(input: {
   let recorder: VoiceRecorderHandle | undefined
   let activeTranscriber: VoiceTranscriber | undefined
   let generation = 0
-  const transcribe = input.transcribe ?? ((file, transcriber) => transcribeVoiceFile({ file, transcriber }))
+  // 持有当前转写的 AbortController，让 toggle/abort 能中断卡死的外部转写器进程。
+  let transcribeAbort: AbortController | undefined
+  const transcribe = input.transcribe ?? ((file, transcriber, signal) => transcribeVoiceFile({ file, transcriber, signal }))
   const validateTranscriber = input.transcribe ? async () => {} : validateVoiceTranscriber
 
   const setStatus = (next: VoiceInputStatus) => {
@@ -56,16 +59,22 @@ export function createVoiceInputController(input: {
     input.onError?.(error instanceof Error ? error.message : String(error))
   }
 
+  // cancel 是 abort 和 toggle(transcribing) 共享的取消逻辑：bump generation 让迟到结果失效，
+  // abort signal 中断 in-flight transcribe 进程，清理 recorder 并回 idle。
+  const cancel = async () => {
+    generation++
+    transcribeAbort?.abort()
+    if (status.type !== "idle") await recorder?.abort().catch(() => {})
+    recorder = undefined
+    activeTranscriber = undefined
+    setStatus({ type: "idle" })
+  }
+
   return {
     status: () => status,
     abort: async () => {
-      // generation 让启动、停止、转写中的异步结果失效；cleanup 后迟到的结果只能自清理，不能再改状态或插入文本。
-      generation++
       // abort 是取消语义，不调用 stop/transcribe，避免把用户明确取消的录音上传给外部服务。
-      if (status.type !== "idle") await recorder?.abort().catch(() => {})
-      recorder = undefined
-      activeTranscriber = undefined
-      setStatus({ type: "idle" })
+      await cancel()
     },
     toggle: async () => {
       if (status.type === "recording") {
@@ -79,8 +88,10 @@ export function createVoiceInputController(input: {
           await active.stop()
           if (stopGeneration !== generation) return
           setStatus({ type: "transcribing" })
+          // 为本轮转写创建独立 AbortController，让 cancel/abort 能真正中断外部进程。
+          transcribeAbort = new AbortController()
           // transcriber 在开始录音时固定，停止时不重新读配置，防止录音期间配置变更导致错用后端。
-          const text = await transcribe(active.file, requireTranscriber(activeTranscriber))
+          const text = await transcribe(active.file, requireTranscriber(activeTranscriber), transcribeAbort.signal)
           if (stopGeneration !== generation) return
           // 空白文本由 transcribeVoiceFile 当错误处理；这里仍 trim 一次，保护自定义测试转写器和未来调用者。
           if (text.trim()) input.insertText(text)
@@ -96,6 +107,12 @@ export function createVoiceInputController(input: {
             setStatus({ type: "idle" })
           }
         }
+        return
+      }
+      // transcribing 表示转写正在运行（可能 hang）；用户再次按快捷键时直接取消，让 TUI 恢复可操作。
+      // 不调 onError：用户主动取消不是错误，不应弹出 error toast。
+      if (status.type === "transcribing") {
+        await cancel()
         return
       }
       if (status.type !== "idle") return
@@ -136,6 +153,8 @@ export async function transcribeVoiceFile(input: {
   file: string
   transcriber: VoiceTranscriber
   timeout?: number
+  // 外部 signal 让 controller 的 cancel/abort 能真正中断 Process.run。
+  signal?: AbortSignal
 }) {
   const command = input.transcriber.command.trim()
   // command 允许用户配置时带空格，但进入 spawn 前必须归一成真正 argv[0]。
@@ -149,9 +168,10 @@ export async function transcribeVoiceFile(input: {
 
   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
+  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
+  const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
   const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
-    // AbortSignal 是整体转写上限，Process timeout 只限制单次 wait 粒度，保持既有进程工具的轮询语义。
-    abort: AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS),
+    abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
     nothrow: true,
     timeout: 1_000,
   })

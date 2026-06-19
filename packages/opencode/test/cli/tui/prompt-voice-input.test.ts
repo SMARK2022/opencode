@@ -425,4 +425,77 @@ describe("prompt voice input", () => {
     expect(startCount).toBe(2)
     expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
   })
+
+  // 转写中用户按快捷键应能中断卡死的转写，而不是被 `status.type !== "idle"` 跳过。
+  // 这覆盖最严重场景：空音频、噪音无语音或网络 hang 时，用户必须能自救。
+  // mock transcribe 返回永不 resolve 的 promise 但监听 signal abort 来模拟被 kill 的 Process.run。
+  test("interrupts a stuck transcription when toggled again", async () => {
+    let transcribeSignal: AbortSignal | undefined
+    let resolveTranscribe: (() => void) | undefined
+    const transcribeStarted = new Promise<void>((resolve) => {
+      resolveTranscribe = resolve
+    })
+    const inserted: string[] = []
+    const controller = createVoiceInputController({
+      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
+      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
+      transcribe: (_file, _transcriber, signal) => {
+        transcribeSignal = signal
+        resolveTranscribe?.()
+        // 模拟 Process.run 被 signal kill 后 promise reject 的真实行为。
+        // 用 polling 而非 addEventListener 避免 bun:test 的 pending promise tracker 误判测试未结束。
+        return new Promise<string>((_, reject) => {
+          const timer = setInterval(() => {
+            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
+          }, 5)
+        })
+      },
+      insertText: (text) => inserted.push(text),
+    })
+
+    // toggle#1 开始录音, toggle#2 停止进入转写, toggle#3 取消转写。
+    await controller.toggle()
+    const stopping = controller.toggle()
+    await transcribeStarted
+    await controller.toggle()
+    await stopping
+
+    // 取消后 signal 必须被 abort，状态回 idle，迟到文本不会插入。
+    expect(transcribeSignal?.aborted).toBe(true)
+    expect(controller.status()).toEqual({ type: "idle" })
+    expect(inserted).toEqual([])
+  })
+
+  // 用户主动取消转写时不应弹出 error toast，否则用户会以为出错了。
+  test("does not show an error when the user cancels a stuck transcription", async () => {
+    const errors: string[] = []
+    let resolveTranscribe: (() => void) | undefined
+    const transcribeStarted = new Promise<void>((resolve) => {
+      resolveTranscribe = resolve
+    })
+    const controller = createVoiceInputController({
+      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
+      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
+      transcribe: (_file, _transcriber, signal) => {
+        resolveTranscribe?.()
+        return new Promise<string>((_, reject) => {
+          const timer = setInterval(() => {
+            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
+          }, 5)
+        })
+      },
+      insertText: () => {},
+      onError: (message) => errors.push(message),
+    })
+
+    await controller.toggle()
+    const stopping = controller.toggle()
+    await transcribeStarted
+    await controller.toggle()
+    await stopping
+
+    // 用户主动取消不是错误，不应弹出 error toast。
+    expect(errors).toEqual([])
+    expect(controller.status()).toEqual({ type: "idle" })
+  })
 })
