@@ -238,7 +238,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         })
       },
       "session.next.step.ended": (event) => {
-        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+        return Effect.gen(function* () {
+          yield* updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           draft.time.completed = event.data.timestamp
           // 迟到的用量结算可更新快照，但不能将已有失败投影成成功 finish。
           draft.finish = draft.error ? "error" : event.data.finish
@@ -252,6 +253,14 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
               end: event.data.snapshot,
               files: event.data.files ? Array.from(event.data.files) : undefined,
             }
+          })
+          if (event.data.summary) {
+            const user = yield* adapter.getMessage(event.data.summary.messageID)
+            // 更新同一用户消息而非Session全局summary；重放相同快照只替换，不重复累加。
+            if (user?.type === "user") yield* adapter.updateMessage({ ...user,
+              summary: { ...user.summary, diffs: event.data.summary.diffs },
+            })
+          }
         })
       },
       "session.next.step.failed": (event) => {

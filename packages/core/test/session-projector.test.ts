@@ -12,7 +12,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -29,6 +29,7 @@ import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Location } from "@opencode-ai/core/location"
 import { SessionHistory } from "@opencode-ai/core/session/history"
+import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
 const sessionsLayer = AppNodeBuilder.build(SessionV2.node, [[SessionExecution.node, SessionExecution.noopLayer]])
@@ -51,6 +52,74 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  it.effect("persists request-owned tool diffs through the native completion event", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const events = yield* EventV2.Service
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "diff",
+        directory: "/project/app", title: "diff", version: "test" }).run()
+      const first = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_first"), sessionID,
+        prompt: Prompt.make({ text: "edit first" }), delivery: "steer" })
+      yield* SessionInput.promoteSteers(db, events, sessionID, first.admittedSeq)
+      const assistantMessageID = SessionMessage.ID.make("msg_diff_assistant")
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp: created, agent: "build", model, snapshot: "tree_before" })
+      const complete = (id: SessionMessage.ID, callID: string, name: string, structured: Record<string, unknown>) => Effect.gen(function* () {
+        yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID: id, callID, name, timestamp: created })
+        yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID: id, callID, tool: name, input: {}, provider: { executed: false }, timestamp: created })
+        yield* events.publish(SessionEvent.Tool.Success, { sessionID, assistantMessageID: id, callID, structured, content: [], provider: { executed: false }, timestamp: created })
+      })
+      // 真实完成投影同时覆盖三种工具形状、嵌套Location和最终格式化diff，不使用展示正文反推。
+      yield* complete(assistantMessageID, "edit", "edit", { files: [{ file: "a.ts", patch: "+edit\n", additions: 1, deletions: 0, status: "modified" }] })
+      yield* complete(assistantMessageID, "patch", "apply_patch", { files: [
+        { file: "a.ts", patch: "+patch\n", additions: 1, deletions: 0, status: "modified" },
+        { file: "gone.ts", patch: "-gone\n", additions: 0, deletions: 1, status: "deleted" },
+      ] })
+      yield* complete(assistantMessageID, "write", "write", { target: "/project/app/new.ts", resource: "new.ts", existed: false,
+        diff: "--- before\n+++ after\n+formatted\n", formattedContent: "formatted\n" })
+      // 新提升的输入和助手不能认领旧轮结果；无快照请求仍然保留工具流归因。
+      const later = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_later"), sessionID,
+        prompt: Prompt.make({ text: "edit later" }), delivery: "steer" })
+      yield* SessionInput.promoteSteers(db, events, sessionID, later.admittedSeq)
+      const other = SessionMessage.ID.make("msg_diff_other")
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: other, timestamp: created, agent: "build", model })
+      yield* complete(other, "other", "edit", { files: [{ file: "other.ts", patch: "+other\n", additions: 1, deletions: 0 }] })
+      const input = { sessionID, assistantMessageID, directory: "/project/app", worktree: "/project" }
+      const withoutSnapshots = yield* ToolDiffs.summarize(db, { ...input, diff: () => Effect.die("must not read snapshots") })
+      expect(withoutSnapshots?.messageID).toBe(first.id)
+      expect(withoutSnapshots?.diffs.map(item => item.file)).toEqual(["app/a.ts", "app/gone.ts", "app/new.ts"])
+      const summary = yield* ToolDiffs.summarize(db, { ...input, snapshot: Snapshot.ID.make("tree_after"), diff: () => Effect.succeed([
+        { path: RelativePath.make("app/a.ts"), status: "modified", patch: "+wrong\n", additions: 99, deletions: 0 },
+        { path: RelativePath.make("shell.ts"), status: "added", patch: "+shell\n", additions: 1, deletions: 0 },
+      ]) })
+      // 快照只能补未覆盖文件，同文件必须保留当前请求工具的真实patch和计数。
+      expect(summary?.diffs.slice(0, 3)).toEqual(withoutSnapshots?.diffs)
+      expect(summary?.diffs[3]).toMatchObject({ file: "shell.ts", patch: "+shell\n" })
+      expect(summary?.diffs[0]).toMatchObject({ file: "app/a.ts", patch: "+edit\n+patch\n", additions: 2, deletions: 0, status: "modified" })
+      expect(summary?.diffs[1]?.status).toBe("deleted")
+      expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n+formatted\n" })
+      const settlement = { sessionID, assistantMessageID, timestamp: created, finish: "stop", cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, summary }
+      yield* events.publish(SessionEvent.Step.Ended, settlement)
+      yield* events.publish(SessionEvent.Step.Ended, settlement)
+      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, first.id)).get()
+      expect(row?.data).toMatchObject({ summary: { diffs: summary?.diffs } })
+      const otherUser = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, later.id)).get()
+      expect(otherUser?.data).not.toHaveProperty("summary")
+      // 同一事件经内存updater重放，也必须更新同一user而非最近user，且不重复累计。
+      const memory = { messages: [SessionMessage.User.make({ id: first.id, type: "user", text: "first", time: { created } }),
+        SessionMessage.User.make({ id: later.id, type: "user", text: "later", time: { created } })] as SessionMessage.Message[] }
+      const event = yield* events.publish(SessionEvent.Step.Ended, settlement)
+      yield* SessionMessageUpdater.update(SessionMessageUpdater.memory(memory), event)
+      expect(memory.messages[0]).toMatchObject({ summary: { diffs: summary?.diffs } })
+      expect(memory.messages[1]).not.toHaveProperty("summary")
+      expect(encodeMessage(SessionMessage.User.make({ id: later.id, type: "user", text: "old", time: { created } }))).not.toHaveProperty("summary")
+      yield* events.publish(SessionEvent.RevertEvent.Committed, { sessionID, messageID: first.id, timestamp: created })
+      const reverted = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, first.id)).get()
+      expect(reverted?.data).not.toHaveProperty("summary")
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
+    }),
+  )
   it.effect("keeps native request ownership and rolls back incomplete ledger updates", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db

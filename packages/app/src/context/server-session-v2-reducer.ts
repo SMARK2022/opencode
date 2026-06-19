@@ -15,7 +15,11 @@ export type V2SessionReduction = {
 export function createV2SessionReducer() {
   const pending = new Map<string, SessionPendingMessage>()
 
-  const reduce = (source: readonly SessionMessageInfo[], input: OpenCodeEvent | NativeSessionEvent): V2SessionReduction | undefined => {
+  const reduce = (initial: readonly SessionMessageInfo[], input: OpenCodeEvent | NativeSessionEvent): V2SessionReduction | undefined => {
+    const summary = input.type === "session.next.step.ended" ? input.data.summary : undefined
+    // 完成事件携带服务端确定的归属；不能将迟到旧轮的diff挂到当前最后一个用户上。
+    const source = summary ? initial.map(message => message.id === summary.messageID && message.type === "user"
+      ? { ...message, summary: { diffs: summary.diffs.map(item => ({ ...item })) } } : message) : initial
     const event = input.type.startsWith("session.next.") ? nativeSessionEvent(source, input, pending) : input
     if (!event) return
     if ("messages" in event) return event
@@ -24,7 +28,7 @@ export function createV2SessionReducer() {
     const result = (messages: SessionMessageInfo[], touched: string[] = []): V2SessionReduction => ({
       sessionID,
       messages,
-      touched,
+      touched: summary ? [...new Set([...touched, summary.messageID])] : touched,
     })
     const append = (message: SessionMessageInfo) =>
       result(source.some((item) => item.id === message.id) ? [...source] : [...source, message], [message.id])

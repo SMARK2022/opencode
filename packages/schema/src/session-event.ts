@@ -1,6 +1,7 @@
 export * as SessionEvent from "./session-event"
 
 import { Schema } from "effect"
+import { FileDiff } from "./file-diff"
 import { optional } from "./schema"
 import { Event } from "./event"
 import { ProviderMetadata, ToolContent } from "./llm"
@@ -204,6 +205,8 @@ export namespace Step {
       }),
       snapshot: Schema.String.pipe(optional),
       files: Schema.Array(RelativePath).pipe(optional),
+      // 同一durable完成事件承载已聚合的prompt身份与diff，实时端和重放端不另选归属。
+      summary: Schema.Struct({ messageID: SessionMessage.ID, diffs: Schema.Array(FileDiff.Info) }).pipe(optional),
     },
   })
   export type Ended = typeof Ended.Type

@@ -53,6 +53,7 @@ import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
 import { Token } from "../../util/token"
 import { FSUtil } from "../../fs-util"
+import { ToolDiffs } from "../tool-diffs"
 import { Global } from "../../global"
 
 /**
@@ -489,6 +490,12 @@ const layer = Layer.effect(
                     .files({ from: startSnapshot, to: endSnapshot })
                     .pipe(Effect.catch(() => Effect.succeed(undefined)))
                 : undefined
+            // 工具fibers已结算并持久化；按Started冻结的请求读取，不受新steer或压缩窗口影响。
+            const summary = yield* ToolDiffs.summarize(db, {
+              sessionID: session.id, assistantMessageID: yield* publisher.startAssistant(finalizer),
+              directory: location.directory, worktree: location.project.directory,
+              snapshot: endSnapshot, diff: snapshots.diff,
+            })
             yield* withPublication(
               events.publish(SessionEvent.Step.Ended, {
                 sessionID: session.id,
@@ -499,6 +506,7 @@ const layer = Layer.effect(
                 tokens: stepSettlement.tokens,
                 snapshot: endSnapshot,
                 files,
+                ...(summary ? { summary } : {}),
               // 失败退出仍结算同一确认 step，模式只影响通知，不改变 cost/tokens。
               }, { finalizer }),
             )

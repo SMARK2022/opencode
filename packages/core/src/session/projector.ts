@@ -621,6 +621,12 @@ const layer = Layer.effectDiscard(
           .all()
           .pipe(Effect.orDie)
         // DELETE 返回实际移除的行，扣数与删消息同事务，不另扫历史或猜测边界用量。
+        // 用户边界保留但其助手已被撤销；同事务移除该轮摘要，避免重开后再展示已撤销diff。
+        yield* db.update(SessionMessageTable).set({
+          data: sql`json_remove(${SessionMessageTable.data}, '$.summary')`,
+        }).where(and(eq(SessionMessageTable.session_id, event.data.sessionID),
+          eq(SessionMessageTable.id, event.data.messageID), eq(SessionMessageTable.type, "user"),
+        )).run().pipe(Effect.orDie)
         for (const row of removed) {
           if (row.type !== "assistant") continue
           const message = decodeMessage({ ...row.data, id: row.id, type: row.type })

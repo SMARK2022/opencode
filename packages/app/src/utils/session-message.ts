@@ -13,6 +13,7 @@ const emptyTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write
 const emptyModel: { id: string; providerID: string; variant?: string } = { id: "", providerID: "" }
 const decodeToolInput = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
 const hidden = Schema.is(SessionMessage.Hidden)
+const decodeSummary = Schema.decodeUnknownOption(Schema.Struct({ summary: SessionMessage.User.fields.summary }))
 
 export function sessionMessageHidden(message: SessionMessageInfo) {
   return "metadata" in message && message.metadata?.hidden !== undefined && hidden(message.metadata.hidden)
@@ -227,11 +228,14 @@ function userMessage(
   agent: string,
   model: { id: string; providerID: string; variant?: string },
 ): UserMessage {
+  const summary = "summary" in message ? Option.getOrUndefined(decodeSummary(message))?.summary : undefined
   return {
     id: message.id,
     sessionID,
     role: "user",
     time: message.time,
+    // vendor展示DTO尚无此字段；只读取canonical可选摘要，不重算或转述工具返回的patch。
+    ...(summary ? { summary: { diffs: summary.diffs.map(item => ({ ...item })) } } : {}),
     agent,
     model: { providerID: model.providerID, modelID: model.id, variant: model.variant },
   }

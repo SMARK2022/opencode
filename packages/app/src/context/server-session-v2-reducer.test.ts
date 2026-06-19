@@ -235,7 +235,15 @@ test("projects canonical live reviewer events into the same visible turns and te
   expect(failed.parts.get("msg_parent")?.[2]).toMatchObject({ state: { status: "error", metadata: { autoReview: { status: "denied", sessionID: "ses_child" } } } })
   expect(store.get("ses_parent")?.find((message) => message.type === "assistant")).toMatchObject({ content: [{}, {}, { state: { content: [{ type: "text", text: "partial result" }] } }] })
   apply("ses_parent", "session.next.step.failed", { assistantMessageID: "msg_parent", aborted: true, error: { type: "unknown", message: "cancelled" } })
-  apply("ses_parent", "session.next.step.ended", { assistantMessageID: "msg_parent", finish: "stop", cost: 1, tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 0, write: 0 } } })
+  // 新用户先到、旧轮结算后到，实时摘要仍按服务端固定的prompt身份写入。
+  apply("ses_parent", "session.next.prompted", { messageID: "msg_later", prompt: { text: "later" }, delivery: "steer" })
+  apply("ses_parent", "session.next.step.ended", { assistantMessageID: "msg_parent", finish: "stop", cost: 1,
+    tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 0, write: 0 } },
+    summary: { messageID: "msg_user", diffs: [{ file: "changed.ts", patch: "+actual\n", additions: 1, deletions: 0, status: "added" }] },
+  })
+  const turn = normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? [])
+  expect(turn.messages.find(message => message.id === "msg_user")).toMatchObject({ summary: { diffs: [{ file: "changed.ts", patch: "+actual\n" }] } })
+  expect(turn.messages.find(message => message.id === "msg_later")).not.toHaveProperty("summary")
   expect(normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? []).messages.find((message) => message.id === "msg_parent")).toMatchObject({ finish: "error", error: { name: "MessageAbortedError" }, cost: 1 })
   // 重新打开的源快照仍按实际片段ID更新；缺失身份只请求原有hydration，不猜ordinal。
   const restored = createV2SessionReducer()

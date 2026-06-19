@@ -1,6 +1,7 @@
 export * as SessionMessage from "./session-message"
 
 import { Schema } from "effect"
+import { FileDiff } from "./file-diff"
 import { optional } from "./schema"
 import { ProviderMetadata, ToolContent } from "./llm"
 import { Model } from "./model"
@@ -54,6 +55,8 @@ export const User = Schema.Struct({
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
+  // 仅完成事件写入本prompt的改动；旧记录不携带时保持缺省，不从其它会话补值。
+  summary: Schema.Struct({ diffs: Schema.Array(FileDiff.Info) }).pipe(optional),
   type: Schema.Literal("user"),
 }).annotate({ identifier: "Session.Message.User" })
 
