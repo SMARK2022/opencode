@@ -75,11 +75,20 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
     if (proc.exitCode !== null || proc.signalCode !== null) return
     closed = true
 
-    proc.kill(opts.kill ?? "SIGTERM")
-
-    const ms = opts.timeout ?? 5_000
-    if (ms <= 0) return
-    timer = setTimeout(() => proc.kill("SIGKILL"), ms)
+    // 这是全局 abort 行为变更：所有通过 Process.run/spawn 启动的子进程在 Windows 上被 abort 时，
+    // 都会走 taskkill 杀整棵进程树。非 Windows 保持原有 proc.kill(SIGTERM) 不变。
+    // Windows 上 proc.kill 只杀父进程；子进程（如 chatgpt daemon spawn 的浏览器）仍持有 stdout pipe，
+    // 导致 buffer(proc.stdout) 永不 resolve。
+    // 控制台进程（node.exe 等）忽略 WM_CLOSE，不能用 taskkill /T 的优雅阶段，必须直接 /T /F 强杀。
+    // 与 Process.stop(line 155) 的既有模式对齐。
+    if (process.platform === "win32" && proc.pid) {
+      launch("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
+    } else {
+      proc.kill(opts.kill ?? "SIGTERM")
+      const ms = opts.timeout ?? 5_000
+      if (ms <= 0) return
+      timer = setTimeout(() => proc.kill("SIGKILL"), ms)
+    }
   }
 
   const exited = new Promise<number>((resolve, reject) => {
