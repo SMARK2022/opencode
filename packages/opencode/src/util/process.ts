@@ -79,13 +79,15 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
     // 都会走 taskkill 杀整棵进程树。非 Windows 保持原有 proc.kill(SIGTERM) 不变。
     // Windows 上 proc.kill 只杀父进程；子进程（如 chatgpt daemon spawn 的浏览器）仍持有 stdout pipe，
     // 导致 buffer(proc.stdout) 永不 resolve。
-    // 控制台进程（node.exe 等）忽略 WM_CLOSE，不能用 taskkill /T 的优雅阶段，必须直接 /T /F 强杀。
-    // 与 Process.stop(line 155) 的既有模式对齐。
+    // 两阶段：先 taskkill /T（发 WM_CLOSE，等价 SIGTERM 的优雅退出机会），超时后再 taskkill /T /F 强杀。
+    // 对控制台进程（node.exe 等）WM_CLOSE 常被忽略，实际效果接近直接强杀，但语义上保留优雅期。
+    const ms = opts.timeout ?? 5_000
     if (process.platform === "win32" && proc.pid) {
-      launch("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
+      launch("taskkill", ["/pid", String(proc.pid), "/T"], { windowsHide: true, stdio: "ignore" })
+      // 超时后强杀整棵树，与原 SIGKILL 升级语义对齐。
+      if (ms > 0) timer = setTimeout(() => launch("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }), ms)
     } else {
       proc.kill(opts.kill ?? "SIGTERM")
-      const ms = opts.timeout ?? 5_000
       if (ms <= 0) return
       timer = setTimeout(() => proc.kill("SIGKILL"), ms)
     }
