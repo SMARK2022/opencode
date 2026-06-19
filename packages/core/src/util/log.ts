@@ -59,6 +59,7 @@ export function file() {
   return logpath
 }
 let stream: ReturnType<typeof createWriteStream> | undefined
+let initID = 0
 const writeStderr = (msg: any) => {
   process.stderr.write(msg)
   return msg.length
@@ -66,8 +67,10 @@ const writeStderr = (msg: any) => {
 let write = writeStderr
 
 export async function init(options: Options) {
+  const id = ++initID
+  const dir = Global.Path.log
   if (options.level) level = options.level
-  void cleanup(Global.Path.log)
+  void cleanup(dir)
   stream?.destroy()
   stream = undefined
   if (options.print) {
@@ -78,14 +81,16 @@ export async function init(options: Options) {
   }
   // Global.Path.log 在测试中会临时切到 scoped tmpdir，生产环境下用户也可能
   // 删除日志目录；init() 必须自愈目录，日志失败不能污染业务流程。
-  await fs.mkdir(Global.Path.log, { recursive: true }).catch(() => {})
-  logpath = path.join(
-    Global.Path.log,
+  await fs.mkdir(dir, { recursive: true }).catch(() => {})
+  const nextLogpath = path.join(
+    dir,
     options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
   )
   const runID = process.env.OPENCODE_RUN_ID
   const shouldTruncate = !options.dev || !runID || process.env[initializedRunID] !== runID
-  if (shouldTruncate) await fs.truncate(logpath).catch(() => {})
+  if (shouldTruncate) await fs.truncate(nextLogpath).catch(() => {})
+  if (id !== initID) return
+  logpath = nextLogpath
   if (options.dev && runID) process.env[initializedRunID] = runID
   const current = createWriteStream(logpath, { flags: "a" })
   stream = current

@@ -111,3 +111,55 @@ it.live("dev logging recreates a missing log directory", () =>
     expect(content).toContain("log directory was recreated")
   }),
 )
+
+it.live("init uses one log directory snapshot", () =>
+  Effect.gen(function* () {
+    const log = Global.Path.log
+    const mkdir = fs.mkdir
+    const runID = process.env.OPENCODE_RUN_ID
+    const initialized = process.env.OPENCODE_LOG_INITIALIZED_RUN_ID
+    let releaseMkdir = () => {}
+    yield* Effect.addFinalizer(() =>
+      Effect.promise(async () => {
+        releaseMkdir()
+        fs.mkdir = mkdir
+        Global.Path.log = log
+        if (runID === undefined) delete process.env.OPENCODE_RUN_ID
+        else process.env.OPENCODE_RUN_ID = runID
+        if (initialized === undefined) delete process.env.OPENCODE_LOG_INITIALIZED_RUN_ID
+        else process.env.OPENCODE_LOG_INITIALIZED_RUN_ID = initialized
+        await Log.init({ print: false, dev: true, level: "DEBUG" })
+      }),
+    )
+
+    const dir = yield* tmpdirScoped()
+    const target = path.join(dir, "target")
+    const later = path.join(dir, "later")
+    const mkdirStarted = new Promise<void>((resolve) => {
+      fs.mkdir = ((file, options) => {
+        if (file !== target) return mkdir(file, options)
+        resolve()
+        return new Promise<void>((release) => {
+          releaseMkdir = () => {
+            release()
+            releaseMkdir = () => {}
+          }
+        }).then(() => mkdir(file, options))
+      }) as typeof fs.mkdir
+    })
+
+    delete process.env.OPENCODE_RUN_ID
+    delete process.env.OPENCODE_LOG_INITIALIZED_RUN_ID
+    Global.Path.log = target
+    const initializing = Log.init({ print: false, dev: true, level: "DEBUG" })
+    yield* Effect.promise(() => mkdirStarted)
+    Global.Path.log = later
+    releaseMkdir()
+    yield* Effect.promise(() => initializing)
+
+    Log.Default.info("snapshot target receives logs")
+
+    const content = yield* readEventually(path.join(target, "dev.log"), "snapshot target receives logs")
+    expect(content).toContain("snapshot target receives logs")
+  }),
+)
