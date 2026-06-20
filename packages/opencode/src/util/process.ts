@@ -75,22 +75,20 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
     if (proc.exitCode !== null || proc.signalCode !== null) return
     closed = true
 
-    // 这是全局 abort 行为变更：所有通过 Process.run/spawn 启动的子进程在 Windows 上被 abort 时，
-    // 都会走 taskkill 杀整棵进程树。非 Windows 保持原有 proc.kill(SIGTERM) 不变。
-    // Windows 上 proc.kill 只杀父进程；子进程（如 chatgpt daemon spawn 的浏览器）仍持有 stdout pipe，
-    // 导致 buffer(proc.stdout) 永不 resolve。
-    // 两阶段：先 taskkill /T（发 WM_CLOSE，等价 SIGTERM 的优雅退出机会），超时后再 taskkill /T /F 强杀。
-    // 对控制台进程（node.exe 等）WM_CLOSE 常被忽略，实际效果接近直接强杀，但语义上保留优雅期。
-    const ms = opts.timeout ?? 5_000
+    // Windows 上 proc.kill 只杀父进程；子进程仍持有 stdout pipe，导致 buffer(proc.stdout) 永不 resolve。
+    // 必须先同步完成 taskkill /T /F：如果异步启动 taskkill 后立刻 proc.kill()，
+    // 父进程可能先退出，taskkill 来不及沿父子关系清理 detached 浏览器/daemon 子进程。
+    // 控制台进程忽略 WM_CLOSE，必须带 /F 强杀；与下方 Process.stop 的既有模式对齐。
     if (process.platform === "win32" && proc.pid) {
-      launch("taskkill", ["/pid", String(proc.pid), "/T"], { windowsHide: true, stdio: "ignore" })
-      // 超时后强杀整棵树，与原 SIGKILL 升级语义对齐。
-      if (ms > 0) timer = setTimeout(() => launch("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }), ms)
-    } else {
-      proc.kill(opts.kill ?? "SIGTERM")
-      if (ms <= 0) return
-      timer = setTimeout(() => proc.kill("SIGKILL"), ms)
+      launch.sync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
     }
+    // proc.kill 在所有平台上都必须调用：触发 Node.js 的 exit 事件并关闭 pipe，
+    // 让 buffer(proc.stdout) 和 proc.exited 正常 resolve。
+    proc.kill(opts.kill ?? "SIGTERM")
+
+    const ms = opts.timeout ?? 5_000
+    if (ms <= 0) return
+    timer = setTimeout(() => proc.kill("SIGKILL"), ms)
   }
 
   const exited = new Promise<number>((resolve, reject) => {

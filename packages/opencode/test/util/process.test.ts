@@ -8,6 +8,26 @@ function node(script: string) {
   return [process.execPath, "-e", script]
 }
 
+function isProcessRunning(pid: number) {
+  if (pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function remainsRunningAfter(pid: number, timeout: number) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (!isProcessRunning(pid)) return false
+    // Windows 的进程表可见性有短暂延迟；短轮询比固定 sleep 更能避免 CI 抖动。
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return isProcessRunning(pid)
+}
+
 describe("util.process", () => {
   test("captures stdout and stderr", async () => {
     const out = await Process.run(node('process.stdout.write("out");process.stderr.write("err")'))
@@ -42,6 +62,60 @@ describe("util.process", () => {
     expect(out.code).not.toBe(0)
     expect(Date.now() - started).toBeLessThan(1000)
   }, 3000)
+
+  test("aborts a Windows process tree before resolving", async () => {
+    if (process.platform !== "win32") return
+
+    const nodePath = Bun.which("node")
+    if (!nodePath) return
+
+    const abort = new AbortController()
+    const proc = Process.spawn(
+      [
+        nodePath,
+        "-e",
+        [
+          'const { spawn } = require("child_process")',
+          // detached 子进程模拟浏览器/daemon：父进程退出后仍可能留在前台或继续占用资源。
+          'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" })',
+          "child.unref()",
+          // 输出 pid 不是实现细节断言，而是为了在 abort 返回后观察真实 OS 子进程是否已被清理。
+          "console.log(child.pid)",
+          "setInterval(() => {}, 1000)",
+        ].join(";"),
+      ],
+      { abort: abort.signal, stdout: "pipe", stderr: "pipe" },
+    )
+
+    if (!proc.stdout || !proc.stderr) throw new Error("Process output not available")
+    proc.stderr.resume()
+
+    let childPid = 0
+    try {
+      childPid = await new Promise<number>((resolve, reject) => {
+        let stdout = ""
+        const timer = setTimeout(() => reject(new Error("child pid was not printed")), 1_000)
+        proc.stdout!.on("data", (chunk) => {
+          stdout += chunk.toString()
+          const pid = Number(stdout.trim().split(/\s+/)[0])
+          if (!Number.isFinite(pid) || pid <= 0) return
+          clearTimeout(timer)
+          resolve(pid)
+        })
+      })
+
+      abort.abort()
+      expect(await proc.exited).not.toBe(0)
+
+      // 这里验证的是 abort 返回后的系统状态：不能只让父进程结束，还必须清掉 detached 子进程。
+      expect(await remainsRunningAfter(childPid, 1_000)).toBe(false)
+    } finally {
+      abort.abort()
+      // 失败路径也必须清理，避免测试自身制造本需求要消除的后台 node.exe 垃圾。
+      if (proc.pid && isProcessRunning(proc.pid)) await Process.run(["taskkill", "/pid", String(proc.pid), "/T", "/F"], { nothrow: true })
+      if (childPid && isProcessRunning(childPid)) await Process.run(["taskkill", "/pid", String(childPid), "/T", "/F"], { nothrow: true })
+    }
+  }, 5000)
 
   test("kills after timeout when process ignores terminate signal", async () => {
     if (process.platform === "win32") return
