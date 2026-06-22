@@ -99,7 +99,8 @@ function envProxy(url: URL): SystemProxy | undefined {
 
 /** Execute a shell command and return its stdout text */
 async function execText(command: string, args: string[], timeout = 1500) {
-  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
+  // Windows 系统代理读取会定期调用 reg.exe；必须隐藏 helper 控制台，否则 daemon 每次刷新代理都会弹出 conhost。
+  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore", windowsHide: process.platform === "win32" })
   const timer = setTimeout(() => proc.kill(), timeout)
   try {
     const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()])

@@ -4,9 +4,12 @@ import { HttpClient } from "effect/unstable/http"
 import { NetworkProxy } from "../src/network-proxy"
 
 const originalFetch = globalThis.fetch
+const originalSpawn = Bun.spawn
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  // Bun.spawn 是全局进程边界；测试替换后必须恢复，避免污染后续真实网络/进程测试。
+  Bun.spawn = originalSpawn
 })
 
 describe("NetworkProxy", () => {
@@ -53,5 +56,36 @@ describe("NetworkProxy", () => {
     } finally {
       server.stop(true)
     }
+  })
+
+  test("hides Windows system proxy helper processes", async () => {
+    // reg.exe/conhost 弹窗只存在于 Windows；macOS scutil 与 Linux env proxy 保持原平台行为即可。
+    if (process.platform !== "win32") return
+
+    let calls = 0
+    let hidden = false
+    Bun.spawn = ((command: string[], options?: { windowsHide?: boolean }) => {
+      // 该测试保护的是外部可见行为：系统代理刷新不能创建前台 reg.exe/conhost 弹窗。
+      if (command[0] === "reg") {
+        calls++
+        hidden = options?.windowsHide === true
+      }
+      return {
+        exited: Promise.resolve(1),
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            // 空 stdout + 非零退出模拟 reg query 失败；代理读取失败仍必须回退 direct，不能影响请求路径。
+            controller.close()
+          },
+        }),
+      } as unknown as ReturnType<typeof Bun.spawn>
+    }) as typeof Bun.spawn
+
+    // refresh=true 绕过 10s 系统代理缓存，确保测试覆盖真实 helper 启动边界而不是命中旧 Promise。
+    const route = await NetworkProxy.resolveProxyRoute("https://example.com", "provider", true)
+
+    expect(calls).toBe(1)
+    expect(hidden).toBe(true)
+    expect(route).toEqual({ type: "direct", reason: "refresh-no-proxy" })
   })
 })
