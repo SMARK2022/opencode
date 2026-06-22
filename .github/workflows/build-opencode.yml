@@ -25,6 +25,11 @@ on:
       - "packages/opencode/**"
       # 原 CLI 产品已拆到这些运行时 owner，独立改动也须触发构建，避免仅旧目录命中而漏包
       - "packages/core/**"
+      # 构建依赖迁移后仍保留既有owner范围，并补齐源要求的SDK、插件及构建入口。
+      - "packages/plugin/**"
+      - "packages/script/**"
+      - "packages/sdk/js/**"
+      - "packages/ui/**"
       - "packages/tui/**"
       - "packages/llm/**"
       - "packages/schema/**"
