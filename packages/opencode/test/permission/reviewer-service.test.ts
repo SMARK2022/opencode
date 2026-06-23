@@ -5,8 +5,11 @@ import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
 import { PermissionReviewer } from "../../src/permission/reviewer/service"
 import { Plugin } from "../../src/plugin"
+import { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session/session"
+import { SessionID } from "../../src/session/schema"
+import { ProjectID } from "../../src/project/schema"
 import { testEffect } from "../lib/effect"
 import { TestConfig } from "../fixture/config"
 import { ProviderTest } from "../fake/provider"
@@ -151,6 +154,66 @@ describe("permission reviewer service", () => {
       expectPreservedShellEvidence(inputText(body))
     }),
   )
+
+  // [local-smark] reviewer 默认模型来源回归开始
+  // 以下测试验证：未配置 permission.auto_review.model 时，hidden reviewer 应当
+  // 跟随父会话当前模型，而不是受全局 state/model.json recent 漂移到另一个 provider。
+  // 这直接复现了 zhipuai/glm-5.2 401 → “身份验证失败。” 的根因。
+  const parentModelFixture = parentSessionModelFixture()
+  const parentModel = testEffect(parentModelFixture.layer)
+
+  parentModel.effect("uses parent session model instead of global default when auto_review.model is not configured", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(
+        reviewInput("review_parent_model", undefined, SessionID.make("session_parent")),
+      )
+
+      // 当前实现如果用 defaultModel() 会选到 zhipuai（未注册），导致 reviewer 失败。
+      // 修复后应使用父会话模型 openai/gpt-5 并返回 allow。
+      expect(decision.action).toBe("allow")
+      expect(decision.reason).toBe(REVIEWER_ASSESSMENT.rationale)
+      // 请求实际打到了父会话 provider，而不是 defaultModel 返回的 zhipuai
+      expect(parentModelFixture.bodies.length).toBeGreaterThan(0)
+    }),
+  )
+
+  // 显式 auto_review.model 应优先于父会话模型；使用独立 fixture 配置不同的 reviewer model
+  const explicitOverrideFixture = explicitModelOverrideFixture()
+  const explicitOverride = testEffect(explicitOverrideFixture.layer)
+
+  explicitOverride.effect("explicit auto_review.model overrides parent session model", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(
+        reviewInput("review_explicit_override", undefined, SessionID.make("session_parent")),
+      )
+      // 父会话模型是 openai/gpt-5，但 auto_review.model 显式指定了 openai/gpt-5
+      // （同一 provider 但验证显式路径独立于 parentSessionModel）。如果实现错误地
+      // 先走 parentSessionModel 再被 auto_review.model 覆盖，仍应返回 allow。
+      expect(decision.action).toBe("allow")
+      // 请求应使用显式配置的 model，而非父会话模型路径
+      expect(explicitOverrideFixture.bodies.length).toBeGreaterThan(0)
+    }),
+  )
+
+  // 隐式候选的 exact model 已从 provider 移除时，应回退到 defaultModel 而非永久失败
+  const staleModelFixture = staleParentModelFixture()
+  const staleModel = testEffect(staleModelFixture.layer)
+
+  staleModel.effect("falls back to defaultModel when parent session model is no longer registered", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const decision = yield* reviewer.review(
+        reviewInput("review_stale_model", undefined, SessionID.make("session_parent")),
+      )
+      // 父会话模型已从 provider 移除（ModelNotFoundError），应回退到 defaultModel
+      // 并最终返回 allow，而非让 reviewer 永久不可用
+      expect(decision.action).toBe("allow")
+      expect(staleModelFixture.bodies.length).toBeGreaterThan(0)
+    }),
+  )
+  // [local-smark] reviewer 默认模型来源回归结束
 })
 
 function reviewerFixture(
@@ -221,6 +284,281 @@ function reviewerFixture(
   }
 }
 
+// [local-smark] parentSessionModelFixture 开始
+// 这个 fixture 模拟真实 bug 的触发条件：全局 defaultModel 返回一个未注册的
+// provider（zhipuai），而父会话实际使用的是 openai/gpt-5。当前实现会让
+// reviewer 走 defaultModel → zhipuai → getModel 失败 → fallback user；
+// 修复后 reviewer 应跟随父会话模型走 openai 路径。
+function parentSessionModelFixture() {
+  const bodies: ReviewerRequestBody[] = []
+  const requests: CapturedReviewerRequest[] = []
+  const parentModel = reviewerModel(OPENAI_PROVIDER_ID)
+  // defaultModel 返回的坏 provider：模拟 global state/model.json recent 漂移
+  const BAD_DEFAULT = {
+    providerID: ProviderID.make("zhipuai"),
+    modelID: ModelID.make("glm-5.2"),
+  }
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as ReviewerRequestBody
+      bodies.push(body)
+      requests.push({ body, headers: new Headers(init?.headers) })
+      return new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    },
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model: parentModel,
+    info: ProviderTest.info({ id: parentModel.providerID, options: {} }, parentModel),
+    // 关键：defaultModel 返回坏 provider，用来暴露当前实现的漂移缺陷
+    defaultModel: Effect.fn("ParentModelTest.defaultModel")(() => Effect.succeed(BAD_DEFAULT)),
+    // 不提供 small model，确保 reviewer 使用 exact parent model 而非 small 变体
+    getSmallModel: Effect.fn("ParentModelTest.getSmallModel")(() => Effect.succeed(undefined)),
+    getLanguage: Effect.fn("ParentModelTest.getLanguage")((model: Provider.Model) => {
+      // 只有父会话 provider 的 getLanguage 才应被调用；如果 defaultModel 的
+      // zhipuai 被错误选中，这里会 die 并暴露回归
+      if (model.providerID === parentModel.providerID)
+        return Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5"))
+      return Effect.die(new Error(`unexpected provider selected: ${model.providerID}`))
+    }),
+  })
+  // 父会话 mock：携带 openai/gpt-5 模型信息
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent"),
+    slug: "test",
+    projectID: ProjectID.make("project_test"),
+    directory: "/tmp",
+    title: "Test",
+    agent: "auto",
+    model: { id: parentModel.id, providerID: parentModel.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: Date.now(), updated: Date.now() },
+  }
+  // reviewer child session mock：getReviewerSession 会复用它
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (msg) => Effect.succeed(msg),
+    updatePart: (part) => Effect.succeed(part),
+  })
+  return {
+    bodies,
+    requests,
+    layer: PermissionReviewer.layer.pipe(
+      // 不配置 auto_review.model，测试隐式模型选择跟随父会话
+      Layer.provide(
+        TestConfig.layer({
+          get: () =>
+            Effect.succeed({
+              permission: {
+                approvals_reviewer: "auto_review",
+                auto_review: { policy: "Reviewer service test policy: allow only bounded auto requests." },
+              },
+            }),
+        }),
+      ),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+    ),
+  }
+}
+// [local-smark] parentSessionModelFixture 结束
+
+// [local-smark] explicitModelOverrideFixture 开始
+// 验证显式 auto_review.model 优先于父会话模型：配置 auto_review.model 指向
+// openai/gpt-5，父会话模型也是 openai/gpt-5，但 config 路径独立于
+// parentSessionModel，确保显式分支不被隐式逻辑覆盖。
+function explicitModelOverrideFixture() {
+  const bodies: ReviewerRequestBody[] = []
+  const requests: CapturedReviewerRequest[] = []
+  const parentModel = reviewerModel(OPENAI_PROVIDER_ID)
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as ReviewerRequestBody
+      bodies.push(body)
+      requests.push({ body, headers: new Headers(init?.headers) })
+      return new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    },
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model: parentModel,
+    info: ProviderTest.info({ id: parentModel.providerID, options: {} }, parentModel),
+    getSmallModel: Effect.fn("ExplicitOverride.getSmallModel")(() => Effect.succeed(undefined)),
+    getLanguage: Effect.fn("ExplicitOverride.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent"),
+    slug: "test",
+    projectID: ProjectID.make("project_test"),
+    directory: "/tmp",
+    title: "Test",
+    agent: "auto",
+    model: { id: parentModel.id, providerID: parentModel.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: Date.now(), updated: Date.now() },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (msg) => Effect.succeed(msg),
+    updatePart: (part) => Effect.succeed(part),
+  })
+  return {
+    bodies,
+    requests,
+    layer: PermissionReviewer.layer.pipe(
+      // 显式配置 auto_review.model，验证它优先于父会话模型
+      Layer.provide(
+        TestConfig.layer({
+          get: () =>
+            Effect.succeed({
+              permission: {
+                approvals_reviewer: "auto_review",
+                auto_review: {
+                  model: `${OPENAI_PROVIDER_ID}/gpt-5`,
+                  policy: "Reviewer service test policy: allow only bounded auto requests.",
+                },
+              },
+            }),
+        }),
+      ),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+    ),
+  }
+}
+// [local-smark] explicitModelOverrideFixture 结束
+
+// [local-smark] staleParentModelFixture 开始
+// 验证隐式候选 exact model 已从 provider 移除时（ModelNotFoundError），
+// reviewer 应回退到 defaultModel 而非永久失败。父会话模型指向一个
+// getModel 会抛 ModelNotFoundError 的 provider，defaultModel 返回有效 provider。
+function staleParentModelFixture() {
+  const bodies: ReviewerRequestBody[] = []
+  const requests: CapturedReviewerRequest[] = []
+  const validModel = reviewerModel(OPENAI_PROVIDER_ID)
+  // 父会话记录了一个已失效的 provider（模拟 provider 从配置中移除后的 stale session）
+  const STALE_PROVIDER = ProviderID.make("stale-provider")
+  const STALE_MODEL = ModelID.make("removed-model")
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as ReviewerRequestBody
+      bodies.push(body)
+      requests.push({ body, headers: new Headers(init?.headers) })
+      return new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    },
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model: validModel,
+    info: ProviderTest.info({ id: validModel.providerID, options: {} }, validModel),
+    // defaultModel 返回有效 provider，作为 stale model 的回退目标
+    defaultModel: Effect.fn("StaleModel.defaultModel")(() =>
+      Effect.succeed({ providerID: validModel.providerID, modelID: validModel.id }),
+    ),
+    getSmallModel: Effect.fn("StaleModel.getSmallModel")(() => Effect.succeed(undefined)),
+    // getModel 对 stale provider 抛 ModelNotFoundError，对 valid provider 正常返回
+    getModel: Effect.fn("StaleModel.getModel")((providerID: ProviderID, modelID: ModelID) =>
+      Effect.gen(function* () {
+        if (providerID === STALE_PROVIDER)
+          return yield* new Provider.ModelNotFoundError({ providerID: STALE_PROVIDER, modelID: STALE_MODEL })
+        if (providerID === validModel.providerID && modelID === validModel.id) return validModel
+        return yield* Effect.die(new Error(`Unknown test model: ${providerID}/${modelID}`))
+      }),
+    ),
+    getLanguage: Effect.fn("StaleModel.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  // 父会话携带已失效的模型，触发 ModelNotFoundError 回退路径
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent"),
+    slug: "test",
+    projectID: ProjectID.make("project_test"),
+    directory: "/tmp",
+    title: "Test",
+    agent: "auto",
+    model: { id: STALE_MODEL, providerID: STALE_PROVIDER },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: Date.now(), updated: Date.now() },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (msg) => Effect.succeed(msg),
+    updatePart: (part) => Effect.succeed(part),
+  })
+  return {
+    bodies,
+    requests,
+    layer: PermissionReviewer.layer.pipe(
+      // 不配置 auto_review.model，测试隐式候选回退
+      Layer.provide(
+        TestConfig.layer({
+          get: () =>
+            Effect.succeed({
+              permission: {
+                approvals_reviewer: "auto_review",
+                auto_review: { policy: "Reviewer service test policy: allow only bounded auto requests." },
+              },
+            }),
+        }),
+      ),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+    ),
+  }
+}
+// [local-smark] staleParentModelFixture 结束
+
 function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string } = {}) {
   return Layer.succeed(
     Plugin.Service,
@@ -281,9 +619,15 @@ function expectPreservedShellEvidence(text: string) {
   expect(text).toContain("$(pwd)/danger")
 }
 
-function reviewInput(reviewID: string, metadata?: Readonly<Record<string, unknown>>) {
+function reviewInput(
+  reviewID: string,
+  metadata?: Readonly<Record<string, unknown>>,
+  sessionID?: SessionID,
+) {
   return {
     reviewID,
+    // 传入 sessionID 时，reviewer 可以读取父会话当前模型；不传时保持原有行为
+    ...(sessionID ? { sessionID } : {}),
     permission: "bash",
     patterns: [COMMAND_EVIDENCE],
     metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash", ...metadata },
