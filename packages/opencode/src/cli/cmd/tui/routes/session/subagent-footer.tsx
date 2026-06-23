@@ -8,6 +8,7 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util/locale"
 import { tokenAccounting } from "@/token/accounting"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { activeTurnPair } from "../../util/session-pending"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandPalette } from "../../context/command-palette"
 import { useCommandShortcut } from "../../keymap"
@@ -52,9 +53,11 @@ export function SubagentFooter() {
     const msg = messages()
     const getParts = (id: string) => sync.data.part[id] ?? []
 
-    const lastUser = msg.findLast((item) => item.role === "user")
-    const last = lastUser ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id) : undefined
-    if (!last) return
+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
+    // 避免 subagent footer usage 在 orphan 窗口期归零。
+    const pair = activeTurnPair(msg)
+    if (!pair?.assistant) return
+    const last = pair.assistant
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     // [local-smark] token accounting for detailed usage tracking

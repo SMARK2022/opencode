@@ -105,7 +105,18 @@ export function tokenAccounting(
   contextLimit?: number,
 ): TokenAccounting {
   // ── 1. lastUser / requestAssistantIDs ──
-  const lastUser = messages.findLast((m) => m.role === "user")
+  // 以最新 assistant 的 parentID 锁定当前活跃 user，跳过尚未派生 assistant 的 queued user
+  // （例如 TaskTool 后台注入 noReply prompt 在父会话 busy 期间落库的 orphan）。
+  // 无 assistant（首次 prompt 空窗）时仍取最新 user，保留原 fail-closed 语义。
+  // 不变量：成对场景下 latestAssistantForUser.parentID === latestUser.id，与旧
+  // findLast(role==="user") 完全等价，不改变任何既有行为。
+  // 数据异常边界：若 assistant.parentID 在 messages 中找不到对应 user（理论不应发生，
+  // assistant 创建时 parentID 来自 lastUser.id），lastUser 为 undefined → requestAssistantIDs
+  // 为空 → confirmedRequest 归零，比旧逻辑回退到无关 user 更安全（fail-closed）。
+  const latestAssistantForUser = messages.findLast((m) => m.role === "assistant")
+  const lastUser = latestAssistantForUser
+    ? messages.findLast((m) => m.role === "user" && m.id === latestAssistantForUser.parentID)
+    : messages.findLast((m) => m.role === "user")
   const latestRequestAssistant = lastUser
     ? messages.findLast((m) => m.role === "assistant" && m.parentID === lastUser.id)
     : undefined

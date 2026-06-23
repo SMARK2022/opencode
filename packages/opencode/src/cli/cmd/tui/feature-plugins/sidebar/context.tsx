@@ -5,6 +5,7 @@ import type { InternalTuiPlugin } from "../../plugin/internal"
 import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
+import { activeTurnPair } from "../../util/session-pending"
 import { tokenAccounting } from "@/token/accounting"
 import { useLocal } from "@tui/context/local"
 import { useSDK } from "@tui/context/sdk"
@@ -40,11 +41,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     const messages = msg()
     const getParts = (id: string) => props.api.state.part(id)
 
-    const lastUser = messages.findLast((item) => item.role === "user")
-    if (!lastUser) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-
-    const last = messages.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id)
-    if (!last) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
+    // 避免 sidebar context 在 orphan 窗口期显示全 0（旧逻辑找不到匹配 assistant 时
+    // 直接 return 全 0 对象）。
+    const pair = activeTurnPair(messages)
+    if (!pair?.assistant) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+    const last = pair.assistant
 
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const acc = tokenAccounting(messages, getParts, model?.limit.context)

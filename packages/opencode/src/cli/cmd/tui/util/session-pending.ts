@@ -59,20 +59,41 @@ export function assistantTurnDuration(messages: Message[], assistant: AssistantM
   return durationSince(user.time.created, end)
 }
 
+// 当前活跃轮次的 (user, assistant) 对。是 footer usage、sidebar context 与左下角计时器
+// 共用的解析口径，必须跳过尚未派生 assistant 的 queued orphan user——否则这些 widget
+// 会在 orphan 窗口期（例如 TaskTool 后台注入 noReply prompt 在父会话 busy 期间持久化的
+// user message）归零或漂移到错误的 user 时间戳。tokenAccounting 与 computeContextData
+// 也通过同一口径锁定活跃 user，避免 request 累计和 model 解析落到 orphan 上。
+export type ActiveTurnPair = { user: UserMessage; assistant: AssistantMessage | undefined }
+
+export function activeTurnPair(messages: readonly Message[]): ActiveTurnPair | undefined {
+  const latestAssistant = messages.findLast((message): message is AssistantMessage => message.role === "assistant")
+  const user = latestAssistant
+    ? // 有 assistant：以最新 assistant 的 parentID 锁定活跃 user，跳过其后未派生 assistant
+      // 的 orphan user。不变量：成对场景下 latestAssistant.parentID === latestUser.id，
+      // 因此与旧 findLast(role==="user") 完全等价，不改变任何既有行为。
+      messages.findLast((message): message is UserMessage => message.role === "user" && message.id === latestAssistant.parentID)
+    : // 无 assistant（首次 prompt 落库但 assistant 尚未创建的空窗期）：fallback 到最新 user，
+      // 返回 assistant: undefined 让调用点维持既有的 fail-closed 显示语义。
+      messages.findLast((message): message is UserMessage => message.role === "user")
+
+  if (!user) return undefined
+  return { user, assistant: latestAssistant }
+}
+
 export function activeTurnDuration(messages: Message[], status: SessionStatus | undefined, now: number) {
   if (!status || status.type === "idle") return 0
 
-  const user = messages.findLast((message): message is UserMessage => message.role === "user")
-  if (!user) return 0
-
-  const assistant = messages.findLast((message): message is AssistantMessage => {
-    return message.role === "assistant" && message.parentID === user.id
-  })
-  if (!assistant) return durationSince(user.time.created, now)
+  // 复用 activeTurnPair 锁定活跃 (user, assistant)，确保计时器与 token widget 口径一致，
+  // 不会在 orphan user 窗口期切到错误的 user 时间戳。
+  const pair = activeTurnPair(messages)
+  if (!pair) return 0
+  const { user, assistant } = pair
 
   // tool-calls / unknown 表示同一个 user turn 还可能继续执行工具或下一步模型调用。
   // 运行中 footer 必须继续按 parent user 计时，不能停在上一条 assistant.completed。
-  if (!assistant.time.completed || assistant.finish === "tool-calls" || assistant.finish === "unknown") {
+  // assistant 为 undefined（首次 prompt 空窗）时也走此分支，按 user.created 起算。
+  if (!assistant || !assistant.time.completed || assistant.finish === "tool-calls" || assistant.finish === "unknown") {
     return durationSince(user.time.created, now)
   }
 

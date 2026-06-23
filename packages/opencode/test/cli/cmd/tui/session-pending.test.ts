@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { AssistantMessage, Message, UserMessage } from "@opencode-ai/sdk/v2"
 import {
   activeTurnDuration,
+  activeTurnPair,
   assistantTurnDuration,
   hasStreamingAssistant,
   pendingAssistantID,
@@ -90,14 +91,25 @@ describe("session pending helpers", () => {
     expect(assistantTurnDuration([user("msg_user", 1_000), reply], reply)).toBe(0)
   })
 
-  test("derives active turn duration from the latest user before the assistant exists", () => {
+  test("derives active turn duration from the latest user before any assistant exists", () => {
+    // 首次 prompt 落库但 assistant 尚未创建的空窗期：保留按最新 user.created 计时的语义，
+    // 不应因为缺少 assistant 就把耗时归零。
+    const messages: Message[] = [user("only", 5_000)]
+
+    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(2_000)
+  })
+
+  test("ignores queued orphan user when deriving active turn duration", () => {
+    // 已完成 assistant 之后再落入 queued orphan user（例如 TaskTool 后台注入 noReply prompt
+    // 在父会话 busy 期间持久化的 user message）：不应按 orphan user 重新起算耗时，
+    // 而应沿用已完成 assistant 的终态——stale busy 下耗时归零，与 terminal-finish 语义一致。
     const messages: Message[] = [
       user("first", 1_000),
       assistant("done", 2_000, "first", "stop"),
       user("latest", 5_000),
     ]
 
-    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(2_000)
+    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(0)
   })
 
   test("derives active turn duration from the latest user's streaming assistant", () => {
@@ -141,5 +153,50 @@ describe("session pending helpers", () => {
     const messages: Message[] = [user("msg_user", 1_000), assistant("open", undefined, "msg_user")]
 
     expect(activeTurnDuration(messages, { type: "idle" }, 8_000)).toBe(0)
+  })
+})
+
+// activeTurnPair 是 footer/sidebar/timer 共用的"当前活跃轮次"解析口径。
+// 它必须跳过尚未派生 assistant 的 queued orphan user，否则 footer usage、sidebar context
+// 和左下角计时器都会在 orphan 窗口期内归零或漂移到错误的 user 时间戳。
+describe("activeTurnPair", () => {
+  test("returns the latest paired user and assistant when all turns are paired", () => {
+    const messages: Message[] = [
+      user("u1", 1),
+      assistant("a2", 2, "u1"),
+      user("u3", 3),
+      assistant("a4", 4, "u3"),
+    ]
+
+    const pair = activeTurnPair(messages)
+    expect(pair?.user.id).toBe("u3")
+    expect(pair?.assistant?.id).toBe("a4")
+  })
+
+  test("skips queued orphan user and returns the latest assistant's parent pair", () => {
+    // orphan user3 无 assistant 子节点：应跳过它，回退到最新 assistant 的 parent user，
+    // 让 widget 继续展示正在运行/已完成的 A 轮次，而不是 orphan B 的空数据。
+    const messages: Message[] = [
+      user("u1", 1),
+      assistant("a2", 2, "u1", "stop"),
+      user("u3", 3),
+    ]
+
+    const pair = activeTurnPair(messages)
+    expect(pair?.user.id).toBe("u1")
+    expect(pair?.assistant?.id).toBe("a2")
+  })
+
+  test("falls back to the latest user with undefined assistant before any assistant exists", () => {
+    // 首次 prompt 空窗：返回 assistant: undefined，让调用点维持既有 fail-closed 显示。
+    const messages: Message[] = [user("only", 1)]
+
+    const pair = activeTurnPair(messages)
+    expect(pair?.user.id).toBe("only")
+    expect(pair?.assistant).toBeUndefined()
+  })
+
+  test("returns undefined when there are no messages", () => {
+    expect(activeTurnPair([])).toBeUndefined()
   })
 })

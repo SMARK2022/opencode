@@ -42,6 +42,7 @@ import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websear
 import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
 import { usable as overflowUsable } from "@/session/overflow"
 import { estimateDataUrlInputTokens } from "./token-estimate"
+import { activeTurnPair } from "./session-pending"
 import { tokenAccounting } from "@/token/accounting"
 
 type WithParts = {
@@ -665,7 +666,10 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
 }
 
 export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
-  const lastUser = input.messages.findLast((msg) => msg.role === "user")
+  // 以活跃轮次取 user，跳过尚未派生 assistant 的 queued orphan user，让 model/tool
+  // 解析对齐实际运行的 assistant 而非 orphan。computeContextData 不因无 assistant 早退——
+  // 无 breakdown 时仍走文件系统兜底估算分支，故只取 pair.user。
+  const lastUser = activeTurnPair(input.messages)?.user
   const modelInfo = currentModel(input, lastUser)
   const maxTokens = modelInfo.model?.limit.context ?? 0
 

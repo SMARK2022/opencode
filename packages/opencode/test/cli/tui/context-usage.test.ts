@@ -599,4 +599,64 @@ describe("context usage", () => {
     // 估算应接近确认值 (误差 < 2%)
     expect(Math.abs(inputTokens - confirmed) / confirmed).toBeLessThan(0.02)
   })
+
+  test("queued trailing user does not blank out context usage or shift the resolved model", async () => {
+    // orphan user3 没有 assistant 子节点（模拟 TaskTool 后台注入 noReply prompt 在父会话
+    // busy 期间持久化的 user message）。修复前 lastUser=user3(modelB) 导致 /context 面板
+    // 的 model 解析漂移到未定义的 modelB（maxTokens=0）；修复后应锁定 user1（活跃
+    // assistantA 的 parent），model 解析回到 provider 已定义的 "test/model"。
+    const messages = [
+      user("1"),
+      assistant("2", "1"),
+      { ...user("3"), model: { providerID: "test", modelID: "modelB" } },
+    ]
+    const parts: Record<string, Part[]> = {
+      "2": [
+        {
+          id: "sf1",
+          sessionID: "s",
+          messageID: "2",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0.001,
+          tokens: { input: 12000, output: 600, reasoning: 0, cache: { read: 3000, write: 2000 } },
+          inputChars: 34000,
+          inputBreakdown: {
+            system: 8000,
+            instructions: 1000,
+            skills: 0,
+            tools: 5000,
+            messages: {
+              userText: 8000,
+              assistantText: 8000,
+              reasoning: 0,
+              toolInput: 2000,
+              toolOutput: 2000,
+              attachments: 0,
+              total: 20000,
+            },
+          },
+        } as unknown as Part,
+      ],
+    }
+
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: {},
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [],
+    })
+
+    // model 应解析为 user1 的 "test/model"（provider 有定义），而非 orphan user3 的 "test/modelB"
+    expect(data.model).toBe("test/model")
+    expect(data.maxTokens).toBe(20_000)
+    // totalTokens 取自活跃 assistantA 的 step（17000 input + 600 output），不受 queued user 影响
+    expect(data.totalTokens).toBe(17_600)
+  })
 })

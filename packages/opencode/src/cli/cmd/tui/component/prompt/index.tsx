@@ -51,7 +51,7 @@ import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 // [local-smark] Token flow pulse and throttled signal for usage display
 import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { activeTurnDuration } from "../../util/session-pending"
+import { activeTurnDuration, activeTurnPair } from "../../util/session-pending"
 import { DialogSkill } from "../dialog-skill"
 import {
   confirmWorkspaceFileChanges,
@@ -384,9 +384,12 @@ export function Prompt(props: PromptProps) {
     const msg = sync.data.message[props.sessionID] ?? []
     const getParts = (id: string) => sync.data.part[id] ?? []
 
-    const lastUser = msg.findLast((item) => item.role === "user")
-    const last = lastUser ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id) : undefined
-    if (!last) return
+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
+    // 避免 footer usage 在后台任务注入 orphan user 期间归零（旧逻辑按 lastUser.id
+    // 反查 assistant 找不到时直接 return undefined）。
+    const pair = activeTurnPair(msg)
+    if (!pair?.assistant) return
+    const last = pair.assistant
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     // [local-smark] Detailed token accounting
