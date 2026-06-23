@@ -340,18 +340,13 @@ describe("SessionProjector", () => {
       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(reverted)
       // revert 删除第二轮后请求费用只取保留助手，会话已花费用仍不退款。
       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, cost: 1 })
+      const activeRequest = (yield* sessions.get(sessionID)).request
       yield* events.publish(SessionEvent.PromptAdmitted, {
         sessionID, messageID: SessionMessage.ID.make("msg_waiting_request"), timestamp: DateTime.makeUnsafe(6),
         prompt: Prompt.make({ text: "waiting" }), delivery: "queue",
       })
-      // 尚未 promoted 的最新 admission 是独立零值请求，不能消费旧助手。
-      expect((yield* sessions.get(sessionID)).request).toMatchObject({
-        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
-        // 新 admission 没有回复时 step 也必须为零，不能沿用最后一次旧结算。
-        stepInput: 0, stepOutput: 0,
-        // 保留 assistantID 缺省，避免把“无回复”与“已有未结算回复”混为一类。
-      })
-      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+      // 入队只增加待处理输入，当前轮的累计、模型和未确认状态均保持原快照。
+      expect((yield* sessions.get(sessionID)).request).toEqual(activeRequest)
       expect((yield* sessions.get(sessionID)).cost).toBe(1.5)
       // 旧助手迟到结算不改变请求身份；只比较 admission/promotion，不比较 Ended 序号。
       yield* events.publish(SessionEvent.Step.Ended, {
@@ -359,12 +354,8 @@ describe("SessionProjector", () => {
         timestamp: DateTime.makeUnsafe(7), finish: "stop", cost: 1,
         tokens: { input: 6, output: 9, reasoning: 3, cache: { read: 15, write: 21 } },
       })
-      expect((yield* sessions.get(sessionID)).request).toMatchObject({
-        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
-      })
-      // get/list 同用一个 SQL owner，等待请求没有模型，也没有可借用的助手。
-      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
-      expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request).toEqual(activeRequest)
+      // get/list共用同一活跃请求，模型与助手不能被未提升的queue清空。
       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
       // 真实 V1 turn 更换助手；旧 native 的确认不得混入新 V1 请求的上下文。
       const userID = SessionV1.MessageID.ascending()
@@ -407,13 +398,13 @@ describe("SessionProjector", () => {
       // completed=0 同样是终态；展示输入不能恢复到先前非零上下文。
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next, time: { created: 12, completed: 0 } } })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
-      // 新用户立即换请求范围，上一请求的确认不得成为它的在途基数。
+      // 无回复用户仍属排队窗口，不应抹去配对轮次的确认值；首包前估算不复活。
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
         id: SessionV1.MessageID.ascending(), sessionID, role: "user", time: { created: 13 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
       } })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
-      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
-      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, stepInput: 0, stepOutput: 0 })
+      expect((yield* sessions.get(sessionID)).request?.assistantID).toBe(next.id)
       // 原生零确认没有 V1 part，必须依靠 tokens 是否存在而不是数字真值。
       const zeroRequest = SessionMessage.ID.make("msg_zero_estimate")
       const zeroAssistant = SessionMessage.ID.make("msg_zero_estimate_assistant")
