@@ -808,7 +808,11 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test("truncates tool output when requested", async () => {
+  // head+tail 双向截断：tool 工具层截断 notice 位于输出末尾（head 方向），
+  // shell 工具层截断 notice 位于输出开头（tail 方向）。旧的单边 head 截断会把
+  // 末尾的 tool notice 整段丢弃，导致模型压缩后丢失恢复文件路径。这里改用
+  // head+tail 同时保留两端，并断言中间被省略的字符数。
+  test("truncates tool output with head+tail when requested", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
 
@@ -844,7 +848,8 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    expect(await MessageV2.toModelMessages(input, model, { toolOutputMaxChars: 4 })).toStrictEqual([
+    // head=2 tail=2：10 字符输入，省略中间 6 字符，两端各保 2 字符
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 2, tail: 2 } })).toStrictEqual([
       {
         role: "user",
         content: [{ type: "text", text: "run tool" }],
@@ -870,8 +875,356 @@ describe("session.message-v2.toModelMessage", () => {
             toolName: "bash",
             output: {
               type: "text",
-              value: "abcd\n[... compaction truncated 6 chars]",
+              value: "ab\n[... compaction truncated 6 chars ...]\nij",
             },
+          },
+        ],
+      },
+    ])
+  })
+
+  // 等长边界：输入恰好等于 head+tail 时不应触发截断，也不应插入 marker
+  test("does not truncate when text fits within head+tail budget", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "abcd",
+              title: "Shell",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // 4 字符输入恰好等于 head+tail=2+2，原样返回，无任何 marker
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 2, tail: 2 } })).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: {
+              type: "text",
+              value: "abcd",
+            },
+          },
+        ],
+      },
+    ])
+  })
+
+  // 兼容回归：标题生成 / decide / 正常 prompt / estimate 路径都不传
+  // toolOutputTruncation，此时必须原样返回，不能因 undefined 触发 NaN 污染。
+  test("passes tool output through untouched when no truncation option is given", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            // 故意使用远超截断阈值的输出，验证不传 option 时绝不截断
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "x".repeat(10_000),
+              title: "Shell",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    // user=0, assistant=1, tool-result=2
+    const toolResult = result[2]!.content[0] as { type: string; output: { type: string; value: string } }
+    expect(toolResult.output.value).toBe("x".repeat(10_000))
+  })
+
+  // 行为复现：tool 工具层的截断 notice 在输出末尾（head 方向），必须被 tail
+  // 段完整保留。这是本次修复的核心目标——旧实现从头部截断会丢掉末尾 notice
+  // 中的恢复文件路径。
+  test("preserves tool-truncation notice at tail via head+tail truncation", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    // 模拟 tool.ts 截断后的真实形态：preview + "\n\n" + notice(path 在末尾)
+    const noticePath = "/data/tool-output/tool_abc123"
+    const notice = `<opencode_notice type="output_truncated" source="tool" total="500L/40000B" shown="head 1000L/16000B" path="${noticePath}" guidance="use grep on path first" />`
+    const output = "PREVIEW_LINE\n".repeat(100) + "\n\n" + notice
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { filePath: "/some/file" },
+              output,
+              title: "Read",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // head=50 tail=200：tail 段必须完整含 notice 与 path 属性
+    const result = await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 50, tail: 200 } })
+    // user=0, assistant=1, tool-result=2
+    const toolResult = result[2]!.content[0] as { type: string; output: { type: string; value: string } }
+    expect(toolResult.output.value).toContain(noticePath)
+    expect(toolResult.output.value).toContain(notice)
+    expect(toolResult.output.value).toContain("[... compaction truncated")
+  })
+
+  // 行为复现：shell 工具层 notice 在输出开头（tail 方向），必须被 head 段保留。
+  test("preserves shell-truncation notice at head via head+tail truncation", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    // 模拟 shell.ts 截断后的真实形态：notice(path 在开头) + "\n\n" + output + 末尾 execution notice
+    const noticePath = "/data/tool-output/tool_shell456"
+    const truncNotice = `<opencode_notice type="output_truncated" source="shell" total="800L/60000B" shown="tail 1000L/16000B" path="${noticePath}" guidance="use grep on path first" />`
+    const execNotice = '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="1" />'
+    const output = truncNotice + "\n\n" + "TAIL_LINE\n".repeat(100) + "\n\n" + execNotice
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: "ls" },
+              output,
+              title: "Shell",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // head=200 tail=120：head 段保 shell 截断 notice 的 path；
+    // tail=120 足以容纳末尾 execution notice（约 90 字符），tail 段保 execution notice
+    const result = await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 200, tail: 120 } })
+    // user=0, assistant=1, tool-result=2
+    const toolResult = result[2]!.content[0] as { type: string; output: { type: string; value: string } }
+    expect(toolResult.output.value).toContain(noticePath)
+    expect(toolResult.output.value).toContain(execNotice)
+    expect(toolResult.output.value).toContain("[... compaction truncated")
+  })
+
+  // 退化边界：head=0 时只保留尾部，marker 在开头不含多余空行；
+  // tail=0 时只保留头部，marker 在末尾不含多余空行。真实调用方恒传 400/2000，
+  // 这两个用例闭合单边退化分支的防御性代码验证。
+  test("degrades to tail-only when head is 0", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "abcdefghij",
+              title: "Shell",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // head=0 tail=3：只保留末尾 3 字符 "hij"，marker 在开头，不应有前导空行
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 0, tail: 3 } })).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "[... compaction truncated 7 chars ...]\nhij" },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("degrades to head-only when tail is 0", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run tool" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "abcdefghij",
+              title: "Shell",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    // head=3 tail=0：只保留开头 3 字符 "abc"，marker 在末尾，不应有尾随空行
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 3, tail: 0 } })).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "abc\n[... compaction truncated 7 chars]" },
           },
         ],
       },

@@ -43,7 +43,12 @@ export const Event = {
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
+// 压缩回放时旧 tool 输出的 head/tail 双向截断预算。
+// head=400 保 shell 头部的截断 notice（path 属性排在 guidance 前，长路径下
+// 即使切到 notice 中段也能保住 path 前缀）；tail=2000 保 tool 末尾的截断
+// notice 完整含 path，避免模型压缩后丢失恢复文件路径。
+const TOOL_OUTPUT_HEAD_CHARS = 400
+const TOOL_OUTPUT_TAIL_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 // Whole-turn tail retention keeps exact assistant/tool continuity when it fits.
 // The defaults deliberately preserve four recent user turns with a 4k-16k token
@@ -864,7 +869,7 @@ export const layer = Layer.effect(
       const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       // 压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
       // 会保留已被 summary 覆盖的旧 head 作为审计/恢复数据，但这些旧 tool results 不能在
-      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
+      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 head/tail 预算
       // 重新截断并累计，导致本应压缩的可见会话膨胀成远超模型窗口的压缩请求。
       const history = MessageV2.filterCompacted(rawHistory)
       const prior = completedCompactions(history)
@@ -896,7 +901,7 @@ export const layer = Layer.effect(
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
         stripMedia: true,
-        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        toolOutputTruncation: { head: TOOL_OUTPUT_HEAD_CHARS, tail: TOOL_OUTPUT_TAIL_CHARS },
       })
       const ctx = yield* InstanceState.context
       const compactionMessages = [

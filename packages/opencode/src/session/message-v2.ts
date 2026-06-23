@@ -387,10 +387,22 @@ export const ToolStateCompleted = Schema.Struct({
 }).annotate({ identifier: "ToolStateCompleted" })
 export type ToolStateCompleted = Types.DeepMutable<Schema.Schema.Type<typeof ToolStateCompleted>>
 
-function truncateToolOutput(text: string, maxChars?: number) {
-  if (!maxChars || text.length <= maxChars) return text
-  const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
+// 压缩回放时对旧 tool 输出做 head+tail 双向保留。
+// 不变量：tool 工具层（truncate.ts）的截断 notice 在输出末尾（head 方向），
+// shell 工具层（shell.ts）的截断 notice 在输出开头（tail 方向）。两段 notice
+// 都携带恢复文件路径 path，单边截断必然丢掉另一侧路径，导致模型压缩后无法
+// 定位被省略的完整输出。head 段保开头 shell notice，tail 段保末尾 tool notice。
+// 兼容边界：headChars / tailChars 任一为 undefined 时（标题生成 / decide /
+// 正常 prompt / estimate 等非压缩路径均不传 option）必须原样返回，避免
+// slice(0, undefined) 与 NaN 污染每条 tool 输出。
+function truncateToolOutput(text: string, headChars?: number, tailChars?: number) {
+  if (headChars === undefined || tailChars === undefined) return text
+  if (text.length <= headChars + tailChars) return text
+  const omitted = text.length - headChars - tailChars
+  // head=0 / tail=0 退化为单边截断，并省去多余空行；真实调用方恒传 400/2000
+  if (tailChars === 0) return `${text.slice(0, headChars)}\n[... compaction truncated ${omitted} chars]`
+  if (headChars === 0) return `[... compaction truncated ${omitted} chars ...]\n${text.slice(text.length - tailChars)}`
+  return `${text.slice(0, headChars)}\n[... compaction truncated ${omitted} chars ...]\n${text.slice(text.length - tailChars)}`
 }
 
 export const ToolStateError = Schema.Struct({
@@ -780,7 +792,7 @@ function providerMetaValue(input: unknown): input is ProviderMetadata[string] {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
@@ -950,7 +962,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
               ? formatCompactionClearedNotice()
-              : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
+              : truncateToolOutput(
+                  part.state.output,
+                  options?.toolOutputTruncation?.head,
+                  options?.toolOutputTruncation?.tail,
+                )
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
             // For providers that don't support media in tool results, extract media files
@@ -1076,7 +1092,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
 }

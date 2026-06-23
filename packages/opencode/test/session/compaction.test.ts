@@ -2375,7 +2375,7 @@ describe("session.compaction.process", () => {
         const oldReply = yield* createAssistantMessage(session.id, old.id, test.directory)
         // 旧 head 里的大 tool result 模拟真实会话中已被 summary 覆盖的工具历史；
         // 第二次压缩必须只基于 compacted active window 更新 summary，不能把这段
-        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
+        // 审计/恢复用的 raw 历史重新上传，否则每条工具输出会按 head/tail 预算
         // 再次截断并累计，重新膨胀本应被压缩的上下文。
         yield* ssn.updatePart({
           id: PartID.ascending(),
