@@ -236,31 +236,34 @@ describe("step-finish token propagation via event", () => {
         input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 },
       })
       expect((yield* session.children(created.id)).find((item) => item.id === empty.id)?.tokens?.input).toBe(0)
-      // 旧请求仍有 100 个助手，加入新用户必须立即生成独立零请求快照。
+      // 旧请求仍有100个助手，无回复的新用户不能让完整请求累计归零。
       const nextUserID = MessageID.ascending()
       yield* session.updateMessage({
         id: nextUserID, sessionID: created.id, role: "user", time: { created: 1000 },
         agent: "build", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
       })
-      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: nextUserID, input: 0, output: 0, cost: 0 })
-      expect((yield* session.get(created.id)).request?.assistantID).toBeUndefined()
+      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: userID, input: 1400, output: 400, cost: 1 })
+      expect((yield* session.get(created.id)).request?.assistantID).toBeDefined()
       // 身份切换只改变请求投影，已确认 Session.tokens 仍保留完整历史。
       expect((yield* session.get(created.id)).tokens?.input).toBe(200)
-      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
-      expect(snapshots.at(-1)?.request?.cost).toBe(0)
+      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
+      expect(snapshots.at(-1)?.request?.cost).toBe(1)
       // 退订不影响持久请求；没有消费者时无需为兼容快照扫描完整历史。
       GlobalBus.off("event", listener)
+      const observed = snapshots.length
       const unobserved = {
         id: MessageID.ascending(), sessionID: created.id, role: "user" as const, time: { created: 1001 },
         agent: "build", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
       }
       yield* session.updateMessage(unobserved)
-      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
-      expect((yield* session.get(created.id)).request?.messageID).toBe(unobserved.id)
+      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
+      expect(snapshots).toHaveLength(observed)
+      expect((yield* session.get(created.id)).request?.messageID).toBe(userID)
       // 重新订阅后立即恢复真实投影，不能把无订阅状态缓存成永久禁用。
       GlobalBus.on("event", listener)
       yield* session.updateMessage({ ...unobserved, agent: "updated" })
-      expect(snapshots.at(-1)?.request?.messageID).toBe(unobserved.id)
+      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
+      expect(snapshots.length).toBeGreaterThan(observed)
     }),
     // fixture 包含跨窗口的持久事件与 fork；只放宽执行上限，不用固定 sleep 掩盖竞态。
     { timeout: 30000 },

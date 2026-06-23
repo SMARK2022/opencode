@@ -1105,7 +1105,13 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   // filter 接受新到旧的序列，源数组仍保持原顺序，不能原位 reverse 改掉 Sync 的消息顺序。
   const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
   const compacted = filterCompactedMessages(raw.toReversed())
-  const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
+  // 旧数据按已配对助手选择模型，避免排队中的 user 改变当前轮；无助手时保留首次输入估算。
+  const latestAssistantMsg = compacted.findLast((msg) => msg.info.role === "assistant")
+  const latestAssistantInfo = latestAssistantMsg?.info
+  const latestAssistantParentID = latestAssistantInfo && latestAssistantInfo.role === "assistant" ? latestAssistantInfo.parentID : undefined
+  const lastUser = latestAssistantParentID
+    ? compacted.findLast((msg) => msg.info.role === "user" && msg.info.id === latestAssistantParentID)?.info
+    : compacted.findLast((msg) => msg.info.role === "user")?.info
   const modelInfo = currentModel(input, lastUser)
   // 请求投影包含 native 首包前与确认后的细分；只有没有投影的旧 V1 才读取确认 part。
   const prepared = input.session?.request ? input.session.request.inputEstimate : latestInputEstimate(compacted, raw, modelInfo)

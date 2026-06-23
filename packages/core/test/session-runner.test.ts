@@ -3199,15 +3199,15 @@ describe("SessionRunnerLLM", () => {
 
       const first = yield* session.resume(sessionID).pipe(Effect.forkChild)
       while (requests.length < 1) yield* Effect.yieldNow
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue first" }), delivery: "queue" })
+      const active = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue first" }), delivery: "queue" })
       const queued = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
       streamGate = secondGate
       yield* Deferred.succeed(firstGate, undefined)
       while (requests.length < 2) yield* Effect.yieldNow
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Steer before next queued input" }) })
-      const steer = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
-      // gate 内的新 admission 尚未提升，必须有独立零请求，不能显示 Queue first 的回复。
-      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: steer.id, input: 0, output: 0, cost: 0 })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
+      // gate内的新steer尚未提升，显示继续属于已开始的Queue first。
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: active.id, input: 0, output: 0, cost: 0 })
       expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
       expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
       // 放开边界后先提升 steers，再提升早接纳的 Queue second；最终身份按可见顺序。
@@ -3275,14 +3275,14 @@ describe("SessionRunnerLLM", () => {
       expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
       const nextLegacyID = SessionV1.MessageID.ascending()
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...legacy, id: nextLegacyID, time: { created: legacy.time.created + 1 } } })
-      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: nextLegacyID, input: 0, output: 0, cost: 0 })
-      // 混合入口之后的新 admission 仍是独立零值，不能固定 native 优先或永远保留 V1 候选。
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
+      // 混合入口的无回复用户和未提升queue都不能接管已有配对请求。
       const waiting = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed waiting" }), delivery: "queue", resume: false })
-      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: waiting.id, input: 0, output: 0, cost: 0 })
-      // 再接纳等待请求后 step 也清零，不能借用刚完成的 native step。
-      expect((yield* session.get(sessionID)).request).toMatchObject({ stepInput: 0, stepOutput: 0 })
-      expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
-      expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
+      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
+      expect(waiting.id).not.toBe(queued.id)
+      expect((yield* session.get(sessionID)).request).toMatchObject({ stepInput: 10, stepOutput: 4 })
+      expect((yield* session.get(sessionID)).request?.assistantID).toBe(messages.findLast((message) => message.type === "assistant")?.id)
+      expect((yield* session.get(sessionID)).request?.model).toBeDefined()
     }),
   )
 

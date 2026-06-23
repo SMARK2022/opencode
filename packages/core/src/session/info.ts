@@ -20,16 +20,21 @@ export const selection = {
     -- 修订、移除和 revert 直接反映存储行，无需额外 replay 去重标记。
     -- 单表 SELECT 会剥离 Column 限定名；关联外层必须固定使用 "session"."id"。
     WITH v1_request AS (
-      -- V1 身份取完整持久用户消息，窗口淘汰不会触发新请求零值。
-      SELECT id, time_created, NULL AS promoted_seq, 'v1' AS kind
-      FROM message WHERE session_id = "session"."id" AND json_extract(data, '$.role') = 'user'
-      ORDER BY time_created DESC, id DESC LIMIT 1
+      -- 优先最新助手的父用户，跳过无回复输入；首次输入仍有独立零值投影。
+      SELECT m.id, m.time_created, NULL AS promoted_seq, 'v1' AS kind
+      FROM message m WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'user'
+      ORDER BY (m.id = (
+        SELECT json_extract(a.data, '$.parentID') FROM message a
+        WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
+        ORDER BY a.time_created DESC, a.id DESC LIMIT 1
+      )) DESC, m.time_created DESC, m.id DESC LIMIT 1
     ), native_request AS (
       -- native 身份取持久化 admission，不依赖显示窗口。
       -- 两种序号同属 Session durable 序列；旧 queue 后提升要覆盖较新 steer 的 admission。
       SELECT id, time_created, promoted_seq, 'native' AS kind, coalesce(promoted_seq, admitted_seq) AS position
       FROM session_input WHERE session_id = "session"."id"
-      ORDER BY coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
+      -- 未提升的queue/steer不能接管当前轮；没有提升记录时仍显示首次admission。
+      ORDER BY (promoted_seq IS NOT NULL) DESC, coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
     ), active_compaction AS (
       -- 复用压缩独立身份，仅在其真实生命周期内显示prepared估算，不冒用用户admission。
       SELECT json_extract(e.data, '$.messageID') AS id, json_extract(e.data, '$.timestamp') AS time_created,
@@ -49,9 +54,14 @@ export const selection = {
           ON e.aggregate_id = "session"."id" AND e.type = 'message.updated.1'
           AND json_extract(e.data, '$.info.id') = v.id AND json_extract(e.data, '$.info.role') = 'user'
         GROUP BY v.id
-        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction)
-      -- admission 或 promotion 决定最新身份；新 admission 等待时不能借用旧轮次。
-      ORDER BY position DESC, time_created DESC, id DESC LIMIT 1
+        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction) candidates
+      -- 混合入口同样优先已开始的请求；无回复V1输入不能压过正在执行的native轮次。
+      -- 活跃压缩拥有真实独立估算，继续以其durable位置参与最新执行请求选择。
+      ORDER BY CASE WHEN kind = 'compaction' THEN 1 WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
+        SELECT 1 FROM message a WHERE a.session_id = "session"."id"
+          AND json_extract(a.data, '$.role') = 'assistant'
+          AND json_extract(a.data, '$.parentID') = candidates.id
+      ) END DESC, position DESC, time_created DESC, id DESC LIMIT 1
     ), assistants AS (
       -- V1 明确 parentID 归属，不能只按最后助手或时间范围猜测请求。
       SELECT m.id, m.data, m.time_created AS position, 'v1' AS kind
