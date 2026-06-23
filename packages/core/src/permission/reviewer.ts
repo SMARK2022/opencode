@@ -57,7 +57,13 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       if (!session) return yield* new Failed({ reason: "Review session was not found" })
       const target = options.model ? ModelV2.parse(options.model) : undefined
       // 独立审查复用真实 Catalog/认证解析，不运行 Session 或任何工具。
-      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : undefined })
+      // 未显式指定 reviewer 模型时保留父会话选择，避免漂移到其他默认提供者。
+      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : session.model }).pipe(
+        // 仅source规定的失效隐式候选回退一次；显式配置及认证、取消等其它失败继续报错。
+        Effect.catchTag("SessionRunnerModel.ModelUnavailableError", (error) => target
+          ? Effect.fail(error)
+          : models.resolve({ ...session, model: undefined })),
+      )
       const history = yield* sessions.context(session.id)
       const policy = options.policy_path ? yield* fs.readFileString(path.resolve(location.directory, options.policy_path)) : ""
       const tenant = [PermissionReviewerPrompt.DEFAULT_TENANT_POLICY, policy, options.policy].filter(Boolean).join("\n\n")
