@@ -80,8 +80,10 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
 
-function truncateToolOutput(text: string, maxChars?: number) {
-  return truncateForCompaction(text, maxChars)
+function truncateToolOutput(text: string, headChars?: number, tailChars?: number) {
+  // 非压缩调用未提供完整双向预算时不截断；首尾与省略标记由两代共享owner维护。
+  if (headChars === undefined || tailChars === undefined) return text
+  return truncateForCompaction(text, headChars, tailChars)
 }
 
 export const Event = {
@@ -163,7 +165,7 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
@@ -344,7 +346,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
               ? formatCompactionClearedNotice()
-              : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
+              : truncateToolOutput(
+                  part.state.output,
+                  options?.toolOutputTruncation?.head,
+                  options?.toolOutputTruncation?.tail,
+                )
             const attachments =
               part.state.time.compacted || options?.stripMedia
                 ? []
@@ -472,7 +478,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }

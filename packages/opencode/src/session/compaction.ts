@@ -33,7 +33,13 @@ export const Event = SessionCompactionEvent
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
+// 压缩回放时旧 tool 输出的 head/tail 双向截断预算。
+// head=400 保 shell 头部的截断 notice（path 属性排在 guidance 前，长路径下
+// 即使切到 notice 中段也能保住 path 前缀）；tail=2000 保 tool 末尾的截断
+// notice 完整含 path，避免模型压缩后丢失恢复文件路径。
+// #328：400/2000 的不对称是刻意设计——头部只需容纳 notice 的 path 前缀，尾部要装完整恢复指引。
+const TOOL_OUTPUT_HEAD_CHARS = 400
+const TOOL_OUTPUT_TAIL_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
 const MIN_PRESERVE_RECENT_TOKENS = 4_000
@@ -64,7 +70,11 @@ type CompletedCompaction = {
 }
 
 const truncate = (value: string) =>
-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
+  // #328：head/tail 双向截断——head=400 保 notice 的 path 前缀（path 属性排在 guidance 前），
+  // tail=2000 保 tool 末尾 notice 完整含 path，压缩回放不丢恢复文件路径。
+  value.length <= TOOL_OUTPUT_HEAD_CHARS + TOOL_OUTPUT_TAIL_CHARS
+    ? value
+    : `${value.slice(0, TOOL_OUTPUT_HEAD_CHARS)}\n[truncated]\n...\n${value.slice(-TOOL_OUTPUT_TAIL_CHARS)}`
 
 const serialize = (message: SessionV1.WithParts) => {
   if (message.info.role === "user") {
@@ -484,7 +494,7 @@ const layer = Layer.effect(
       const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       // #251：压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
       // 会保留已被 summary 覆盖的旧 head 作为审计/恢复数据，但这些旧 tool results 不能在
-      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 TOOL_OUTPUT_MAX_CHARS
+      // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 head/tail 预算
       // 重新截断并累计，导致本应压缩的可见会话膨胀成远超模型窗口的压缩请求。
       const history = MessageV2.filterCompacted(rawHistory)
       const prior = completedCompactions(history)

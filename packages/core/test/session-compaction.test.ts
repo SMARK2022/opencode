@@ -60,7 +60,7 @@ test("compaction describes tool media without embedding base64", () => {
   expect(serialized).toBe("Image read successfully\n[Attached image/png: pixel.png]")
   expect(serialized).not.toContain(base64)
   // 检查真实shell与已完成工具序列化；只省略交付文本，不改持久消息或媒体策略。
-  const text = "x".repeat(2_006)
+  const text = "x".repeat(4_006) + "RECOVERY_TAIL"
   const created = DateTime.makeUnsafe(0)
   const shell = SessionMessage.Shell.make({
     id: SessionMessage.ID.make("msg_notice_shell"), type: "shell", callID: "shell-notice",
@@ -71,13 +71,15 @@ test("compaction describes tool media without embedding base64", () => {
     model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
     content: [SessionMessage.AssistantTool.make({
       type: "tool", id: "notice-tool", name: "read", time: { created, completed: created },
-      state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, structured: {}, content: [{ type: "text", text }] }),
+      state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, structured: {}, content: [{ type: "text", text }], outputPaths: ["/cache/middle-output"] }),
     })],
     time: { created, completed: created },
   })
   for (const message of [shell, assistant]) {
     const result = SessionCompaction.serialize(message)
-    expect(result).toContain(`${"x".repeat(2_000)}\n[... compaction truncated 6 chars]`)
+    // 实际serializer保留两端和精确省略数，不能用短于预算的输出充当截断回归。
+    expect(result).toContain(`${"x".repeat(2_000)}\n[... compaction truncated 19 chars ...]\n${"x".repeat(1_987)}RECOVERY_TAIL`)
+    if (message.type === "assistant") expect(result).toContain("[Full tool output]: /cache/middle-output")
     expect(result).not.toContain("[truncated]")
     expect(result).not.toContain("compaction_cleared")
   }
