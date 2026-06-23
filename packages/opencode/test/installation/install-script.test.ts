@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { existsSync } from "fs"
+import { existsSync, readdirSync, statSync } from "fs"
 import fs from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -57,6 +57,48 @@ describe("install script", () => {
     expect(result.output).toContain("reinstalling to refresh it")
     expect(await Bun.file(target).text()).toContain("new-target")
   })
+
+  // 回归：升级时覆盖运行中二进制曾用 `cp` 原地截断，在 macOS 上触发内核
+  // cs_invalid_page → SIGKILL，令运行中 daemon 与升级后的 --version 验证进程
+  // 双双卡死。install_executable 必须改用同目录临时文件 + rename 原子替换，
+  // 使运行中进程仍持有旧 inode 而不受影响。Linux/macOS 上 `cp` 截断保留目标
+  // inode、`mv` rename 切换 inode，因此 inode 是否变化是区分两种实现的可复现
+  // 判别；Windows 独占锁定运行中 .exe，rename 退回 cp，inode 语义不可靠，跳过。
+  test.skipIf(process.platform === "win32")(
+    "replaces the target via atomic rename rather than in-place overwrite",
+    async () => {
+      await using tmp = await tmpdir()
+      const home = path.join(tmp.path, "home")
+      const installDir = path.join(home, ".local", "bin")
+      const fakeBin = path.join(tmp.path, "fake-bin")
+      const asset = await createReleaseAsset(tmp.path, "atomic-target")
+      const target = path.join(installDir, "opencode")
+
+      await writeFakeReleaseCommands(fakeBin, asset)
+      // 预置旧目标二进制并记录其 inode；原地 cp 会保留它，原子 rename 会替换它。
+      await writeExecutable(target, `#!/usr/bin/env bash\necho "${VERSION}"\n# old-target\n`)
+      const beforeIno = statSync(target).ino
+
+      const result = await runInstall(["--version", VERSION, "--no-modify-path"], {
+        HOME: home,
+        OPENCODE_INSTALL_DIR: installDir,
+        OPENCODE_TEST_ASSET: asset,
+        // installDir 必须进 PATH：脚本 check_version 会 `command -v opencode`，
+        // 让其先命中预置的 target，而不是用户 PATH 上可能存在的真实（可能损坏
+        // 或卡死在 --version）的 opencode，避免测试被环境拖入死等。
+        PATH: bashPath(fakeBin, installDir),
+      })
+
+      expectSuccess(result)
+      // cp 截断 → inode 不变（旧实现下此处相等，测试红）；mv rename → inode 变化。
+      const afterIno = statSync(target).ino
+      expect(afterIno).not.toBe(beforeIno)
+      // 新二进制可用且为新版本内容。
+      expect(await runBinary(target)).toBe(VERSION)
+      // 原子路径成功后不得在安装目录残留 .install.* 临时文件（mktemp 随机后缀）。
+      expect(readdirSync(installDir).filter((name) => name.includes(".install."))).toEqual([])
+    },
+  )
 
   test("updates all existing supported profiles by default without duplicate PATH entries", async () => {
     await using tmp = await tmpdir()

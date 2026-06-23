@@ -486,8 +486,25 @@ install_executable() {
     local dst_name="$2"
     local dst="${INSTALL_DIR}/${dst_name}"
 
-    cp "$src" "$dst"
-    chmod 755 "$dst"
+    # 原子替换：先把新二进制写进同目录临时文件，再 rename 覆盖目标。
+    # 运行中的 daemon 仍映射旧 inode，避免 macOS 内核对被覆盖 Mach-O 做
+    # cs_invalid_page 校验失败而 SIGKILL 进程；升级后紧接的 --version 验证
+    # 也因此能映射到完整有效的新二进制，不再卡在 _dyld_start。Windows 独占
+    # 锁定运行中的 .exe，rename 会失败——退回原地覆盖（仅在该 .exe 未被持有时
+    # 可行；被持有时 cp 同样失败，属既有行为，Windows 无代码签名页失效问题）。
+    # 临时文件与目标同目录保证 mv 是同文件系统纯 rename。
+    local tmp
+    tmp=$(mktemp "${dst}.install.XXXXXX") || { cp "$src" "$dst" && chmod 755 "$dst"; return; }
+    # 清理上一轮崩溃可能残留的同前缀临时文件，避免目录堆积。
+    rm -f "${dst}.install."* 2>/dev/null || true
+    cp "$src" "$tmp"
+    chmod 755 "$tmp"
+    if ! mv -f "$tmp" "$dst" 2>/dev/null; then
+        # rename 失败（Windows 运行中 .exe 被独占锁，或跨文件系统）退回原地覆盖。
+        rm -f "$tmp"
+        cp "$src" "$dst"
+        chmod 755 "$dst"
+    fi
 
     if [ "${os:-}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
         xattr -d com.apple.quarantine "$dst" 2>/dev/null || true
