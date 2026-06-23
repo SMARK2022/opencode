@@ -12,10 +12,12 @@ import { SessionRetry } from "@/session/retry"
 import { Database } from "@opencode-ai/core/database/database"
 
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import type { ToolPart, User, Assistant, TextPart, ReasoningPart } from "@opencode-ai/core/v1/session"
 import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } from "ai"
-import { Context, Effect, Layer, Schema, Semaphore } from "effect"
+import { Context, Effect, Exit, Layer, Option, Schema, Semaphore } from "effect"
 import * as Stream from "effect/Stream"
 import { mergeDeep } from "remeda"
 import { PermissionReviewerPrompt } from "./prompt"
@@ -139,13 +141,7 @@ export const layer = Layer.effect(
                 Provider.parseModel(autoReview.model).providerID,
                 Provider.parseModel(autoReview.model).modelID,
                 )
-            : yield* Effect.gen(function* () {
-                const current = yield* provider.defaultModel()
-                return (
-                  (yield* provider.getSmallModel(current.providerID)) ??
-                  (yield* provider.getModel(current.providerID, current.modelID))
-                )
-              })
+            : yield* resolveImplicitReviewerModel(input.sessionID ? SessionID.make(input.sessionID) : undefined)
           // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
           const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
           // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
@@ -274,6 +270,76 @@ export const layer = Layer.effect(
       })
 
     return Service.of({ review })
+
+    // [local-smark] 隐式 reviewer 模型解析开始
+    // 未配置 permission.auto_review.model 时，reviewer 不应直接使用全局
+    // Provider.defaultModel()，因为后者会读 state/model.json recent，可能漂移到
+    // 一个认证失效的 provider（如 zhipuai/glm-5.2 → 401 → “身份验证失败。”）。
+    // 这里复用 SessionPrompt.currentModel 的语义：先读父会话 SessionTable.model，
+    // 再找最近一条带 model 的 user message，最后才回退到 defaultModel。选定候选
+    // provider 后仍沿用 getSmallModel 优先策略以保持成本/性能行为不变。
+    function resolveImplicitReviewerModel(sessionID: SessionID | undefined) {
+      return Effect.gen(function* () {
+        const candidate = yield* parentSessionModel(sessionID)
+        // 候选 provider 选定后，优先用同 provider 的 small model；若不存在则用 exact model。
+        // 保留既有 small_model 语义：全局 small_model 仍可能跨 provider 覆盖，这是兼容行为。
+        return yield* resolveModelWithFallback(candidate)
+      })
+    }
+
+    // 读取父会话当前模型，语义对齐 SessionPrompt.currentModel：
+    // SessionTable.model → 最近 user message model → provider.defaultModel()
+    function parentSessionModel(sessionID: SessionID | undefined) {
+      return Effect.gen(function* () {
+        if (!sessionID) return yield* provider.defaultModel()
+        // session.get 和 findMessage 是 best-effort：如果 session 不存在或
+        // message store 不可用，不能让 reviewer 直接不可用，应回退到 defaultModel。
+        const exit = yield* Effect.exit(session.get(sessionID))
+        if (Exit.isSuccess(exit)) {
+          const s = exit.value
+          if (s.model) {
+            return {
+              providerID: s.model.providerID,
+              modelID: s.model.id,
+            }
+          }
+        }
+        // 旧 session 或 projector 未写入 model 时，用最近 user message 的 model
+        const match = yield* session
+          .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+          .pipe(Effect.catch(() => Effect.succeed(Option.none())))
+        if (Option.isSome(match) && match.value.info.role === "user" && match.value.info.model) {
+          return {
+            providerID: match.value.info.model.providerID,
+            modelID: match.value.info.model.modelID,
+          }
+        }
+        return yield* provider.defaultModel()
+      })
+    }
+
+    // 选定候选 provider/model 后，沿用 getSmallModel → getModel 的既有解析顺序。
+    // 如果隐式候选的 exact model 已从 provider 配置移除（ModelNotFoundError），
+    // 只在此处回退一次到 defaultModel，避免 stale session model 让 reviewer 永久不可用。
+    function resolveModelWithFallback(candidate: { providerID: ProviderV2.ID; modelID: ModelV2.ID }) {
+      return Effect.gen(function* () {
+        const small = yield* provider.getSmallModel(candidate.providerID).pipe(
+          Effect.catch(() => Effect.succeed(undefined)),
+        )
+        if (small) return small
+        return yield* provider.getModel(candidate.providerID, candidate.modelID).pipe(
+          // 仅隐式候选的 exact model 缺失才回退；显式 auto_review.model 不经过此路径
+          Effect.catchTag("ProviderModelNotFoundError", () =>
+            Effect.gen(function* () {
+              const fallback = yield* provider.defaultModel()
+              return yield* provider.getModel(fallback.providerID, fallback.modelID)
+            }),
+          ),
+        )
+      })
+    }
+    // [local-smark] 隐式 reviewer 模型解析结束
+
 
     // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
     function getReviewerSession(parentID: SessionID, model: Provider.Model) {

@@ -36,6 +36,7 @@ import { testEffect } from "./lib/effect"
 let reviewSettings = new Config.Info({})
 let assessment: typeof PermissionReviewerSchema.Assessment.Type = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
 const reviewRequests: LLMRequest[] = []
+const reviewModels: unknown[] = []
 let reviewGate: Deferred.Deferred<void> | undefined
 let reviewStarted: Deferred.Deferred<void> | undefined
 let malformed = false
@@ -76,7 +77,14 @@ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
     }))))
   })),
 }))
-const reviewModel = SessionRunnerModel.layerWith(() => Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route })))
+const reviewModel = SessionRunnerModel.layerWith((session) => {
+  reviewModels.push(session.model)
+  // 真实reviewer仍执行，只在模型目录边界模拟已删除条目；默认解析及合法显式模型保持成功。
+  if (session.model?.id === "removed-model") return Effect.fail(new SessionRunnerModel.ModelUnavailableError({
+    providerID: session.model.providerID, modelID: session.model.id,
+  }))
+  return Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route }))
+})
 const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
 
 const current = Layer.succeed(
@@ -458,6 +466,7 @@ describe("PermissionV2", () => {
   it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
     reviewSettings = new Config.Info({})
     reviewRequests.length = 0
+    reviewModels.length = 0
     malformed = false
     reviewGate = undefined
     reviewStarted = undefined
@@ -471,6 +480,10 @@ describe("PermissionV2", () => {
     }))
     yield* Effect.addFinalizer(() => unsubscribe)
     const evidence = yield* Database.Service
+    // 验证的是实际 reviewer 到 resolver 的输入，不能用固定返回模型掩盖来源漂移。
+    yield* evidence.db.update(SessionTable).set({ model: {
+      id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider"),
+    } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
     const evidenceRows = [
       ...Array.from({ length: 45 }, (_, index) => ({
         id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
@@ -491,6 +504,7 @@ describe("PermissionV2", () => {
     const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
+    expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
     expect(progress[0]?.reviewID).toBeDefined()
     expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
@@ -512,8 +526,23 @@ describe("PermissionV2", () => {
     expect(reviewText).not.toContain("PRIVATE REASONING")
     expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
     // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
+    // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。
+    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "override/reviewer" }) })
     expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(2)
+    expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
+    const stale = { id: ModelV2.ID.make("removed-model"), providerID: ProviderV2.ID.make("parent-provider") }
+    yield* evidence.db.update(SessionTable).set({ model: stale }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
+    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ fallback: "deny" }) })
+    const staleRequest = { ...automatic, action: "external_directory", resources: ["/stale"], metadata: { action_kind: "shell", command: "git add ." } }
+    expect(yield* service.ask(staleRequest)).toMatchObject({ effect: "allow" })
+    expect(reviewModels.at(-2)).toEqual({ ...stale, variant: "default" })
+    expect(reviewModels.at(-1)).toBeUndefined()
+    // 同样的不存在模型若来自显式配置就必须失败，不能悄悄改用默认提供者。
+    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "parent-provider/removed-model", fallback: "deny" }) })
+    expect(yield* service.ask({ ...staleRequest, resources: ["/explicit-stale"] })).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(3)
+    yield* evidence.db.update(SessionTable).set({ model: { id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider") } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
     reviewSettings = new Config.Info({ approvals_reviewer: "user" })
     const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
     expect(user.effect).toBe("ask")
