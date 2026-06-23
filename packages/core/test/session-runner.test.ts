@@ -2073,6 +2073,28 @@ describe("SessionRunnerLLM", () => {
       const fileSystem = yield* FSUtil.Service
       if (!info) return yield* Effect.die("Missing Session for catalog input budget")
       const entries = yield* SessionHistory.entriesForRunner(database.db, sessionID, 0)
+      const outputs = yield* ToolOutputStore.Service
+      const bounded = yield* outputs.bound({
+        sessionID, toolCallID: "recovery-proof",
+        output: { structured: {}, content: [{ type: "text", text: "head".repeat(6_000) + "RECOVERY_TAIL" }] },
+      })
+      expect(bounded.outputPaths).toHaveLength(1)
+      // 使用真实16KiB投影确认恢复路径在中部，再检查摘要请求而非复制截断算法。
+      const preview = bounded.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+      expect(preview.indexOf(bounded.outputPaths.join(""))).toBeGreaterThan(2_000)
+      expect(preview.indexOf(bounded.outputPaths.join(""))).toBeLessThan(preview.length - 2_000)
+      const recoveryEntry = {
+        seq: -1,
+        message: SessionMessage.Assistant.make({
+          id: SessionMessage.ID.create(), type: "assistant", agent: "build",
+          model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") },
+          time: { created: info.time.created },
+          content: [{
+            type: "tool", id: "recovery-proof", name: "fixture", time: { created: info.time.created },
+            state: { status: "completed", input: {}, structured: {}, content: [{ type: "text", text: preview }], outputPaths: bounded.outputPaths },
+          }],
+        }),
+      }
       const providerID = ProviderV2.ID.make("input-budget")
       const modelID = ModelV2.ID.make("input-budget")
       // 68k 保留原 floor 余量；69k 越过 68700，可同时识别丢 input 与重复扣 output 两种回归。
@@ -2111,6 +2133,7 @@ describe("SessionRunnerLLM", () => {
           // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
           llm: { stream: (summaryRequest, onPrepared) => {
             streams++
+            expect(userTexts(summaryRequest)[0]).toContain(bounded.outputPaths.join(""))
             return Stream.unwrap(Effect.gen(function* () {
               yield* (onPrepared?.({ messages: summaryRequest.messages }) ?? Effect.void)
               const pending = yield* store.get(sessionID)
@@ -2121,12 +2144,12 @@ describe("SessionRunnerLLM", () => {
               return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
             }))
           } },
-          config: buffer === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({
-            compaction: new ConfigCompaction.Info({ buffer }),
+          config: [new Config.Document({ type: "document", info: new Config.Info({
+            compaction: new ConfigCompaction.Info({ buffer, keep: new ConfigCompaction.Keep({ tokens: 0 }) }),
           }) })],
         })
         const request = LLM.request({ model: resolved, messages: [Message.user("x".repeat(size * 4))], generation: { maxTokens: output } })
-        expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request })).toBe(expected)
+        expect(yield* compaction.compactIfNeeded({ sessionID, entries: [recoveryEntry, ...entries], model: resolved, pricing: selected.cost, request })).toBe(expected)
         // 阈值触发只产生现有一次 summary turn；未触发和摘要预算拒绝都保持零 provider 调用。
         expect(streams).toBe(expected ? 1 : 0)
         if (limit === 73_700 && size === 68_000) {
@@ -2135,7 +2158,7 @@ describe("SessionRunnerLLM", () => {
             { type: "text", text: "x".repeat(50_000) }, { type: "media", mediaType: "image/png", data: `data:image/png;base64,${"a".repeat(400_000)}` },
           ])] })
           expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: mediaRequest })).toBe(false)
-          const learnedEntries = entries.map((entry) => entry.message.type !== "assistant" ? entry : { ...entry, message: {
+          const learnedEntries = [recoveryEntry, ...entries].map((entry) => entry.message.type !== "assistant" ? entry : { ...entry, message: {
             ...entry.message, model: { id: modelID, providerID },
             inputEstimate: { bodyChars: 827_111, input: 128_159, confirmed: true },
             tokens: { input: 128_159, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -2144,7 +2167,7 @@ describe("SessionRunnerLLM", () => {
           // 实际压缩owner应在读取provider前使用确认密度；缺样本对照则触发一次摘要。
           expect(yield* compaction.compactIfNeeded({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(false)
           expect(streams).toBe(0)
-          expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
+          expect(yield* compaction.compactIfNeeded({ sessionID, entries: [recoveryEntry, ...entries], model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
           expect(streams).toBe(1)
           expect(yield* compaction.compact({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
           expect(estimated?.charsPerToken).toBeCloseTo(6.45, 1)

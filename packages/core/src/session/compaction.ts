@@ -25,6 +25,8 @@ const DEFAULT_BUFFER = 20_000
 const DEFAULT_BUFFER_MIN = 5_000
 const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
+// 保留输出尾部错误信息；中部恢复引用由下方序列化器单独保留。
+const TOOL_OUTPUT_TAIL_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
 // 保留上游工作状态结构；文件定位与错误修复单列，避免恢复时重读文件或重复失败尝试。
 // 原生 Core 摘要不经过 V1 agent，语言约束须放在共享模板；路径、符号和错误等字面值仍保持原样。
@@ -114,8 +116,8 @@ type Input = {
 
 const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
-// 保留原2000字符预算；只统一模型省略说明，不重做tail、memento或持久清理。
-const truncate = (value: string) => truncateForCompaction(value, TOOL_OUTPUT_MAX_CHARS)
+// 保留原2000字符头部并加尾部预算，用户原话与memento不经过此工具文本截断。
+const truncate = (value: string) => truncateForCompaction(value, TOOL_OUTPUT_MAX_CHARS, TOOL_OUTPUT_TAIL_CHARS)
 
 export const serializeToolContent = (content: SessionMessage.ToolStateCompleted["content"]) =>
   content
@@ -139,6 +141,8 @@ export const serialize = (message: SessionMessage.Message) => {
           return [
             `[Assistant tool call]: ${part.name}(${input})`,
             `[Tool result]: ${truncate(serializeToolContent(part.state.content))}`,
+            // 托管路径可能位于预览中部，不能随二次首尾截断丢失恢复入口。
+            ...(part.state.outputPaths ?? []).map((path) => `[Full tool output]: ${path}`),
           ]
         if (part.state.status === "error")
           return [`[Assistant tool call]: ${part.name}(${input})`, `[Tool error]: ${part.state.error.message}`]

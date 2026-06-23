@@ -67,10 +67,18 @@ export function formatCompactionClearedNotice() {
   return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
 }
 
-// 截断只作用于模型交付文本，不标记持久历史已被清理；零上限沿源语义禁用截断。
-export function truncateForCompaction(text: string, maxChars?: number) {
-  if (!maxChars || text.length <= maxChars) return text
-  return `${text.slice(0, maxChars)}\n[... compaction truncated ${text.length - maxChars} chars]`
+// 只截模型交付文本；旧单边零上限禁用截断，显式双向预算保留source的零端退化语义。
+export function truncateForCompaction(text: string, maxChars?: number, tailChars?: number) {
+  if (tailChars === undefined) {
+    if (!maxChars || text.length <= maxChars) return text
+    return `${text.slice(0, maxChars)}\n[... compaction truncated ${text.length - maxChars} chars]`
+  }
+  if (maxChars === undefined || text.length <= maxChars + tailChars) return text
+  const omitted = text.length - maxChars - tailChars
+  // 不截短重叠的首尾；单端预算避免多余空行，训练过的省略标记原话保持不变。
+  if (tailChars === 0) return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
+  if (maxChars === 0) return `[... compaction truncated ${omitted} chars ...]\n${text.slice(-tailChars)}`
+  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars ...]\n${text.slice(-tailChars)}`
 }
 
 function formatNotice(input: Notice) {
