@@ -488,7 +488,14 @@ const layer = Layer.effect(
           { args: taskArgs },
         )
         return yield* taskTool.execute(taskArgs, {
-          agent: task.agent,
+          // handleSubtask 必须把父会话当前 agent 名传给 TaskTool，而不是
+          // SubtaskPart.agent（子 agent 名）。task.ts 用 ctx.agent 解析
+          // parentAgentName 来派生子会话的 permission ceiling：如果传子 agent
+          // 名，parentAgent 会被解析为子 agent 自己的 permission，auto 父会话
+          // 的 external_directory/bash/edit auto 规则不会出现在 ceilings 中。
+          // lastUser.agent 与 Path A（resolveTools 的 input.agent.name）一致，
+          // 都来自 createUserMessage 写入的 user message agent 字段。
+          agent: lastUser.agent,
           messageID: assistantMessage.id,
           sessionID,
           abort: taskAbort.signal,
@@ -507,12 +514,9 @@ const layer = Layer.effect(
             permission
               .ask({
                 ...req,
-                 // Internally materialized task execution bypasses the main tool
-                 // adapter above, so it must attach the same agent evidence here.
-                 // Keep this aligned with the primary ctx.ask wrapper: reviewer
-                 // enablement must depend on the executing agent, not on each tool
-                 // remembering to pass metadata.agent itself.
-                 metadata: { ...req.metadata, agent: task.agent },
+                // 审计元数据也必须用父 agent 名，与 Path A 的
+                // metadata.agent: input.agent.name 保持一致
+                metadata: { ...req.metadata, agent: lastUser.agent },
         // #230：prompt 适配层统一写入 agent 标识——工具实现无需各自复制 ctx.agent
                 sessionID,
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
@@ -1261,8 +1265,15 @@ const layer = Layer.effect(
         permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
       }
       if (permissions.length > 0) {
-        session.permission = permissions
-        yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
+        // 子会话的 permission 由 TaskTool 通过 deriveSubagentSessionPermission
+        // 派生（含父 agent 的 auto/ask/deny ceiling 和默认 task/todowrite deny）。
+        // 这里的 tool override（如 task: false、todowrite: false）必须追加到
+        // 已有 permission 之后（last-match-wins），而不是替换整个 ruleset。
+        // 替换会擦除 TaskTool 派生的 auto ceiling，导致子会话的
+        // external_directory/bash 等权限从 auto 降级到子 agent 自己的默认 ask。
+        const merged = Permission.compact([...(session.permission ?? []), ...permissions])
+        session.permission = merged
+        yield* sessions.setPermission({ sessionID: session.id, permission: merged })
       }
 
       if (input.noReply === true) {
