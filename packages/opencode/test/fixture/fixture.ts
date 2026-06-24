@@ -56,7 +56,12 @@ export async function reloadTestInstance(input: { directory: string }) {
 const DISPOSAL_TIMEOUT = 5_000
 const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
   // 用 setTimeout 而非 Bun.sleep，以便在 p 先 settle 时 clearTimeout
-  // 避免向后续测试输出虚假的 "timed out" 警告
+  // 避免向后续测试输出虚假的 "timed out" 警告。
+  //
+  // 关键不变量：Promise.race 直接竞争原始 p（不包 .finally()），
+  // 确保 settle 时序与无超时保护时完全一致——Bus 测试依赖
+  // disposeAllInstances 返回后 InstanceDisposed 事件已在 PubSub
+  // 队列中，额外的微任务轮次会扰动跨 runtime 的事件投递时序。
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<void>((resolve) => {
     timer = setTimeout(() => {
@@ -64,10 +69,9 @@ const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
       resolve()
     }, DISPOSAL_TIMEOUT)
   })
-  return Promise.race([
-    p.finally(() => { if (timer) clearTimeout(timer) }),
-    timeout,
-  ]) as Promise<T>
+  // 在 p 上注册 settle 回调清除定时器，但不改变 p 本身的 settle 行为
+  p.then(() => { if (timer) clearTimeout(timer) }, () => { if (timer) clearTimeout(timer) })
+  return Promise.race([p, timeout]) as Promise<T>
 }
 
 export async function disposeAllInstances() {
