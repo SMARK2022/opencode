@@ -138,13 +138,27 @@ export function renderReadStub(input: {
   status: "stub_same_range_visible" | "stub_covered_range_visible"
   coveredBy?: string
 }) {
+  // 两代共用可见覆盖末行，续读从已交付区间之后开始，不重复灌入正文。
+  const visibleEnd = input.coveredBy ? Number(input.coveredBy.split("-")[1]) : input.end
+  const nextOffset = visibleEnd + 1
+  // 有界扫描的 total 可能只是下界，只有确切末尾才能关闭 offset 出口。
+  const reachedEof = input.totalExact && visibleEnd >= input.total
+  const offsetExit = reachedEof
+    ? "No unread lines remain (end of file reached); use grep to locate symbols."
+    : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
+  const coverage = input.coveredBy ?? `${input.start}-${input.end}`
+  // 版本与覆盖证明已由 findReadStub 核验，保留原话以消除模型的重读动机。
+  const message =
+    input.status === "stub_same_range_visible"
+      ? `Lines ${input.start}-${input.end} are the latest version and already in context; do NOT re-read.\n${offsetExit}`
+      : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
   return [
     `<path>${escapeXmlText(input.path)}</path>`,
     `<type>file</type>`,
     `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
     `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="0" />`,
     `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${escapeXmlAttr(input.coveredBy)}"` : ""}>`,
-    input.status === "stub_same_range_visible" ? "Requested range is already visible in the current context." : "Requested range is already covered by a visible read result.",
+    message,
     "</stub>",
   ].join("\n")
 }

@@ -37,6 +37,10 @@ describe("toLLMMessages", () => {
     expect(results(first, second)[0]).toEqual({ type: "json", value: output })
     expect(results(first, second)[1]).toMatchObject({ type: "text" })
     expect(JSON.stringify(results(first, second)[1])).toContain("stub_same_range_visible")
+    // 实际 Native 模型投影在确切 EOF 关闭 offset，持久工具结果仍保持原样。
+    expect(JSON.stringify(results(first, second)[1])).toContain("end of file reached")
+    expect(JSON.stringify(results(first, second)[1])).not.toContain("offset=2 for unread lines")
+    expect(JSON.stringify(results(first, second)[1])).toContain("grep to locate symbols")
     expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
     // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
     expect(results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1]).toMatchObject({ type: "json" })
@@ -62,12 +66,25 @@ describe("toLLMMessages", () => {
     const defaultPage = { ...page, content: Array.from({ length: 200 }, () => "line").join("\n"), next: 201,
       read: { ...metadata, size: 5000, end: 200, total: 1000, returned: 200 } }
     expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 200 }))[1])).toContain("stub_same_range_visible")
+    expect(JSON.stringify(results(read("next1", defaultPage), read("next2", defaultPage))[1])).toContain("offset=201 for unread lines")
     const wider = { ...defaultPage, truncated: false, next: undefined, content: "line\n".repeat(999) + "line", read: { ...defaultPage.read, end: 1000, returned: 1000 } }
     expect(results(read("default3", defaultPage), read("default4", wider, { path: "note.txt", limit: 2000 }))[1]).toEqual({ type: "json", value: wider })
     // 按实际区间判断覆盖，不能把请求 limit 当作已经交付的正文；小交集不额外提示。
     const covering = { ...defaultPage, content: "line\n".repeat(99) + "line", read: { ...defaultPage.read, end: 100, returned: 100 } }
     const covered = { ...page, content: "line\n".repeat(10) + "line", offset: 10, next: 21, read: { ...defaultPage.read, start: 10, end: 20, returned: 11 } }
     expect(JSON.stringify(results(read("wide", covering), read("covered", covered))[1])).toContain("stub_covered_range_visible")
+    expect(JSON.stringify(results(read("wide-next", covering), read("covered-next", covered))[1])).toContain("offset=101 for unread lines")
+    // 覆盖源的末行决定出口；同样的总行数下界不能伪装成已到 EOF。
+    const eofCovering = { ...covering, read: { ...covering.read, total: 100 } }
+    const eofCovered = { ...covered, read: { ...covered.read, total: 100 } }
+    const atEof = JSON.stringify(results(read("eof-wide", eofCovering), read("eof-covered", eofCovered))[1])
+    expect(atEof).toContain("end of file reached")
+    expect(atEof).not.toContain("offset=101 for unread lines")
+    expect(atEof).toContain("grep to locate symbols")
+    const unknownCovering = { ...eofCovering, read: { ...eofCovering.read, totalExact: false } }
+    const unknownCovered = { ...eofCovered, read: { ...eofCovered.read, totalExact: false } }
+    expect(JSON.stringify(results(read("unknown-wide", unknownCovering), read("unknown-covered", unknownCovered))[1]))
+      .toContain("offset=101 for unread lines")
     const overlap = { ...defaultPage, content: "line\n".repeat(99) + "line", offset: 151, next: 251, read: { ...defaultPage.read, start: 151, end: 250, returned: 100 } }
     expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
     // 缺少稳定版本、只有 stub 或未交付正文的结果仍不能证明覆盖。
