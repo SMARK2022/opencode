@@ -613,6 +613,39 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
   ),
 )
 
+// 直接脚本入口必须改用 node 执行转写 CLI，不能误启动会污染 stdout 的 MCP 协议服务。
+it.instance("infers voice transcriber when MCP command runs mcp-server.js directly via shebang", () =>
+  withCleanState(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const test = yield* TestInstance
+      const agentDir = path.join(test.directory, "tools", "chatgpt-agent")
+      const mcpServer = path.join(agentDir, "mcp-server.js")
+      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
+      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
+        mcp: {
+          chatgpt: {
+            type: "local",
+            command: [mcpServer],
+            enabled: true,
+          },
+        },
+      })
+
+      // basename+toLowerCase 归一平台大小写与路径分隔差异：判定只看文件名，不关心安装目录前缀。
+      const config = yield* getTuiConfig(test.directory)
+      expect(config.voice?.transcriber?.command).toBe("node")
+      expect(config.voice?.transcriber?.args).toEqual([
+        path.join(agentDir, "chatgpt.js"),
+        "transcribe-file",
+        "--file",
+        "{file}",
+        "--json",
+      ])
+    }),
+  ),
+)
+
 // 这个用例保护 MCP 扫描边界：只有 key/name 明确指向 ChatGPT 的本地 server 才能作为语音后端。
 // unrelated server 即使目录里有 chatgpt.js，也不能被误当作语音转写器来源。
 // 同时保留多个 server 时的选择行为，防止未来遍历顺序改动导致错用其它工具目录。
