@@ -330,6 +330,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # release notes 需要完整 commit 历史 + 全部 tag
 
       - name: Download release workflow artifacts
         uses: actions/download-artifact@v4
@@ -363,23 +365,81 @@ jobs:
           echo "==== checksums.txt ===="
           cat checksums.txt
 
-      - name: Create release if missing
+      - name: Generate release notes from commit log
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
 
+          # 上一个版本 tag（排除当前版本自身；匹配 v*-smark 格式）
+          PREV_TAG=$(git tag --sort=-creatordate \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+(-smark)?$" \
+            | grep -vE "^v${VERSION}$" \
+            | head -1)
+
+          {
+            echo "## 更新内容"
+            echo ""
+
+            if [ -z "$PREV_TAG" ]; then
+              echo "（首次发布）"
+              git log --format="%h %s" --reverse | head -50
+            else
+              # 版本 bump commit：首个把当前版本号写进 package.json 的提交
+              BUMPCOMMIT=$(git log "${PREV_TAG}..HEAD" --reverse --format="%H" \
+                -S "\"version\": \"${VERSION}\"" -- packages/opencode/package.json | head -1)
+
+              if [ -n "$BUMPCOMMIT" ]; then
+                # 有版本 bump：分两节，避免上个版本期间积累的 commit 与本版本新增混在一起
+                POST_BUMP=$(git log "${BUMPCOMMIT}..HEAD" --format="%h %s" --reverse)
+                if [ -n "$POST_BUMP" ]; then
+                  echo "### v${VERSION} 新增"
+                  echo ""
+                  echo "$POST_BUMP"
+                  echo ""
+                fi
+
+                ACCUMULATED=$(git log "${PREV_TAG}..${BUMPCOMMIT}" --format="%h %s" --reverse)
+                if [ -n "$ACCUMULATED" ]; then
+                  echo "### 自 \`${PREV_TAG}\` 积累"
+                  echo ""
+                  echo "$ACCUMULATED"
+                  echo ""
+                fi
+              else
+                # 无版本 bump（同版本重新 push 或手动覆盖版本号）：单节展示全部增量
+                echo "自 \`${PREV_TAG}\` 以来的变更："
+                echo ""
+                git log "${PREV_TAG}..HEAD" --format="%h %s" --reverse
+                echo ""
+              fi
+            fi
+
+            echo "---"
+            echo "自动构建 from ${{ github.sha }}"
+          } > release-notes.md
+
+          echo "==== release-notes.md ===="
+          cat release-notes.md
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; assets will be replaced in the next step."
+            echo "Release $TAG already exists; updating notes and assets."
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md
           else
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "$TAG" \
-              --notes "OpenCode smark build $VERSION"
+              --notes-file release-notes.md
           fi
 
       - name: Upload release assets with retry
