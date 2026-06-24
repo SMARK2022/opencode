@@ -170,14 +170,20 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             return (yield* config.get()).snapshot !== false
           })
 
+          // Cache the rev-parse result (deterministic per worktree) to avoid
+          // a git process spawn on every sync() call.  File existence is still
+          // checked each time since the user may create/delete info/exclude.
+          let excludeFilePath: string | undefined | null = null
           const excludes = Effect.fnUntraced(function* () {
-            const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
-              cwd: state.worktree,
-            })
-            const file = result.text.trim()
-            if (!file) return
-            if (!(yield* exists(file))) return
-            return file
+            if (excludeFilePath === null) {
+              const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
+                cwd: state.worktree,
+              })
+              excludeFilePath = result.text.trim() || undefined
+            }
+            if (!excludeFilePath) return
+            if (!(yield* exists(excludeFilePath))) return
+            return excludeFilePath
           })
 
           const sync = Effect.fnUntraced(function* (list: string[] = []) {
@@ -235,9 +241,11 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             const allow = all.filter((item) => !ignored.has(item))
             if (!allow.length) return
 
+            // Only untracked files need size checks: `block` filters
+            // `untracked` by `large`, so tracked-file stats are wasted I/O.
             const large = new Set(
               (yield* Effect.all(
-                allow.map((item) =>
+                untracked.map((item) =>
                   fs
                     .stat(path.join(state.directory, item))
                     .pipe(Effect.catch(() => Effect.void))
@@ -249,7 +257,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
                       }),
                     ),
                 ),
-                { concurrency: 8 },
+                { concurrency: "unbounded" },
               )).filter((item): item is string => Boolean(item)),
             )
             const block = new Set(untracked.filter((item) => large.has(item)))

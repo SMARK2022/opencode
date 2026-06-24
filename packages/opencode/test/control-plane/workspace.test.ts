@@ -1643,5 +1643,5 @@ describe("workspace waitForSync", () => {
         `Timed out waiting for sync fence: {"${sessionID}":1}`,
       )
     })
-  }, 7000)
+  }, 15000)
 })

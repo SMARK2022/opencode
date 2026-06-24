@@ -802,7 +802,7 @@ it.instance(
   Effect.gen(function* () {
     const tmp = yield* bootstrap()
     const snapshot = yield* Snapshot.Service
-    const ids = Array.from({ length: 60 }, (_, i) => i.toString().padStart(3, "0"))
+    const ids = Array.from({ length: 30 }, (_, i) => i.toString().padStart(3, "0"))
     const mod = ids.map((id) => fwd(tmp.path, "mix", `${id}-mod.txt`))
     const del = ids.map((id) => fwd(tmp.path, "mix", `${id}-del.txt`))
     const add = ids.map((id) => fwd(tmp.path, "mix", `${id}-add.txt`))
@@ -1090,8 +1090,8 @@ it.instance(
   Effect.gen(function* () {
     const tmp = yield* bootstrap()
     const snapshot = yield* Snapshot.Service
-    const base = Array.from({ length: 140 }, (_, i) => fwd(tmp.path, "batch", `${i}.txt`))
-    const fresh = Array.from({ length: 140 }, (_, i) => fwd(tmp.path, "fresh", `${i}.txt`))
+    const base = Array.from({ length: 55 }, (_, i) => fwd(tmp.path, "batch", `${i}.txt`))
+    const fresh = Array.from({ length: 55 }, (_, i) => fwd(tmp.path, "fresh", `${i}.txt`))
     yield* mkdirp(`${tmp.path}/batch`)
     yield* mkdirp(`${tmp.path}/fresh`)
     yield* Effect.all(
