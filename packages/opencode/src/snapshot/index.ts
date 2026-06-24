@@ -169,14 +169,22 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
           return (yield* config.get()).snapshot !== false
         })
 
+        // Cache the rev-parse result (deterministic per worktree) to avoid
+        // a git process spawn on every sync() call.  File existence is still
+        // checked each time since the user may create/delete info/exclude.
+        // 路径对同一 worktree 是确定的，可跨 sync 缓存；存在性必须每次重查——
+        // 用户可能随时创建或删除 info/exclude。null 表示未解析、undefined 表示解析为空、
+        let excludeFilePath: string | undefined | null = null
         const excludes = Effect.fnUntraced(function* () {
-          const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
-            cwd: state.worktree,
-          })
-          const file = result.text.trim()
-          if (!file) return
-          if (!(yield* exists(file))) return
-          return file
+          if (excludeFilePath === null) {
+            const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
+              cwd: state.worktree,
+            })
+            excludeFilePath = result.text.trim() || undefined
+          }
+          if (!excludeFilePath) return
+          if (!(yield* exists(excludeFilePath))) return
+          return excludeFilePath
         })
 
         const sync = Effect.fnUntraced(function* (list: string[] = []) {
@@ -274,9 +282,13 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
           const allow = all.filter((item) => !ignored.has(item))
           if (!allow.length) return
 
+          // Only untracked files need size checks: `block` filters
+          // `untracked` by `large`, so tracked-file stats are wasted I/O.
+          // 仅 untracked 需要 stat：block 用 large 过滤 untracked，
+          // 对 tracked 文件做 stat 是纯浪费的 I/O（Windows CI 上尤其昂贵）。
           const large = new Set(
             (yield* Effect.all(
-              allow.map((item) =>
+              untracked.map((item) =>
                 fs
                   .stat(path.join(state.worktree, item))
                   .pipe(Effect.catch(() => Effect.void))
@@ -288,7 +300,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                     }),
                   ),
               ),
-              { concurrency: 8 },
+              { concurrency: "unbounded" },
             )).filter((item): item is string => Boolean(item)),
           )
           const block = new Set(untracked.filter((item) => large.has(item)))
