@@ -210,6 +210,47 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       logPartDeltaApplication(event, "delta.apply")
     }
 
+    // 单调合并守卫：防止 pending 阶段的短快照覆盖已累积的长流式文本。
+    // daemon 的 message.part.updated 通过 fire-and-forget 发送（void
+    // Effect.runPromise），而 message.part.delta 通过 yield* await 发送。
+    // 当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta 之后
+    // 才到达时，或 session.sync 从 DB 读到 streaming 期间的空文本快照时，
+    // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
+    // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
+    function mergeLivePart(existing: Part | undefined, next: Part) {
+      if (!existing) return next
+      if (next.type === "text") {
+        if (existing.type !== "text") return next
+        // 终态快照直接采纳——daemon 在 text-end 写入的 DB 值是权威完整文本
+        if (next.time?.end) return next
+        // pending 阶段：本地更长时保留本地文本，拒绝短快照回退
+        if (existing.text.length <= next.text.length) return next
+        return { ...next, text: existing.text }
+      }
+      if (next.type === "reasoning") {
+        if (existing.type !== "reasoning") return next
+        if (next.time?.end) return next
+        if (existing.text.length <= next.text.length) return next
+        return { ...next, text: existing.text }
+      }
+      if (next.type === "tool") {
+        if (existing.type !== "tool") return next
+        // tool 只在 pending 阶段保护 raw（delta 累积的参数 JSON）；
+        // running/completed/error 状态的 part.updated 携带权威状态，直接采纳
+        if (next.state.status !== "pending" || existing.state.status !== "pending") return next
+        if (existing.state.raw.length <= next.state.raw.length) return next
+        return { ...next, state: { ...next.state, raw: existing.state.raw } }
+      }
+      return next
+    }
+
+    // 批量合并：用于 session.sync HTTP 快照与本地 store 的 parts 合并。
+    // 对每个快照 part 调用 mergeLivePart 与本地对应 part 做单调守卫。
+    function mergeLiveParts(existing: readonly Part[] | undefined, next: readonly Part[]): Part[] {
+      if (!existing) return next.slice()
+      return next.map((part) => mergeLivePart(existing.find((item) => item.id === part.id), part))
+    }
+
     function flushPartDeltas() {
       if (pendingPartDeltaTimer) {
         clearTimeout(pendingPartDeltaTimer)
@@ -624,7 +665,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           }
           const result = Binary.search(parts, part.id, (p) => p.id)
           if (result.found) {
-            setStore("part", part.messageID, result.index, reconcile(part))
+            // 合并守卫：防止 fire-and-forget 竞态导致短快照覆盖长流式文本
+            setStore("part", part.messageID, result.index, reconcile(mergeLivePart(parts[result.index], part)))
             break
           }
           setStore(
@@ -843,7 +885,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               const infos: (typeof draft.message)[string] = []
               for (const message of messages.data ?? []) {
                 infos.push(message.info)
-                draft.part[message.info.id] = message.parts
+                // HTTP 快照合并：DB 在 streaming 期间 text="" ，
+                // mergeLiveParts 保留本地已通过 delta 累积的长文本
+                draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
               }
               draft.message[sessionID] = infos
               draft.session_diff[sessionID] = diff.data ?? []

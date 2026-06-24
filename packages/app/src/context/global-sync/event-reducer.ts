@@ -256,6 +256,24 @@ export function applyDirectoryEvent(input: {
         break
       }
       if (SKIP_PARTS.has(part.type)) break
+      // 单调守卫：防止 pending 阶段的短快照覆盖已通过 delta 累积的长文本。
+      // daemon 的 message.part.updated 通过 fire-and-forget 发送
+      // （void Effect.runPromise），而 message.part.delta 通过 yield* await
+      // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到
+      // delta 之后才到达时，不带 time.end 的短文本不应回退本地长文本，
+      // 也不应清除 accum_delta（UI 优先读 accum_delta 显示流式内容）。
+      // 终态（time.end 存在）不进入此守卫，正常执行覆盖和 accum_delta 清除。
+      if ((part.type === "text" || part.type === "reasoning") && !part.time?.end) {
+        const existingParts = input.store.part[part.messageID]
+        if (existingParts) {
+          const found = Binary.search(existingParts, part.id, (p) => p.id)
+          if (found.found) {
+            const existing = existingParts[found.index]
+            // pending 阶段：本地 text 更长时跳过覆盖（保留 accum_delta 和 part.text）
+            if (existing.type === part.type && (existing as { text: string }).text.length > (part as { text: string }).text.length) break
+          }
+        }
+      }
       input.setStore(
         produce((draft) => {
           delete draft.part_text_accum_delta[part.id]

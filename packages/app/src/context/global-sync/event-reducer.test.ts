@@ -424,6 +424,103 @@ describe("applyDirectoryEvent", () => {
     expect(store.part[messageID]).toBeUndefined()
   })
 
+  // 复现核心竞态：delta 已将 part.text 和 accum_delta 累积为长文本，
+  // 随后收到不带 time.end 的短快照 part.updated（模拟 daemon fire-and-forget
+  // 延迟到达的 text-start 事件），守卫必须阻止短文本回退已累积的长文本。
+  test("preserves streaming text when a stale part.updated arrives without time.end", () => {
+    const sessionID = "ses_1"
+    const messageID = "msg_1"
+    const partID = "prt_stream"
+    const [store, setStore] = createStore(
+      baseState({
+        // 先用 text-start 快照（text=""）初始化 part，模拟流式开始
+        part: {
+          [messageID]: [{ id: partID, sessionID, messageID, type: "text", text: "", time: { start: 1 } } as Part],
+        },
+      }),
+    )
+
+    // 通过两条 delta 事件累积 "hello world"（与真实流式行为一致）
+    applyDirectoryEvent({
+      event: { type: "message.part.delta", properties: { messageID, partID, field: "text", delta: "hello" } },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+    applyDirectoryEvent({
+      event: { type: "message.part.delta", properties: { messageID, partID, field: "text", delta: " world" } },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+
+    // delta 双写后 accum_delta 和 part.text 都应为完整累积值
+    expect(store.part_text_accum_delta[partID]).toBe("hello world")
+    expect(store.part[messageID]?.[0]?.type).toBe("text")
+    if (store.part[messageID]?.[0]?.type === "text") expect(store.part[messageID][0].text).toBe("hello world")
+
+    // 模拟 fire-and-forget 竞态：text-start 的 part.updated 延迟到达，
+    // 携带短文本且无 time.end — 守卫必须保留本地更长的 "hello world"
+    applyDirectoryEvent({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { id: partID, sessionID, messageID, type: "text", text: "hello", time: { start: 1 } } as Part,
+        },
+      },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+
+    // 守卫阻止了回退：accum_delta 和 part.text 都保持 "hello world"
+    expect(store.part_text_accum_delta[partID]).toBe("hello world")
+    expect(store.part[messageID]?.[0]?.type).toBe("text")
+    if (store.part[messageID]?.[0]?.type === "text") expect(store.part[messageID][0].text).toBe("hello world")
+  })
+
+  // 终态 part.updated 携带 time.end 时，必须接受权威最终文本并清除 accum_delta。
+  // 这验证守卫不会阻止合法的终态覆盖（包括 plugin 修改后的文本）。
+  test("applies final part.updated with time.end and clears accum_delta", () => {
+    const sessionID = "ses_1"
+    const messageID = "msg_1"
+    const partID = "prt_final"
+    const [store, setStore] = createStore(
+      baseState({
+        part: {
+          [messageID]: [{ id: partID, sessionID, messageID, type: "text", text: "hello world", time: { start: 1 } } as Part],
+        },
+        // 模拟 delta 累积后的 accum_delta 状态
+        part_text_accum_delta: { [partID]: "hello world" },
+      }),
+    )
+
+    // 终态 part.updated 携带 time.end — 必须覆盖为权威文本并清除 accum_delta
+    applyDirectoryEvent({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { id: partID, sessionID, messageID, type: "text", text: "final", time: { start: 1, end: 2 } } as Part,
+        },
+      },
+      store,
+      setStore,
+      push() {},
+      directory: "/tmp",
+      loadLsp() {},
+    })
+
+    expect(store.part_text_accum_delta[partID]).toBeUndefined()
+    expect(store.part[messageID]?.[0]?.type).toBe("text")
+    if (store.part[messageID]?.[0]?.type === "text") expect(store.part[messageID][0].text).toBe("final")
+  })
+
   test("tracks permission and question request lifecycles", () => {
     const sessionID = "ses_1"
     const [store, setStore] = createStore(

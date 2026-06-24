@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { tmpdir } from "../../../fixture/fixture"
 import { directory, json, mount, wait, worktree } from "./sync-fixture"
-import type { AssistantMessage, GlobalEvent, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
 
 function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
@@ -130,12 +130,36 @@ function messageEvent(info: AssistantMessage): GlobalEvent {
   }
 }
 
-function partEvent(part: ToolPart): GlobalEvent {
+function partEvent(part: Part): GlobalEvent {
   return {
     directory,
     project: "proj_test",
     payload: { id: "evt_part", type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: 1 } },
   }
+}
+
+// 构造 text part 测试 fixture，模拟 text-start 阶段的初始状态（text 可为空或短文本）
+function textPart(id = "part_text", text = ""): Part {
+  return {
+    id,
+    sessionID: "ses_1",
+    messageID: "msg_1",
+    type: "text",
+    text,
+    time: { start: 1 },
+  } as Part
+}
+
+// 构造 reasoning part 测试 fixture，与 textPart 同构但 type 为 reasoning
+function reasoningPart(id = "part_reasoning", text = ""): Part {
+  return {
+    id,
+    sessionID: "ses_1",
+    messageID: "msg_1",
+    type: "reasoning",
+    text,
+    time: { start: 1 },
+  } as Part
 }
 
 function deltaEvent(id: string, delta: string, partID = "part_1"): GlobalEvent {
@@ -146,6 +170,19 @@ function deltaEvent(id: string, delta: string, partID = "part_1"): GlobalEvent {
       id,
       type: "message.part.delta",
       properties: { sessionID: "ses_1", messageID: "msg_1", partID, field: "raw", delta },
+    },
+  }
+}
+
+// 构造 text delta 事件，模拟流式 token 到达（field="text"）
+function textDeltaEvent(id: string, delta: string, partID = "part_text"): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id,
+      type: "message.part.delta",
+      properties: { sessionID: "ses_1", messageID: "msg_1", partID, field: "text", delta },
     },
   }
 }
@@ -554,6 +591,156 @@ describe("tui sync", () => {
           sync.data.part.msg_1[1].state.raw === "b",
       )
       expect(sync.data.vcs?.branch).toBe("flush")
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  // 验证 session.sync HTTP 快照路径：delta 累积 "hello world" 后，
+  // 强制重新拉取返回 DB 中的短快照 "hello " — mergeLiveParts 必须保留本地长文本。
+  // 随后终态 part.updated（带 time.end）到达时，必须接受权威最终值 "final"。
+  test("preserves streaming text when a stale session sync snapshot arrives", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const stalePart = textPart("part_text", "hello ")
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [stalePart] }])
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") return json([])
+    })
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(stalePart))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text" && sync.data.part.msg_1[0].text === "hello ")
+
+      emit(textDeltaEvent("delta_text", "world"))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text" && sync.data.part.msg_1[0].text === "hello world")
+
+      await sync.session.sync("ses_1", { force: true })
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "text", text: "hello world" })
+
+      emit(partEvent({ ...stalePart, text: "final", time: { start: 1, end: 2 } } as Part))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text" && sync.data.part.msg_1[0].text === "final")
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "text", text: "final" })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  // 验证 reasoning part 的 session.sync 快照路径：与 text 同构，
+  // delta 累积 "step two" 后强制重拉返回短快照 "step " — 必须保留本地长文本。
+  test("preserves streaming reasoning when a stale session sync snapshot arrives", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const stalePart = reasoningPart("part_reasoning", "step ")
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [stalePart] }])
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") return json([])
+    })
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(stalePart))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "reasoning" && sync.data.part.msg_1[0].text === "step ")
+
+      emit(textDeltaEvent("delta_reasoning", "two", "part_reasoning"))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "reasoning" && sync.data.part.msg_1[0].text === "step two")
+
+      await sync.session.sync("ses_1", { force: true })
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "reasoning", text: "step two" })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  // 复现核心竞态：daemon 的 message.part.updated 事件通过 fire-and-forget
+  // 发送（void Effect.runPromise），而 message.part.delta 通过 yield* await
+  // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta
+  // 累积之后才到达时，不带 time.end 的短快照不应覆盖已流式拼接的长文本。
+  test("preserves streaming text when a stale part.updated arrives without time.end", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const startPart = textPart("part_text", "hello ")
+    const { app, emit, sync } = await mount()
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(startPart))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text" && sync.data.part.msg_1[0].text === "hello ")
+
+      emit(textDeltaEvent("delta_text", "world"))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text" && sync.data.part.msg_1[0].text === "hello world")
+
+      // 模拟 fire-and-forget 竞态：text-start 的 part.updated 延迟到达，
+      // 携带短文本且无 time.end — mergeLivePart 必须保留本地更长的 "hello world"
+      emit(partEvent(textPart("part_text", "hello")))
+      await Bun.sleep(30)
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "text", text: "hello world" })
+
+      // 终态 part.updated 携带 time.end 时，必须接受权威最终值
+      emit(partEvent({ ...startPart, text: "final", time: { start: 1, end: 2 } } as Part))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text" && sync.data.part.msg_1[0].text === "final")
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "text", text: "final" })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  // 验证 tool pending 阶段的 raw 守卫：delta 累积长 raw 后，
+  // 收到不带状态转换的 stale part.updated（更短 raw）— mergeLivePart 必须保留本地长 raw。
+  // running/completed/error 状态的 part.updated 携带权威状态，不进入守卫。
+  test("preserves streaming tool raw when a stale part.updated arrives in pending state", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const tool = pendingToolPart("part_tool", "call_tool")
+    const { app, emit, sync } = await mount()
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(tool))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "tool")
+
+      // 累积 raw 到完整 JSON 参数（partID 必须与 tool part 一致）
+      emit(deltaEvent("delta_raw_1", '{"path"', "part_tool"))
+      emit(deltaEvent("delta_raw_2", ':"test.ts"}', "part_tool"))
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" &&
+          sync.data.part.msg_1[0].state.status === "pending" &&
+          sync.data.part.msg_1[0].state.raw === '{"path":"test.ts"}',
+      )
+
+      // stale part.updated 携带更短 raw，仍为 pending — 守卫必须保留本地完整 raw
+      emit(partEvent({ ...tool, state: { status: "pending", input: {}, raw: '{"path' } } as Part))
+      await Bun.sleep(30)
+
+      const part = sync.data.part.msg_1?.[0]
+      // 先断言类型和状态，再断言 raw 值——避免类型不匹配时静默跳过
+      expect(part?.type).toBe("tool")
+      if (part?.type === "tool" && part.state.status === "pending") expect(part.state.raw).toBe('{"path":"test.ts"}')
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous
