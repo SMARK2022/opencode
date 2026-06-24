@@ -981,6 +981,11 @@ describe("tool.read visible context stubs", () => {
         },
       )
       expect(second.output).toContain('status="stub_same_range_visible"')
+      // 断言新文案：声明"最新版本"消除重读动机，并给出精确 offset=3 跳读出口
+      // （文件共 3 行，已读 1-2，下一段未读起始即第 3 行）
+      expect(second.output).toContain("are the latest version and already in context")
+      expect(second.output).toContain("offset=3 for unread lines")
+      expect(second.output).toContain("grep to locate symbols")
       expect(second.output).not.toContain("<content>")
       expect(second.metadata.read?.stub).toBe(true)
       expect(second.output).toContain("<system-reminder>")
@@ -1024,7 +1029,99 @@ describe("tool.read visible context stubs", () => {
         },
       )
       expect(narrow.output).toContain("stub_covered_range_visible")
+      // 断言新文案：引用覆盖源 1-40、声明"file unchanged"消除重读动机、
+      // 精确 offset=41（可见末行 40 + 1）指向下一段未读内容
+      expect(narrow.output).toContain("covered by visible read 1-40")
+      expect(narrow.output).toContain("file unchanged")
+      expect(narrow.output).toContain("offset=41 for unread lines")
       expect(narrow.output).not.toContain("<content>")
+    }),
+  )
+
+  // EOF 钳制回归：可见范围已覆盖到末行时不再给出 offset 出口，
+  // 改为显式声明已达文件末尾，避免模型发起必失败的 read 陷入循环。
+  it.instance("stubs same range reaching EOF: declares end of file instead of misleading offset", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "eof-same.txt")
+      // 2 行文件：首次读 1-2 即读完整个文件，visibleEnd=2=total=2 → reachedEof
+      yield* put(file, "one\ntwo")
+      const input = { filePath: file, offset: 1, limit: 2 }
+
+      const first = yield* run(input)
+      const second = yield* run(input, {
+        ...ctx,
+        messages: [
+          {
+            info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+            parts: [
+              {
+                type: "tool",
+                tool: "read",
+                callID: "c1",
+                state: {
+                  status: "completed",
+                  time: { start: 1, end: Date.now() + 1000 },
+                  input: { filePath: file, offset: 1, limit: 2 },
+                  output: first.output,
+                  title: "t",
+                  metadata: first.metadata,
+                },
+              },
+            ],
+          } as any,
+        ],
+      })
+
+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
+      expect(second.output).toContain("are the latest version and already in context")
+      expect(second.output).toContain("end of file reached")
+      expect(second.output).not.toContain("offset=3 for unread lines")
+      expect(second.output).toContain("grep to locate symbols")
+    }),
+  )
+
+  it.instance("stubs covered range reaching EOF: declares end of file instead of misleading offset", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const file = path.join(test.directory, "eof-covered.txt")
+      // 50 行文件：首次读 1-50 读完整文件，第二次请求 10-20 被 1-50 覆盖，
+      // visibleEnd=50=total=50 → reachedEof，不应输出 offset=51
+      yield* put(file, Array.from({ length: 50 }, (_, i) => `line${i + 1}`).join("\n"))
+      const firstInput = { filePath: file, offset: 1, limit: 50 }
+      const secondInput = { filePath: file, offset: 10, limit: 11 }
+
+      const first = yield* run(firstInput)
+      const second = yield* run(secondInput, {
+        ...ctx,
+        messages: [
+          {
+            info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
+            parts: [
+              {
+                type: "tool",
+                tool: "read",
+                callID: "c1",
+                state: {
+                  status: "completed",
+                  time: { start: 1, end: Date.now() + 1000 },
+                  input: { filePath: file, offset: 1, limit: 50 },
+                  output: first.output,
+                  title: "t",
+                  metadata: first.metadata,
+                },
+              },
+            ],
+          } as any,
+        ],
+      })
+
+      expect(second.output).toContain('<stub status="stub_covered_range_visible" covered_by="1-50">')
+      expect(second.output).toContain("covered by visible read 1-50")
+      expect(second.output).toContain("file unchanged")
+      expect(second.output).toContain("end of file reached")
+      expect(second.output).not.toContain("offset=51 for unread lines")
+      expect(second.output).toContain("grep to locate symbols")
     }),
   )
 
