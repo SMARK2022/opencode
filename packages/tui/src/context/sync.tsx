@@ -170,6 +170,13 @@ export const {
     let pendingPartDeltas: EventMessagePartDelta[] = []
     let pendingPartDeltaTimer: Timer | undefined
     const loggedPartDeltaApplications = new Set<string>()
+    // 缓冲因 part 尚未到达而被 drop 的 delta，按 partID 索引。
+    // daemon 的 message.part.updated 是 fire-and-forget（void Effect.runPromise），
+    // 而 message.part.delta 是 await（yield* bus.publish）。当 delta 先于
+    // part.updated 到达时，store 中没有对应 part，delta 会被 drop。
+    // delta 是 bus-only（不写 DB），被 drop 后永久丢失——子会话进入前
+    // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
+    const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
 
     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
       // #186：仅同 session/message/part/field 的相邻 delta 可合并；公共事件流仍逐条投递
@@ -221,12 +228,20 @@ export const {
       // #186：orphan delta（part 尚未入 store）直接丢弃，与 hydration 竞态测试一致
       const parts = store.part[event.properties.messageID]
       if (!parts) {
+        // part 尚未到达（fire-and-forget 竞态）：缓冲 delta，等 part.updated 创建 part 后 replay
+        const buffered = orphanPartDeltas.get(event.properties.partID)
+        if (buffered) buffered.push(event)
+        else orphanPartDeltas.set(event.properties.partID, [event])
         logPartDeltaApplication(event, "delta.drop", "missing-message")
         return
       }
       const result = search(parts, event.properties.partID, (p) => p.id)
       // #186：找不到 part 时不创建空壳，避免伪造 tool/text
       if (!result.found) {
+        // part 在数组中不存在（part.updated 尚未到达）：同样缓冲
+        const buffered = orphanPartDeltas.get(event.properties.partID)
+        if (buffered) buffered.push(event)
+        else orphanPartDeltas.set(event.properties.partID, [event])
         logPartDeltaApplication(event, "delta.drop", "missing-part")
         return
       }
@@ -260,6 +275,36 @@ export const {
     // 才到达时，或 session.sync 从 DB 读到 streaming 期间的空文本快照时，
     // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
     // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
+    // 当 part.updated 终于到达并创建 part 后，replay 之前因 part 缺失而缓冲的 delta。
+    // 合并同一 partID 的连续 delta 以减少 reactive 更新次数，然后逐条 apply。
+    // replay 后清除缓冲，避免终态 part.updated 再次触发时重复应用。
+    // 终态 part（time.end 存在）不 replay：其文本是权威完整的，追加 delta 会污染。
+    function replayOrphanDeltas(partID: string, messageID: string) {
+      const buffered = orphanPartDeltas.get(partID)
+      if (!buffered || buffered.length === 0) return
+      // 检查 store 中的 part 是否已终态（text-end 的 DB 快照携带完整文本）
+      const parts = store.part[messageID]
+      if (parts) {
+        const found = search(parts, partID, (p) => p.id)
+        if (found.found) {
+          const part = parts[found.index]
+          if ((part.type === "text" || part.type === "reasoning") && part.time?.end) {
+            orphanPartDeltas.delete(partID)
+            return
+          }
+        }
+      }
+      const coalesced = coalescePartDeltas(buffered)
+      // 仅应用 messageID 匹配的 delta（partID 全局唯一，此处防御未来可能的碰撞）
+      const matched = coalesced.filter((event) => event.properties.messageID === messageID)
+      if (matched.length === 0) return
+      // 匹配后才删除缓冲，未匹配的保留以防 partID 碰撞时另一 message 仍需 replay
+      orphanPartDeltas.delete(partID)
+      for (const event of matched) {
+        applyPartDelta(event)
+      }
+    }
+
     function mergeLivePart(existing: Part | undefined, next: Part) {
       if (!existing) return next
       if (next.type === "text") {
@@ -717,12 +762,16 @@ export const {
                 draft.splice(foundAt.index, 1)
               }),
             )
+            // 清除该 part 的缓冲 delta（part 已隐藏移除，delta 不再需要）
+            orphanPartDeltas.delete(part.id)
             break
           }
           touchPart(event.properties.part.sessionID, event.properties.part.id)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
             setStore("part", event.properties.part.messageID, [event.properties.part])
+            // part 首次创建：replay 在 part.updated 之前到达的缓冲 delta
+            replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
             break
           }
           const result = search(parts, event.properties.part.id, (part) => part.id)
@@ -738,6 +787,8 @@ export const {
               draft.splice(result.index, 0, event.properties.part)
             }),
           )
+          // part 插入到已有数组：replay 在 part.updated 之前到达的缓冲 delta
+          replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
           break
         }
 
@@ -761,6 +812,8 @@ export const {
               }),
             )
           }
+          // part移除后不再保留待重放正文。
+          orphanPartDeltas.delete(event.properties.partID)
           break
         }
 
@@ -784,6 +837,7 @@ export const {
       // #186：不在 cleanup 里 flush——组件已拆，UI 不再需要最后一帧
       if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
       pendingPartDeltas = []
+      orphanPartDeltas.clear()
       loggedPartDeltaApplications.clear()
     })
 
@@ -1082,6 +1136,14 @@ export const {
                 draft.session_diff[sessionID] = diff.data ?? []
               }),
             )
+            // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
+            // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
+            // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
+            for (const message of messages.data ?? []) {
+              for (const part of message.parts) {
+                replayOrphanDeltas(part.id, message.info.id)
+              }
+            }
             fullSyncedSessions.add(sessionID)
           })().finally(() => {
             syncingSessions.delete(sessionID)
