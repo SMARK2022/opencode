@@ -216,7 +216,7 @@ test.each(["success", "failure"] as const)("forced hydration after an old reject
   }
 })
 
-test("orphan live deltas do not suppress hydrated parts", async () => {
+test.each(["streaming", "completed"] as const)("orphan live deltas replay only onto unfinished hydrated parts: %s", async (state) => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")
 
@@ -246,11 +246,12 @@ test("orphan live deltas do not suppress hydrated parts", async () => {
       }),
     )
     resolveMessages(
-      json([{ info: assistant, parts: [{ id: partID, sessionID, messageID, type: "text", text: "hydrated" }] }]),
+      json([{ info: assistant, parts: [{ id: partID, sessionID, messageID, type: "text", text: "hydrated", time: { start: 1, ...(state === "completed" ? { end: 2 } : {}) } }] }]),
     )
     await hydrate
 
-    expect(sync.data.part[messageID][0]).toMatchObject({ text: "hydrated" })
+    // 未完成快照恢复早到正文；终态快照仍权威，不能追加旧 delta 污染最终值。
+    expect(sync.data.part[messageID][0]).toMatchObject({ text: state === "streaming" ? "hydratedignored until part exists" : "hydrated" })
   } finally {
     app.renderer.destroy()
   }
