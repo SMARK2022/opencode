@@ -104,7 +104,7 @@ describe("prompt voice input", () => {
   // 断言文本插入的是停止后的 WAV 文件结果，而不是录音中途的旧状态。
   // stop 后仍调用 abort，是为了删除临时文件；这个 cleanup 不应影响已插入文本。
   // 状态序列锁定 TUI 用户能看到的阶段，避免后续重构跳过保存或转写提示。
-  test.each(["default", "mcp", "explicit"] as const)("host config reaches the voice controller: %s", async (scenario) => {
+  test.each(["default", "mcp", "direct", "explicit"] as const)("host config reaches the voice controller: %s", async (scenario) => {
     await using tmp = await tmpdir()
     await Bun.write(path.join(tmp.path, "tui.json"), JSON.stringify({
       tui: { theme: "ancestor", attention: { sounds: { done: "alert.wav" } }, keybinds: { prompt_voice_toggle: "alt+x" } },
@@ -115,7 +115,8 @@ describe("prompt voice input", () => {
       await Bun.write(script, "")
       await Bun.write(path.join(tmp.path, "opencode.json"), JSON.stringify({ mcp: {
         other: { command: ["unrelated", path.join(path.dirname(script), "mcp-server.js")] },
-        chatgpt: { type: "local", command: [process.execPath, path.join(path.dirname(script), "mcp-server.js")] },
+        // 同一个host入口覆盖显式runtime与直接脚本，两种配置均不启动真实进程。
+        chatgpt: { type: "local", command: scenario === "direct" ? [path.join(path.dirname(script), "mcp-server.js")] : [process.execPath, path.join(path.dirname(script), "mcp-server.js")] },
       } }))
     }
     if (scenario === "explicit") {
@@ -133,8 +134,8 @@ describe("prompt voice input", () => {
     expect(config.keybinds.get("terminal.suspend")).toEqual([])
     expect(config.voice?.transcriber).toEqual(scenario === "explicit"
       ? { command: "explicit-voice", args: ["{file}"] }
-      : scenario === "mcp"
-        ? { command: process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
+      : scenario === "mcp" || scenario === "direct"
+        ? { command: scenario === "direct" ? "node" : process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
         : TuiConfigHost.DefaultVoiceTranscriber)
     const inserted: string[] = []
     const errors: string[] = []

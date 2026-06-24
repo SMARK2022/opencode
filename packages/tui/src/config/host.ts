@@ -61,7 +61,11 @@ function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTransc
     if (!mcpServer || !command[0]) continue
     // 与原本地MCP一致，相对脚本以项目目录解析，不以配置文件目录解析。
     const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
-    return { command: command[0], args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] }
+    return {
+      // 直接执行 mcp-server.js 时没有显式解释器；沿用 shebang 依赖的 node 运行同目录 chatgpt.js。
+      command: path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0],
+      args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
+    }
   }
 }
 
