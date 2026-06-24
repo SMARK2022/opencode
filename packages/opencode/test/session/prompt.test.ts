@@ -2480,8 +2480,14 @@ noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
     })
 
     const reloaded = yield* sessions.get(session.id)
-    expect(reloaded.permission).toEqual([{ permission: "read", pattern: "*", action: "allow" }])
-    expect(Permission.evaluate("bash", "anything", reloaded.permission ?? []).action).toBe("ask")
+    // 0337 SMARK 语义：tool override 追加而非替换整体 ruleset——保住 TaskTool 派生的
+    // 子会话 auto ceiling。两次 prompt 的 rules 以 last-match-wins 累积：bash deny 保留，read allow 生效。
+    expect(reloaded.permission).toEqual([
+      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "read", pattern: "*", action: "allow" },
+    ])
+    // 0337 融合语义：bash deny 经 last-match-wins 累积保留，不随第二次 prompt 消失
+    expect(Permission.evaluate("bash", "anything", reloaded.permission ?? []).action).toBe("deny")
   }),
 )
 
@@ -4028,6 +4034,71 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
+)
+
+// handleSubtask 路径必须把父会话当前 agent 名传给 TaskTool.execute，
+// 而不是 SubtaskPart.agent（子 agent 名）。否则 task.ts 会用子 agent
+// 的 permission 作为 parentAgent 解析 ceiling，导致 auto 父会话的
+// external_directory/bash/edit auto 规则丢失，子会话访问外部目录时
+// 落到 ask 弹窗而非 auto reviewer。
+it.instance(
+  "subtask from auto parent inherits auto ceilings in child session permission",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "auto subtask" })
+      // 创建 agent 为 auto 的 user message，模拟 auto 主会话场景
+      const msg = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: chat.id,
+        agent: "auto",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: msg.id,
+        sessionID: chat.id,
+        type: "text",
+        text: "review the implementation",
+      })
+      // 注入 SubtaskPart 走 handleSubtask 路径
+      yield* addSubtask(chat.id, msg.id)
+      // 子会话返回后父模型仍需消费工具结果，为两次实际调用分别提供响应。
+      yield* llm.push(reply().text("review done").stop().item())
+      yield* llm.push(reply().text("review summarized").stop().item())
+
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(yield* llm.hits).toHaveLength(2)
+
+      // 找到 task 工具 part 拿到子会话 ID
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+      // 目标 helper：completedTool 断言 completed 并收窄类型
+      const taskTool = completedTool(taskMsg?.parts ?? [])
+      // task 工具完成后 state 为 completed，metadata 含子会话 ID
+      const childSessionID = taskTool?.state.metadata?.sessionId
+      expect(typeof childSessionID).toBe("string")
+      if (typeof childSessionID !== "string") return
+
+      // 子会话 stored permission 必须含父 auto agent 的 external_directory auto ceiling
+      const child = yield* sessions.get(SessionID.make(childSessionID))
+      const hasExtAuto = child.permission?.some(
+        (r) => r.permission === "external_directory" && r.action === "auto",
+      )
+      const hasBashAuto = child.permission?.some(
+        (r) => r.permission === "bash" && r.action === "auto",
+      )
+      // 修复前：parentAgent 被解析为 general（子 agent 名），ceilings 为空，
+      // child.permission 只有 [task deny]，两个断言都会失败
+      expect(hasExtAuto).toBe(true)
+      expect(hasBashAuto).toBe(true)
+    }),
+  { git: true },
+  15_000,
 )
 
 noLLMServer.instance(
