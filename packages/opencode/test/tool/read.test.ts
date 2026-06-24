@@ -734,7 +734,11 @@ describe("tool.read visible context", () => {
 
       expect(second.output).toContain('<range start="1" end="2" total="3" returned="0" />')
       expect(second.output).toContain('<stub status="stub_same_range_visible">')
-      expect(second.output).toContain("Requested range is already visible in the current context.")
+      // 断言新文案：声明"最新版本"消除重读动机，并给出精确 offset=3 跳读出口
+      // （文件共 3 行，已读 1-2，下一段未读起始即第 3 行）
+      expect(second.output).toContain("are the latest version and already in context")
+      expect(second.output).toContain("offset=3 for unread lines")
+      expect(second.output).toContain("grep to locate symbols")
       expect(second.output).not.toContain("<content>")
       expect(second.metadata.read).toMatchObject({
         type: "file",
@@ -760,12 +764,62 @@ describe("tool.read visible context", () => {
 
       expect(second.output).toContain('<range start="40" end="59" total="120" returned="0" />')
       expect(second.output).toContain('<stub status="stub_covered_range_visible" covered_by="1-100">')
+      // 断言新文案：引用覆盖源 1-100、声明"file unchanged"消除重读动机、
+      // 精确 offset=101（可见末行 100 + 1）指向下一段未读内容
+      expect(second.output).toContain("covered by visible read 1-100")
+      expect(second.output).toContain("file unchanged")
+      expect(second.output).toContain("offset=101 for unread lines")
       expect(second.output).not.toContain("<content>")
       expect(second.metadata.read).toMatchObject({
         stub: true,
         stubStatus: "stub_covered_range_visible",
         coveredBy: "1-100",
       })
+    }),
+  )
+
+  it.live("stubs same range reaching EOF: declares end of file instead of misleading offset", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "eof-same.txt")
+      // 2 行文件：首次读 1-2 即读完整个文件，visibleEnd=2=total=2 → reachedEof
+      yield* put(filePath, "one\ntwo")
+      const input = { filePath, offset: 1, limit: 2 }
+
+      const first = yield* exec(dir, input)
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
+
+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
+      expect(second.output).toContain("are the latest version and already in context")
+      // 关键回归：可见范围已覆盖到末行时不应给出 offset=3（指向 EOF 之后的空行），
+      // 应改为显式声明已达文件末尾，避免模型发起必失败的 read
+      expect(second.output).toContain("end of file reached")
+      expect(second.output).not.toContain("offset=3 for unread lines")
+      expect(second.output).toContain("grep to locate symbols")
+    }),
+  )
+
+  it.live("stubs covered range reaching EOF: declares end of file instead of misleading offset", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "eof-covered.txt")
+      // 50 行文件：首次读 1-50 读完整文件，第二次请求 10-20 被 1-50 覆盖，
+      // visibleEnd=50=total=50 → reachedEof，不应输出 offset=51
+      yield* put(filePath, Array.from({ length: 50 }, (_, i) => `line${i + 1}`).join("\n"))
+      const firstInput = { filePath, offset: 1, limit: 50 }
+      const secondInput = { filePath, offset: 10, limit: 11 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      expect(second.output).toContain('<stub status="stub_covered_range_visible" covered_by="1-50">')
+      expect(second.output).toContain("covered by visible read 1-50")
+      expect(second.output).toContain("file unchanged")
+      // 关键回归：covering.end=50=total 时不应给出 offset=51（指向 EOF 之后），
+      // 应改为声明已达末尾，并保留 grep 兜底出口
+      expect(second.output).toContain("end of file reached")
+      expect(second.output).not.toContain("offset=51 for unread lines")
+      expect(second.output).toContain("grep to locate symbols")
     }),
   )
 

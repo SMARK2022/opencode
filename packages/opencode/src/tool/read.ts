@@ -302,15 +302,38 @@ function renderReadStub(input: {
   status: ReadStubStatus
   coveredBy?: string
 }) {
+  // 可见覆盖范围的末行：被覆盖时取外部已读区间的 end，否则即本次请求的 end。
+  // 用于推导下一段未读内容的起始 offset，给模型一个明确的"往哪读"指令，
+  // 避免模型把 stub 误解为读取失败而重复请求同一范围（见诊断：连续 13 次 stub 死循环）。
+  const visibleEnd = input.coveredBy ? Number(input.coveredBy.split("-")[1]) : input.end
+  // 下一段未读内容的起始行 = 可见末行 + 1。这是打破"重复读同范围"循环的关键锚点。
+  const nextOffset = visibleEnd + 1
+  // 上界钳制：当可见范围已覆盖到文件末尾（visibleEnd >= total）时再给 offset 会指向
+  // EOF 之后的空区间，误导模型发起必失败的 read。此时文案改为声明已达末尾，彻底关闭
+  // offset 出口、仅保留 grep 兜底，消除"还能继续读"的错觉。
+  const reachedEof = visibleEnd >= input.total
+  // offset 出口：未到末尾时给出精确跳读指令；到末尾时退化为 pub grep 兜底，
+  // 使第二行在任何分支下都提供至少一个可执行动作，不留空指令。
+  const offsetExit = reachedEof
+    ? "No unread lines remain (end of file reached); use grep to locate symbols."
+    : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
+  // 两行高信息量文案。findReadStub 已经过 size+modifiedMs 同版本门控，故可断言
+  // "上下文里的内容是最新版本"——这直接消除模型对"是否过期需重读"的疑虑，避免它
+  // 把 stub 误读为"内容陈旧、需刷新"而重复请求同一范围（诊断：连续 13 次 stub 死循环）。
+  // coveredBy 在 stub_covered_range_visible 分支恒非空（findReadStub 仅此时赋值），
+  // 但类型为可选，这里用兜底字符串防御性守卫，避免未来调用方缺省值渗入文案输出 "undefined"。
+  const coverage = input.coveredBy ?? `${input.start}-${input.end}`
+  const message =
+    input.status === "stub_same_range_visible"
+      ? `Lines ${input.start}-${input.end} are the latest version and already in context; do NOT re-read.\n${offsetExit}`
+      : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
   return [
     `<path>${escapeXmlText(input.path)}</path>`,
     `<type>file</type>`,
     `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
     `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="0" />`,
     `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${input.coveredBy}"` : ""}>`,
-    input.status === "stub_same_range_visible"
-      ? "Requested range is already visible in the current context."
-      : "Requested range is already covered by a visible read result.",
+    message,
     "</stub>",
   ].join("\n")
 }
