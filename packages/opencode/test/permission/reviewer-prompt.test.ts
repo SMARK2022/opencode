@@ -89,6 +89,16 @@ describe("permission reviewer prompt", () => {
   })
 
   // #198：验证用户提示词包含哨兵分隔标记——transcript、retry reason、planned action JSON 均有明确边界
+  test("default policy instructs reviewer to treat variable expansion deletes as parent path", () => {
+    // 默认策略 policy.md 新增一行指导 reviewer：把含变量展开的删除目标
+    // （如 rm -rf /home/$TMP）视为可能展开到静态父目录；这是 reviewer
+    // 指导文本而非 deterministic 规则——避免误判合法 $TMPDIR 用法
+    const prompt = PermissionReviewerPrompt.buildSystemPrompt(PermissionReviewerPrompt.DEFAULT_TENANT_POLICY)
+    expect(prompt).toContain("variable expansion in delete")
+    expect(prompt).toContain("/home/$TMP")
+  })
+
+
   test("builds user prompt items with transcript, retry reason, and planned action", () => {
     const items = PermissionReviewerPrompt.buildUserPromptItems(
       {

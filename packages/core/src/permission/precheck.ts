@@ -383,6 +383,27 @@ function evaluateCommand(command: string, depth: number): Decision {
   if (risk) return risk
   // #197：通过只读不变量验证的命令才 safe——安全命令必须直接、本地且只读
   if (safeTokens(tokens)) return { level: "safe", reason: "known read-only shell command" }
+  // 未知前缀穿透启发式：tokens[0] 不命中任何已知 cmd 分支时，RAW_FILE_DELETE
+  // 等需 `;`/`&`/`\n` 起点的 raw 正则看不到空格后的内层 rm 等，token 层也
+  // 因 cmd=tokens[0] 而漏过。剥去前缀后对 tokens.slice(1) 再分类一次。
+  // 仅升 cautious ——dangerous 仍由 raw 层确定性短路（evaluateShell 先跑
+  // dangerousRaw），启发式不越权升级到 dangerous，避免把 token 独有的
+  // mkfs / dd of=/dev / setcap 等在前缀遮蔽下从 general 跳到 dangerous。
+  // 注意：POSIX 形如 `KEY=value cmd` 的环境变量赋值前缀不在此启发式范围——
+  // bashEffect 的 patterns 通常不含前置 env，故 pattern 路径直接命中 classifyGit；
+  // raw 路径受 env 排除保持 general，maxRisk 取 pattern 的 cautious 及其 reason，
+  // 避免剥头路径产生不同 reason 改写既有断言（如 L704 force push reason）。
+  if (tokens.length > 1 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
+    const stripped = classifyTokens(tokens.slice(1))
+    if (stripped?.level === "cautious") {
+      const inner = normalizeCommandName(tokens[1])
+      return {
+        level: "cautious",
+        // 审计线索：透传被未知前缀遮蔽的内层命令名和原始 reason
+        reason: `unknown wrapper prefix shadows ${inner}; ${stripped.reason}`,
+      }
+    }
+  }
   // #197：未识别命令无法证明只读——默认 general 确保未知命令不因缺乏危险特征而自动放行
   return { level: "general", reason: "unknown shell command" }
 }
@@ -658,8 +679,28 @@ function wslScript(tokens: string[]) {
 }
 
 // #220：dangerousRaw——使用预编译正则常量，在 token 化之前拦截跨管道/编码/命令替换内的危险载荷
+// raw 层正则用 [^|;]* 作为段边界，只在 ; 和 | 处截断。但 shell 换行
+// 也是命令分隔符；若归一化时把 \n 变成空白，[^|;]* 就会跨过换行把
+// 下一条命令的参数混入当前命令，导致误报（如 rm -rf /tmp/foo\n/Users）。
+// 将命令分隔型换行转为 " ; " 让 [^|;]* 在 ; 处截断；而管道续行
+// （\n 后跟 |）前的换行保留为空格，避免断裂管道检测。
+// 注意：& 和 && 不属于续行豁免——[^|;]* 不排除 &，保留为空格会让
+//  [^|;]* 仍能跨过 && 将下一命令的参数混入，重引入同类误报。
+function normalizeForRawScan(command: string): string {
+  return command
+    .replace(/[ \t]+/g, " ")
+    .replace(/[\n\r]+/g, (match, offset, input) => {
+      const after = input.slice(offset + match.length).trimStart()
+      // 仅管道续行符 | 前的换行是装饰性空白；& 在 [^|;]* 中是普通字符不豁免
+      if (after.startsWith("|")) return " "
+      return " ; "
+    })
+    .replace(/ +/g, " ")
+    .trim()
+}
+
 function dangerousRaw(command: string): string | undefined {
-  const normalized = command.replace(/\s+/g, " ").trim()
+  const normalized = normalizeForRawScan(command)
   if (RE_D_RM_RF_ROOT.test(normalized)) return "critical recursive delete"
   if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
     return "remote download piped to interpreter; review the script locally before running safe commands"
@@ -693,7 +734,7 @@ function dangerousRaw(command: string): string | undefined {
 function cautiousRaw(command: string): string | undefined {
   if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
   if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
-  const normalized = command.replace(/\s+/g, " ").trim()
+  const normalized = normalizeForRawScan(command)
   // #220：持久化写入（重定向目标）——splitCommands 遇重定向返回 undefined，必须在 raw 层捕获
   if (RE_C_SHELL_RC_WRITE.test(normalized)) return "shell RC file modification enables persistent code execution"
   if (RE_C_GIT_HOOKS_WRITE.test(normalized)) return "git hook modification runs code on git operations"
