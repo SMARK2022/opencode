@@ -3155,3 +3155,66 @@ it.instance(
   { git: true },
   30_000,
 )
+
+// handleSubtask 路径必须把父会话当前 agent 名传给 TaskTool.execute，
+// 而不是 SubtaskPart.agent（子 agent 名）。否则 task.ts 会用子 agent
+// 的 permission 作为 parentAgent 解析 ceiling，导致 auto 父会话的
+// external_directory/bash/edit auto 规则丢失，子会话访问外部目录时
+// 落到 ask 弹窗而非 auto reviewer。
+it.instance(
+  "subtask from auto parent inherits auto ceilings in child session permission",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "auto subtask" })
+      // 创建 agent 为 auto 的 user message，模拟 auto 主会话场景
+      const msg = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: chat.id,
+        agent: "auto",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: msg.id,
+        sessionID: chat.id,
+        type: "text",
+        text: "review the implementation",
+      })
+      // 注入 SubtaskPart 走 handleSubtask 路径
+      yield* addSubtask(chat.id, msg.id)
+      // 子会话只需要返回文本即可完成
+      yield* llm.push(reply().text("review done").stop().item())
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // 找到 task 工具 part 拿到子会话 ID
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
+      const taskTool = taskMsg?.parts.find((part): part is MessageV2.ToolPart => part.type === "tool")
+      // task 工具完成后 state 为 completed，metadata 含子会话 ID
+      const childSessionID =
+        taskTool?.state.status === "completed" ? taskTool.state.metadata?.sessionId : undefined
+      expect(typeof childSessionID).toBe("string")
+      if (typeof childSessionID !== "string") return
+
+      // 子会话 stored permission 必须含父 auto agent 的 external_directory auto ceiling
+      const child = yield* sessions.get(SessionID.make(childSessionID))
+      const hasExtAuto = child.permission?.some(
+        (r) => r.permission === "external_directory" && r.action === "auto",
+      )
+      const hasBashAuto = child.permission?.some(
+        (r) => r.permission === "bash" && r.action === "auto",
+      )
+      // 修复前：parentAgent 被解析为 general（子 agent 名），ceilings 为空，
+      // child.permission 只有 [task deny]，两个断言都会失败
+      expect(hasExtAuto).toBe(true)
+      expect(hasBashAuto).toBe(true)
+    }),
+  { git: true },
+  15_000,
+)
