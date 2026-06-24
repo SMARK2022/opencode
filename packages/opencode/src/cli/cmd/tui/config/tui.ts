@@ -122,7 +122,8 @@ function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTransc
     // 相对路径按当前项目目录解析，保持和本地 MCP 配置文件里的路径语义一致。
     const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
     return {
-      command: command[0],
+      // 直接执行 mcp-server.js 时没有显式解释器；沿用 shebang 依赖的 node 运行同目录 chatgpt.js。
+      command: path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0],
       // voice 默认只复用 ChatGPT MCP 同目录的 CLI 入口；不注册 MCP tool，也不要求 chatgpt-browser-agent 在 PATH。
       args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
     }
