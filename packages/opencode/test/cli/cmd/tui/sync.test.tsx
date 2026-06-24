@@ -532,6 +532,7 @@ describe("tui sync", () => {
     })
 
     try {
+      // delta 在 part 创建前到达（模拟 fire-and-forget 竞态），被缓冲而非永久丢弃
       emit(deltaEvent("delta_missing", "secret"))
       await wait(() => logs.some((entry) => entry.extra?.phase === "delta.drop"))
 
@@ -543,18 +544,20 @@ describe("tui sync", () => {
       emit(deltaEvent("delta_2", "lo"))
       emit(deltaEvent("delta_3", " world"))
 
+      // 缓冲的 "secret" 在 part 创建时被 replay，所以 raw = "secret" + "hello world"
       await wait(
         () =>
           sync.data.part.msg_1?.[0]?.type === "tool" &&
           sync.data.part.msg_1[0].state.status === "pending" &&
-          sync.data.part.msg_1[0].state.raw === "hello world",
+          sync.data.part.msg_1[0].state.raw === "secrethello world",
       )
       await wait(() => logs.some((entry) => entry.extra?.phase === "delta.apply"))
-      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "hello world" } })
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "secrethello world" } })
       const phases = logs.map((entry) => entry.extra?.phase)
       expect(phases.filter((phase) => phase === "delta.receive")).toHaveLength(1)
       expect(phases).toContain("delta.drop")
       expect(phases).toContain("delta.apply")
+      // 日志 payload 不携带 delta 正文
       expect(JSON.stringify(logs)).not.toContain("hello world")
       expect(JSON.stringify(logs)).not.toContain("secret")
     } finally {
@@ -741,6 +744,40 @@ describe("tui sync", () => {
       // 先断言类型和状态，再断言 raw 值——避免类型不匹配时静默跳过
       expect(part?.type).toBe("tool")
       if (part?.type === "tool" && part.state.status === "pending") expect(part.state.raw).toBe('{"path":"test.ts"}')
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  // 复现子会话进入时的核心问题：子会话在用户进入前已在 streaming，
+  // 但 TUI store 中没有子会话的 message/part，delta 因 missing-message 被 drop。
+  // 修复后 delta 被缓冲，当 part.updated 终于到达创建 part 时 replay，
+  // 恢复进入前已生成的完整流式文本。
+  test("replays buffered deltas when part.updated arrives after delta was dropped", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const startPart = textPart("part_sub", "")
+    const { app, emit, sync } = await mount()
+
+    try {
+      // 子会话 streaming 已开始：delta 先于 part.updated 到达（fire-and-forget 竞态）
+      // 此时 store 中没有子会话的 message/part，delta 被缓冲而非永久丢弃
+      emit(textDeltaEvent("delta_pre_1", "ASDF", "part_sub"))
+      emit(textDeltaEvent("delta_pre_2", "GHJKL", "part_sub"))
+      await Bun.sleep(30)
+
+      // part.updated 终于到达，创建 part — 缓冲的 delta 应被 replay
+      emit(messageEvent(message))
+      emit(partEvent(startPart))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "text")
+
+      // 缓冲的 delta 被 replay，text 恢复为 "ASDFGHJKL"（而非 part.updated 的空文本）
+      expect(sync.data.part.msg_1?.[0]?.type).toBe("text")
+      if (sync.data.part.msg_1?.[0]?.type === "text") expect(sync.data.part.msg_1[0].text).toBe("ASDFGHJKL")
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous
