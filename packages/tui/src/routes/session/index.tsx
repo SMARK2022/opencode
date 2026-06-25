@@ -2579,7 +2579,8 @@ export function InlineToolRow(props: {
   )
 }
 
-function BlockTool(props: {
+// 导出供 block-tool-collapse 回归测试直接挂载：测试是唯一新增消费点，不改变运行时语义。
+export function BlockTool(props: {
   title?: string
   children: JSX.Element
   onClick?: () => void
@@ -2605,6 +2606,14 @@ function BlockTool(props: {
     if (props.contextView) return theme.diffContextBg
     if (hover()) return theme.backgroundMenu
     return theme.backgroundPanel
+  })
+  // 外层拥有展开状态；保存预览节点，使它暂时缺席时不会销毁后再挂载。
+  const collapsed = createMemo(() => props.preview !== undefined)
+  const preview = createMemo<JSX.Element>((previous) => props.preview ?? previous)
+  const [bodyMounted, setBodyMounted] = createSignal(!collapsed())
+  // 正文首次展开才挂载，此后仅隐藏，保留diff等renderable的内部状态。
+  createEffect(() => {
+    if (!collapsed()) setBodyMounted(true)
   })
   return (
     <box
@@ -2653,8 +2662,15 @@ function BlockTool(props: {
       <Show when={props.autoReview !== false}>
         <ToolAutoReviewLine />
       </Show>
-      {/* 预览是否存在由原有外层展开状态决定，容器不维护第二套折叠状态。 */}
-      <box marginTop={1}>{props.preview ?? props.children}</box>
+      {/* 预览与正文分开挂载，显示状态继续由外层驱动。 */}
+      <box marginTop={collapsed() ? 1 : 0} maxHeight={collapsed() ? undefined : 0} overflow={collapsed() ? undefined : "hidden"}>
+        {preview()}
+      </box>
+      <Show when={bodyMounted()}>
+        <box marginTop={collapsed() ? 0 : 1} maxHeight={collapsed() ? 0 : undefined} overflow={collapsed() ? "hidden" : undefined}>
+          {props.children}
+        </box>
+      </Show>
       <Show when={props.preview}>
         <text fg={theme.textMuted}>Click to expand</text>
       </Show>
