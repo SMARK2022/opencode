@@ -2407,6 +2407,16 @@ function BlockTool(props: {
   })
   const [expanded, setExpanded] = createSignal(false)
   const collapsed = createMemo(() => collapsible() && !expanded())
+  const hasPreview = createMemo(() => props.preview !== undefined)
+  // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
+  // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
+  // 常驻，折叠态通过 maxHeight=0 + overflow=hidden 隐藏，而非卸载 DOM 节点。
+  const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
+  // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
+  // 一旦挂载就不再卸载，后续折叠仅靠布局裁剪隐藏。
+  createEffect(() => {
+    if (!hasPreview() || !collapsed()) setBodyMounted(true)
+  })
   // BlockTool spacing is intentionally owned by the section wrappers below.
   // The body, expand affordance, and error rows each use marginTop={1}; adding
   // a root gap would stack with those margins and render two blank rows around
@@ -2452,15 +2462,27 @@ function BlockTool(props: {
       <Show when={props.autoReview !== false}>
         <ToolAutoReviewLine />
       </Show>
-      <box
-        marginTop={1}
-        maxHeight={collapsed() && !props.preview ? previewLines() : undefined}
-        overflow={collapsed() && !props.preview ? "hidden" : undefined}
-      >
-        <Show when={!collapsed() || !props.preview} fallback={props.preview}>
+      {/* preview 区：折叠态可见（marginTop=1 撑出间距），展开态用 maxHeight=0 隐藏 */}
+      <Show when={hasPreview()}>
+        <box
+          marginTop={collapsed() ? 1 : 0}
+          maxHeight={collapsed() ? undefined : 0}
+          overflow={collapsed() ? undefined : "hidden"}
+        >
+          {props.preview}
+        </box>
+      </Show>
+      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 maxHeight=0 隐藏，
+          无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
+      <Show when={bodyMounted()}>
+        <box
+          marginTop={hasPreview() && collapsed() ? 0 : 1}
+          maxHeight={collapsed() ? (hasPreview() ? 0 : previewLines()) : undefined}
+          overflow={collapsed() ? "hidden" : undefined}
+        >
           {props.children}
-        </Show>
-      </box>
+        </box>
+      </Show>
       <Show when={collapsible()}>
         <box marginTop={1}>
           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>

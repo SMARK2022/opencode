@@ -1074,6 +1074,71 @@ test("notebook source, run, and output tools render rich notebook cards", async 
   )
 })
 
+// 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
+// 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
+// 修复方式为 preview/body 常驻 + 布局裁剪隐藏，而非 <Show> 分支卸载。
+test("notebook source card keeps content after collapse and re-expand", async () => {
+  // 24 行输出超过 threshold=20，确保 BlockTool 进入可折叠状态
+  const sourceOutput = Array.from({ length: 24 }, (_, index) => `source line ${index + 1}`).join("\n")
+  await withRenderedSession(
+    [assistantMessage("msg_notebook_source_toggle", 1)],
+    {
+      msg_notebook_source_toggle: [
+        completedToolPart(
+          "part_notebook_source_toggle",
+          "msg_notebook_source_toggle",
+          "vscode_notebook_source",
+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-source" },
+          {
+            vscodeNotebook: {
+              view: "source",
+              path: "notebooks/analysis.ipynb",
+              target: "cell 3",
+              cellId: "#VSC-source",
+              returned: 24,
+              totalLines: 24,
+              truncated: false,
+            },
+          },
+          sourceOutput,
+        ),
+      ],
+    },
+    async (app) => {
+      // 初始折叠态：预览可见（前 10 行），完整内容不可见
+      let frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook source")) &&
+        lines.some((line) => line.includes("source line 10")) &&
+        lines.some((line) => line.includes("Click to expand")),
+      )
+      expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
+
+      // 第一次展开：完整内容可见
+      await clickVisibleText(app, "Click to expand")
+      frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
+      )
+      expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
+
+      // 折叠回去：预览恢复可见，完整内容再次隐藏——这是原 bug 的复现点
+      await clickVisibleText(app, "Click to collapse")
+      frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("source line 10")) && lines.some((line) => line.includes("Click to expand")),
+      )
+      expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
+
+      // 再次展开：完整内容仍然可见——验证 body 常驻后不会被销毁成空白
+      await clickVisibleText(app, "Click to expand")
+      frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
+      )
+      expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
+    },
+    {},
+    { height: 40 },
+  )
+})
+
 test("collapsed notebook run preview surfaces late failed cells", async () => {
   await withRenderedSession(
     [assistantMessage("msg_notebook_run_late_failure", 1)],
@@ -2060,6 +2125,9 @@ function completedToolPart(
   tool: string,
   input: Record<string, unknown>,
   metadata: Record<string, unknown> = {},
+  // 新增可选 output 参数：notebook source 等工具的真实输出需要透传到 tool.state.output，
+  // 之前硬编码空字符串导致 GenericTool 的 output memo 取不到值。
+  output = "",
 ) {
   return {
     id,
@@ -2071,7 +2139,7 @@ function completedToolPart(
     state: {
       status: "completed",
       input,
-      output: "",
+      output,
       title: tool,
       metadata,
       time: { start: 1, end: 2 },
