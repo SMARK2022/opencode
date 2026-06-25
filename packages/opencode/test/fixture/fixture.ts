@@ -53,8 +53,9 @@ export async function reloadTestInstance(input: { directory: string }) {
 // 注意：超时只是放弃等待，不会取消后台仍在运行的 disposal fiber——
 // 挂死的 disposer 会继续占用资源直到进程退出。这是 teardown 场景下
 // 可接受的折衷：优先保证后续测试不被 hook 超时阻断。
-const DISPOSAL_TIMEOUT = 5_000
-const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
+export const DISPOSAL_TIMEOUT = 5_000
+
+export const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
   // 用 setTimeout 而非 Bun.sleep，以便在 p 先 settle 时 clearTimeout
   // 避免向后续测试输出虚假的 "timed out" 警告。
   //
@@ -75,18 +76,15 @@ const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
 }
 
 export async function disposeAllInstances() {
-  // allSettled 而非 all：teardown 中某个 runtime 的 rejection 不应
-  // 阻止另一个 runtime 的清理，也不应传播给 afterEach 调用方——
-  // 这与 db.ts 中 resetDatabase 已有的 .catch(() => undefined) 意图一致。
-  // 但 rejection 也不应完全静默：下方检查 allSettled 结果并输出警告，
-  // 让 finalizer bug 在 CI 日志中可追踪。
-  const results = await Promise.allSettled([
+  // Promise.all（而非 allSettled）：disposeInstance（instance-registry.ts）
+  // 内部已用 Promise.allSettled 捕获所有 disposer rejection，因此
+  // store.disposeAll() 不会因单个 disposer 失败而 reject——
+  // 先前 allSettled 的 rejection 日志循环是永远不会触发的死代码。
+  // 保持 Promise.all 与绿测基线（16bb317b8b）行为一致。
+  await Promise.all([
     withDisposalTimeout(InstanceRuntime.disposeAllInstances(), "InstanceRuntime"),
     withDisposalTimeout(runTestInstanceStore((store) => store.disposeAll()), "InstanceStore"),
   ])
-  for (const r of results) {
-    if (r.status === "rejected") console.warn(`[fixture] disposal rejected:`, r.reason)
-  }
 }
 
 // Strip null bytes from paths (defensive fix for CI environment issues)

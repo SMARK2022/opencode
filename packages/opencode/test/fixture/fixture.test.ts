@@ -1,7 +1,7 @@
 import { $ } from "bun"
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
-import { disposeAllInstances, tmpdir, withTestInstance } from "./fixture"
+import { DISPOSAL_TIMEOUT, disposeAllInstances, tmpdir, withDisposalTimeout, withTestInstance } from "./fixture"
 import { registerDisposer } from "../../src/effect/instance-registry"
 
 describe("tmpdir", () => {
@@ -26,15 +26,57 @@ describe("tmpdir", () => {
   })
 })
 
-describe("disposeAllInstances", () => {
-  test("does not throw when disposal rejects", async () => {
-    // teardown 不应将 disposal rejection 传播给调用方——
-    // 这与 db.ts 中 resetDatabase 已有的 .catch(() => undefined) 意图一致。
+describe("withDisposalTimeout", () => {
+  test("forwards the resolved value when the promise settles normally", async () => {
+    // 正常路径：disposal 快速完成时，withDisposalTimeout 必须透传原始值，
+    // 不能被 timeout 分支拦截——这是 Bus 测试依赖的核心不变量：
+    // disposeAllInstances 返回后 InstanceDisposed 事件已在 PubSub 队列中。
+    const result = await withDisposalTimeout(Promise.resolve(42), "test-normal")
+    expect(result).toBe(42)
+  })
+
+  test("resolves within the timeout when the promise hangs", async () => {
+    // 超时路径：disposal 挂死时，withDisposalTimeout 必须在 DISPOSAL_TIMEOUT
+    // (5s) 内返回，而非永久阻塞——这防止 afterEach hook 超时拖垮整个测试文件。
     //
-    // 放在 hang 测试之前执行：hang 测试会向 testInstanceRuntime 的
-    // cachedDisposeAll 注入永不 settle 的 fiber，后续 disposeAll 调用
-    // 可能 join 同一个卡死 fiber。先执行 rejection 测试可确保它
-    // 在干净的缓存状态下验证 rejection-swallowing 行为。
+    // 直接用合成 Promise 测试，不经过 disposeAllInstances / InstanceStore，
+    // 避免 hang 场景 poison testInstanceRuntime 的 cachedDisposeAll fiber
+    // （Effect.cachedWithTTL(Duration.zero) 缓存 in-flight fiber，永不 settle
+    // 则永久缓存，后续所有 disposeAll 调用 join 同一个 stuck fiber）。
+    const start = Date.now()
+    await withDisposalTimeout(new Promise(() => {}), "test-hang")
+    const elapsed = Date.now() - start
+
+    // DISPOSAL_TIMEOUT + 2 秒余量覆盖 setTimeout 精度和 CI 调度延迟
+    expect(elapsed).toBeLessThan(DISPOSAL_TIMEOUT + 2_000)
+    expect(elapsed).toBeGreaterThanOrEqual(DISPOSAL_TIMEOUT)
+  })
+
+  test("does not emit a timeout warning when the promise settles first", async () => {
+    // timer 清理不变量：p 先 settle 时 clearTimeout 必须执行，
+    // 否则 5 秒后会输出虚假的 "disposal timed out" 警告污染 CI 日志。
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (msg: string) => warnings.push(msg)
+    try {
+      await withDisposalTimeout(Promise.resolve("ok"), "test-no-leak")
+      // 等待超过 DISPOSAL_TIMEOUT 确保 setTimeout 不会延迟触发
+      await Bun.sleep(DISPOSAL_TIMEOUT + 200)
+    } finally {
+      console.warn = originalWarn
+    }
+    expect(warnings).toEqual([])
+  })
+})
+
+describe("disposeAllInstances", () => {
+  test("does not throw when a disposer rejects", async () => {
+    // rejection 不传播：disposeInstance（instance-registry.ts）内部
+    // 使用 Promise.allSettled 捕获所有 disposer rejection，
+    // 因此 disposeAllInstances 本身不会因 disposer rejection 而抛出。
+    //
+    // 此测试加载真实 instance（让 disposeAllOnce 有 cache entry 可遍历）
+    // 并注入 rejecting disposer，验证端到端 rejection-swallowing 行为。
     await using tmp = await tmpdir()
     await withTestInstance({ directory: tmp.path, fn: () => undefined })
 
@@ -46,29 +88,11 @@ describe("disposeAllInstances", () => {
     }
   })
 
-  test("completes within a bounded time even when an internal disposal hangs", async () => {
-    // 行为复现：模拟 Windows CI 上某个 service finalizer 挂死。
-    // withTestInstance 加载 instance 但不 dispose（与 provideTestInstance 不同），
-    // 让 disposeAllInstances 有 cache entry 可遍历。
-    // 注入永不 resolve 的 disposer 模拟 SessionRunState.runner.cancel 等
-    // finalizer 在特定时序下不返回的场景。
-    // 修复前 disposeAllInstances 会永远挂起，修复后应在远低于 30 秒
-    // hook 超时的时间内返回。
-    await using tmp = await tmpdir()
-    // withTestInstance 不 dispose，instance 留在 testInstanceRuntime 缓存中
-    await withTestInstance({ directory: tmp.path, fn: () => undefined })
-
-    const off = registerDisposer(() => new Promise(() => {}))
-    try {
-      const start = Date.now()
-      await disposeAllInstances()
-      const elapsed = Date.now() - start
-
-      // fixture.ts 中 DISPOSAL_TIMEOUT = 5_000，此处加 2 秒调度开销余量。
-      // 关键是远低于 bun 30 秒 hook 超时，避免 afterEach 拖垮整个测试文件。
-      expect(elapsed).toBeLessThan(5_000 + 2_000)
-    } finally {
-      off()
-    }
+  test("resolves quickly on empty cache", async () => {
+    // 空载路径：无实例可清理时 disposeAllInstances 应在毫秒级返回，
+    // 不能因 withDisposalTimeout 引入不必要延迟。
+    const start = Date.now()
+    await disposeAllInstances()
+    expect(Date.now() - start).toBeLessThan(2_000)
   })
 })
