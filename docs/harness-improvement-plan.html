@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenCode Harness 改造方案与问题分析报告</title>
+<style>
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bg4:#30363d;
+  --fg:#e6edf3;--fg2:#8b949e;--fg3:#484f58;
+  --blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#bc8cff;--cyan:#39d2c0;
+  --p0:#f85149;--p1:#d29922;--p2:#39d2c0;
+  --border:#30363d;--radius:12px;
+  --mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6;font-size:15px}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Layout */
+.wrap{max-width:1200px;margin:0 auto;padding:0 24px}
+.sidebar{position:fixed;left:0;top:0;width:240px;height:100vh;background:var(--bg2);border-right:1px solid var(--border);overflow-y:auto;padding:20px 0;z-index:100}
+.sidebar a{display:block;padding:8px 20px;color:var(--fg2);font-size:13px;border-left:2px solid transparent}
+.sidebar a:hover,.sidebar a.active{color:var(--fg);border-left-color:var(--blue);background:var(--bg3)}
+.sidebar .group{padding:12px 20px 4px;font-size:11px;text-transform:uppercase;color:var(--fg3);letter-spacing:1px}
+.main{margin-left:240px;padding:48px 48px 120px}
+
+/* Hero */
+.hero{background:linear-gradient(135deg,#0d1117 0%,#161b22 50%,#1a1f2e 100%);padding:64px 0;border-bottom:1px solid var(--border);position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-50%;right:-10%;width:600px;height:600px;background:radial-gradient(circle,rgba(88,166,255,0.06) 0%,transparent 70%);pointer-events:none}
+.hero h1{font-size:42px;font-weight:800;letter-spacing:-1px;margin-bottom:12px;background:linear-gradient(135deg,#e6edf3,#58a6ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero .sub{font-size:18px;color:var(--fg2);margin-bottom:32px}
+.hero .meta{display:flex;gap:24px;flex-wrap:wrap}
+.hero .meta-item{background:var(--bg3);padding:12px 20px;border-radius:8px;border:1px solid var(--border)}
+.hero .meta-item .val{font-size:24px;font-weight:700;color:var(--blue)}
+.hero .meta-item .lbl{font-size:12px;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px}
+
+/* Sections */
+.section{margin-bottom:64px}
+.section h2{font-size:28px;font-weight:700;margin-bottom:24px;padding-bottom:12px;border-bottom:2px solid var(--border);display:flex;align-items:center;gap:12px}
+.section h2 .num{background:var(--blue);color:var(--bg);width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800}
+.section h3{font-size:20px;font-weight:600;margin:24px 0 12px;color:var(--fg)}
+.section h4{font-size:16px;font-weight:600;margin:20px 0 8px;color:var(--fg2)}
+
+/* Cards */
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:16px;transition:border-color .2s}
+.card:hover{border-color:var(--bg4)}
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+
+/* Tables */
+.tbl-wrap{overflow-x:auto;margin-bottom:16px;border-radius:var(--radius);border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--bg3);padding:10px 14px;text-align:left;font-weight:600;color:var(--fg2);border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+tr:last-child td{border-bottom:none}
+tr:hover{background:rgba(88,166,255,0.03)}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;font-family:var(--mono)}
+.tag-p0{background:rgba(248,81,73,0.15);color:var(--p0);border:1px solid rgba(248,81,73,0.3)}
+.tag-p1{background:rgba(210,153,34,0.15);color:var(--p1);border:1px solid rgba(210,153,34,0.3)}
+.tag-p2{background:rgba(57,210,192,0.15);color:var(--p2);border:1px solid rgba(57,210,192,0.3)}
+.tag-excl{background:rgba(139,148,158,0.15);color:var(--fg2);border:1px solid var(--border)}
+.tag-dir{background:rgba(188,140,255,0.15);color:var(--purple);border:1px solid rgba(188,140,255,0.3)}
+
+/* Stats bar */
+.stats-bar{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}
+.stat{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px 24px;flex:1;min-width:160px}
+.stat .num{font-size:32px;font-weight:800;font-family:var(--mono)}
+.stat .lbl{font-size:12px;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px}
+.stat .delta{font-size:13px;margin-top:4px}
+.stat .delta.up{color:var(--green)}
+.stat .delta.down{color:var(--red)}
+
+/* Priority matrix */
+.matrix{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px}
+.matrix-col{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.matrix-col .hdr{padding:16px;font-weight:700;font-size:16px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border)}
+.matrix-col .hdr .dot{width:10px;height:10px;border-radius:50%}
+.matrix-col.p0 .dot{background:var(--p0)}
+.matrix-col.p1 .dot{background:var(--p1)}
+.matrix-col.p2 .dot{background:var(--p2)}
+.matrix-col .item{padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px}
+.matrix-col .item:last-child{border-bottom:none}
+.matrix-col .item .id{font-family:var(--mono);font-size:11px;color:var(--fg2);margin-right:6px}
+.matrix-col .item .title{font-weight:600;margin-bottom:4px}
+.matrix-col .item .desc{color:var(--fg2);font-size:12px;line-height:1.5}
+
+/* Flow diagram */
+.flow{display:flex;align-items:center;justify-content:center;gap:0;margin:24px 0;flex-wrap:wrap}
+.flow-node{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:14px 20px;text-align:center;font-size:13px;min-width:140px}
+.flow-node .icon{font-size:24px;margin-bottom:4px}
+.flow-node .label{font-weight:600}
+.flow-node .count{font-size:11px;color:var(--fg2);margin-top:2px}
+.flow-arrow{color:var(--fg3);font-size:20px;margin:0 8px}
+.flow-node.highlight{border-color:var(--blue);background:rgba(88,166,255,0.08)}
+.flow-node.danger{border-color:var(--red);background:rgba(248,81,73,0.08)}
+.flow-node.success{border-color:var(--green);background:rgba(63,185,80,0.08)}
+
+/* Direction cards */
+.dir-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:12px;cursor:pointer;transition:all .2s}
+.dir-card:hover{border-color:var(--bg4)}
+.dir-card .hdr{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.dir-card .hdr .badge{background:var(--purple);color:var(--bg);padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;font-family:var(--mono)}
+.dir-card .hdr .title{font-weight:700;font-size:16px}
+.dir-card .body{color:var(--fg2);font-size:13px;line-height:1.7}
+.dir-card .findings{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.dir-card .findings .f{font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:3px;background:var(--bg3);color:var(--fg2)}
+
+/* Collapsible */
+.collapsible{cursor:pointer}
+.collapsible-content{display:none;margin-top:12px}
+.collapsible.open .collapsible-content{display:block}
+.collapsible .toggle{float:right;color:var(--fg2);font-size:12px}
+
+/* Code blocks */
+code{font-family:var(--mono);background:var(--bg3);padding:2px 6px;border-radius:4px;font-size:13px}
+pre{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0}
+pre code{background:none;padding:0}
+
+/* Bar chart */
+.bar-chart{margin:24px 0}
+.bar-row{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.bar-row .label{width:200px;font-size:13px;color:var(--fg2);text-align:right;flex-shrink:0}
+.bar-row .track{flex:1;height:28px;background:var(--bg3);border-radius:6px;overflow:hidden;position:relative}
+.bar-row .fill{height:100%;border-radius:6px;display:flex;align-items:center;padding-left:8px;font-size:12px;font-weight:600;color:var(--bg);transition:width .6s ease}
+.bar-row .val{width:80px;font-size:13px;font-family:var(--mono);color:var(--fg)}
+
+/* Timeline */
+.timeline{position:relative;padding-left:32px;margin:24px 0}
+.timeline::before{content:'';position:absolute;left:12px;top:0;bottom:0;width:2px;background:var(--border)}
+.timeline-item{position:relative;margin-bottom:24px}
+.timeline-item::before{content:'';position:absolute;left:-26px;top:4px;width:12px;height:12px;border-radius:50%;background:var(--bg);border:2px solid var(--blue)}
+.timeline-item.p0::before{border-color:var(--p0)}
+.timeline-item.p1::before{border-color:var(--p1)}
+.timeline-item .time{font-size:12px;color:var(--fg2);font-family:var(--mono)}
+.timeline-item .title{font-weight:600;margin:4px 0}
+.timeline-item .desc{font-size:13px;color:var(--fg2)}
+
+/* Risk */
+.risk-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
+.risk-item{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px}
+.risk-item .lvl{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-bottom:6px}
+.risk-item.high .lvl{background:rgba(248,81,73,0.15);color:var(--red)}
+.risk-item.mid .lvl{background:rgba(210,153,34,0.15);color:var(--yellow)}
+.risk-item.low .lvl{background:rgba(63,185,80,0.15);color:var(--green)}
+
+/* Responsive */
+@media(max-width:900px){
+  .sidebar{display:none}.main{margin-left:0;padding:24px}
+  .matrix{grid-template-columns:1fr}.risk-grid{grid-template-columns:1fr}
+  .hero h1{font-size:28px}
+}
+
+/* Animations */
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.section{animation:fadeUp .4s ease}
+@keyframes growBar{from{width:0}}
+.bar-row .fill{animation:growBar .8s ease}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--fg3)}
+
+/* Footer */
+.footer{text-align:center;padding:48px 0;color:var(--fg3);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<nav class="sidebar">
+  <div class="group">概览</div>
+  <a href="#hero">执行摘要</a>
+  <a href="#design">设计思想调研</a>
+  <div class="group">分析</div>
+  <a href="#filter">问题筛选</a>
+  <a href="#root">根因分析</a>
+  <a href="#priority">优先级矩阵</a>
+  <div class="group">方案</div>
+  <a href="#p0">P0 改造方案</a>
+  <a href="#p1">P1 改造方案</a>
+  <a href="#p2">P2 改造方案</a>
+  <div class="group">实施</div>
+  <a href="#roadmap">实施路线图</a>
+  <a href="#risk">风险评估</a>
+  <a href="#mapping">Finding 映射</a>
+</nav>
+
+<!-- Hero -->
+<div class="hero" id="hero">
+<div class="wrap">
+  <h1>OpenCode Harness 改造方案</h1>
+  <div class="sub">基于 835 sessions / 94,164 tool calls / $1,195.68 的只读取证分析</div>
+  <div class="meta">
+    <div class="meta-item"><div class="val">64</div><div class="lbl">Confirmed Findings</div></div>
+    <div class="meta-item"><div class="val">60</div><div class="lbl">Harness 可修复</div></div>
+    <div class="meta-item"><div class="val">10</div><div class="lbl">改造方向</div></div>
+    <div class="meta-item"><div class="val">32</div><div class="lbl">改造项 (P0+P1+P2)</div></div>
+  </div>
+</div>
+</div>
+
+<div class="main">
+<div class="wrap">
+
+<!-- Key Stats -->
+<div class="section">
+<h2><span class="num">01</span> 关键指标</h2>
+<div class="stats-bar">
+  <div class="stat"><div class="num" style="color:var(--blue)">835</div><div class="lbl">分析会话数</div></div>
+  <div class="stat"><div class="num" style="color:var(--green)">94,164</div><div class="lbl">工具调用总数</div></div>
+  <div class="stat"><div class="num" style="color:var(--red)">1,625</div><div class="lbl">工具错误 (1.7%)</div></div>
+  <div class="stat"><div class="num" style="color:var(--yellow)">$1,196</div><div class="lbl">总成本</div></div>
+  <div class="stat"><div class="num" style="color:var(--purple)">65.2h</div><div class="lbl">Subagent 阻塞</div></div>
+  <div class="stat"><div class="num" style="color:var(--cyan)">316</div><div class="lbl">Compaction 事件</div></div>
+</div>
+
+<h3>预期收益</h3>
+<div class="bar-chart">
+  <div class="bar-row"><div class="label">循环检测覆盖率</div><div class="track"><div class="fill" style="width:5%;background:var(--red)">5.1%</div></div><div class="val">→ >40%</div></div>
+  <div class="bar-row"><div class="label">Compaction 文件保留率</div><div class="track"><div class="fill" style="width:28%;background:var(--yellow)">28%</div></div><div class="val">→ >60%</div></div>
+  <div class="bar-row"><div class="label">重复读取热文件对</div><div class="track"><div class="fill" style="width:100%;background:var(--red)">1,248</div></div><div class="val">→ <600</div></div>
+  <div class="bar-row"><div class="label">Subagent 阻塞时间</div><div class="track"><div class="fill" style="width:100%;background:var(--red)">65.2h</div></div><div class="val">→ <40h</div></div>
+  <div class="bar-row"><div class="label">Read output 上下文占比</div><div class="track"><div class="fill" style="width:43%;background:var(--yellow)">42.7%</div></div><div class="val">→ <30%</div></div>
+  <div class="bar-row"><div class="label">Typecheck 重跑次数</div><div class="track"><div class="fill" style="width:97%;background:var(--red)">97</div></div><div class="val">→ <30</div></div>
+</div>
+</div>
+
+<!-- Design Philosophy -->
+<div class="section" id="design">
+<h2><span class="num">02</span> 设计思想调研</h2>
+<p style="color:var(--fg2);margin-bottom:24px">当前仓库为 opencode 的 SMARK 增强分支（dev-smark, v1.15.7），采用 client/server 架构。本地修改通过 [local-smark] 标记（190 处，76 文件）确保上游合并可恢复。</p>
+
+<div class="card-grid">
+  <div class="card">
+    <h4 style="color:var(--blue)">Effect-first 架构</h4>
+    <p style="font-size:13px;color:var(--fg2)">Effect.gen/fn 组合，Schema-first 建模，InstanceState 按目录隔离，makeRuntime 共享 memoMap 去重 layer</p>
+  </div>
+  <div class="card">
+    <h4 style="color:var(--green)">Tool-first 交互</h4>
+    <p style="font-size:13px;color:var(--fg2)">Tool.define() 自包含工具（参数 schema + execute + metadata），工具是模型与系统交互的唯一接口</p>
+  </div>
+  <div class="card">
+    <h4 style="color:var(--yellow)">多层权限系统</h4>
+    <p style="font-size:13px;color:var(--fg2)">precheck 静态分类器 → auto-review LLM 审查 → manual ask。auto agent 4 级预审查是 LLM-cost 边界</p>
+  </div>
+  <div class="card">
+    <h4 style="color:var(--purple)">Compaction 上下文管理</h4>
+    <p style="font-size:13px;color:var(--fg2)">overflow 触发 → LLM anchored summary → Evidence Handoff → pruning → 4-turn tail retention</p>
+  </div>
+  <div class="card">
+    <h4 style="color:var(--cyan)">Provider-agnostic</h4>
+    <p style="font-size:13px;color:var(--fg2)">多 provider 支持，provider-specific prompts 和 transforms，4-axis route 分解（Protocol/Endpoint/Auth/Framing）</p>
+  </div>
+  <div class="card">
+    <h4 style="color:var(--red)">[local-smark] 方向</h4>
+    <p style="font-size:13px;color:var(--fg2)">LLM-cost-aware 权限路由、token/cost 可观测性、daemon 加固、Windows 一等支持、工具输出纪律</p>
+  </div>
+</div>
+
+<h3>改造约束</h3>
+<div class="card">
+<p style="font-size:14px;color:var(--fg2);line-height:1.8">
+  <strong style="color:var(--fg)">[local-smark] 标记</strong>：所有改动标记确保合并可恢复 &nbsp;|&nbsp;
+  <strong style="color:var(--fg)">Effect-first</strong>：Effect.fn/InstanceState/Tool.define &nbsp;|&nbsp;
+  <strong style="color:var(--fg)">向后兼容</strong>：Schema.optional 新增字段 &nbsp;|&nbsp;
+  <strong style="color:var(--fg)">渐进式</strong>：P0→P1→P2，每批 bun typecheck + bun test &nbsp;|&nbsp;
+  <strong style="color:var(--fg)">不假设模型行为</strong>：harness 能 catch/redirect，不依赖"模型会做 X"
+</p>
+</div>
+</div>
+
+<!-- Problem Filter -->
+<div class="section" id="filter">
+<h2><span class="num">03</span> 问题筛选：Harness vs 模型</h2>
+
+<div class="flow">
+  <div class="flow-node"><div class="icon">📊</div><div class="label">64 Findings</div><div class="count">确认发现</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-node danger"><div class="icon">✕</div><div class="label">4 排除</div><div class="count">纯模型问题</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-node highlight"><div class="icon">✓</div><div class="label">60 保留</div><div class="count">Harness 可修复</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-node success"><div class="icon">◆</div><div class="label">10 方向</div><div class="count">聚合根因</div></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-node success"><div class="icon">▶</div><div class="label">32 改造项</div><div class="count">P0×8 P1×10 P2×14</div></div>
+</div>
+
+<h3>排除项（纯模型问题）</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Finding</th><th>问题</th><th>排除原因</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-excl">F-29</span></td><td>73% 单工具调用（不 batch）</td><td>模型决策不 batch，harness 只能 prompt nudge，不属于 harness 工程范畴</td></tr>
+<tr><td><span class="tag tag-excl">F-50</span></td><td>47 个 grep regex 错误</td><td>模型 regex 生成质量是模型能力问题，harness 可校验但不能阻止</td></tr>
+<tr><td><span class="tag tag-excl">F-32</span></td><td>edit oldString U 型失败曲线</td><td>oldString 长短选择是模型决策，harness 可提示但不能替模型选择</td></tr>
+<tr><td><span class="tag tag-excl">F-35</span></td><td>45% write 是覆写</td><td>模型工具选择偏好（write vs edit），harness 可建议但不应强制</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>保留项分类</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>类型</th><th>数量</th><th>典型 Finding</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><strong style="color:var(--red)">Harness 设计缺陷</strong></td><td>3</td><td>F-52, F-53, F-24</td><td>Bug：quotePattern crash、offset=0、retry 24 天</td></tr>
+<tr><td><strong style="color:var(--yellow)">有信息未传递</strong></td><td>8</td><td>F-26, F-38, F-41</td><td>auto-format diff、LSP 状态、typecheck errors 未 surface</td></tr>
+<tr><td><strong style="color:var(--blue)">Dedup/Detection 不足</strong></td><td>12</td><td>F-1, F-5, F-11</td><td>read partial-overlap、doom_loop、semantic loops</td></tr>
+<tr><td><strong style="color:var(--purple)">Tool 设计效率损失</strong></td><td>15</td><td>F-13, F-17, F-19, F-43</td><td>grep 64-cap、task 截断、write 双倍、apply_patch all-or-nothing</td></tr>
+<tr><td><strong style="color:var(--cyan)">Context 管理丢失</strong></td><td>22</td><td>F-4, F-14, F-55</td><td>search history 丢失、summary 28%、pruning 不保护 read</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<!-- Root Cause -->
+<div class="section" id="root">
+<h2><span class="num">04</span> 根因分析与改造方向</h2>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 1</span><span class="title">工具错误诊断不可操作</span><span class="toggle">[展开]</span></div>
+<div class="body">edit/apply_patch/notebook_edit/read-binary 的 error 只报告"期望什么"不报告"实际有什么"。read.ts:384 的 "Did you mean" 是唯一例外。</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-3</span><span class="f">F-16</span><span class="f">F-51</span><span class="f">F-54</span><span class="f">F-62</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>在所有内容匹配工具的 error 中增加 actual content / available alternatives</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 2</span><span class="title">上下文信息丢失且模型不知情</span><span class="toggle">[展开]</span></div>
+<div class="body">5+ 机制拥有信息但不传递给模型——auto-format、compaction、file watcher、LSP、typecheck errors</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-4</span><span class="f">F-14</span><span class="f">F-26</span><span class="f">F-38</span><span class="f">F-41</span><span class="f">F-55</span><span class="f">F-56</span><span class="f">F-58</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>统一"信息前传"原则——harness 的 effect information 必须在 tool output 中对模型可见</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 3</span><span class="title">循环检测层次不足</span><span class="toggle">[展开]</span></div>
+<div class="body">4 层循环检测各有盲区，合计覆盖率仅 5.1%。doom_loop 仅同消息精确匹配（10/816），无 semantic loop 检测（51% sessions 有）</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-5</span><span class="f">F-11</span><span class="f">F-42</span><span class="f">F-60</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>扩展 doom_loop 到跨消息 sliding window + semantic 3-gram + typecheck caching + overlap suppression</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 4</span><span class="title">Subagent 委托效率低下</span><span class="toggle">[展开]</span></div>
+<div class="body">65.2h 阻塞（100% foreground）、92% re-read parent files、12% 空结果、no background mode</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-10</span><span class="f">F-17</span><span class="f">F-30</span><span class="f">F-47</span><span class="f">F-61</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>启用 background + 传递 inspected files + 空结果验证 + result 截断预算</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 5</span><span class="title">Compaction 信息保留不足</span><span class="toggle">[展开]</span></div>
+<div class="body">summary 28% 保留率、Evidence Handflow 排除 search、pruning 不保护 read、splitTurn 跳 error、head/tail bias、memento 太小</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-14</span><span class="f">F-36</span><span class="f">F-55</span><span class="f">F-56</span><span class="f">F-57</span><span class="f">F-63</span><span class="f">F-64</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>Evidence Handoff +Search History + pruning 保护 read + splitTurn 保留 error + 计数 + content-aware + memento min 4K</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 6</span><span class="title">工具 Dedup/Registry 不完整</span><span class="toggle">[展开]</span></div>
+<div class="body">read stub 仅精确 range、skill 无 load dedup、outline per-read-range 不 per-file</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-1</span><span class="f">F-27</span><span class="f">F-33</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>overlap>=80% suppress + skill load dedup + whole-file outline cache</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 7</span><span class="title">工具输出缺乏可操作信息</span><span class="toggle">[展开]</span></div>
+<div class="body">bash timeout 不区分 hung/slow、truncation 总是 tail、grep/glob 无总数、glob 每文件 stat、webfetch 404 无建议</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-2</span><span class="f">F-7</span><span class="f">F-13</span><span class="f">F-18</span><span class="f">F-48</span><span class="f">F-31</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>bash timeout 区分 + command-aware truncation + grep/glob count + glob stat opt-in + webfetch 建议</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 8</span><span class="title">Harness Bug 修复</span><span class="toggle">[展开]</span></div>
+<div class="body">quotePattern .replaceAll on undefined（9 crashes）、offset=0 schema 不一致、retry 24.8 天上限</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-52</span><span class="f">F-53</span><span class="f">F-24</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>guard + auto-correct + cap。零风险。</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 9</span><span class="title">验证与步骤限制缺失</span><span class="toggle">[展开]</span></div>
+<div class="body">45% edit session 无验证、agent.steps ?? Infinity（111 sessions >100 steps）、typecheck re-run 无 caching</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-8</span><span class="f">F-21</span><span class="f">F-42</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>默认 step ceiling 200 + session-end verification notice + typecheck caching</p>
+</div>
+</div>
+
+<div class="dir-card collapsable" onclick="this.classList.toggle('open')">
+<div class="hdr"><span class="badge">方向 10</span><span class="title">工具旁路与未覆盖路径</span><span class="toggle">[展开]</span></div>
+<div class="body">system prompt 不覆盖 bun -e/Select-String、无 git tool（5309 via bash）、WSL 5% encoding</div>
+<div class="collapsible-content">
+<div class="findings"><span class="f">F-6</span><span class="f">F-20</span><span class="f">F-44</span><span class="f">F-45</span><span class="f">F-46</span><span class="f">F-49</span><span class="f">F-59</span></div>
+<p style="margin-top:8px;font-size:13px"><strong>改造：</strong>扩展 prompt + invalid substitute + WSL UTF-8 + 可选 git 结构化工具</p>
+</div>
+</div>
+</div>
+
+<!-- Priority Matrix -->
+<div class="section" id="priority">
+<h2><span class="num">05</span> 优先级矩阵</h2>
+
+<div class="matrix">
+  <div class="matrix-col p0">
+    <div class="hdr"><span class="dot"></span> P0 — 高影响 / 低成本 / 1-2 周</div>
+    <div class="item"><span class="id">P0-1</span><div class="title">Harness Bug 修复</div><div class="desc">quotePattern guard + offset auto-correct + retry cap</div></div>
+    <div class="item"><span class="id">P0-2</span><div class="title">工具错误诊断增强</div><div class="desc">edit/apply_patch/notebook error 增加 actual content</div></div>
+    <div class="item"><span class="id">P0-3</span><div class="title">Disabled tools 替代</div><div class="desc">invalid response 增加 substitute directive</div></div>
+    <div class="item"><span class="id">P0-4</span><div class="title">LSP 不可用提示</div><div class="desc">LSP 返回空时追加 unavailable notice</div></div>
+    <div class="item"><span class="id">P0-5</span><div class="title">apply_patch per-file</div><div class="desc">hunk loop 改为 file-level atomicity</div></div>
+    <div class="item"><span class="id">P0-6</span><div class="title">Blind edit 前读检查</div><div class="desc">edit 前检查 collectVisibleReads</div></div>
+    <div class="item"><span class="id">P0-7</span><div class="title">Auto-format 透明化</div><div class="desc">write/edit output 追加 format diff</div></div>
+    <div class="item"><span class="id">P0-8</span><div class="title">Write input elision</div><div class="desc">执行后 elide tool input content</div></div>
+  </div>
+  <div class="matrix-col p1">
+    <div class="hdr"><span class="dot"></span> P1 — 核心机制 / 2-4 周</div>
+    <div class="item"><span class="id">P1-1</span><div class="title">Read dedup 增强</div><div class="desc">overlap>=80% suppress + outline cache</div></div>
+    <div class="item"><span class="id">P1-2</span><div class="title">Evidence Handoff 扩展</div><div class="desc">+Search History + FILE_LIMIT 自适应</div></div>
+    <div class="item"><span class="id">P1-3</span><div class="title">Compaction 保留增强</div><div class="desc">pruning 保护 read + splitTurn + 计数 + content-aware</div></div>
+    <div class="item"><span class="id">P1-4</span><div class="title">Subagent 效率</div><div class="desc">background 默认 + 传递 files + 空结果验证</div></div>
+    <div class="item"><span class="id">P1-5</span><div class="title">循环检测增强</div><div class="desc">doom_loop 跨消息 + semantic 3-gram + caching</div></div>
+    <div class="item"><span class="id">P1-6</span><div class="title">Step ceiling</div><div class="desc">默认 200 + 80% 收敛提示</div></div>
+    <div class="item"><span class="id">P1-7</span><div class="title">Grep/Glob count</div><div class="desc">truncation 时返回 total count</div></div>
+    <div class="item"><span class="id">P1-8</span><div class="title">Bash truncation 方向</div><div class="desc">command-aware head/tail direction</div></div>
+    <div class="item"><span class="id">P1-9</span><div class="title">Skill load dedup</div><div class="desc">重复加载返回 stub</div></div>
+    <div class="item"><span class="id">P1-10</span><div class="title">Typecheck error flag</div><div class="desc">验证命令 parse error + hasErrors</div></div>
+  </div>
+  <div class="matrix-col p2">
+    <div class="hdr"><span class="dot"></span> P2 — 增强 / 按需</div>
+    <div class="item"><span class="id">P2-1</span><div class="title">验证 Gate</div></div>
+    <div class="item"><span class="id">P2-2</span><div class="title">Model switching 提示</div></div>
+    <div class="item"><span class="id">P2-3</span><div class="title">Reviewer 上下文 bound</div></div>
+    <div class="item"><span class="id">P2-4</span><div class="title">WSL encoding</div></div>
+    <div class="item"><span class="id">P2-5</span><div class="title">Tool bypass 检测</div></div>
+    <div class="item"><span class="id">P2-6</span><div class="title">User correction 持久化</div></div>
+    <div class="item"><span class="id">P2-7</span><div class="title">Reasoning elision</div></div>
+    <div class="item"><span class="id">P2-8</span><div class="title">Binary file 替代建议</div></div>
+    <div class="item"><span class="id">P2-9</span><div class="title">Webfetch 404 建议</div></div>
+    <div class="item"><span class="id">P2-10</span><div class="title">Todo age tracking</div></div>
+    <div class="item"><span class="id">P2-11</span><div class="title">Glob stat 优化</div></div>
+    <div class="item"><span class="id">P2-12</span><div class="title">Error acknowledgment</div></div>
+    <div class="item"><span class="id">P2-13</span><div class="title">Consecutive error breaker</div></div>
+    <div class="item"><span class="id">P2-14</span><div class="title">Git 结构化工具</div></div>
+  </div>
+</div>
+</div>
+
+<!-- P0 Details -->
+<div class="section" id="p0">
+<h2><span class="num">06</span> P0 级改造方案</h2>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>编号</th><th>改造项</th><th>涉及 Finding</th><th>核心改动</th><th>影响</th><th>证据</th><th>成本</th><th>涉及源文件</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-p0">P0-1</span></td><td><strong>Harness Bug 修复</strong></td><td>F-52,53,24</td><td>quotePattern guard + offset auto-correct + retry cap 5min</td><td>5</td><td>5</td><td>5</td><td>bash-compress.ts, read.ts, retry.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-2</span></td><td><strong>工具错误诊断增强</strong></td><td>F-3,16,54,51</td><td>edit/apply_patch/notebook error 增加 actual content / available alternatives</td><td>5</td><td>5</td><td>4</td><td>edit.ts, apply_patch.ts, read.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-3</span></td><td><strong>Disabled tools 替代</strong></td><td>F-6</td><td>invalid tool response 增加 substitute directive</td><td>4</td><td>5</td><td>5</td><td>invalid.ts, selection.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-4</span></td><td><strong>LSP 不可用提示</strong></td><td>F-38</td><td>LSP 返回空时追加 "LSP unavailable" notice</td><td>4</td><td>5</td><td>5</td><td>edit.ts, write.ts, apply_patch.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-5</span></td><td><strong>apply_patch per-file</strong></td><td>F-43</td><td>hunk loop 改为 file-level atomicity</td><td>4</td><td>4</td><td>3</td><td>apply_patch.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-6</span></td><td><strong>Blind edit 前读检查</strong></td><td>F-40</td><td>edit 前检查 collectVisibleReads，未读过则提示</td><td>4</td><td>5</td><td>4</td><td>edit.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-7</span></td><td><strong>Auto-format 透明化</strong></td><td>F-26</td><td>write/edit output 追加 format diff 摘要</td><td>4</td><td>4</td><td>4</td><td>write.ts, edit.ts</td></tr>
+<tr><td><span class="tag tag-p0">P0-8</span></td><td><strong>Write input elision</strong></td><td>F-19</td><td>执行后 elide tool input content（保留 diff output）</td><td>3</td><td>4</td><td>3</td><td>message-v2.ts</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<!-- P1 Details -->
+<div class="section" id="p1">
+<h2><span class="num">07</span> P1 级改造方案</h2>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>编号</th><th>改造项</th><th>涉及 Finding</th><th>核心改动</th><th>影响</th><th>证据</th><th>成本</th><th>涉及源文件</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-p1">P1-1</span></td><td><strong>Read dedup 增强</strong></td><td>F-1,33</td><td>overlap>=80% suppress + whole-file outline cache</td><td>5</td><td>5</td><td>2</td><td>read.ts, read-outline.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-2</span></td><td><strong>Evidence Handoff 扩展</strong></td><td>F-4,14</td><td>+Search History section + EVIDENCE_FILE_LIMIT 自适应</td><td>5</td><td>4</td><td>3</td><td>compaction.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-3</span></td><td><strong>Compaction 保留增强</strong></td><td>F-55,56,57,63,64</td><td>pruning 保护 read + splitTurn 保留 error + 计数 + content-aware + memento min</td><td>5</td><td>4</td><td>2</td><td>compaction.ts, message-v2.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-4</span></td><td><strong>Subagent 效率</strong></td><td>F-10,17,30,47</td><td>background 默认 + 传递 inspected files + 空结果验证 + 截断预算</td><td>5</td><td>5</td><td>2</td><td>task.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-5</span></td><td><strong>循环检测增强</strong></td><td>F-5,11,42,60</td><td>doom_loop 跨消息 + semantic 3-gram + typecheck caching + error breaker</td><td>4</td><td>5</td><td>2</td><td>processor.ts, prompt.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-6</span></td><td><strong>Step ceiling</strong></td><td>F-21</td><td>默认 200 step + 80% 收敛提示</td><td>4</td><td>4</td><td>4</td><td>prompt.ts, agent.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-7</span></td><td><strong>Grep/Glob count</strong></td><td>F-13,18</td><td>truncation 时返回 total count</td><td>3</td><td>5</td><td>4</td><td>grep.ts, glob.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-8</span></td><td><strong>Bash truncation 方向</strong></td><td>F-7</td><td>command-aware head/tail direction</td><td>4</td><td>4</td><td>3</td><td>shell.ts, truncate.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-9</span></td><td><strong>Skill load dedup</strong></td><td>F-27</td><td>重复加载返回 stub</td><td>3</td><td>4</td><td>4</td><td>skill.ts</td></tr>
+<tr><td><span class="tag tag-p1">P1-10</span></td><td><strong>Typecheck error flag</strong></td><td>F-41</td><td>验证命令 parse error patterns + hasErrors flag</td><td>3</td><td>4</td><td>3</td><td>shell.ts, output-notice.ts</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<!-- P2 Details -->
+<div class="section" id="p2">
+<h2><span class="num">08</span> P2 级改造方案</h2>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>编号</th><th>改造项</th><th>涉及 Finding</th><th>核心改动</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-p2">P2-1</span></td><td>验证 Gate</td><td>F-8</td><td>session-end verification notice</td></tr>
+<tr><td><span class="tag tag-p2">P2-2</span></td><td>Model switching 提示</td><td>F-9</td><td>切换时注入 transition note</td></tr>
+<tr><td><span class="tag tag-p2">P2-3</span></td><td>Reviewer 上下文 bound</td><td>F-22</td><td>限制 reviewer 为 sliding window</td></tr>
+<tr><td><span class="tag tag-p2">P2-4</span></td><td>WSL encoding</td><td>F-44</td><td>WSL output 强制 UTF-8 解码</td></tr>
+<tr><td><span class="tag tag-p2">P2-5</span></td><td>Tool bypass 检测</td><td>F-45,46,49,59</td><td>扩展 prompt + bash bypass 检测</td></tr>
+<tr><td><span class="tag tag-p2">P2-6</span></td><td>User correction 持久化</td><td>F-28</td><td>检测 correction + Evidence Handoff 持久化</td></tr>
+<tr><td><span class="tag tag-p2">P2-7</span></td><td>Reasoning elision</td><td>F-37</td><td>旧 reasoning 替换为 stub</td></tr>
+<tr><td><span class="tag tag-p2">P2-8</span></td><td>Binary file 替代建议</td><td>F-51</td><td>type-specific alternative in error</td></tr>
+<tr><td><span class="tag tag-p2">P2-9</span></td><td>Webfetch 404 建议</td><td>F-31</td><td>404 后建议 websearch</td></tr>
+<tr><td><span class="tag tag-p2">P2-10</span></td><td>Todo age tracking</td><td>F-15</td><td>追踪年龄 + session-end notice</td></tr>
+<tr><td><span class="tag tag-p2">P2-11</span></td><td>Glob stat 优化</td><td>F-48</td><td>mtime sort opt-in（默认 alphabetical）</td></tr>
+<tr><td><span class="tag tag-p2">P2-12</span></td><td>Error acknowledgment</td><td>F-23</td><td>tool error 后注入 reminder</td></tr>
+<tr><td><span class="tag tag-p2">P2-13</span></td><td>Consecutive error breaker</td><td>F-25</td><td>3 次连续 error 后注入策略变更</td></tr>
+<tr><td><span class="tag tag-p2">P2-14</span></td><td>Git 结构化工具</td><td>F-20</td><td>git_status/git_diff 返回 JSON</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<!-- Roadmap -->
+<div class="section" id="roadmap">
+<h2><span class="num">09</span> 实施路线图</h2>
+
+<div class="timeline">
+  <div class="timeline-item p0">
+    <div class="time">Phase 1 — Week 1</div>
+    <div class="title">P0-1 Bug 修复 + P0-3 Disabled tools + P0-4 LSP 提示</div>
+    <div class="desc">零风险 guard 修复，立即可交付。消除 9 次 JS crash + 10 次 offset error + 42 次 invalid 浪费 + false "no errors" 假象</div>
+  </div>
+  <div class="timeline-item p0">
+    <div class="time">Phase 1 — Week 1</div>
+    <div class="title">P0-2 工具错误诊断增强</div>
+    <div class="desc">edit/apply_patch/notebook/read-binary error 增加 actual content。减少 54% re-read + 83% non-recovery</div>
+  </div>
+  <div class="timeline-item p0">
+    <div class="time">Phase 1 — Week 2</div>
+    <div class="title">P0-5 apply_patch per-file + P0-6 blind edit + P0-7 format + P0-8 write elision</div>
+    <div class="desc">核心编辑工具改造。减少 44 multi-file failures + 1291 blind edits + 32% silent format + 4.9M chars 双倍上下文</div>
+  </div>
+  <div class="timeline-item p1">
+    <div class="time">Phase 2 — Week 3</div>
+    <div class="title">P1-1 Read dedup + P1-9 Skill dedup + P1-7 Grep/Glob count</div>
+    <div class="desc">工具 dedup 与 count 增强。减少 1248 hot pairs + 70 skill reloads + 20.3% grep 盲区</div>
+  </div>
+  <div class="timeline-item p1">
+    <div class="time">Phase 2 — Week 4</div>
+    <div class="title">P1-2 Evidence Handoff + P1-3 Compaction 保留</div>
+    <div class="desc">compaction.ts 密集改造。保留率 28%→>60% + search history + pruning 保护 read</div>
+  </div>
+  <div class="timeline-item p1">
+    <div class="time">Phase 2 — Week 5</div>
+    <div class="title">P1-4 Subagent 效率 + P1-5 循环检测 + P1-6 Step ceiling</div>
+    <div class="desc">减少 65.2h 阻塞 + 92% re-read + 循环覆盖率 5%→40% + 111 sessions 无界循环</div>
+  </div>
+  <div class="timeline-item p1">
+    <div class="time">Phase 2 — Week 6</div>
+    <div class="title">P1-8 Bash truncation + P1-10 Typecheck flag</div>
+    <div class="desc">bash command-aware direction + typecheck error content 标记</div>
+  </div>
+  <div class="timeline-item p2">
+    <div class="time">Phase 3 — 按需</div>
+    <div class="title">P2 改造项（14 项独立可交付）</div>
+    <div class="desc">建议优先：P2-5（bypass 检测）、P2-7（reasoning elision）、P2-14（git 工具）</div>
+  </div>
+</div>
+</div>
+
+<!-- Risk -->
+<div class="section" id="risk">
+<h2><span class="num">10</span> 风险评估</h2>
+<div class="risk-grid">
+  <div class="risk-item mid">
+    <span class="lvl">中风险</span>
+    <p style="font-size:13px"><strong>apply_patch 原子性语义改变</strong><br>P0-5：从 patch-level 到 file-level。需 release notes 说明，保留 config 选项</p>
+  </div>
+  <div class="risk-item mid">
+    <span class="lvl">中风险</span>
+    <p style="font-size:13px"><strong>write input elision 改变持久化</strong><br>P0-8：需验证 compaction replay + session replay，config flag 控制</p>
+  </div>
+  <div class="risk-item mid">
+    <span class="lvl">中风险</span>
+    <p style="font-size:13px"><strong>background subagent 稳定性</strong><br>P1-4：config flag 控制默认开启但可关闭，验证 task_status 轮询</p>
+  </div>
+  <div class="risk-item mid">
+    <span class="lvl">中风险</span>
+    <p style="font-size:13px"><strong>compaction.ts 上游合并冲突</strong><br>P1-2/P1-3：[local-smark] 标记，合并时逐文件恢复</p>
+  </div>
+  <div class="risk-item low">
+    <span class="lvl">低风险</span>
+    <p style="font-size:13px"><strong>semantic loop 检测开销</strong><br>P1-5：window size 限制 30，每 step 一次检测</p>
+  </div>
+  <div class="risk-item low">
+    <span class="lvl">低风险</span>
+    <p style="font-size:13px"><strong>blind edit false positive</strong><br>P0-6：检查逻辑同时查 read 和 write 历史</p>
+  </div>
+  <div class="risk-item low">
+    <span class="lvl">低风险</span>
+    <p style="font-size:13px"><strong>Evidence Handoff 膨胀</strong><br>P1-2：Search History 上限 10 queries，FILE_LIMIT 有上限</p>
+  </div>
+  <div class="risk-item low">
+    <span class="lvl">低风险</span>
+    <p style="font-size:13px"><strong>所有 P0-1 bug 修复</strong><br>纯防御性 guard，零行为变更</p>
+  </div>
+</div>
+</div>
+
+<!-- Mapping -->
+<div class="section" id="mapping">
+<h2><span class="num">11</span> 附录：Finding 到改造项映射</h2>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Finding</th><th>问题摘要</th><th>改造项</th><th>优先级</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-excl">F-1</span></td><td>read partial-overlap 仅 note 不 suppress</td><td>P1-1</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-2</span></td><td>bash timeout "(no output)" 不区分 hung/slow</td><td>P2-5</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-3</span></td><td>edit "Could not find oldString" 无 actual content</td><td>P0-2</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-4</span></td><td>Evidence Handoff 排除 search history</td><td>P1-2</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-5</span></td><td>doom_loop exact-match 仅 10 次触发</td><td>P1-5</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-6</span></td><td>disabled tools 无 substitute 建议</td><td>P0-3</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-7</span></td><td>bash tail-truncation 丢失 head</td><td>P1-8</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-8</span></td><td>45% edit session 无验证</td><td>P2-1</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-9</span></td><td>model switching 无 transition note</td><td>P2-2</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-10</span></td><td>subagent 92% re-read parent files</td><td>P1-4</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-11</span></td><td>51% sessions 有 semantic loops</td><td>P1-5</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-12</span></td><td>1248 hot file-session pairs（测量）</td><td>P1-1</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-13</span></td><td>grep 64-cap 无 total count</td><td>P1-7</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-14</span></td><td>compaction summary 28% 保留率</td><td>P1-2, P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-15</span></td><td>26% sessions abandon todos</td><td>P2-10</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-16</span></td><td>apply_patch error 无 actual content</td><td>P0-2</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-17</span></td><td>task result 不一致截断</td><td>P1-4</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-18</span></td><td>glob 100-cap 无 total + mtime sort 丢失旧文件</td><td>P1-7</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-19</span></td><td>write input 双倍上下文（4.9M chars）</td><td>P0-8</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-20</span></td><td>无 git tool，5309 git via bash</td><td>P2-14</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-21</span></td><td>agent.steps ?? Infinity</td><td>P1-6</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-22</span></td><td>permission-reviewer 5.3M chars 上下文</td><td>P2-3</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-23</span></td><td>31.9% tool errors 未 acknowledge</td><td>P2-12</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-24</span></td><td>retry delay 2.1B ms（24.8 天）</td><td>P0-1</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-25</span></td><td>3+ 连续 errors 50% same-tool retry</td><td>P2-13</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-26</span></td><td>auto-format 32% silent content change</td><td>P0-7</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-27</span></td><td>skill reload 无 dedup（70 次重复）</td><td>P1-9</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-28</span></td><td>1313 user corrections 未持久化</td><td>P2-6</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl" style="opacity:.5">F-29</span></td><td>73% 单工具调用</td><td colspan="2"><span class="tag tag-excl">排除 — 模型问题</span></td></tr>
+<tr><td><span class="tag tag-excl">F-30</span></td><td>12% task 空结果</td><td>P1-4</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-31</span></td><td>webfetch 404 仅 8% 切 websearch</td><td>P2-9</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl" style="opacity:.5">F-32</span></td><td>edit U 型失败曲线</td><td colspan="2"><span class="tag tag-excl">排除 — 模型问题</span></td></tr>
+<tr><td><span class="tag tag-excl">F-33</span></td><td>read-outline 0% 覆盖率 for minified</td><td>P1-1</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-34</span></td><td>read output 42.7% 上下文（测量）</td><td>P1-1</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl" style="opacity:.5">F-35</span></td><td>45% write 是覆写</td><td colspan="2"><span class="tag tag-excl">排除 — 模型问题</span></td></tr>
+<tr><td><span class="tag tag-excl">F-36</span></td><td>24 次 compaction 累积损失</td><td>P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-37</span></td><td>reasoning 8.8% 上下文不 elide</td><td>P2-7</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-38</span></td><td>LSP 0 diagnostics（12,607 edits）</td><td>P0-4</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-39</span></td><td>editor-context 0% action rate</td><td>P2-5</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-40</span></td><td>1291 blind edits（11.1%）</td><td>P0-6</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-41</span></td><td>13% typecheck errors 未 acknowledge</td><td>P1-10</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-42</span></td><td>97 immediate typecheck re-runs</td><td>P1-5</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-43</span></td><td>apply_patch all-or-nothing</td><td>P0-5</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-44</span></td><td>WSL 5% encoding issues</td><td>P2-4</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-45</span></td><td>1757 Select-String 绕过 grep</td><td>P2-5</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-46</span></td><td>412 inline scripts 绕过 read</td><td>P2-5</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-47</span></td><td>65.2h subagent blocking</td><td>P1-4</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-48</span></td><td>glob p90=2349ms（per-file stat）</td><td>P2-11</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-49</span></td><td>58 Unix-in-pwsh errors</td><td>P2-5</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl" style="opacity:.5">F-50</span></td><td>47 grep regex errors</td><td colspan="2"><span class="tag tag-excl">排除 — 模型问题</span></td></tr>
+<tr><td><span class="tag tag-excl">F-51</span></td><td>read binary 无 alternative</td><td>P0-2, P2-8</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-52</span></td><td>quotePattern crash（9 次）</td><td>P0-1</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-53</span></td><td>offset=0 1-indexed confusion</td><td>P0-1</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-54</span></td><td>notebook cellId 83% non-recovery</td><td>P0-2</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-55</span></td><td>PRUNE_PROTECTED_TOOLS 仅 skill</td><td>P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-56</span></td><td>splitTurn 跳过 error turns</td><td>P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-57</span></td><td>previous-summary 无质量检查</td><td>P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-58</span></td><td>5+ silent feedback gaps</td><td>P0-4, P0-7, P1-3</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-59</span></td><td>5+ tool bypass paths</td><td>P2-5</td><td><span class="tag tag-p2">P2</span></td></tr>
+<tr><td><span class="tag tag-excl">F-60</span></td><td>4 loop layers 5.1% coverage</td><td>P1-5</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-61</span></td><td>subagent 5 compounding inefficiencies</td><td>P1-4</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-62</span></td><td>error diagnostics 跨工具 non-actionable</td><td>P0-2</td><td><span class="tag tag-p0">P0</span></td></tr>
+<tr><td><span class="tag tag-excl">F-63</span></td><td>compaction truncation head/tail bias</td><td>P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+<tr><td><span class="tag tag-excl">F-64</span></td><td>preserveRecentUserBudget 20% too small</td><td>P1-3</td><td><span class="tag tag-p1">P1</span></td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+</div>
+</div>
+
+<div class="footer">
+  OpenCode Harness 改造方案与问题分析报告 &middot; 基于只读取证分析 &middot; 2026-06-28<br>
+  835 sessions / 94,164 tool calls / 64 confirmed findings / 32 improvement items
+</div>
+
+<script>
+// Sidebar active state
+const links=document.querySelectorAll('.sidebar a');
+const sections=document.querySelectorAll('.section,.hero');
+window.addEventListener('scroll',()=>{
+  let cur='';
+  sections.forEach(s=>{if(window.scrollY>=s.offsetTop-100)cur=s.id});
+  links.forEach(a=>{
+    a.classList.toggle('active',a.getAttribute('href')==='#'+cur);
+  });
+});
+
+// Collapsible toggle
+document.querySelectorAll('.dir-card').forEach(c=>{
+  c.addEventListener('click',e=>{
+    if(e.target.classList.contains('toggle'))e.stopPropagation();
+  });
+});
+
+// Smooth scroll
+links.forEach(a=>{
+  a.addEventListener('click',e=>{
+    e.preventDefault();
+    const t=document.querySelector(a.getAttribute('href'));
+    if(t)window.scrollTo({top:t.offsetTop-20,behavior:'smooth'});
+  });
+});
+</script>
+</body>
+</html>
