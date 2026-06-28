@@ -1,7 +1,7 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { afterEach, describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -95,6 +95,21 @@ const asks = () => {
 }
 
 describe("tool.lsp", () => {
+  it.instance("reports unavailable before file access or permission approval", () =>
+    Effect.gen(function* () {
+      const service = yield* LSP.Service
+      const { items, next } = asks()
+      const result = yield* Effect.exit(run({ operation: "hover", filePath: "not-read.ts", line: 1, character: 1 }, next).pipe(
+        Effect.provideService(LSP.Service, { ...service, hasClients: () => Effect.succeed(false) }),
+      ))
+      expect(result._tag).toBe("Failure")
+      if (result._tag !== "Failure") throw new Error("expected unavailable LSP")
+      // 只注入不可用的假Service，不启动LSP；错误必须先于不存在文件和审批。
+      expect(String(Cause.squash(result.cause))).toContain("LSP diagnostics unavailable")
+      expect(items).toEqual([])
+    }),
+  )
+
   describe("permission metadata", () => {
     it.instance(
       "keeps cursor details for position-based operations",

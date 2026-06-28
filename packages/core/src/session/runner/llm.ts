@@ -282,12 +282,20 @@ const layer = Layer.effect(
       const toolMaterialization = isLastStep || decide ? undefined : prepared.materialization
       // 指引只引用本轮真实可见工具；内部修复定义不算用户能力，空列表明确提示无工具。
       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name).filter(ToolSelection.isUserConfigurable) ?? [])
+      // 根据本轮实际工具表提示历史调用的可用性，不另建权限判断或持久化提醒。
+      const available = new Set(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
+      const disabled = toolMaterialization ? [...new Set(context.flatMap(message => message.type === "assistant" ? message.content.flatMap(part => part.type === "tool" && part.provider?.executed !== true ? [part.name] : []) : []))].filter(name => !available.has(name)) : []
+      const notice = disabled.map(name => {
+        const substitutes = name === "apply_patch" ? ["edit", "write"].filter(tool => available.has(tool)) : []
+        return `${name} is not available in this session. Use ${substitutes.length ? substitutes.join(" or ") : "an available tool"} instead.`
+      }).join("\n")
       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
       // 普通提醒逐轮生成，实验计划沿既有synthetic持久化；两者都不新增用户admission或放宽权限。
       const reminders = decide ? [] : yield* buildReminders(agent.id, session.id, context)
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const systemParts = [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
+        ...(notice ? [`<system-reminder>${notice}</system-reminder>`] : []),
         ...(decide ? [DECIDE_PROMPT] : []),
         `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
         .filter((part): part is string => part !== undefined && part.length > 0)

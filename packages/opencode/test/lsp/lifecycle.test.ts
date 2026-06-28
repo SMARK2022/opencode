@@ -52,24 +52,29 @@ describe("LSP service lifecycle", () => {
   )
 
   it.instance(
-    "hasClients() returns true for .ts files in instance when lsp is true",
+    "hasClients() stays false even when lsp is true",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
           const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
-          expect(result).toBe(true)
+          // 配置不能重启产品已停用的能力，Read warming 也不能偷偷启动服务。
+          expect(result).toBe(false)
+          yield* lsp.touchFile(path.join((yield* TestInstance).directory, "test.ts"))
+          expect(spawnSpy).toHaveBeenCalledTimes(0)
         }),
       ),
     { config: { lsp: true } },
   )
 
   it.instance(
-    "hasClients() keeps built-in LSPs when config object is provided",
+    "hasClients() stays false when a config object is provided",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
           const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
-          expect(result).toBe(true)
+          expect(result).toBe(false)
+          yield* lsp.touchFile(path.join((yield* TestInstance).directory, "test.ts"))
+          expect(spawnSpy).toHaveBeenCalledTimes(0)
         }),
       ),
     { config: { lsp: { eslint: { disabled: true } } } },

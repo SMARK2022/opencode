@@ -193,6 +193,7 @@ describe("ApplyPatchTool", () => {
                   type: "text",
                   value: expect.stringContaining("Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt\n\nChanged:\n```diff"),
                 })
+                expect(shown).toEndWith("\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.")
                 expect(settled.output?.structured).toMatchObject({
                   applied: [
                     { type: "add", resource: "nested/new.txt" },

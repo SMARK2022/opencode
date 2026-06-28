@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 import { formatExitNotice } from "@opencode-ai/core/util/output-notice"
 
 // #129：CLIXML 纯块解码与混合块保留
@@ -187,5 +187,20 @@ describe("tool.bash-compress", () => {
 
     expect(result.text).toBe('[repeated "abc" ×6000]')
     expect(result.stats.inlinePatternGroups).toBe(1)
+  })
+
+  // [local-smark] quotePattern 在 bash 压缩管线内部被调用，PowerShell 输出格式化
+  // 的边界情况可能传入 undefined pattern，导致 .replaceAll crash（历史 9 次）。
+  // guard 必须返回空字符串而非 throw，保证压缩管线不会因单个 pattern 为空而中断。
+  test("quotePattern returns empty string for undefined input instead of crashing", () => {
+    // 模拟压缩管线传入 undefined 的边界场景
+    expect(quotePattern(undefined as unknown as string)).toBe("")
+  })
+
+  test("quotePattern escapes backslashes and quotes in normal input", () => {
+    // 正常路径：转义反斜杠和双引号，超长截断
+    expect(quotePattern("hello")).toBe('"hello"')
+    expect(quotePattern('a"b')).toBe('"a\\"b"')
+    expect(quotePattern("a\\b")).toBe('"a\\\\b"')
   })
 })

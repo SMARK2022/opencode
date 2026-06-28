@@ -178,6 +178,51 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // They are not pending work and must not trigger an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
 }
+// [local-smark] 检查历史消息中是否使用了当前被 disabled 的工具，返回事前提醒文本。
+// 场景：GPT 模型在历史中用了 apply_patch，切换到 Claude（apply_patch 被 deny）后，
+// 新模型看到历史中的 apply_patch 调用可能也尝试使用，但工具不可用会浪费一轮。
+// 此函数在 reminders 阶段调用，在模型生成下一轮回复之前注入提醒。
+// 纯函数，无副作用，可直接单元测试。
+export function disabledToolNotice(
+  messages: SessionV1.WithParts[],
+  agentPermission: PermissionV1.Ruleset,
+  sessionPermission: PermissionV1.Ruleset,
+): string | undefined {
+  // 从历史消息中提取所有出现过的工具名
+  const toolNames = new Set<string>()
+  for (const msg of messages) {
+    for (const part of msg.parts) {
+      if (part.type === "tool") toolNames.add(part.tool)
+    }
+  }
+  const mergedRuleset = Permission.merge(agentPermission, sessionPermission)
+  // Permission.disabled 返回在这些工具中被 ruleset deny 的子集；
+  // 因为 toolNames 本身来自历史消息，所以 disabled.size > 0 蕴含
+  // "历史中确实使用了被 disable 的工具"，无需额外检查
+  const disabled = Permission.disabled([...toolNames], mergedRuleset)
+  if (disabled.size === 0) return undefined
+  // [local-smark] 已知工具的替代建议映射；替代工具可能在当前 ruleset 下也被 deny
+  // （如 edit: deny * 会同时禁用 edit/write/apply_patch），需单独检查替代工具的可用性
+  const substituteMap: Record<string, string[]> = {
+    apply_patch: ["edit", "write"],
+  }
+  // 检查所有可能的替代工具是否也被 disable
+  const allSubstitutes = [...new Set(Object.values(substituteMap).flat())]
+  const substituteDisabled = Permission.disabled(allSubstitutes, mergedRuleset)
+  const notices = [...disabled].map((tool) => {
+    const substitutes = substituteMap[tool]
+    if (substitutes) {
+      // 过滤掉同样被 disabled 的替代工具，避免建议不可用的工具
+      const available = substitutes.filter((s) => !substituteDisabled.has(s))
+      if (available.length > 0) {
+        return `${tool} is not available in this session. Use ${available.join(" or ")} instead.`
+      }
+    }
+    return `${tool} is not available in this session. Use an available tool instead.`
+  })
+  return `<system-reminder>${notices.join("\n")}</system-reminder>`
+}
+
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
@@ -1501,6 +1546,20 @@ const layer = Layer.effect(
           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
+            // [local-smark] 事前提醒：当历史记录中使用了当前被 disable 的工具时，
+            // 在用户消息中注入 system-reminder，让模型在生成下一轮回复前就知道
+            // 该工具不可用及替代方案。所有 agent 模式共用此循环，注入覆盖全路径。
+            const notice = disabledToolNotice(msgs, agent.permission, session.permission ?? [])
+            if (notice && lastUserMsg) {
+              lastUserMsg.parts.push({
+                id: PartID.ascending(),
+                messageID: lastUserMsg.info.id,
+                sessionID: lastUserMsg.info.sessionID,
+                type: "text",
+                text: notice,
+                synthetic: true,
+              } as SessionV1.Part)
+            }
             const promptOps = yield* ops()
             // #159：decide 路径工具表恒为空，不 resolve 注册表
             // 空表同时驱动 system 的 WITHOUT any tools 文案

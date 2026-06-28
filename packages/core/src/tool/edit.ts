@@ -69,6 +69,8 @@ export const toModelOutput = (output: Output) =>
     // 展示真实文件 diff，第七行以后的修改和 formatter 变化同样可见。
     ...output.files.map((file) => file.patch),
     "```",
+    // 最终文件 diff 保持完整；LSP 固定停用，不能把成功当作诊断通过。
+    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
   ].join("\n")
 
 /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */

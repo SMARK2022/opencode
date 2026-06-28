@@ -251,7 +251,7 @@ const layer = Layer.effect(
             tool.patch,
             tool.permission_review_decision,
             ...(tool.execute ? [tool.execute] : []),
-            ...(flags.experimentalLspTool ? [tool.lsp] : []),
+            // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],
           task: tool.task,

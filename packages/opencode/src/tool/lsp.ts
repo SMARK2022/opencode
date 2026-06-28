@@ -44,6 +44,8 @@ export const LspTool = Tool.define(
       parameters: Parameters,
       execute: (args: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
+          // 直接调用也先报告停用，避免文件读取、审批和后台启动成为另一入口。
+          if (!(yield* lsp.hasClients(args.filePath))) throw new Error("LSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.")
           const instance = yield* InstanceState.context
           const file = path.isAbsolute(args.filePath) ? args.filePath : path.join(instance.directory, args.filePath)
           yield* assertExternalDirectoryEffect(ctx, file)
