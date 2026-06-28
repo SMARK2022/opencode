@@ -15,7 +15,8 @@ import { BlockTool } from "../../../src/routes/session"
 
 // 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
 // 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
-// 修复方式为 preview/body 常驻 + maxHeight 裁剪隐藏，而非 <Show> 分支卸载。
+// 修复方式为 preview/body 常驻挂载，隐藏态由 #344 起改用 visible 属性整体
+// 不可见（maxHeight=0 会经 Math.max(height,1) 泄漏首行），而非 <Show> 卸载。
 test("block tool keeps content after collapse and re-expand", async () => {
   // 24 行输出超过 threshold=20，确保 BlockTool 进入可折叠状态。
   // KV 预置空对象文件，避免 init 读缺失文件时的错误日志噪音。

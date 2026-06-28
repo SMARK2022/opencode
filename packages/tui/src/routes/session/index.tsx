@@ -2662,12 +2662,12 @@ export function BlockTool(props: {
       <Show when={props.autoReview !== false}>
         <ToolAutoReviewLine />
       </Show>
-      {/* 预览与正文分开挂载，显示状态继续由外层驱动。 */}
-      <box marginTop={collapsed() ? 1 : 0} maxHeight={collapsed() ? undefined : 0} overflow={collapsed() ? undefined : "hidden"}>
+      {/* visible隐藏整块但不销毁节点，避免零高度仍泄漏首行；状态继续由外层驱动。 */}
+      <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
         {preview()}
       </box>
       <Show when={bodyMounted()}>
-        <box marginTop={collapsed() ? 0 : 1} maxHeight={collapsed() ? 0 : undefined} overflow={collapsed() ? "hidden" : undefined}>
+        <box marginTop={collapsed() ? 0 : 1} visible={!collapsed()}>
           {props.children}
         </box>
       </Show>
