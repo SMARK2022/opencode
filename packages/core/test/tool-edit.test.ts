@@ -152,6 +152,7 @@ describe("EditTool", () => {
                 })
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\nrest\n")
                 expect(shown).toContain("-before\n+after\n rest")
+                expect(shown).toEndWith("\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.")
                 expect(assertions).toMatchObject([{ sessionID, action: "edit", resources: ["hello.txt"], save: ["*"] }])
                 expect(writes).toEqual([yield* Effect.promise(() => fs.realpath(target))])
               }),

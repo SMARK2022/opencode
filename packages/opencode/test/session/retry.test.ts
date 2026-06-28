@@ -70,6 +70,15 @@ describe("session.retry.delay", () => {
     expect(d).toBeGreaterThanOrEqual(19000)
     expect(d).toBeLessThanOrEqual(20000)
   })
+  test("uses retry-after values up to the 30-minute cap", () => {
+    const error = apiError({ "retry-after": "50" })
+    expect(SessionRetry.delay(1, error)).toBe(50000)
+    const longError = apiError({ "retry-after-ms": "700000" })
+    expect(SessionRetry.delay(1, longError)).toBe(700000)
+    // 超过 30 分钟的值被 cap
+    const veryLongError = apiError({ "retry-after-ms": "999999999999" })
+    expect(SessionRetry.delay(1, veryLongError)).toBe(1_800_000)
+  })
 
   test("ignores invalid retry hints", () => {
     const error = apiError({ "retry-after": "not-a-number" })

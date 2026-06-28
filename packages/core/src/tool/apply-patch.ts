@@ -47,6 +47,8 @@ export const toModelOutput = (output: Output) =>
     "```diff",
     ...output.files.map((file) => file.patch),
     "```",
+    // 批次最终 diff 与诊断状态独立，不用不可用提示替代真实改动。
+    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
   ].join("\n")
 
 type Prepared =

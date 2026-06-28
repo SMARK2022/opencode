@@ -1,7 +1,7 @@
 import { describe, expect, spyOn } from "bun:test"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Deferred, Effect, Layer } from "effect"
+import { Effect, Layer } from "effect"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -9,7 +9,7 @@ import { LSP } from "@/lsp/lsp"
 import * as LSPServer from "@/lsp/server"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestInstance } from "../fixture/fixture"
-import { awaitWithTimeout, testEffect } from "../lib/effect"
+import { testEffect } from "../lib/effect"
 
 const lspLayer = (flags: Parameters<typeof RuntimeFlags.layer>[0] = {}) =>
   LayerNode.compile(LayerNode.group([LSP.node, Config.node, RuntimeFlags.node, EventV2Bridge.node]), [
@@ -71,7 +71,7 @@ describe("lsp.spawn", () => {
   )
 
   it.instance(
-    "would spawn builtin LSP for files inside instance when lsp is true",
+    "does not spawn builtin LSP inside the instance even when lsp is true",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -84,7 +84,7 @@ describe("lsp.spawn", () => {
               line: 0,
               character: 0,
             })
-            expect(spy).toHaveBeenCalledTimes(1)
+            expect(spy).toHaveBeenCalledTimes(0)
           } finally {
             spy.mockRestore()
           }
@@ -94,15 +94,15 @@ describe("lsp.spawn", () => {
   )
 
   it.instance(
-    "publishes lsp.updated after custom LSP initialization",
+    "custom LSP config cannot initialize a server or publish lsp.updated",
     () =>
       Effect.gen(function* () {
         const dir = (yield* TestInstance).directory
         const lsp = yield* LSP.Service
-        const updated = yield* Deferred.make<void>()
+        const updated: string[] = []
         const events = yield* EventV2Bridge.Service
         const unsubscribe = yield* events.listen((event) => {
-          if (event.type === LSP.Event.Updated.type) Deferred.doneUnsafe(updated, Effect.void)
+          if (event.type === LSP.Event.Updated.type) updated.push(event.type)
           return Effect.void
         })
         yield* Effect.addFinalizer(() => unsubscribe)
@@ -110,7 +110,9 @@ describe("lsp.spawn", () => {
         const file = path.join(dir, "sample.repro")
         yield* Effect.promise(() => Bun.write(file, "sample\n"))
         yield* lsp.touchFile(file)
-        yield* awaitWithTimeout(Deferred.await(updated), "lsp.updated event was not published")
+        // 自定义命令也不能被执行，空状态不能误报成已连接或诊断通过。
+        expect(updated).toEqual([])
+        expect(yield* lsp.status()).toEqual([])
       }),
     {
       config: {
@@ -125,7 +127,7 @@ describe("lsp.spawn", () => {
   )
 
   it.instance(
-    "would spawn builtin LSP for files inside instance when config object is provided",
+    "does not spawn builtin LSP when a config object is provided",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -138,7 +140,7 @@ describe("lsp.spawn", () => {
               line: 0,
               character: 0,
             })
-            expect(spy).toHaveBeenCalledTimes(1)
+            expect(spy).toHaveBeenCalledTimes(0)
           } finally {
             spy.mockRestore()
           }
@@ -154,7 +156,7 @@ describe("lsp.spawn", () => {
   )
 
   it.instance(
-    "uses pyright instead of ty by default",
+    "keeps pyright and ty disabled by default",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -169,7 +171,7 @@ describe("lsp.spawn", () => {
               character: 0,
             })
             expect(ty).toHaveBeenCalledTimes(0)
-            expect(pyright).toHaveBeenCalledTimes(1)
+            expect(pyright).toHaveBeenCalledTimes(0)
           } finally {
             ty.mockRestore()
             pyright.mockRestore()
@@ -180,7 +182,7 @@ describe("lsp.spawn", () => {
   )
 
   experimentalTyIt.instance(
-    "uses ty instead of pyright when experimentalLspTy is enabled",
+    "experimentalLspTy cannot enable ty or pyright",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -194,7 +196,7 @@ describe("lsp.spawn", () => {
               line: 0,
               character: 0,
             })
-            expect(ty).toHaveBeenCalledTimes(1)
+            expect(ty).toHaveBeenCalledTimes(0)
             expect(pyright).toHaveBeenCalledTimes(0)
           } finally {
             ty.mockRestore()
@@ -206,7 +208,7 @@ describe("lsp.spawn", () => {
   )
 
   disabledDownloadIt.instance(
-    "passes disableLspDownload to builtin LSP spawn",
+    "keeps LSP unavailable regardless of the download flag",
     () =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -219,8 +221,8 @@ describe("lsp.spawn", () => {
               line: 0,
               character: 0,
             })
-            expect(pyright).toHaveBeenCalledTimes(1)
-            expect(pyright.mock.calls[0]?.[2]).toMatchObject({ disableLspDownload: true })
+            expect(pyright).toHaveBeenCalledTimes(0)
+            expect(yield* lsp.hasClients(path.join(dir, "src", "inside.py"))).toBe(false)
           } finally {
             pyright.mockRestore()
           }

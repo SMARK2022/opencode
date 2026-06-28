@@ -44,6 +44,8 @@ export const toModelOutput = (output: Output) =>
   [
     `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`,
     ...(output.formattedDiff ? ["", "Formatted changes (auto-format adjusted the file):", "```diff", output.formattedDiff, "```"] : []),
+    // 保留格式化后的真实变化，并明确写入成功不等于类型检查通过。
+    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
   ].join("\n")
 
 // 最终内容反馈来自锁内实际回读；后续历史投影消费相同格式化结果。

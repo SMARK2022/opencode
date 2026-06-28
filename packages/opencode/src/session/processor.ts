@@ -267,14 +267,23 @@ const layer = Layer.effect(
           ...match.part,
           state: {
             status: "completed",
-            input: match.part.state.input,
+            // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
+            // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
+            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
+            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
+            // 原始 input 不保留——format 后的内容才是真实落盘内容。
+            input: typeof output.metadata?._formattedContent === "string"
+              ? { ...match.part.state.input, content: output.metadata._formattedContent }
+              : match.part.state.input,
             output: output.output,
             // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
-            // #209：completion 用工具自身 output.metadata 覆盖——autoReview 是 reviewer 写入的外部注解，不属于工具输出，必须显式回填
-            // #209：无 autoReview 时直接用 output.metadata——非自动审查的工具不携带 reviewer 信封，无需额外合并
-            metadata: match.part.state.metadata?.autoReview
-              ? { ...output.metadata, autoReview: match.part.state.metadata.autoReview }
-              : output.metadata,
+            // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
+            metadata: (() => {
+              const { _formattedContent, ...rest } = output.metadata ?? {}
+              return match.part.state.metadata?.autoReview
+                ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+                : rest
+            })(),
             title: output.title,
             time: { start: match.part.state.time.start, end: Date.now() },
             attachments: output.attachments,

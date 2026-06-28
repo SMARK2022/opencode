@@ -7,7 +7,6 @@ import { pathToFileURL, fileURLToPath } from "url"
 import * as LSPServer from "./server"
 import { Config } from "@/config/config"
 import { Process } from "@/util/process"
-import { spawn as lspspawn } from "./launch"
 import { Effect, Layer, Context, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { containsPath } from "@/project/instance-context"
@@ -95,18 +94,6 @@ const kinds = [
   SymbolKind.Enum,
 ]
 
-const filterExperimentalServers = (servers: Record<string, LSPServer.Info>, flags: RuntimeFlags.Info) => {
-  if (flags.experimentalLspTy) {
-    if (servers["pyright"]) {
-      delete servers["pyright"]
-    }
-  } else {
-    if (servers["ty"]) {
-      delete servers["ty"]
-    }
-  }
-}
-
 type LocInput = { file: string; line: number; character: number }
 
 interface State {
@@ -138,55 +125,14 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/LS
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const config = yield* Config.Service
     const flags = yield* RuntimeFlags.Service
     const events = yield* EventV2Bridge.Service
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("LSP.state")(function* (ctx) {
-        const cfg = yield* config.get()
-
+        // 产品固定停用 LSP；true 或自定义 server 配置也不能恢复子进程。
         const servers: Record<string, LSPServer.Info> = {}
-
-        if (!cfg.lsp) {
-          yield* Effect.logInfo("all LSPs are disabled")
-        } else {
-          for (const server of Object.values(LSPServer)) {
-            servers[server.id] = server
-          }
-
-          filterExperimentalServers(servers, flags)
-
-          if (cfg.lsp !== true) {
-            for (const [name, item] of Object.entries(cfg.lsp)) {
-              const existing = servers[name]
-              if (item.disabled) {
-                yield* Effect.logInfo(`LSP server ${name} is disabled`)
-                delete servers[name]
-                continue
-              }
-              servers[name] = {
-                ...existing,
-                id: name,
-                root: existing?.root ?? (async (_file, ctx) => ctx.directory),
-                extensions: item.extensions ?? existing?.extensions ?? [],
-                spawn: async (root) => ({
-                  process: lspspawn(item.command[0], item.command.slice(1), {
-                    cwd: root,
-                    env: { ...process.env, ...item.env },
-                  }),
-                  initialization: item.initialization,
-                }),
-              }
-            }
-          }
-
-          yield* Effect.logInfo("enabled LSP servers", {
-            serverIds: Object.values(servers)
-              .map((server) => server.id)
-              .join(", "),
-          })
-        }
+        yield* Effect.logInfo("all LSPs are disabled")
 
         const s: State = {
           clients: [],
