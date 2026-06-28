@@ -300,13 +300,25 @@ export const ApplyPatchTool = Tool.define(
       })
       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
 
+      let lspFoundErrors = false
       for (const change of fileChanges) {
         if (change.type === "delete") continue
         const target = change.movePath ?? change.filePath
         const block = LSP.Diagnostic.report(target, diagnostics[AppFileSystem.normalizePath(target)] ?? [])
         if (!block) continue
+        lspFoundErrors = true
         const rel = path.relative(instance.worktree, target).replaceAll("\\", "/")
         output += `\n\nLSP errors detected in ${rel}, please fix:\n${block}`
+      }
+      // [local-smark] 当 LSP diagnostics 无结果且无已连接 client 时，
+      // 追加不可用提示，避免模型误认为修改的文件无类型错误。
+      // 用 status() 而非 hasClients()：后者检查 server 配置存在性，
+      // 不代表 client 已完成 fire-and-forget 启动。
+      if (!lspFoundErrors) {
+        const clients = yield* lsp.status()
+        if (clients.length === 0) {
+          output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+        }
       }
 
       return {

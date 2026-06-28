@@ -197,7 +197,19 @@ export const EditTool = Tool.define(
           const diagnostics = yield* lsp.diagnostics()
           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
           const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
-          if (block) output += `\n\nLSP errors detected in this file, please fix:\n${block}`
+          if (block) {
+            output += `\n\nLSP errors detected in this file, please fix:\n${block}`
+          } else {
+            // [local-smark] 当 diagnostics 为空时，用 status() 区分 "无错误" 和 "LSP 未运行"。
+            // status() 返回已连接的 client 列表：空列表 = 无 LSP server 在运行，
+            // 此时 "无 diagnostics" 不代表 "无类型错误"，需提示模型自行验证。
+            // 不使用 hasClients()：它检查 server 配置是否存在，但 server 可能已配置
+            // 却未完成 fire-and-forget 启动，会误判为"有 LSP"而省略提示。
+            const clients = yield* lsp.status()
+            if (clients.length === 0) {
+              output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+            }
+          }
 
           return {
             metadata: {

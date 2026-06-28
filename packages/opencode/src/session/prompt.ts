@@ -294,6 +294,54 @@ function isOpenToolPart(part: MessageV2.Part): part is OpenToolPart {
   return part.type === "tool" && (part.state.status === "pending" || part.state.status === "running")
 }
 
+// [local-smark] 检查历史消息中是否使用了当前被 disabled 的工具，返回事前提醒文本。
+// 场景：GPT 模型在历史中用了 apply_patch，切换到 Claude（apply_patch 被 deny）后，
+// 新模型看到历史中的 apply_patch 调用可能也尝试使用，但工具不可用会浪费一轮。
+// 此函数在 insertReminders 中调用，在模型生成下一轮回复之前注入提醒。
+// 纯函数，无副作用，可直接单元测试。
+export function disabledToolNotice(
+  messages: MessageV2.WithParts[],
+  agentPermission: Permission.Ruleset,
+  sessionPermission: Permission.Ruleset,
+): string | undefined {
+  // 从历史消息中提取所有出现过的工具名
+  const toolNames = new Set<string>()
+  for (const msg of messages) {
+    for (const part of msg.parts) {
+      if (part.type === "tool") toolNames.add(part.tool)
+    }
+  }
+  // Permission.disabled 返回在这些工具中被 ruleset deny 的子集；
+  // 因为 toolNames 本身来自历史消息，所以 disabled.size > 0 蕴含
+  // "历史中确实使用了被 disable 的工具"，无需额外检查
+  const mergedRuleset = Permission.merge(agentPermission, sessionPermission)
+  // Permission.disabled 返回在这些工具中被 ruleset deny 的子集；
+  // 因为 toolNames 本身来自历史消息，所以 disabled.size > 0 蕴含
+  // "历史中确实使用了被 disable 的工具"，无需额外检查
+  const disabled = Permission.disabled([...toolNames], mergedRuleset)
+  if (disabled.size === 0) return undefined
+  // [local-smark] 已知工具的替代建议映射；替代工具可能在当前 ruleset 下也被 deny
+  // （如 edit: deny * 会同时禁用 edit/write/apply_patch），需单独检查替代工具的可用性
+  const substituteMap: Record<string, string[]> = {
+    apply_patch: ["edit", "write"],
+  }
+  // 检查所有可能的替代工具是否也被 disable
+  const allSubstitutes = [...new Set(Object.values(substituteMap).flat())]
+  const substituteDisabled = Permission.disabled(allSubstitutes, mergedRuleset)
+  const notices = [...disabled].map((tool) => {
+    const substitutes = substituteMap[tool]
+    if (substitutes) {
+      // 过滤掉同样被 disabled 的替代工具，避免建议不可用的工具
+      const available = substitutes.filter((s) => !substituteDisabled.has(s))
+      if (available.length > 0) {
+        return `${tool} is not available in this session. Use ${available.join(" or ")} instead.`
+      }
+    }
+    return `${tool} is not available in this session. Use an available tool instead.`
+  })
+  return `<system-reminder>${notices.join("\n")}</system-reminder>`
+}
+
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
@@ -585,6 +633,22 @@ export const layer = Layer.effect(
     }) {
       const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
       if (!userMessage) return input.messages
+
+      // [local-smark] 事前提醒：当历史记录中使用了当前被 disable 的工具时，
+      // 在用户消息中注入 system-reminder，让模型在生成下一轮回复前就知道
+      // 该工具不可用及替代方案。必须在 decide/plan 等 early return 之前注入，
+      // 确保所有 agent 模式都能收到提醒。
+      const notice = disabledToolNotice(input.messages, input.agent.permission, input.session.permission ?? [])
+      if (notice) {
+        userMessage.parts.push({
+          id: PartID.ascending(),
+          messageID: userMessage.info.id,
+          sessionID: userMessage.info.sessionID,
+          type: "text",
+          text: notice,
+          synthetic: true,
+        })
+      }
 
       // [local-smark] decide agent 特性
       if (isDecideAgent(input.agent)) {

@@ -25,7 +25,11 @@ export type Retryable = {
 export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
-export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
+// [local-smark] 将有 header 时的 retry 上限从 32 位整数极值（~24.8 天）改为 30 分钟。
+// 原值允许 provider 的 retry-after header 指定天级等待，导致 session 假死；
+// 30 分钟覆盖 transient 429/503 以及 quota reset（通常分钟到小时级）场景，
+// 超过 30 分钟的 retry-after 被截断，避免 session 长时间假死。
+export const RETRY_MAX_DELAY = 1_800_000 // 30 minutes
 
 function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)

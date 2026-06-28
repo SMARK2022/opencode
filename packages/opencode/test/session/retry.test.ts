@@ -76,12 +76,19 @@ describe("session.retry.delay", () => {
     expect(SessionRetry.delay(1, error)).toBe(2000)
   })
 
-  test("uses retry-after values even when exceeding 10 minutes with headers", () => {
+  test("uses retry-after values up to the 30-minute cap", () => {
+    // 50 秒在 cap 以下，原样返回
     const error = apiError({ "retry-after": "50" })
     expect(SessionRetry.delay(1, error)).toBe(50000)
 
+    // [local-smark] retry-after 超过 30 分钟上限时被 cap：原值 2^31-1（~24.8 天）
+    // 会导致 session 假死；改为 1800000ms（30 分钟）后，超长 retry-after 被截断
     const longError = apiError({ "retry-after-ms": "700000" })
     expect(SessionRetry.delay(1, longError)).toBe(700000)
+
+    // 超过 30 分钟的值被 cap
+    const veryLongError = apiError({ "retry-after-ms": "999999999999" })
+    expect(SessionRetry.delay(1, veryLongError)).toBe(1_800_000)
   })
 
   test("caps oversized header delays to the runtime timer limit", () => {

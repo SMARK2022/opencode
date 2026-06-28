@@ -234,15 +234,22 @@ export const layer = Layer.effect(
           ...match.part,
           state: {
             status: "completed",
-            input: match.part.state.input,
+            // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
+            // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
+            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
+            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
+            // 原始 input 不保留——format 后的内容才是真实落盘内容。
+            input: output.metadata?._formattedContent
+              ? { ...match.part.state.input, content: output.metadata._formattedContent }
+              : match.part.state.input,
             output: output.output,
-            // Permission auto-review annotates the running tool part before the
-            // reviewed command executes. Tool completion replaces metadata with
-            // the tool's own result, so preserve that small review envelope here
-            // to keep the final shell card linked to the reviewer subagent.
-            metadata: match.part.state.metadata?.autoReview
-              ? { ...output.metadata, autoReview: match.part.state.metadata.autoReview }
-              : output.metadata,
+            // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
+            metadata: (() => {
+              const { _formattedContent, ...rest } = output.metadata ?? {}
+              return match.part.state.metadata?.autoReview
+                ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+                : rest
+            })(),
             title: output.title,
             time: { start: match.part.state.time.start, end: Date.now() },
             attachments: output.attachments,
@@ -515,10 +522,13 @@ export const layer = Layer.effect(
             }
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (flags.experimentalEventSystem) {
+              // [local-smark] strip _formattedContent 与持久化保持一致，
+              // 避免 event 消费方看到临时传递字段
+              const { _formattedContent: _strip, ...eventMetadata } = output.metadata ?? {}
               yield* events.publish(SessionEvent.Tool.Success, {
                 sessionID: ctx.sessionID,
                 callID: value.toolCallId,
-                structured: output.metadata,
+                structured: eventMetadata,
                 content: [
                   {
                     type: "text",

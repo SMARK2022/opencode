@@ -664,7 +664,14 @@ function truncateOneLine(text: string, maxChars: number) {
 }
 
 // 引号包裹被压缩的模式字符串，并对其进行转义处理（主要为了呈现给 LLM 看时更清晰）
-function quotePattern(pattern: string, maxChars = 40) {
+// [local-smark] 导出 quotePattern 用于直接测试其边界行为；
+// 增加 undefined guard：压缩管线中 PowerShell 输出格式化的边界情况
+// 可能传入 undefined pattern，直接 .replaceAll 会 crash（历史 9 次 JS 错误）。
+// 返回空字符串而非 throw，保证压缩管线不会因单个 pattern 为空而中断整个输出处理。
+export function quotePattern(pattern: string, maxChars = 40) {
+  // 防御 undefined / 非 string 输入：TypeScript 类型标注不在运行时强制，
+  // 压缩管线的调用方在 PowerShell CLIXML 解析等边界路径可能产生 undefined
+  if (typeof pattern !== "string") return ""
   let text = pattern
     .replaceAll("\\", "\\\\")
     .replaceAll("\t", "\\t")

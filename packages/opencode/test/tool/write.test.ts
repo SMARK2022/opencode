@@ -42,6 +42,35 @@ const it = testEffect(
   ),
 )
 
+// [local-smark] mock Format 层：模拟 auto-format 在文件末尾追加换行，
+// 使 write.ts 能检测到内容变化并设置 _formattedContent。
+// 真实 formatter（prettier/gofmt）在测试环境中不可用，需要 mock。
+// 用 Effect.promise 避免引入 service 依赖，保持返回类型与 Format.Service 一致。
+const mockFormatLayer = Layer.succeed(Format.Service, {
+  init: () => Effect.void,
+  status: () => Effect.succeed([]),
+  file: (filepath: string) =>
+    Effect.promise(async () => {
+      const content = await fs.readFile(filepath, "utf-8")
+      // 模拟格式化：在末尾添加换行符（模拟 prettier 的 final newline 行为）
+      await fs.writeFile(filepath, content + "\n")
+      return true
+    }),
+})
+
+// 使用 mock Format 层的 testEffect 实例
+const itFormatted = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Bus.layer,
+    mockFormatLayer,
+    CrossSpawnSpawner.defaultLayer,
+    Truncate.defaultLayer,
+    Agent.defaultLayer,
+  ),
+)
+
 const init = Effect.fn("WriteToolTest.init")(function* () {
   const info = yield* WriteTool
   return yield* info.init()
@@ -307,6 +336,56 @@ describe("tool.write", () => {
 
         const result = yield* run({ filePath: filepath, content: "export const Button = () => {}" })
         expect(result.title).toEndWith(path.join("src", "components", "Button.tsx"))
+      }),
+    )
+  })
+
+  // [local-smark] 测试 auto-format 改变内容时 _formattedContent 的设置行为。
+  // mockFormatLayer 模拟 formatter 在文件末尾追加换行符。
+  // _formattedContent 由 processor 的 completeToolCall 消费，用于覆盖 state.input.content，
+  // 使 DB 中持久化的 input 与磁盘实际内容一致。
+  describe("auto-format _formattedContent", () => {
+    // 格式化改变了内容（末尾追加换行）→ metadata 应包含 _formattedContent
+    itFormatted.instance("sets _formattedContent when format changes content", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.ts")
+        // 先创建已有文件，使 write 走覆写路径
+        yield* Effect.promise(() => fs.writeFile(filepath, "old"))
+
+        // 写入不含末尾换行的内容；mock formatter 会追加换行
+        const result = yield* run({ filePath: filepath, content: "const x=1" })
+
+        // _formattedContent 应为格式化后的内容（含追加的换行）
+        expect(result.metadata._formattedContent).toBe("const x=1\n")
+      }),
+    )
+
+    // 内容本身已含末尾换行 → formatter 追加后变为双换行，仍算"改变"
+    itFormatted.instance("sets _formattedContent when format adds extra newline", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file2.ts")
+        yield* Effect.promise(() => fs.writeFile(filepath, "old"))
+
+        const result = yield* run({ filePath: filepath, content: "const y=2\n" })
+
+        // formatter 在已有换行后再追加一个换行
+        expect(result.metadata._formattedContent).toBe("const y=2\n\n")
+      }),
+    )
+
+    // 无 formatter 时 _formattedContent 不应存在（使用默认 Format 层，无 formatter 配置）
+    it.instance("does not set _formattedContent when no formatter is configured", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file3.ts")
+        yield* Effect.promise(() => fs.writeFile(filepath, "old"))
+
+        const result = yield* run({ filePath: filepath, content: "const z=3" })
+
+        // 默认 Format 层无 formatter → formatted=false → _formattedContent 不设置
+        expect(result.metadata._formattedContent).toBeUndefined()
       }),
     )
   })

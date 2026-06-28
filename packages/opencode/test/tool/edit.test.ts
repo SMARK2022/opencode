@@ -530,4 +530,22 @@ describe("tool.edit", () => {
       }),
     )
   })
+
+  // [local-smark] 当 LSP 不可用时（无 language server 运行），edit 的 output
+  // 应包含 "LSP diagnostics unavailable" 提示，避免模型误认为"无类型错误"。
+  // 测试环境无 LSP server，status() 返回空数组，应触发提示。
+  describe("LSP unavailable notice", () => {
+    it.instance("appends LSP unavailable notice when no language server is running", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "content")
+
+        const result = yield* run({ filePath: filepath, oldString: "content", newString: "modified" })
+
+        // 无 LSP server 时 output 应包含不可用提示
+        expect(result.output).toContain("LSP diagnostics unavailable")
+      }),
+    )
+  })
 })
