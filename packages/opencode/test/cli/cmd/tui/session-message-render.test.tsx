@@ -1338,6 +1338,65 @@ test("collapsed completed shell preview keeps the auto review result line", asyn
   )
 })
 
+// BlockTool 的 preview/body 互斥回归：非折叠态下 preview 的 maxHeight=0 会因
+// OpenTUI updateFromLayout 中 Math.max(layout.height, 1) 泄漏 1 行，导致 shell
+// 命令行同时出现在 preview 泄漏行和 body 中。该测试在 maxHeight=0 实现下会失败。
+test("non-collapsed shell block shows command once", async () => {
+  await withRenderedSession(
+    [assistantMessage("msg_shell_nocollapse", 1)],
+    {
+      msg_shell_nocollapse: [
+        completedToolPart(
+          "part_shell_nocollapse",
+          "msg_shell_nocollapse",
+          "bash",
+          { command: "echo hello" },
+          { output: "hello\n" },
+          "hello\n",
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("echo hello")))
+      // preview 和 body 都含 "$ echo hello"；互斥正确时只应出现 1 次
+      const commandRows = frame.filter((line) => line.includes("$ echo hello"))
+      expect(commandRows.length).toBe(1)
+    },
+  )
+})
+
+// 展开态 preview 的 maxHeight=0 泄漏首行，与 body 的 $ echo test 重复。
+test("expanded shell block does not leak preview first row", async () => {
+  const longOutput = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n")
+  await withRenderedSession(
+    [assistantMessage("msg_shell_expand_leak", 1)],
+    {
+      msg_shell_expand_leak: [
+        completedToolPart(
+          "part_shell_expand_leak",
+          "msg_shell_expand_leak",
+          "bash",
+          { command: "echo test" },
+          { output: longOutput },
+          longOutput,
+        ),
+      ],
+    },
+    async (app) => {
+      // 先等折叠态出现，再点击展开
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      await clickVisibleText(app, "Click to expand")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to collapse")))
+      // 展开态只有 body 可见（含 $ echo test）；preview 应被彻底隐藏
+      const frame = rows(app.captureCharFrame())
+      const commandRows = frame.filter((line) => line.includes("$ echo test"))
+      expect(commandRows.length).toBe(1)
+    },
+    {},
+    { height: 40 },
+  )
+})
+
 test("errored shell tool keeps the denied auto review result line", async () => {
   await withRenderedSession(
     [assistantMessage("msg_auto_review_error", 1)],

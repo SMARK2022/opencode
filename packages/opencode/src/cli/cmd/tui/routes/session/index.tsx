@@ -2410,10 +2410,12 @@ function BlockTool(props: {
   const hasPreview = createMemo(() => props.preview !== undefined)
   // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
   // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
-  // 常驻，折叠态通过 maxHeight=0 + overflow=hidden 隐藏，而非卸载 DOM 节点。
+  // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
+  // 不使用 maxHeight=0 + overflow=hidden：OpenTUI updateFromLayout 中
+  // Math.max(layout.height, 1) 会将高度 0 强制为 1 行，导致隐藏区域泄漏首行。
   const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
   // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
-  // 一旦挂载就不再卸载，后续折叠仅靠布局裁剪隐藏。
+  // 一旦挂载就不再卸载，后续折叠仅靠 visible=false 隐藏。
   createEffect(() => {
     if (!hasPreview() || !collapsed()) setBodyMounted(true)
   })
@@ -2462,23 +2464,23 @@ function BlockTool(props: {
       <Show when={props.autoReview !== false}>
         <ToolAutoReviewLine />
       </Show>
-      {/* preview 区：折叠态可见（marginTop=1 撑出间距），展开态用 maxHeight=0 隐藏 */}
+      {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
       <Show when={hasPreview()}>
         <box
           marginTop={collapsed() ? 1 : 0}
-          maxHeight={collapsed() ? undefined : 0}
-          overflow={collapsed() ? undefined : "hidden"}
+          visible={collapsed()}
         >
           {props.preview}
         </box>
       </Show>
-      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 maxHeight=0 隐藏，
+      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
           无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
       <Show when={bodyMounted()}>
         <box
           marginTop={hasPreview() && collapsed() ? 0 : 1}
-          maxHeight={collapsed() ? (hasPreview() ? 0 : previewLines()) : undefined}
-          overflow={collapsed() ? "hidden" : undefined}
+          visible={!collapsed() || !hasPreview()}
+          maxHeight={!hasPreview() && collapsed() ? previewLines() : undefined}
+          overflow={!hasPreview() && collapsed() ? "hidden" : undefined}
         >
           {props.children}
         </box>
