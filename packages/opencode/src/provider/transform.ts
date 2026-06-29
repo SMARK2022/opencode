@@ -1278,6 +1278,16 @@ export function options(input: {
     result["enable_thinking"] = true
   }
 
+  // GLM-5.2 支持流式工具调用输出（tool_stream），显式开启以流式传输工具调用参数，
+  // 避免整段工具调用被缓冲后一次性返回。详见 https://docs.bigmodel.cn/llms.txt
+  if (
+    ["zai", "zhipuai"].some((id) => input.model.providerID.includes(id)) &&
+    input.model.api.npm === "@ai-sdk/openai-compatible" &&
+    input.model.api.id.toLowerCase().includes("glm-5.2")
+  ) {
+    result["tool_stream"] = true
+  }
+
   if (input.providerOptions?.setCacheKey !== false) {
     if (input.model.api.npm === "@ai-sdk/deepinfra" || input.model.api.npm === "@ai-sdk/cerebras") {
       result["prompt_cache_key"] = input.sessionID
