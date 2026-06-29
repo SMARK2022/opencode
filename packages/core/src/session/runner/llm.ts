@@ -121,6 +121,10 @@ const layer = Layer.effect(
     const skillGuidance = yield* SkillGuidance.Service
     const referenceGuidance = yield* ReferenceGuidance.Service
     const config = yield* Config.Service
+    const permission = yield* PermissionV2.Service
+    // 同工具成功才重置错误；不同Session和不同工具互不冲掉计数。
+    const errors = new Map<SessionSchema.ID, Map<string, number>>()
+    const nearOverflowNotified = new Set<SessionSchema.ID>()
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
     const buildReminders = yield* SessionReminders.make
@@ -300,6 +304,13 @@ const layer = Layer.effect(
         `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
         .filter((part): part is string => part !== undefined && part.length > 0)
         .map(SystemPart.make)
+      const prior = context.findLast(message => message.type === "assistant" && message.inputEstimate)
+      const estimatedInput = prior?.type === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
+      const usableTokens = compaction.inputBudget({ model })
+      // 仅用前轮真实prepared快照作轻量提醒，本轮硬溢出仍走原压缩入口。
+      const nearOverflow = !decide && !isLastStep && !nearOverflowNotified.has(session.id) && usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)
+      if (nearOverflow) nearOverflowNotified.add(session.id)
+      const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
       const request = LLM.request({
         model,
         http: {
@@ -320,13 +331,15 @@ const layer = Layer.effect(
         } },
         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
         system: selection.openaiOAuth ? undefined : systemParts,
-        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep || decide ? "none" : undefined,
       })
       // 压缩复用本 turn 已采样的模型选择；不从稍后可能切换的 Session 重读 variant。
-      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
+      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })) {
+        nearOverflowNotified.delete(session.id)
         return yield* Effect.die(continueAfterCompaction(currentStep))
+      }
       const startSnapshot = yield* snapshots.capture()
       const startedAt = Date.now()
       let firstStreamEvent = true
@@ -358,7 +371,22 @@ const layer = Layer.effect(
       hasAssistantStarted = publisher.hasAssistantStarted
       const withPublication = Semaphore.makeUnsafe(1).withPermit
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
-        withPublication(publisher.publish(event, outputPaths))
+        withPublication(Effect.gen(function* () {
+          // publisher只为已接受的终态返回凭证，重复/忽略事件不能虚增错误。
+          const settled = yield* publisher.publish(event, outputPaths)
+          if (!settled) return
+          const counts = errors.get(session.id) ?? new Map<string, number>()
+          errors.set(session.id, counts)
+          if (!settled.failed) { counts.delete(settled.name); return }
+          const count = (counts.get(settled.name) ?? 0) + 1
+          counts.set(settled.name, count)
+          if (count < 3) return
+          yield* permission.assert({ action: "doom_loop", resources: [settled.name], save: [settled.name], sessionID: session.id, agent: agent.id,
+            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: count },
+            source: { type: "tool", messageID: settled.assistantMessageID, callID: settled.callID },
+          }).pipe(Effect.orDie)
+          counts.delete(settled.name)
+        }))
       let overflowFailure: ProviderErrorEvent | undefined
       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
@@ -405,13 +433,29 @@ const layer = Layer.effect(
             const assistantMessageID = yield* publisher.assistantMessageID(event.id)
             yield* Effect.uninterruptibleMask((restore) =>
               restore(
-                toolMaterialization.settle({
+                Effect.gen(function* () {
+                  const history = yield* getContext(session.id).pipe(Effect.orDie)
+                  const current = history.find(message => message.type === "assistant" && message.id === assistantMessageID)
+                  const parts = current?.type === "assistant" ? current.content : []
+                  const index = parts.findIndex(part => part.type === "tool" && part.id === event.id)
+                  let recent = parts.slice(0, index + 1).slice(-3)
+                  if (recent.length < 3) {
+                    const previous = history.findLast(message => message.type === "assistant" && message.id !== assistantMessageID)
+                    if (previous?.type === "assistant") recent = [...previous.content.filter(part => part.type === "tool" && part.state.status !== "pending").slice(-3), ...recent].slice(-3)
+                  }
+                  // 每次只检查截止当前call的三项，避免并行后到调用使较早call误触发。
+                  if (recent.length === 3 && recent.every(part => part.type === "tool" && part.state.status !== "pending" && part.name === event.name && JSON.stringify(part.state.input) === JSON.stringify(event.input)))
+                    yield* permission.assert({ action: "doom_loop", resources: [event.name], save: [event.name], sessionID: session.id, agent: agent.id,
+                      metadata: { tool: event.name, input: event.input }, source: { type: "tool", messageID: assistantMessageID, callID: event.id },
+                    }).pipe(Effect.orDie)
+                  return yield* toolMaterialization.settle({
                   sessionID: session.id,
                   agent: agent.id,
                   assistantMessageID,
                   call: event,
                 // 与普通工具结果共用 publication 串行器；回调只交接已限幅的取消证据。
-                }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output))),
+                }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output)))
+                }),
               ).pipe(
                 Effect.flatMap((settlement) =>
                   publish(
@@ -454,7 +498,10 @@ const layer = Layer.effect(
             // 恢复摘要也属于这次失败 turn 的采样，不能再次 resolve 或采用新选择。
             (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })))
           )
+          {
+            nearOverflowNotified.delete(session.id)
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
+          }
           if (overflowFailure) yield* publish(overflowFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
           if (llmFailure && !publisher.hasProviderError()) {
@@ -581,6 +628,7 @@ const layer = Layer.effect(
       readonly force: boolean
       readonly maintenance?: "compact"
     }) {
+      nearOverflowNotified.delete(input.sessionID)
       if (input.maintenance === "compact") {
         const session = yield* getSession(input.sessionID)
         if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
@@ -659,6 +707,7 @@ export const node = makeLocationNode({
     Snapshot.node,
     Database.node,
     FSUtil.node,
+    PermissionV2.node,
     Global.node,
   ],
 })

@@ -215,9 +215,9 @@ export const buildPrompt = (input: { readonly previousSummary?: string; readonly
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
-  const inputBudget = (input: Input) => {
+  const inputBudget = (input: Pick<Input, "model"> & { readonly request?: LLMRequest }) => {
     const context = input.model.route.defaults.limits?.context ?? 0
-    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+    const output = input.request?.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
     // 默认尾部扩大与触发压缩共用真实输入预算，不能越过input限制或重复扣输出。
     const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
     const inputLimit = input.model.route.defaults.limits?.input
@@ -243,7 +243,7 @@ export const make = (dependencies: Dependencies) => {
     // 普通模型仍只读活动窗；原话单独读取真实历史，截止本次快照以免吞入并发新输入。
     const throughSeq = input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0)
     const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, throughSeq)
-    const receipts = yield* SessionHistory.readReceipts(dependencies.db, input.sessionID, throughSeq)
+    const evidence = yield* SessionHistory.evidence(dependencies.db, input.sessionID, throughSeq)
     const recentUserMessages = SessionMemento.collect(
       rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
     const summaryPrompt = buildPrompt({
@@ -329,7 +329,7 @@ export const make = (dependencies: Dependencies) => {
       return false
     }
     // 只有可用摘要才stat当前磁盘；失败和取消不生成或替换旧交接快照。
-    const fileEvidence = yield* FileEvidence.render(receipts, dependencies.fs, dependencies.worktree)
+    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, evidence)
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,
@@ -362,5 +362,6 @@ export const make = (dependencies: Dependencies) => {
     compactIfNeeded,
     compact: (input: Input) => compactAfterOverflow(input, "manual"),
     compactAfterOverflow,
+    inputBudget,
   }
 }

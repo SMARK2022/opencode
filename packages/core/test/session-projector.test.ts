@@ -774,13 +774,23 @@ describe("SessionProjector", () => {
       if (!boundary) return yield* Effect.die("Missing persisted compaction boundary")
       const earlier = assistantRow(SessionMessage.ID.make("msg_receipt_before"), boundary.seq - 1)
       const later = assistantRow(SessionMessage.ID.make("msg_receipt_after"), boundary.seq + 1)
-      const earlierData = { ...earlier.data, content: [tool] }
+      const searches = [
+        { ...tool, id: "grep", name: "grep", state: { ...tool.state, input: { pattern: "needle", path: "src" }, structured: { items: [{ path: "file.ts" }], partial: true, truncated: false } } },
+        { ...tool, id: "glob", name: "glob", state: { ...tool.state, input: { pattern: "*.ts" }, structured: { value: [{ path: "file.ts" }] } } },
+      ]
+      const earlierData = { ...earlier.data, content: [tool, ...searches] }
       const laterData = { ...later.data, content: [{ ...tool, id: "future-read", state: { ...tool.state, structured: { read: { ...receipt, path: "future.ts" } } } }] }
       yield* db.insert(SessionMessageTable).values([
         { ...earlier, data: earlierData },
         { ...later, data: laterData },
       ]).run().pipe(Effect.orDie)
       expect(yield* SessionHistory.readReceipts(db, sessionID, boundary.seq)).toEqual([receipt])
+      const evidence = yield* SessionHistory.evidence(db, sessionID, boundary.seq)
+      expect(evidence.compactionCount).toBe(2)
+      expect(evidence.searches).toEqual([
+        { tool: "grep", pattern: "needle", path: "src", matches: 1, partial: true },
+        { tool: "glob", pattern: "*.ts", path: ".", matches: 1, partial: false },
+      ])
       expect((yield* SessionHistory.load(db, sessionID)).some(message => message.id === earlier.id)).toBe(false)
       // 旧消息缺少optional证据字段仍能解码，已保存表格则保持逐字回放而不重新stat。
       const compacted = messages.find(message => message.type === "compaction")

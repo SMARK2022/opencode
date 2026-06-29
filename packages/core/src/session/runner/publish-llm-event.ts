@@ -60,6 +60,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
       readonly assistantMessageID: SessionMessage.ID
       readonly name: string
       inputEnded: boolean
+      input?: unknown
       called: boolean
       settled: boolean
       providerExecuted: boolean
@@ -352,6 +353,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           return yield* Effect.die(`Tool call name changed for ${event.id}: ${tool.name} -> ${event.name}`)
         if (tool.called) return yield* Effect.die(`Duplicate tool call: ${event.id}`)
         tool.called = true
+        tool.input = event.input
         tool.providerExecuted = event.providerExecuted === true
         tool.providerMetadata = event.providerMetadata
         yield* events.publish(SessionEvent.Tool.Called, {
@@ -393,7 +395,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
             result: event.result,
             provider,
           })
-          return
+          return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
         }
         yield* events.publish(SessionEvent.Tool.Success, {
           sessionID: input.sessionID,
@@ -405,7 +407,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           ...(provider.executed ? { result: event.result } : {}),
           provider,
         })
-        return
+        return { failed: false, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
       }
       case "tool-error": {
         const tool = tools.get(event.id)
@@ -425,7 +427,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
             ...(event.providerMetadata === undefined ? {} : { metadata: event.providerMetadata }),
           },
         })
-        return
+        return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
       }
       case "step-finish":
         yield* flush()

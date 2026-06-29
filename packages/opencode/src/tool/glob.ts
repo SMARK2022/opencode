@@ -49,6 +49,10 @@ export const GlobTool = Tool.define(
           const limit = 100
           const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
           const truncated = files.length === limit
+          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
+          const originalCount = files.length
+          // [local-smark] total: 截断前的真实文件数（rg 按 limit 截停时为下界）
+          const totalFiles = originalCount
 
           const output = []
           if (files.length === 0) output.push("No files found")
@@ -57,7 +61,8 @@ export const GlobTool = Tool.define(
             if (truncated) {
               output.push("")
               output.push(
-                `(Results are truncated: showing first ${limit} results. Consider using a more specific path or pattern.)`,
+                // [local-smark] 显示真实总数下界而非仅 "first 100"，帮助模型判断文件密度
+                `(Results are truncated: showing first ${limit} results. ${truncated ? `Total: ${totalFiles}+ files.` : ""} Consider using a more specific path or pattern.)`,
               )
             }
           }
@@ -66,6 +71,8 @@ export const GlobTool = Tool.define(
             title: path.relative(ins.worktree, search),
             metadata: {
               count: files.length,
+              // [local-smark] total: 截断前的真实文件数
+              total: totalFiles,
               truncated,
             },
             output: output.join("\n"),

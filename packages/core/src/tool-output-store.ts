@@ -27,6 +27,8 @@ export interface BoundInput {
   readonly output: ToolOutput
 }
 
+type CaptureInput = Pick<BoundInput, "sessionID" | "toolCallID"> & { readonly direction?: "head" | "tail" }
+
 export interface BoundResult {
   readonly output: ToolOutput
   readonly outputPaths: ReadonlyArray<string>
@@ -49,7 +51,7 @@ export interface Interface {
   readonly bound: (input: BoundInput) => Effect.Effect<BoundResult, Error>
   // capture 不暴露路径给 leaf；只有 registry 的 bound 才能发布托管恢复引用。
   readonly capture: <A, E>(
-    input: Pick<BoundInput, "sessionID" | "toolCallID">,
+    input: CaptureInput,
     body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
     onInterrupted?: () => Effect.Effect<ToolOutput>,
   ) => Effect.Effect<A, E | Error>
@@ -85,8 +87,11 @@ const takeSuffix = (input: string, maximumBytes: number) => {
   return content.join("")
 }
 
-const preview = (text: string, maxLines: number, maxBytes: number) => {
+const preview = (text: string, maxLines: number, maxBytes: number, direction?: "head" | "tail") => {
   const lines = text.split("\n")
+  // 方向是producer的呈现偏好，实际行/字节限额仍只由本owner实施。
+  if (direction === "head") return { head: takePrefix(lines.slice(0, maxLines).join("\n"), maxBytes), tail: "" }
+  if (direction === "tail") return { head: "", tail: takeSuffix(lines.slice(-maxLines).join("\n"), maxBytes) }
   const headLines = Math.ceil(maxLines / 2)
   const tailLines = Math.floor(maxLines / 2)
   const sampled =
@@ -109,14 +114,14 @@ const preview = (text: string, maxLines: number, maxBytes: number) => {
   return { head: takePrefix(sampled, headBytes), tail: takeSuffix(sampled, tailBytes) }
 }
 
-const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") => string, maxLines: number, maxBytes: number) => {
-  const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, "head+tail"), "utf-8")
+const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "tail" | "head+tail") => string, maxLines: number, maxBytes: number, direction?: "head" | "tail") => {
+  const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, direction ?? "head+tail"), "utf-8")
   // 极小预算优先保住完整恢复路径；不能裁断标签后声称原文仍可恢复。
-  if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), "head")
+  if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), direction ?? "head")
   // 八字节覆盖分隔换行和KB/MB边界处的显示长度变化，不改变原head/tail选择。
-  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8)
+  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8, direction)
   const shown = bounded.tail ? `${bounded.head}\n${bounded.tail}` : bounded.head
-  const marker = format(outputStats(shown), bounded.tail ? "head+tail" : "head")
+  const marker = format(outputStats(shown), bounded.tail ? bounded.head ? "head+tail" : "tail" : "head")
   return bounded.tail ? `${bounded.head}\n\n${marker}\n\n${bounded.tail}` : `${bounded.head}\n\n${marker}`
 }
 
@@ -133,7 +138,7 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const config = yield* Effect.serviceOption(Config.Service)
     // 暂存引用只属于本次 settlement，成功、失败与中断都由 registry 收尾。
-    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
+    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; direction?: "head" | "tail"; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
     // Session 与 call 联合定位，避免不同 Session 的同名 call 串用原文。
     const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) => JSON.stringify([input.sessionID, input.toolCallID])
     const directory = path.join(global.data, MANAGED_DIRECTORY)
@@ -164,14 +169,14 @@ const layer = Layer.effect(
       if (captured?.path) yield* fs.remove(captured.path).pipe(Effect.orDie)
     })
     const capture = <A, E>(
-      input: Pick<BoundInput, "sessionID" | "toolCallID">,
+      input: CaptureInput,
       body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
       onInterrupted?: () => Effect.Effect<ToolOutput>,
     ) => Effect.gen(function* () {
       // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
       const chunks: Uint8Array[] = []
       let bytes = 0
-      const captured = { path: "", retain: false, totalBytes: 0, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
+      const captured = { path: "", retain: false, totalBytes: 0, direction: input.direction, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
         // 排他创建、窗口追加与登记连续完成；wx 失败没有所有权，不能删除碰撞文件。
         if (!captured.path) captured.path = yield* write("")
         // 窗口最多 MAX_BYTES；一次追加和消费登记不可分割，取消后不能重放已写前缀。
@@ -257,7 +262,7 @@ const layer = Layer.effect(
       // 展示清理同样可能丢失原始信息，归档仍保存原文/原字节，不能保存清理后的替身。
       const outputPath = captured ? yield* captured.flush() : yield* write(raw)
       const total = captured ? { bytes: captured.totalBytes } : outputStats(raw)
-      const notice = (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") =>
+      const notice = (shown: ReturnType<typeof outputStats>, direction: "head" | "tail" | "head+tail") =>
         formatOutputTruncatedNotice({ source: "tool", total, shown: { direction, ...shown }, path: outputPath })
       // 未截断呈现变化仍沿原恢复广告；真实限幅才报告output_truncated。
       const marker = fits
@@ -269,13 +274,17 @@ const layer = Layer.effect(
       // 若总预算允许就保留原 content 分段，退出状态与媒体位置不能因增加路径而变化。
       const preserveParts = lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
 
+      // Bash的独立末段承载退出/超时/取消通知，选择正文方向不能把执行结果截掉。
+      const suffix = captured?.direction && text.length > 1 ? sanitizeVisibleText(text.at(-1)?.text ?? "") : ""
+      const window = suffix ? contextual.slice(0, -suffix.length) : contextual
+      const bounded = () => boundedPreview(window, notice, outputLimits.maxLines - (suffix ? lineCount(suffix) + 2 : 0), outputLimits.maxBytes - (suffix ? Buffer.byteLength(suffix) + 2 : 0), captured?.direction) + (suffix ? `\n\n${sanitizeVisibleText(suffix)}` : "")
       return {
         output: {
           structured: input.output.structured,
           content: preserveParts ? [...output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
             {
               type: "text" as const,
-              text: boundedPreview(contextual, notice, outputLimits.maxLines, outputLimits.maxBytes),
+              text: bounded(),
             },
             ...media,
           ],

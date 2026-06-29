@@ -75,6 +75,7 @@ const StructuredOutput = Schema.Struct({
   diagnosticErrorLikeLines: Schema.Number.pipe(Schema.optional),
   diagnosticWarningLikeLines: Schema.Number.pipe(Schema.optional),
   diagnosticDiscardedChars: Schema.Number.pipe(Schema.optional),
+  hasErrors: Schema.Boolean.pipe(Schema.optional),
 })
 
 const Output = Schema.Struct({
@@ -83,6 +84,7 @@ const Output = Schema.Struct({
   // 原文与模型窗口保持分离，路径和最终限额仍由 registry/store 持有。
   contextOutput: Schema.String,
   warnings: Schema.Array(Schema.String).pipe(Schema.optional),
+  executionNotice: Schema.String.pipe(Schema.optional),
 })
 
 type Output = typeof Output.Type
@@ -96,7 +98,7 @@ const modelOutput = (output: Output) => {
     ? `\n\nWarnings:\n${output.warnings.map((warning) => `- ${warning}`).join("\n")}`
     : ""
   // 终止原因已由唯一finish写入正文，状态投影不再叠加第二条同义提示。
-  if (output.timeout || output.interrupted) return warnings.trimStart()
+  if (output.timeout || output.interrupted) return [output.executionNotice, warnings.trimStart()].filter(Boolean).join("\n\n")
   return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.`
 }
 
@@ -180,6 +182,7 @@ const layer = Layer.effectDiscard(
             ...(output.diagnosticErrorLikeLines === undefined ? {} : { diagnosticErrorLikeLines: output.diagnosticErrorLikeLines }),
             ...(output.diagnosticWarningLikeLines === undefined ? {} : { diagnosticWarningLikeLines: output.diagnosticWarningLikeLines }),
             ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
+            ...(output.hasErrors === undefined ? {} : { hasErrors: output.hasErrors }),
           }),
           toModelOutput: ({ output }) => [
             { type: "text", text: output.contextOutput },
@@ -278,6 +281,13 @@ const layer = Layer.effectDiscard(
               // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
               const diag = new BashDiagnosticCollector({ enabled })
               const decoder = createAutoTextDecoder({ encoding: configured.shell_encoding ?? "auto" })
+              let commandForMatch = input.command.trim()
+              while (true) {
+                const match = commandForMatch.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
+                if (!match) break
+                commandForMatch = commandForMatch.slice(match[0].length).trimStart()
+              }
+              const useHead = /^(ls|dir|find|tree|git\s+(status|diff|log|ls-files))/.test(commandForMatch.toLowerCase())
               const parts: string[] = []
               let captured = 0
               let cut = false
@@ -285,6 +295,16 @@ const layer = Layer.effectDiscard(
                 // 诊断先观察全流；淘汰仅影响有界正文，原文字节仍由同一capture保留。
                 diag.push(text)
                 if (!text) return
+                if (useHead) {
+                  const bytes = Buffer.from(text)
+                  let end = Math.min(bytes.length, Math.max(0, MAX_CAPTURE_BYTES - captured))
+                  // 保留列表开头时也须在UTF-8边界截断，原始capture仍接收全部字节。
+                  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--
+                  if (end > 0) parts.push(bytes.subarray(0, end).toString("utf8"))
+                  captured += end
+                  if (end < bytes.length) cut = true
+                  return
+                }
                 parts.push(text)
                 captured += Buffer.byteLength(text)
                 for (let first = parts[0]; captured > MAX_CAPTURE_BYTES && first !== undefined; first = parts[0]) {
@@ -335,11 +355,15 @@ const layer = Layer.effectDiscard(
               const executionNotice = result && !interrupted ? undefined : formatExecutionNotice({
                 severity: "warning", reason: interrupted ? "user_abort" : "timeout", ...(interrupted ? {} : { timeout_ms: timeout }),
               })
+              const emptyTimeout = !result && !interrupted && !text ? "The process produced no output before timeout. This may indicate:\n- The command is block-buffering output (common for build tools like bun install, bundle install); consider adding --verbose or running with a larger timeout.\n- The process is waiting for interactive input; provide input or use a non-interactive flag.\n- The process is hung; check the command and environment." : undefined
+              const command = input.command.trim().toLowerCase()
+              const verification = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(command) || /^node\s+--check(\s|$)/.test(command) || /^python\s+-m\s+py_compile(\s|$)/.test(command) || /^tsc\s+--noemit(\s|$)/.test(command)
+              const hasErrors = verification && ((result !== undefined && result.exitCode !== 0) || /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output))
               // 传真实调用 command，不使用描述或重新解析执行命令。
               const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
               // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
               const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "", config: { enabled } })
-              const projected = [compressed.text, executionNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
+              const projected = [compressed.text, emptyTimeout, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings, executionNotice })
               // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
               const visible = !compressed.stats.applied && !truncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
               const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible, config: { enabled } })
@@ -352,7 +376,8 @@ const layer = Layer.effectDiscard(
                 value: {
                 ...outcome,
                 output: [output, notice, executionNotice].filter(Boolean).join("\n\n"),
-                contextOutput: [compressed.text, notice, executionNotice, appendix].filter(Boolean).join("\n\n"),
+                contextOutput: [compressed.text, notice, emptyTimeout, appendix].filter(Boolean).join("\n\n"),
+                executionNotice,
                   // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
                 truncated,
                 compression: bashCompressionMetadata(compressed.stats),
@@ -360,12 +385,13 @@ const layer = Layer.effectDiscard(
                 diagnosticErrorLikeLines: diagnostic.errorLikeLines,
                 diagnosticWarningLikeLines: diagnostic.warningLikeLines,
                 diagnosticDiscardedChars: diagnostic.discardedChars,
+                hasErrors,
                 ...(warnings.length ? { warnings } : {}),
                 },
               }
               })
               // 原文仍由同一 capture 保留；取消快照只提供领域内容，托管路径只由 registry 发布。
-              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => appProcess.run(command, {
+              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID, direction: useHead ? "head" : "tail" }, (write) => appProcess.run(command, {
                 combineOutput: true,
                 timeout: Duration.millis(timeout),
                 maxOutputBytes: MAX_CAPTURE_BYTES,

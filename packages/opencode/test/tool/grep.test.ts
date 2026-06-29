@@ -429,7 +429,8 @@ describe("tool.grep", () => {
       )
       expect(result.metadata.matches).toBe(64)
       expect(result.metadata.truncated).toBe(true)
-      expect(result.output).toContain("Found 64+")
+      // [local-smark] 截断文案改为显示截断前真实数量（rows.length=65）+ "+" 后缀
+      expect(result.output).toContain("Found 65+")
       expect(result.output).toContain("Results truncated")
     }),
   )

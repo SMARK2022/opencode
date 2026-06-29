@@ -153,6 +153,10 @@ export const GrepTool = Tool.define(
           const truncated = resultLimitTruncated || result.timedOut === true
           // #138：只返回前 RESULT_LIMIT 条匹配
           const final = resultLimitTruncated ? rows.slice(0, RESULT_LIMIT) : rows
+          // [local-smark] 截断时在输出文案中提供 rows.length（截断前的数量），
+          // 保留 + 后缀表示截断（如 "65+ matches"），帮助模型评估搜索密度。
+          // metadata.matches 是截断后长度（向后兼容），metadata.totalMatches 是截断前数量（新增）。
+          const totalMatches = rows.length
           // #244：超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
           // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"
           if (final.length === 0 && result.timedOut) return emptyTimedOut()
@@ -160,7 +164,8 @@ export const GrepTool = Tool.define(
 
           const output = [
             // #244：RESULT_LIMIT 截断与 timeout 截断独立计数，同一结果可能两者同时标注
-            `Found ${resultLimitTruncated ? `${RESULT_LIMIT}+` : final.length} matches${
+            // [local-smark] 截断时显示实际数量 + "+" 后缀，不截断时显示精确数
+            `Found ${resultLimitTruncated ? `${totalMatches}+` : final.length} matches${
               resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""
             }${result.timedOut ? ` before timing out after ${timeout} ms` : ""}`,
           ]
@@ -204,6 +209,8 @@ export const GrepTool = Tool.define(
             // #244：timedOut 用条件展开写入 metadata，未超时时保持旧 wire 形状（无该键）
             metadata: {
               matches: final.length,
+              // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
+              totalMatches,
               truncated,
               ...(result.timedOut && { timedOut: true }),
             },

@@ -8,7 +8,7 @@ import { FSUtil } from "../fs-util"
 import { makeLocationNode } from "../effect/app-node"
 import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
 import { ReadPresentation } from "./read-presentation"
-import { readOutline } from "./read-outline"
+import { readOutlineCached } from "./read-outline"
 
 // 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
 // 短文件是否分页与目录缺省页复用这个常量，400 行不能只作用于大文件分支。
@@ -292,9 +292,9 @@ export const read = Effect.fn("ReadTool.read")(function* (
       const finish = Effect.fnUntraced(function* (offset: number, returned: number, cut: boolean, eof: boolean) {
         const total = totalLines + Number(scanned > 0 && lastByte !== 10)
         const exact = eof || scanned === Number(info.size)
-        const outline = yield* Effect.promise(() => readOutline(real, total, offset, exact))
-        const after = yield* file.stat
         const modified = Option.getOrUndefined(info.mtime)?.getTime()
+        const outline = yield* Effect.promise(() => readOutlineCached(real, total, offset, Number(info.size), modified, exact))
+        const after = yield* file.stat
         const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
         return {
           read: {

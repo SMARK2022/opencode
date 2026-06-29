@@ -7,6 +7,7 @@ import { makeLocationNode } from "../effect/app-node"
 import { FSUtil } from "../fs-util"
 import { SkillV2 } from "../skill"
 import { PermissionV2 } from "../permission"
+import { SessionStore } from "../session/store"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
@@ -22,6 +23,7 @@ export const Output = Schema.Struct({
   name: Schema.String,
   directory: Schema.String,
   output: Schema.String,
+  deduped: Schema.Boolean,
 })
 
 export const description = [
@@ -60,6 +62,7 @@ const layer = Layer.effectDiscard(
     const fs = yield* FSUtil.Service
     const skills = yield* SkillV2.Service
     const permission = yield* PermissionV2.Service
+    const sessions = yield* SessionStore.Service
     yield* tools
       .register({
         [name]: Tool.make({
@@ -82,6 +85,16 @@ const layer = Layer.effectDiscard(
                   source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
                 })
                 const directory = path.dirname(skill.location)
+                // structured可能完整但content已限幅；只有模型仍可见的全文才授权去重。
+                const loaded = (yield* sessions.context(context.sessionID)).some(message => message.type === "assistant" && message.content.some(part => {
+                  if (part.type !== "tool" || part.name !== name || part.provider?.executed === true || part.time.pruned !== undefined || part.state.status !== "completed" || part.state.input.name !== input.name) return false
+                  const output = part.state.structured.output
+                  return typeof output === "string" && output.startsWith(`<skill_content name="${skill.name}">`) && output.endsWith("</skill_content>") && part.state.content.some(item => item.type === "text" && item.text === output)
+                }))
+                if (loaded) return {
+                  name: skill.name, directory, deduped: true,
+                  output: `Skill '${input.name}' was already loaded in this session. Refer to the prior tool output for instructions.`,
+                }
                 const files =
                   path.basename(skill.location) === "SKILL.md"
                     ? (yield* fs.glob("**/*", { cwd: directory, absolute: true, include: "file", dot: true }))
@@ -93,6 +106,7 @@ const layer = Layer.effectDiscard(
                   name: skill.name,
                   directory,
                   output: toModelOutput(skill, files),
+                  deduped: false,
                 }
               }).pipe(Effect.mapError((error) => unableToLoad(input.name, error)))
             }),
@@ -105,5 +119,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/skill",
   layer,
-  deps: [ToolRegistry.node, FSUtil.node, SkillV2.node, PermissionV2.node],
+  deps: [ToolRegistry.node, FSUtil.node, SkillV2.node, PermissionV2.node, SessionStore.node],
 })

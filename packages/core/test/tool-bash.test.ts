@@ -227,6 +227,7 @@ describe("BashTool", () => {
                   diagnosticErrorLikeLines: 0,
                   diagnosticWarningLikeLines: 0,
                   diagnosticDiscardedChars: 0,
+                  hasErrors: false,
                 },
                 content: [
                   { type: "text", text: "hello\n" },
@@ -739,13 +740,29 @@ describe("BashTool", () => {
         result = { ...result, outputTruncated: true }
         return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "verbose" }))).pipe(
           Effect.andThen((settled) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               expect(settled.output?.structured).toMatchObject({ truncated: true })
               expect(settled.output?.content[0]).toMatchObject({
                 type: "text",
                 text: expect.stringContaining("output capture truncated"),
               })
               expect(settled.output?.structured).not.toHaveProperty("resource")
+              // 两个命令只经过AppProcess替身；正文方向、统一限幅和原文恢复均走真实owner。
+              const raw = "FIRST-LISTING\n" + "ordinary row\n".repeat(100_000) + "LAST-LISTING\n"
+              for (const command of ["git status", "bun test"]) {
+                reset()
+                result = { ...result, exitCode: 7, output: Buffer.from(raw) }
+                const output = yield* withTool(tmp.path, registry => settleTool(registry, call({ command, compress_output: false }, command)))
+                const shown = output.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("") ?? ""
+                expect(shown).toContain(command === "git status" ? "FIRST-LISTING" : "LAST-LISTING")
+                expect(shown).not.toContain(command === "git status" ? "LAST-LISTING" : "FIRST-LISTING")
+                expect(shown).toContain("Command exited with code 7")
+                expect(Buffer.byteLength(shown)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+                expect(output.output?.structured).toMatchObject({ hasErrors: command === "bun test" })
+                const retained = output.outputPaths?.[0]
+                if (!retained) return yield* Effect.die("Missing raw output")
+                expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(raw)
+              }
             }),
           ),
         )
@@ -770,7 +787,7 @@ describe("BashTool", () => {
               expect(text.match(/reason="timeout"/g)).toHaveLength(1)
               expect(settled.output?.content[1]).toMatchObject({
                 type: "text",
-                text: "",
+                text: expect.stringContaining('reason="timeout"'),
               })
               expect(settled.output?.structured).toMatchObject({
                 timeout: true,
@@ -781,6 +798,16 @@ describe("BashTool", () => {
               const retained = settled.outputPaths?.[0]
               if (!retained) throw new Error("expected retained timeout output")
               expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe("ready\n")
+              expect(text).not.toContain("block-buffering")
+              result = { ...result, output: Buffer.alloc(0), stdout: Buffer.alloc(0) }
+              const empty = yield* withTool(tmp.path, registry => settleTool(registry, call({ command: "sleep 60", timeout: 10 }, "empty-timeout")))
+              const shown = empty.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("") ?? ""
+              expect(shown).toContain("block-buffering")
+              expect(shown).toContain("--verbose")
+              expect(shown.match(/reason="timeout"/g)).toHaveLength(1)
+              runFailure = undefined
+              const normal = yield* withTool(tmp.path, registry => settleTool(registry, call({ command: "echo", timeout: 10 }, "normal-empty")))
+              expect(JSON.stringify(normal.output?.content)).not.toContain("block-buffering")
             }),
           ),
         )

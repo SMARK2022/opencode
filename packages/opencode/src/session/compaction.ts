@@ -40,7 +40,9 @@ export const PRUNE_PROTECT = 40_000
 // #328：400/2000 的不对称是刻意设计——头部只需容纳 notice 的 path 前缀，尾部要装完整恢复指引。
 const TOOL_OUTPUT_HEAD_CHARS = 400
 const TOOL_OUTPUT_TAIL_CHARS = 2_000
-const PRUNE_PROTECTED_TOOLS = ["skill"]
+// [local-smark] read 输出也受 prune 保护：compaction 后模型最常复用的是文件内容，
+// 丢 read 证据会迫使模型重新读盘；skill 此前已受保护。
+const PRUNE_PROTECTED_TOOLS = ["skill", "read"]
 // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
 const MIN_PRESERVE_RECENT_TOKENS = 4_000
 const MAX_PRESERVE_RECENT_TOKENS = 16_000
@@ -149,9 +151,13 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
 // #256：memento 预算没有下限——与整轮尾部不同，它是 summary+tail 之上的增量，
 // 小窗口模型必须允许把它缩到 0，否则压缩重放后立刻再次溢出。
 function preserveRecentUserBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
+  // [local-smark] 条件化 floor：仅当 usable >= 20K 时设 4K floor，
+  // 小模型（8K context）的 20% 仅 1.6K，4K floor 会吃掉 2/3 预算加剧溢出。
+  // 大模型 4K floor 确保关键 user intent 不被截断。
+  const mementoFloor = usable(input) >= 20_000 ? 4_000 : 0
   return Math.min(
     DEFAULT_PRESERVE_RECENT_USER_TOKENS,
-    Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
+    Math.max(mementoFloor, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
   )
 }
 
@@ -609,7 +615,7 @@ const layer = Layer.effect(
       }
 
       if (result === "continue" && !processor.message.error) {
-        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree)
+        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1)
         if (handoff) yield* session.updatePart({
           id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID,
           type: "text", text: handoff, synthetic: true,

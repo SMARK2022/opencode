@@ -1,12 +1,14 @@
 import fs from "fs/promises"
 import path from "path"
 import { describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SkillV2 } from "@opencode-ai/core/skill"
 import { SkillTool } from "@opencode-ai/core/tool/skill"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
@@ -65,12 +67,14 @@ describe("SkillTool", () => {
               list: () => Effect.succeed(current),
             }),
           )
+          const history: SessionMessage.Message[] = []
           const skillToolLayer = AppNodeBuilder.build(
             LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, SkillTool.node]),
             [
               [PermissionV2.node, permission],
               [SkillV2.node, skills],
               [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+              [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? history : []) })],
             ],
           )
 
@@ -105,6 +109,23 @@ describe("SkillTool", () => {
               { sessionID, action: "skill", resources: ["effect"], save: ["effect"] },
               { sessionID, action: "skill", resources: ["effect"], save: ["effect"] },
             ])
+            // 只有当前可见的完整工具结果才去重；pruned或限幅正文必须重载。
+            const full = SkillTool.toModelOutput(info, [reference])
+            const prior = (content: string, pruned?: number) => Schema.decodeUnknownSync(SessionMessage.Assistant)({
+              id: "msg_loaded", type: "assistant", agent: "build", model: { id: "test", providerID: "test" }, time: { created: 0, completed: 1 },
+              content: [{ type: "tool", id: "loaded", name: "skill", time: { created: 0, completed: 1, ...(pruned === undefined ? {} : { pruned }) },
+                state: { status: "completed", input: { name: "effect" }, structured: { output: full }, content: [{ type: "text", text: content }] } }],
+            })
+            const load = () => executeTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "repeat", name: "skill", input: { name: "effect" } } })
+            history.push(prior(full))
+            const before = assertions.length
+            expect(yield* load()).toEqual({ type: "text", value: "Skill 'effect' was already loaded in this session. Refer to the prior tool output for instructions." })
+            expect(assertions.length).toBe(before + 1)
+            for (const visible of [prior(full, 0), prior("bounded excerpt")]) {
+              history.splice(0, history.length, visible)
+              expect(yield* load()).toEqual({ type: "text", value: full })
+            }
+            history.length = 0
             expect(
               yield* executeTool(registry, {
                 sessionID,

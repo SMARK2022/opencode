@@ -89,6 +89,7 @@ import { Tools } from "@opencode-ai/core/tool/tools"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { tmpdir } from "./fixture/tmpdir"
 
+const doomAssertions: PermissionV2.AssertInput[] = []
 const environment = { ...process.env, OPENCODE_EXPERIMENTAL_PLAN_MODE: "false" }
 const requests: LLMRequest[] = []
 let response: LLMEvent[] = []
@@ -163,7 +164,7 @@ const executions: string[] = []
 const permission = Layer.succeed(
   PermissionV2.Service,
   PermissionV2.Service.of({
-    assert: () => Effect.die("unused"),
+    assert: input => input.action === "doom_loop" ? Effect.sync(() => { doomAssertions.push(input) }) : Effect.die("unused"),
     ask: () => Effect.die("unused"),
     reply: () => Effect.die("unused"),
     get: () => Effect.die("unused"),
@@ -370,6 +371,7 @@ const insertSession = (id: SessionV2.ID) =>
 const setup = Effect.gen(function* () {
   const { db } = yield* Database.Service
   response = []
+  doomAssertions.length = 0
   environment.OPENCODE_EXPERIMENTAL_PLAN_MODE = "false"
   systemBaseline = "Initial context"
   systemRemoved = false
@@ -1072,6 +1074,15 @@ describe("SessionRunnerLLM", () => {
     }))
     const parentModel = { providerID: ProviderV2.ID.make("fake"), id: ModelV2.ID.make("fake-model") }
     yield* sessions.switchModel({ sessionID, model: parentModel })
+    // 用真实事件序列构造已读历史，不能手填seq占用稍后模型切换的投影位置。
+    const parentEvents = yield* EventV2.Service
+    const parentRead = { sessionID, assistantMessageID: SessionMessage.ID.make("msg_task_parent"), timestamp: DateTime.makeUnsafe(0) }
+    yield* parentEvents.publish(SessionEvent.Step.Started, { ...parentRead, agent: "plan", model: parentModel })
+    yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "read-parent", name: "read" })
+    yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "read-parent", tool: "read", input: { path: "/project/src/module.ts" }, provider: { executed: false } })
+    yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "read-parent", structured: { read: { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 4, end: 8 } }, content: [], provider: { executed: false } })
+    yield* parentEvents.publish(SessionEvent.Step.Ended, { ...parentRead, finish: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+    expect((yield* sessions.context(sessionID)).find(message => message.id === parentRead.assistantMessageID)).toMatchObject({ content: [{ type: "tool", name: "read", state: { status: "completed", structured: { read: { start: 4, end: 8 } } } }] })
     yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer"), agent => {
       agent.mode = "subagent"
       agent.system = "Reviewer identity"
@@ -1088,10 +1099,10 @@ describe("SessionRunnerLLM", () => {
     expect(definitions.map(tool => tool.name)).toContain("task")
     expect(definitions.find(tool => tool.name === "task")?.description).toContain("Prompting rules")
     response = fragmentFixture("text", "task-first", ["Research result"]).completeEvents
-    const invoke = (task_id?: string, subagent_type = "research") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
+    const invoke = (task_id?: string, subagent_type = "research", inspected_files?: "none" | "summary") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
       sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
       call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
-        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}) } },
+        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}), ...(inspected_files ? { inspected_files } : {}) } },
     })))
     const first = yield* invoke()
     expect(first.result.type).toBe("text")
@@ -1107,26 +1118,30 @@ describe("SessionRunnerLLM", () => {
     expect(first.output?.content).toEqual([{ type: "text", text: `task_id: ${childID}\n<task_result>\nResearch result\n</task_result>` }])
     const inherited = yield* store.permissions(child.id)
     expect(inherited).toEqual([
-      { action: "external_directory", resource: "/approved/*", effect: "allow" },
       { action: "edit", resource: "*", effect: "deny" },
       { action: "external_directory", resource: "*", effect: "deny" },
       { action: "external_directory", resource: "/approved/*", effect: "ask" },
+      { action: "read", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: "/approved/*", effect: "allow" },
       { action: "todowrite", resource: "*", effect: "deny" },
       { action: "task", resource: "*", effect: "deny" },
     ])
-    // 固定结果由真实求值器检查；父allow没有下放，有序ask仍覆盖较早deny及会话allow。
+    // 共同允许的会话窄例外按末条生效；其他外部路径和edit禁令仍须真实拒绝。
     expect(PermissionV2.evaluate("edit", "/file.ts", inherited).effect).toBe("deny")
     expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
-    expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("ask")
+    expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("allow")
     const actual = requests.at(-1)
     expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
-    expect(userTexts(actual!)).toContain("Inspect the requested module")
+    expect(userTexts(actual!).join("\n")).toContain("Inspect the requested module")
+    expect(userTexts(actual!).join("\n")).toContain("<parent_context>\n### Parent Session Inspected Files")
+    expect(userTexts(actual!).join("\n")).toContain("| project/src/module.ts | 4-8 |")
     // 同一task_id恢复同一durable子会话；第一次正文与第二次结果均保留在真实历史中。
     response = fragmentFixture("text", "task-second", ["Continued result"]).completeEvents
     const resumed = yield* invoke(childID)
     expect(resumed.output?.structured).toMatchObject({ task_id: childID, state: "completed" })
     expect(resumed.output?.content[0]).toEqual({ type: "text", text: `task_id: ${childID}\n<task_result>\nContinued result\n</task_result>` })
     expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
+    expect((yield* sessions.context(child.id)).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
     expect(yield* store.permissions(child.id)).toEqual(inherited)
     const rows = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.parent_id, sessionID)).all().pipe(Effect.orDie)
     expect(rows).toEqual([{ id: child.id }])
@@ -1139,6 +1154,17 @@ describe("SessionRunnerLLM", () => {
     expect(foreign.result.type).toBe("error")
     expect(foreign.result).toMatchObject({ value: `Unknown task_id: ${childID}` })
     expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
+    response = fragmentFixture("text", "summary-override", ["Summary result"]).completeEvents
+    yield* invoke(childID, "research", "summary")
+    expect((yield* sessions.context(child.id)).findLast(message => message.type === "user")).toMatchObject({ text: expect.stringContaining("<parent_context>") })
+    const without = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
+    expect((yield* sessions.context(SessionV2.ID.make(without.task_id))).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
+    response = fragmentFixture("text", "empty-child", ["   "]).completeEvents
+    const empty = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
+    expect(empty.output).toBe("Subagent produced no output (may have been aborted or lacked required tools).")
+    response = fragmentFixture("text", "large-child", ["x".repeat(32_001)]).completeEvents
+    const large = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
+    expect(large.output).toBe("x".repeat(32_000) + "\n...[truncated]")
     // 提升现有前台job触发同一后台通知入口，不修改全局实验开关。
     const jobs = yield* BackgroundJob.Service
     const events = yield* EventV2.Service
@@ -3789,6 +3815,20 @@ describe("SessionRunnerLLM", () => {
         },
         { type: "assistant", finish: "stop", content: [{ type: "text", id: "text-after-error", text: "Recovered" }] },
       ])
+      // 第一轮错误已持久化；两个新step继续同工具失败才触发第三次错误审批。
+      const failedTurn = (id: string, attempt: number) => [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id, name: "missing", input: { attempt } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })]
+      responses = [failedTurn("error-two", 2), failedTurn("error-three", 3), fragmentFixture("text", "error-recovered", ["Recovered again"]).completeEvents]
+      yield* session.resume(sessionID)
+      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
+      doomAssertions.length = 0
+      responses = [
+        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "loop-one", name: "echo", input: { text: "same" } }), LLMEvent.toolCall({ id: "loop-two", name: "echo", input: { text: "same" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
+        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "loop-three", name: "echo", input: { text: "same" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
+        fragmentFixture("text", "loop-recovered", ["Changed strategy"]).completeEvents,
+      ]
+      yield* session.resume(sessionID)
+      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["echo"], metadata: { tool: "echo", input: { text: "same" } } }])
+      expect(doomAssertions).toHaveLength(1)
     }),
   )
 
