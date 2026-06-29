@@ -29,6 +29,10 @@ export interface ConditionalWriteInput extends WriteInput {
   readonly expected: Uint8Array
 }
 
+export interface ConditionalMoveInput extends ConditionalWriteInput {
+  readonly content: string
+  readonly destination: Target
+}
 export interface RemoveInput {
   readonly target: Target
 }
@@ -41,12 +45,20 @@ export class TargetExistsError extends Schema.TaggedErrorClass<TargetExistsError
   path: Schema.String,
 }) {}
 
+export class MoveIncompleteError extends Schema.TaggedErrorClass<MoveIncompleteError>()("FileMutation.MoveIncompleteError", {
+  path: Schema.String,
+  destination: Schema.String,
+  reason: Schema.String,
+}) {}
+
 export interface WriteResult {
   readonly operation: "write"
   readonly target: string
   readonly resource: string
   readonly existed: boolean
   // 仅文本覆写生成展示patch，普通创建和二进制写入保持原结果。
+  // 最终展示和增删统计必须使用同一次持锁写入的前像。
+  readonly previous?: string
   readonly diff?: string
   readonly text?: string
   readonly formattedDiff?: string
@@ -70,6 +82,7 @@ export interface Interface {
   readonly writeIfUnchanged: (
     input: ConditionalWriteInput,
   ) => Effect.Effect<WriteResult, StaleContentError | FSUtil.Error>
+  readonly moveIfUnchanged: (input: ConditionalMoveInput) => Effect.Effect<WriteResult, StaleContentError | MoveIncompleteError | FSUtil.Error>
   readonly remove: (input: RemoveInput) => Effect.Effect<RemoveResult, FSUtil.Error>
 }
 
@@ -122,6 +135,7 @@ const layer = Layer.effect(
       const submitted = normalizeLineEndings(splitBom(input.content).text)
       return {
         ...writeResult(input.target, existed),
+        previous,
         diff: createTwoFilesPatch(input.target.resource, input.target.resource, before, after),
         ...(formatted ? { text } : {}),
         ...(formatted && submitted !== after ? {
@@ -207,6 +221,29 @@ const layer = Layer.effect(
       ),
     )
 
+    const moveIfUnchanged = Effect.fn("FileMutation.moveIfUnchanged")((input: ConditionalMoveInput) => {
+      const commit = Effect.gen(function* () {
+        const source = yield* fs.readFile(input.target.canonical)
+        if (!sameBytes(source, input.expected)) return yield* new StaleContentError({ path: input.target.canonical })
+        const previous = yield* fs.readFile(input.destination.canonical)
+          .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
+        // 目的地继承源BOM，格式化与最终回读沿用唯一文本收尾路径。
+        yield* fs.writeWithDirs(input.destination.canonical, input.content)
+        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined)
+        if (input.destination.canonical !== input.target.canonical) {
+          yield* fs.remove(input.target.canonical).pipe(Effect.mapError(error => new MoveIncompleteError({
+            path: input.target.canonical, destination: input.destination.canonical, reason: error.message,
+          })))
+        }
+        return result
+      })
+      if (input.destination.canonical === input.target.canonical) return withTargetLock(input.target)(commit)
+      // 两端按同一顺序取锁，反向Move不会互相持有一半锁而死锁。
+      const first = input.target.canonical < input.destination.canonical ? input.target : input.destination
+      const second = first === input.target ? input.destination : input.target
+      return withTargetLock(first)(withTargetLock(second)(commit))
+    })
+
     const remove = Effect.fn("FileMutation.remove")((input: RemoveInput) =>
       withTargetLock(input.target)(
         Effect.gen(function* () {
@@ -219,7 +256,7 @@ const layer = Layer.effect(
       ),
     )
 
-    return Service.of({ create, write, writeTextPreservingBom, writeIfUnchanged, remove })
+    return Service.of({ create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove })
   }),
 )
 

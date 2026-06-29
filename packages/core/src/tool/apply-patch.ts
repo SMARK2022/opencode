@@ -1,3 +1,4 @@
+import { closestMatch } from "./edit-excerpt"
 export * as ApplyPatchTool from "./apply-patch"
 
 import { ToolFailure } from "@opencode-ai/llm"
@@ -33,6 +34,7 @@ export const Applied = Schema.Struct({
 export const Output = Schema.Struct({
   applied: Schema.Array(Applied),
   files: Schema.Array(FileDiff.Info),
+  errors: Schema.optional(Schema.Array(Schema.String)),
 })
 export type Output = typeof Output.Type
 
@@ -49,6 +51,7 @@ export const toModelOutput = (output: Output) =>
     "```",
     // 批次最终 diff 与诊断状态独立，不用不可用提示替代真实改动。
     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+    ...(output.errors?.length ? [`\nFailed to update ${output.errors.length} file(s):`, ...output.errors] : []),
   ].join("\n")
 
 type Prepared =
@@ -60,6 +63,7 @@ type Prepared =
   | (Extract<Patch.Hunk, { readonly type: "update" }> & {
       readonly target: LocationMutation.Target
       readonly source: Uint8Array
+      readonly destination?: LocationMutation.Target
       readonly content: string
       readonly before: string
       readonly after: string
@@ -79,7 +83,7 @@ const layer = Layer.effectDiscard(
         [name]: Tool.withPermission(
           Tool.make({
             description:
-              "Apply one patch containing add, update, and delete file operations. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
+              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
             input: Input,
             output: Output,
             toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],
@@ -104,17 +108,22 @@ const layer = Layer.effectDiscard(
                   catch: (cause) => new ToolFailure({ message: `apply_patch verification failed: ${String(cause)}` }),
                 })
                 if (hunks.length === 0) return yield* new ToolFailure({ message: "patch rejected: empty patch" })
-                const move = hunks.find((hunk) => hunk.type === "update" && hunk.movePath !== undefined)
-                if (move) return yield* new ToolFailure({ message: "apply_patch moves are not supported yet" })
 
-                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target }> = []
-                for (const hunk of hunks)
-                  targets.push({ hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) })
+                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target }> = []
+                for (const hunk of hunks) {
+                  const target = yield* mutation.resolve({ path: hunk.path, kind: "file" })
+                  const destination = hunk.type === "update" && hunk.movePath
+                    ? yield* mutation.resolve({ path: hunk.movePath, kind: "file" }) : undefined
+                  targets.push({ hunk, target, destination })
+                }
                 // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
-                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] }>()
-                for (const { hunk, target } of targets) {
-                  const external = target.externalDirectory
-                  if (external) externalDirectories.set(`${external.resource}:${hunk.type}`, { ...external, operation: hunk.type })
+                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] | "move" }>()
+                for (const { hunk, target, destination } of targets) {
+                  // Move目的地有独立授权边界，不能用源路径审批代替。
+                  for (const entry of [{ target, operation: hunk.type }, ...(destination ? [{ target: destination, operation: "move" as const }] : [])]) {
+                    const external = entry.target.externalDirectory
+                    if (external) externalDirectories.set(`${external.resource}:${entry.operation}`, { ...external, operation: entry.operation })
+                  }
                 }
                 for (const external of externalDirectories.values()) {
                   yield* permission.assert({
@@ -128,16 +137,18 @@ const layer = Layer.effectDiscard(
                 yield* permission.assert({
                   action: "edit",
                   // 审批前仅传解析计划；不读取目标来填充diff或伪造删除行数。
-                  metadata: { files: targets.map(item => ({ type: item.hunk.type, relativePath: item.target.resource })), patchText: input.patchText },
-                  resources: [...new Set(targets.map(({ target }) => target.resource))],
+                  metadata: { files: targets.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
+                  resources: [...new Set(targets.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
                   save: ["*"],
                   sessionID: context.sessionID,
                   agent: context.agent,
                   source,
                 })
 
+                // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
+                const errors: string[] = []
                 const prepared: Prepared[] = []
-                for (const { hunk, target } of targets) {
+                for (const { hunk, target, destination } of targets) {
                   yield* Effect.gen(function* () {
                     if (hunk.type === "add") {
                       prepared.push({
@@ -157,25 +168,36 @@ const layer = Layer.effectDiscard(
                       prepared.push({ ...hunk, target, before, after: "" })
                       return
                     }
-                    const update = Patch.derive(hunk.path, hunk.chunks, original)
+                    const update = yield* Effect.try({
+                      try: () => Patch.derive(hunk.path, hunk.chunks, original),
+                      catch: (error) => {
+                        const closest = closestMatch(before, hunk.chunks.flatMap(chunk => chunk.oldLines).join("\n"))
+                        return new ToolFailure({ message: `${error}${closest ? `\n\nActual content near expected location:\n${closest.excerpt}` : ""}` })
+                      },
+                    })
                     prepared.push({
                       ...hunk,
                       target,
                       source,
+                      destination,
                       content: Patch.joinBom(update.content, update.bom),
                       before,
                       after: update.content,
                     })
-                  }).pipe(Effect.mapError(() => fail(hunk.path)))
+                  }).pipe(Effect.catch(error => {
+                    errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
+                    return Effect.void
+                  }))
                 }
 
+                if (prepared.length === 0) return yield* new ToolFailure({ message: errors.join("\n") })
                 const patchFiles: Array<typeof FileDiff.Info.Type> = []
                 yield* Effect.forEach(
                   prepared,
                   (change) =>
                     Effect.gen(function* () {
                       if (change.type === "add") {
-                        const result = yield* files.create({
+                        const result = yield* files.writeTextPreservingBom({
                           target: change.target,
                           content:
                             change.contents.endsWith("\n") || change.contents === ""
@@ -184,7 +206,8 @@ const layer = Layer.effectDiscard(
                           format: format.file,
                         })
                         applied.push({ type: change.type, resource: result.resource, target: result.target })
-                        patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
+                        // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
+                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }), status: result.existed ? "modified" : "added" })
                         return
                       }
                       if (change.type === "delete") {
@@ -193,18 +216,30 @@ const layer = Layer.effectDiscard(
                         patchFiles.push(patchFile(change))
                         return
                       }
-                      const result = yield* files.writeIfUnchanged({
+                      const moving = change.destination && change.destination.canonical !== change.target.canonical ? change.destination : undefined
+                      const write = {
                         target: change.target,
                         expected: change.source,
                         content: change.content,
                         format: format.file,
-                      })
+                      }
+                      const result = yield* (moving ? files.moveIfUnchanged({ ...write, destination: moving }) : files.writeIfUnchanged(write))
+                      if (moving) {
+                        // 用既有删除/创建合同呈现真实两端变化，不新增无人消费的move状态。
+                        applied.push({ type: "delete", resource: change.target.resource, target: change.target.canonical })
+                        applied.push({ type: result.existed ? "update" : "add", resource: result.resource, target: result.target })
+                        patchFiles.push(patchFile({ ...change, type: "delete", after: "" }))
+                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }), status: result.existed ? "modified" : "added" })
+                        return
+                      }
                       applied.push({ type: change.type, resource: result.resource, target: result.target })
                       patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
-                    }).pipe(Effect.mapError(() => fail(change.path))),
+                    }).pipe(Effect.mapError(error => error instanceof FileMutation.MoveIncompleteError
+                      ? new ToolFailure({ message: `${fail(change.path).message}. Destination ${error.destination} was written, but source ${error.path} could not be removed: ${error.reason}` })
+                      : fail(change.path))),
                   { discard: true },
                 )
-                return { applied, files: patchFiles }
+                return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
               }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch", error))))
             },
           }),

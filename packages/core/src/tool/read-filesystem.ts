@@ -24,7 +24,27 @@ export class BinaryFileError extends Schema.TaggedErrorClass<BinaryFileError>()(
   resource: Schema.String,
 }) {
   override get message() {
-    return `Cannot read binary file: ${this.resource}`
+    // 继续使用统一的二进制错误类型，给已识别格式补充可执行的读取方向。
+    const suggestions: Record<string, string> = {
+      ".gz": "Decompress with gunzip or bun -e with zlib first, then read.",
+      ".tar": "Extract with tar -xf first, then read individual files.",
+      ".zip": "Extract with unzip first, then read individual files.",
+      ".7z": "Extract with 7z first, then read individual files.",
+      ".db": "Use bun -e with bun:sqlite to query this database.",
+      ".vscdb": "Use bun -e with bun:sqlite to query this database.",
+      ".sqlite": "Use bun -e with bun:sqlite to query this database.",
+      ".exe": "Use strings or hexdump via bash to inspect binary content.",
+      ".dll": "Use strings or hexdump via bash to inspect binary content.",
+      ".so": "Use strings or hexdump via bash to inspect binary content.",
+      ".wasm": "Use strings or hexdump via bash to inspect binary content.",
+      ".class": "Use javap -c via bash to disassemble Java bytecode.",
+      ".jar": "Extract with jar -xf or unzip first, then read individual files.",
+      ".doc": "Use python-docx or convert to text via libreoffice --headless.",
+      ".docx": "Use python-docx or unzip to read XML content.",
+      ".pyc": "Use python -m dis or uncompyle6 to decompile.",
+    }
+    const suggestion = suggestions[path.extname(this.resource).toLowerCase()]
+    return `Cannot read binary file: ${this.resource}${suggestion ? `\n${suggestion}` : ""}`
   }
 }
 
