@@ -17,6 +17,54 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
 
+// [local-smark] 从父 session 的 messages 提取已读文件列表，
+// 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
+// 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
+// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致）。
+function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[]): string | undefined {
+  const files = new Map<string, { path: string; ranges: string[]; lastRead: number }>()
+  let seq = 0
+  for (const msg of messages) {
+    if (msg.info.role !== "assistant") continue
+    for (const part of msg.parts) {
+      if (part.type !== "tool" || part.tool !== "read") continue
+      if (part.state.status !== "completed") continue
+      if (part.state.time.compacted) continue
+      seq++
+      const meta = part.state.metadata?.read
+      if (!meta || typeof meta !== "object") continue
+      const m = meta as Record<string, unknown>
+      const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
+      const filePath = typeof m.path === "string" ? m.path : ""
+      if (!filePath) continue
+      if (m.stub === true) continue
+      const start = typeof m.start === "number" ? m.start : 0
+      const end = typeof m.end === "number" ? m.end : 0
+      const existing = files.get(canonicalPath || filePath)
+      if (existing) {
+        existing.ranges.push(`${start}-${end}`)
+        existing.lastRead = seq
+      } else {
+        files.set(canonicalPath || filePath, { path: filePath, ranges: [`${start}-${end}`], lastRead: seq })
+      }
+    }
+  }
+  if (files.size === 0) return undefined
+  const sorted = [...files.values()].sort((a, b) => b.lastRead - a.lastRead).slice(0, 20)
+  const lines = [
+    "### Parent Session Inspected Files",
+    "| path | ranges |",
+    "|---|---|",
+    ...sorted.map((f) => {
+      // [local-smark] 显示相对路径而非 basename，避免多包仓库中同名文件歧义
+      const rel = f.path.split(/[\\/]/).slice(-3).join("/")
+      return `| ${rel} | ${f.ranges.join(", ")} |`
+    }),
+  ]
+  if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
+  return lines.join("\n")
+}
+
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
@@ -56,6 +104,13 @@ export const Parameters = Schema.Struct({
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
   background: Schema.optional(Schema.Boolean).annotate({
     description: "When true, launch the subagent in the background and return immediately",
+  }),
+  // [local-smark] 控制是否传递父 session 的已读文件列表给子 agent。
+  // 'summary': 传递文件路径+range 表格（新 subagent 默认）。
+  // 'none': 不传递（resume 默认，子 session 已有自己的 read 历史）。
+  inspected_files: Schema.optional(Schema.Literals(["none", "summary"])).annotate({
+    description:
+      "Controls whether to pass parent session's inspected file list to the subagent. 'none': no file list (default for resume). 'summary': compact file path + range table (default for new subagents).",
   }),
 })
 
@@ -224,6 +279,16 @@ export const TaskTool = Tool.define(
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
+
+        // [local-smark] 根据 inspected_files 参数传递父 session 的已读文件列表。
+        // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
+        // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
+        // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
+        const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
+        const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
+          ? buildParentInspectedFilesSummary(ctx.messages)
+          : undefined
+
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
@@ -237,9 +302,22 @@ export const TaskTool = Tool.define(
             ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
             ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
           },
-          parts,
+          parts: parentContext
+            ? [...parts, { type: "text" as const, text: `<parent_context>\n${parentContext}\n</parent_context>` } as const]
+            : parts,
         })
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        let text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        // [local-smark] 空结果验证：子 agent 未产出任何文本时返回提示，
+        // 返回裸字符串由调用方统一包裹，避免 <task_result> 双重嵌套。
+        if (!text || text.trim().length === 0) {
+          text = "Subagent produced no output (may have been aborted or lacked required tools)."
+        }
+        // [local-smark] result 截断预算：32KB（约 8K tokens），防止大结果撑爆父上下文
+        const TASK_RESULT_MAX_CHARS = 32_000
+        if (text.length > TASK_RESULT_MAX_CHARS) {
+          text = text.slice(0, TASK_RESULT_MAX_CHARS) + "\n...[truncated]"
+        }
+        return text
       })
 
       const resumeWhenIdle: (input: { userID: MessageID; state: "completed" | "error" }) => Effect.Effect<void> =

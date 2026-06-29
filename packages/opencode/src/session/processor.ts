@@ -115,6 +115,11 @@ export const layer = Layer.effect(
     const scope = yield* Scope.Scope
     const status = yield* SessionStatus.Service
     const image = yield* Image.Service
+
+    // [local-smark] consecutive-error breaker 的跨 step 计数器。
+    // ProcessorContext 每步重建，无法跨 step 累加；此处 Map 在 layer 闭包中持久化，
+    // 按 sessionID 隔离，跨 create()/process() 调用存活。
+    const consecutiveErrorMap = new Map<SessionID, Record<string, number>>()
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
 
@@ -463,9 +468,29 @@ export const layer = Layer.effect(
             const parts = MessageV2.parts(ctx.assistantMessage.id)
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
 
+            // [local-smark] 跨消息 doom loop 检测：当前消息 parts 不足时，
+            // 从 session messages 中前一个 assistant message 的末尾 parts 补充，
+            // 防止跨消息的重复循环。
+            // compaction 后旧 parts 可能被清空，此时跨消息检测自然失效——可接受，
+            // 因为 compaction 本身打破了循环。
+            let checkParts = recentParts
+            if (recentParts.length < DOOM_LOOP_THRESHOLD) {
+              // 从 DB 加载当前 session 的消息历史，取前一个 assistant message 的末尾 tool parts
+              const allMessages = yield* session.messages({ sessionID: ctx.sessionID })
+              const prevAssistant = allMessages
+                .filter((m: MessageV2.WithParts) => m.info.role === "assistant" && m.info.id !== ctx.assistantMessage.id)
+                .at(-1)
+              if (prevAssistant) {
+                const prevToolParts = prevAssistant.parts
+                  .filter((p: MessageV2.Part) => p.type === "tool" && p.state.status !== "pending")
+                  .slice(-DOOM_LOOP_THRESHOLD)
+                checkParts = [...prevToolParts, ...recentParts].slice(-DOOM_LOOP_THRESHOLD)
+              }
+            }
+
             if (
-              recentParts.length !== DOOM_LOOP_THRESHOLD ||
-              !recentParts.every(
+              checkParts.length !== DOOM_LOOP_THRESHOLD ||
+              !checkParts.every(
                 (part) =>
                   part.type === "tool" &&
                   part.tool === value.toolName &&
@@ -548,6 +573,15 @@ export const layer = Layer.effect(
               })
             }
             yield* completeToolCall(value.toolCallId, output)
+            // [local-smark] 工具成功时重置 consecutive-error 计数器
+            const successToolName = toolCall?.part.tool
+            if (successToolName) {
+              const errMap = consecutiveErrorMap.get(ctx.sessionID)
+              if (errMap) {
+                delete errMap[successToolName]
+                consecutiveErrorMap.set(ctx.sessionID, errMap)
+              }
+            }
             return
           }
 
@@ -569,6 +603,27 @@ export const layer = Layer.effect(
               })
             }
             yield* failToolCall(value.toolCallId, value.error)
+            // [local-smark] consecutive-error breaker：同一工具连续 3 次 error 后
+            // 注入 doom_loop permission ask，让模型意识到需要改变策略。
+            // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
+            const toolName = toolCall?.part.tool ?? "unknown"
+            const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
+            errMap[toolName] = (errMap[toolName] ?? 0) + 1
+            consecutiveErrorMap.set(ctx.sessionID, errMap)
+            if (errMap[toolName] >= 3) {
+              const agent = yield* agents.get(ctx.assistantMessage.agent)
+              yield* permission.ask({
+                permission: "doom_loop",
+                patterns: [toolName],
+                sessionID: ctx.assistantMessage.sessionID,
+                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: errMap[toolName] },
+                always: [toolName],
+                ruleset: agent.permission,
+              })
+              // 重置计数器，避免每次 error 都触发
+              errMap[toolName] = 0
+              consecutiveErrorMap.set(ctx.sessionID, errMap)
+            }
             return
           }
 

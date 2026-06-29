@@ -2155,4 +2155,74 @@ describe("tool.shell truncation", () => {
       }),
     ),
   )
+
+  // [local-smark] timeout + 空输出时追加诊断提示，帮助模型区分
+  // "block-buffered 未 flush" vs "等待交互输入" vs "进程 hang 住"。
+  // 不改 pipe 架构（pty 改造是 P2），仅改善模型决策质量。
+  describe("timeout empty-output diagnostic", () => {
+    it.live(
+      "appends block-buffering hint on timeout with no output",
+      () =>
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            // sleep 不产生任何输出，触发 timeout + emptyOutput
+            const result = yield* run({
+              command: PS.has(sh()) ? "Start-Sleep -Seconds 60" : "sleep 60",
+              description: "Timeout no output test",
+              timeout: 500,
+            })
+
+            expect(result.output).toContain("(no output)")
+            expect(result.output).toContain("reason=\"timeout\"")
+            // [local-smark] 诊断提示应包含 block-buffering 说明
+            expect(result.output).toContain("block-buffering")
+            expect(result.output).toContain("--verbose")
+          }),
+        ),
+      15_000,
+    )
+
+    it.live(
+      "does not append block-buffering hint on timeout with output",
+      () =>
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            // [local-smark] echo 先输出再 sleep，timeout 时已有 output → emptyOutput=false
+            // 验证有输出时不触发 block-buffering 诊断（仅 timeout+空输出触发）
+            const result = yield* run({
+              command: `echo started && sleep 60`,
+              description: "Timeout with output test",
+              timeout: 500,
+            })
+
+            expect(result.output).toContain("started")
+            expect(result.output).toContain("reason=\"timeout\"")
+            // 有输出时不应追加 block-buffering 诊断
+            expect(result.output).not.toContain("block-buffering")
+          }),
+        ),
+      15_000,
+    )
+
+    it.live(
+      "does not append block-buffering hint on normal exit with no output",
+      () =>
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const command = `${bin} -e ${evalarg("process.exit(0)")}`
+            const result = yield* run({
+              command: PS.has(sh()) ? `& ${command}` : command,
+              description: "Normal exit no output test",
+            })
+
+            expect(result.output).toContain("(no output)")
+            // 正常退出（非 timeout）不应追加 block-buffering 诊断
+            expect(result.output).not.toContain("block-buffering")
+          }),
+        ),
+    )
+  })
 })

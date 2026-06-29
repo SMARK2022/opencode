@@ -2088,6 +2088,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        // [local-smark] nearOverflow 提示只注入一次：首次达到 80% usable 时注入，
+        // compaction 后重置（下一轮 compaction 周期可再次提示）。
+        // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
+        // 不会泄漏给 compaction 模型污染下一轮干净上下文。
+        let nearOverflowNotified = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -2251,7 +2256,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
             const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
             const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
-            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
+            const messages = [
+              ...modelMsgs,
+              ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : []),
+            ]
             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
             // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
             const messageEstimate = TokenEstimate.sanitizeModelMessages(messages)
@@ -2342,12 +2350,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // retained tail messages can carry huge pre-compaction token counts even
             // though the freshly assembled prompt is small; checking estimatedInput
             // here prevents that stale usage from creating back-to-back auto compacts.
-            if (
-              yield* compaction.isOverflow({
-                tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-                model,
-              })
-            ) {
+            const isOverflowing = yield* compaction.isOverflow({
+              tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              model,
+            })
+            if (isOverflowing) {
               // Auto-compaction is executed directly instead of queued as a
               // history task. This keeps the producer side from persisting a
               // stale compact command that a later prompt or undo could replay.
@@ -2357,8 +2364,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 model: lastUser.model,
                 auto: true,
               })
+              // [local-smark] compaction 后重置 nearOverflow 提示标志：
+              // 下一轮 compaction 周期可以再次提示
+              nearOverflowNotified = false
               if (compacted === "stop") return "break" as const
               return "continue" as const
+            }
+            // [local-smark] 上下文接近溢出时的轻量提示：仅首次达到 80% usable 时注入一次。
+            // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
+            // 不会泄漏给 compaction 模型。compaction 后标志重置，下一周期可再次提示。
+            // 不限制工具使用、不退化回复质量；任务仍在进行时模型应忽略并按用户指令执行。
+            if (!nearOverflowNotified && !isLastStep) {
+              const usableTokens = usable({ cfg: yield* config.get(), model })
+              if (usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)) {
+                messages.push({
+                  role: "user" as const,
+                  // [local-smark] 提示重点：避免大量内容进入上下文（大文件读取、
+                  // 宽范围 grep 等），而非缩短回复。不降低回复质量。
+                  // 任务仍在进行时忽略此提示，按用户指令正常执行。
+                  content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
+                })
+                nearOverflowNotified = true
+              }
             }
             handle.message.tokens.input = estimatedInput
             // Persist the pending input snapshot on the assistant message so the TUI can

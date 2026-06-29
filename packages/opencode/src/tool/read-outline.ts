@@ -261,3 +261,37 @@ export async function readOutline(filepath: string, total: number, offset: numbe
   if (items.length === 0) return undefined
   return { items, truncated }
 }
+
+// [local-smark] outline cache：按 canonicalPath+size+modifiedMs 缓存，
+// 文件修改后自动失效。LRU 上限 50 条（每条 ≤640 chars，总内存可控）。
+// 避免每次 read 都重新流式扫描文件前 3000 行。
+const outlineCache = new Map<string, { outline: Outline | undefined; size: number; modifiedMs: number }>()
+const OUTLINE_CACHE_LIMIT = 50
+
+export async function readOutlineCached(
+  filepath: string,
+  total: number,
+  offset: number,
+  size: number,
+  modifiedMs: number,
+): Promise<Outline | undefined> {
+  // [local-smark] 仅在 offset<=1 时使用缓存（readOutline 内部也仅在此条件生成 outline）。
+  // offset>1 时不查缓存也不生成 outline，保持原有行为。
+  if (offset > 1) return undefined
+  const canonical = process.platform === "win32"
+    ? filepath.replaceAll("\\", "/").toLowerCase()
+    : filepath.replaceAll("\\", "/")
+  const cached = outlineCache.get(canonical)
+  // cache 命中条件：同文件（canonicalPath）+ 同版本（size+modifiedMs）
+  if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {
+    return cached.outline
+  }
+  const outline = await readOutline(filepath, total, offset)
+  // LRU 淘汰：超限时删最早插入的条目（Map 保持插入顺序）
+  if (outlineCache.size >= OUTLINE_CACHE_LIMIT) {
+    const firstKey = outlineCache.keys().next().value
+    if (firstKey) outlineCache.delete(firstKey)
+  }
+  outlineCache.set(canonical, { outline, size, modifiedMs })
+  return outline
+}

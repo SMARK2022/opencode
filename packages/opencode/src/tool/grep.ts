@@ -162,13 +162,19 @@ export const GrepTool = Tool.define(
           const resultLimitTruncated = result.truncated || matches.length > RESULT_LIMIT
           const truncated = resultLimitTruncated || result.timedOut === true
           const final = resultLimitTruncated ? matches.slice(0, RESULT_LIMIT) : matches
+          // [local-smark] 截断时在输出文案中提供 matches.length（截断前的数量），
+          // 保留 + 后缀表示截断（如 "65+ matches"），帮助模型评估搜索密度。
+          // metadata.matches 是截断后长度（向后兼容），metadata.totalMatches 是截断前数量（新增）。
+          const totalMatches = matches.length
           // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
-          // 阶段不可用，也不能把未完成搜索降级成确定性的 “No files found”。
+          // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"。
           if (final.length === 0 && result.timedOut) return emptyTimedOut()
           if (final.length === 0) return empty
 
+          // [local-smark] 截断时显示数量 + "+" 后缀，不截断时显示精确数
+          const foundLabel = resultLimitTruncated ? `${totalMatches}+` : `${final.length}`
           const output = [
-            `Found ${resultLimitTruncated ? `${RESULT_LIMIT}+` : final.length} matches${
+            `Found ${foundLabel} matches${
               resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""
             }${result.timedOut ? ` before timing out after ${timeout} ms` : ""}`,
           ]
@@ -208,6 +214,8 @@ export const GrepTool = Tool.define(
             title: params.pattern,
             metadata: {
               matches: final.length,
+              // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
+              totalMatches,
               truncated,
               ...(result.timedOut && { timedOut: true }),
             },

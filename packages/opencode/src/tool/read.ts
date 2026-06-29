@@ -13,7 +13,7 @@ import { Instruction } from "../session/instruction"
 // [local-smark] read tool enhancements: image processing, outline
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
-import { readOutline, type Outline } from "./read-outline"
+import { readOutline, readOutlineCached, type Outline } from "./read-outline"
 import { Reference } from "@/reference/reference"
 import { Image } from "@/image/image"
 import { PartID } from "@/session/schema"
@@ -26,6 +26,10 @@ const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const OVERLAP_MIN_LINES = 20
 const OVERLAP_MIN_RATIO = 0.3
+// [local-smark] 高重叠 suppress 阈值：当已可见读取与当前请求的重叠率 >= 80% 时，
+// 直接返回 stub（而非仅 note），避免大量部分重叠的重复读取。
+// 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
+const OVERLAP_SUPPRESS_RATIO = 0.8
 
 // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
 const BLOCKED_DEVICE_PATHS = new Set([
@@ -67,7 +71,8 @@ const TOKEN_BYTE_RATIOS: Record<string, number> = {
   default: 0.25,
 }
 
-type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
+// [local-smark] 新增 stub_high_overlap_visible：高重叠（>=80%）时 suppress
+type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible" | "stub_high_overlap_visible"
 
 type ReadMetadata = {
   path: string
@@ -701,6 +706,47 @@ export const ReadTool = Tool.define(
         }
       }
 
+      // [local-smark] 高重叠 suppress：当已可见读取与当前请求的重叠率 >= 80% 时，
+      // 直接返回 stub 而非仅 note。这减少了大量部分重叠的重复读取（如偏移微调的重复读）。
+      // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
+      // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
+      const overlapRange = findOverlapNote(visibleReads, current)
+      if (overlapRange) {
+        // 计算实际重叠比例
+        const [overlapStart, overlapEnd] = overlapRange.split("-").map(Number)
+        const overlapLines = overlapEnd - overlapStart + 1
+        const requestedLines = Math.max(1, end - start + 1)
+        if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) {
+          const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
+          const visibleEnd = overlapEnd
+          const nextOffset = visibleEnd + 1
+          const reachedEof = visibleEnd >= file.count
+          const offsetExit = reachedEof
+            ? "No unread lines remain (end of file reached); use grep to locate symbols."
+            : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
+          const message = `Lines ${start}-${end} have ${Math.round((overlapLines / requestedLines) * 100)}% overlap with visible read ${overlapRange} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
+          const output = [
+            `<path>${escapeXmlText(filepath)}</path>`,
+            `<type>file</type>`,
+            `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
+            `<range start="${start}" end="${end}" total="${file.count}" returned="0" />`,
+            `<stub status="stub_high_overlap_visible" covered_by="${overlapRange}">`,
+            message,
+            "</stub>",
+          ].join("\n")
+          return {
+            title,
+            output,
+            metadata: readToolMetadata({
+              preview: output,
+              truncated: false,
+              loaded: [] as string[],
+              read,
+            }),
+          }
+        }
+      }
+
       // Token 预算验证 - 根据文件类型估算 token 数
       const content = file.raw.join("\n")
       const ext = path.extname(filepath).toLowerCase().slice(1)
@@ -725,7 +771,9 @@ export const ReadTool = Tool.define(
         end,
         total: file.count,
         returned: file.raw.length,
-        outline: yield* Effect.promise(() => readOutline(filepath, file.count, file.offset)),
+        // [local-smark] 使用 readOutlineCached 替代 readOutline，
+        // 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
+        outline: yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, versionMs)),
         overlap: findOverlapNote(visibleReads, current),
         content: renderContentLines(file),
         more: truncated ? { offset: end + 1, reason: file.cut ? "byte_limit" : "line_limit" } : undefined,

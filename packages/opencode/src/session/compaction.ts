@@ -49,7 +49,7 @@ export const PRUNE_PROTECT = 40_000
 // notice 完整含 path，避免模型压缩后丢失恢复文件路径。
 const TOOL_OUTPUT_HEAD_CHARS = 400
 const TOOL_OUTPUT_TAIL_CHARS = 2_000
-const PRUNE_PROTECTED_TOOLS = ["skill"]
+const PRUNE_PROTECTED_TOOLS = ["skill", "read"]
 // Whole-turn tail retention keeps exact assistant/tool continuity when it fits.
 // The defaults deliberately preserve four recent user turns with a 4k-16k token
 // adaptive budget: enough for normal coding turns, still bounded so compaction
@@ -194,7 +194,11 @@ function preserveRecentUserBudget(input: { cfg: Config.Info; model: Provider.Mod
   // No minimum floor here: unlike the whole-turn tail, this memento is additive
   // to the summary and retained tail, so small-context models must be allowed to
   // shrink it all the way to zero instead of immediately overflowing again.
-  return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(0, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
+  // [local-smark] 条件化 floor：仅当 usable >= 20K 时设 4K floor，
+  // 小模型（8K context）的 20% 仅 1.6K，4K floor 会吃掉 2/3 预算加剧溢出。
+  // 大模型 4K floor 确保关键 user intent 不被截断。
+  const mementoFloor = usable(input) >= 20_000 ? 4_000 : 0
+  return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(mementoFloor, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
 }
 
 function collectRecentUserMessages(input: { messages: MessageV2.WithParts[]; maxTokens: number }) {
@@ -559,6 +563,45 @@ function renderOutstandingTodos(todos: Todo.Info[]) {
   return output.join("\n")
 }
 
+// [local-smark] Search History section：从 grep/glob tool events 提取搜索历史，
+// 帮助 compaction 后模型知道之前搜过什么、结果如何，避免重复搜索。
+// 上限 EVIDENCE_SEARCH_LIMIT=10 条，按 recency 排序，同 pattern+path 去重。
+const EVIDENCE_SEARCH_LIMIT = 10
+
+function renderSearchHistory(input: { events: ToolEvent[]; worktree: string }): string {
+  const searches = new Map<string, { tool: string; pattern: string; path: string; matches: string; sequence: number }>()
+  for (const event of input.events) {
+    if (event.part.tool !== "grep" && event.part.tool !== "glob") continue
+    const pattern = stringField(event.part.state.input, "pattern")
+    if (!pattern) continue
+    const searchPath = stringField(event.part.state.input, "path") ?? "."
+    // [local-smark] grep metadata 用 matches/totalMatches，glob 用 count/total
+    const meta = event.part.state.metadata
+    const matchCount = event.part.tool === "grep"
+      ? (numberField(meta, "totalMatches") ?? numberField(meta, "matches") ?? 0)
+      : (numberField(meta, "total") ?? numberField(meta, "count") ?? 0)
+    const key = `${event.part.tool}\u0000${pattern}\u0000${searchPath}`
+    searches.set(key, {
+      tool: event.part.tool,
+      pattern: pattern.slice(0, 60),
+      path: displayPath(searchPath, input.worktree),
+      matches: String(matchCount),
+      sequence: event.sequence,
+    })
+  }
+  const all = [...searches.values()].toSorted((a, b) => b.sequence - a.sequence)
+  const rows = all.slice(0, EVIDENCE_SEARCH_LIMIT)
+  const omitted = Math.max(0, all.length - rows.length)
+  const output = [
+    "### Search History",
+    "| tool | pattern | path | matches |",
+    "|---|---|---|---:|",
+    ...rows.map((item) => `| ${item.tool} | ${evidenceCell(item.pattern)} | ${evidenceCell(item.path)} | ${item.matches} |`),
+  ]
+  if (omitted > 0) output.push(`Omitted: ${omitted} searches due to evidence budget.`)
+  return output.join("\n")
+}
+
 function renderEvidenceHandoff(input: {
   messages: MessageV2.WithParts[]
   todos: Todo.Info[]
@@ -568,6 +611,8 @@ function renderEvidenceHandoff(input: {
 }) {
   return Effect.gen(function* () {
     const events = completedToolEvents(input.messages)
+    // [local-smark] compaction 计数：暴露已压缩次数，提示模型 summary 可能降级
+    const compactionCount = completedCompactions(input.messages).length
     return [
       "## Evidence Handoff",
       "",
@@ -575,12 +620,18 @@ function renderEvidenceHandoff(input: {
       "",
       renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
       "",
+      // [local-smark] Search History section：保留 grep/glob 搜索历史，
+      // 避免 compaction 后模型重复搜索已搜过的 pattern
+      renderSearchHistory({ events, worktree: input.worktree }),
+      "",
       renderOutstandingTodos(input.todos),
       "",
       "### Lost Context Notice",
       "- Older raw tool outputs were compacted.",
       "- Use current evidence before repeating reads or commands.",
       "- Treat stale evidence as advisory only.",
+      // [local-smark] 告知模型当前是第几次 compaction，summary 保真度可能下降
+      `- This is compaction #${compactionCount + 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
     ].join("\n")
   })
 }

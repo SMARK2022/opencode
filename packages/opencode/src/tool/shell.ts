@@ -320,41 +320,52 @@ function preview(text: string) {
 }
 
 function tail(text: string, maxLines: number, maxBytes: number) {
+  return truncateWindow(text, maxLines, maxBytes, "tail")
+}
+
+// [local-smark] head 截断：从头取 maxLines 行，与 tail 对称。
+// 用于列表/树形命令（ls/find/tree/git status/git diff）的输出，
+// 这些命令的重要信息在开头（文件列表、变更概览），tail 会丢失。
+function head(text: string, maxLines: number, maxBytes: number) {
+  return truncateWindow(text, maxLines, maxBytes, "head")
+}
+
+// 统一的截断窗口实现：direction="tail" 从末尾取，direction="head" 从头取。
+// 返回 {text, cut, hidden}，hidden 是被窗口丢弃的部分（供诊断扫描）。
+function truncateWindow(text: string, maxLines: number, maxBytes: number, direction: "head" | "tail") {
   const source = text.replace(/\r?\n$/, "")
   const lines = source.split("\n")
   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
-    return {
-      text,
-      cut: false,
-      hidden: "",
-    }
+    return { text, cut: false, hidden: "" }
   }
 
   const out: string[] = []
   let bytes = 0
-  for (let i = lines.length - 1; i >= 0 && out.length < maxLines; i--) {
+  // head: 从头遍历；tail: 从尾遍历
+  for (const i of direction === "head" ? lines.keys() : [...lines.keys()].reverse()) {
+    if (out.length >= maxLines) break
     const size = Buffer.byteLength(lines[i], "utf-8") + (out.length > 0 ? 1 : 0)
     if (bytes + size > maxBytes) {
       if (out.length === 0) {
         const buf = Buffer.from(lines[i], "utf-8")
-        let start = buf.length - maxBytes
+        let start = direction === "head" ? 0 : buf.length - maxBytes
         if (start < 0) start = 0
         while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++
-        out.unshift(buf.subarray(start).toString("utf-8"))
+        const slice = direction === "head" ? buf.subarray(start, start + maxBytes) : buf.subarray(start)
+        if (direction === "head") out.push(slice.toString("utf-8"))
+        else out.unshift(slice.toString("utf-8"))
       }
       break
     }
-    out.unshift(lines[i])
+    if (direction === "head") out.push(lines[i])
+    else out.unshift(lines[i])
     bytes += size
   }
   const visible = out.join("\n")
-  return {
-    text: visible,
-    cut: true,
-    // tail 只展示末尾窗口；hidden 是同一个 source 中被窗口丢弃的前缀。
-    // 后续诊断只扫描这段文本，避免从全量输出再反推“是否已经可见”。
-    hidden: visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source,
-  }
+  const hidden = direction === "head"
+    ? source.slice(visible.length)
+    : visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source
+  return { text: visible, cut: true, hidden }
 }
 
 const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
@@ -1004,7 +1015,19 @@ export const ShellTool = Tool.define(
         ? compressVisibleOutput(normalized)
         : { text: normalized, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
 
-      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
+      // [local-smark] command-aware truncation direction：
+      // 列表/树形命令（ls/find/tree/git status/git diff）用 head 保开头（文件列表在头部），
+      // 日志/流式命令（typecheck/test/build）用 tail 保末尾（错误/结果在尾部）。
+      // 内联环境变量剥离逻辑（与 compaction.ts stripLeadingEnvAssignments 同款），
+      // 避免 FOO=bar git status 被误判为非列表命令。
+      let cmdForMatch = input.command.trim()
+      while (true) {
+        const m = cmdForMatch.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
+        if (!m) break
+        cmdForMatch = cmdForMatch.slice(m[0].length).trimStart()
+      }
+      const useHead = /^(ls|dir|find|tree|git\s+(status|diff|log|ls-files))/.test(cmdForMatch.toLowerCase())
+      const end = (useHead ? head : tail)(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
       if (end.cut) {
         cut = true
         hiddenDiag.push(end.hidden)
@@ -1018,12 +1041,29 @@ export const ShellTool = Tool.define(
       const emptyOutput = end.text.length === 0
       let output = emptyOutput ? "(no output)" : end.text
 
+      // [local-smark] timeout + 空输出时追加诊断提示，帮助模型区分三种可能：
+      // 1. 进程 block-buffering（pipe 非 tty 时 C 库默认 4-8KB 块缓冲，
+      //    bun install/bundle install 等构建工具的进度输出停留在进程内部缓冲区，
+      //    timeout kill 时被 OS 丢弃）→ 建议 --verbose 或增大 timeout
+      // 2. 进程等待交互输入 → 建议非交互 flag
+      // 3. 进程 hang 住 → 检查命令和环境
+      // 不改 pipe 架构（pty 改造是 P2），仅改善模型在 timeout-no-output 时的决策质量。
+      // 仅在 timeout（expired）且空输出时触发；有输出或正常退出不触发。
+      if (emptyOutput && expired) {
+        output +=
+          "\n\nThe process produced no output before timeout. This may indicate:" +
+          "\n- The command is block-buffering output (common for build tools like bun install, bundle install);" +
+          " consider adding --verbose or running with a larger timeout." +
+          "\n- The process is waiting for interactive input; provide input or use a non-interactive flag." +
+          "\n- The process is hung; check the command and environment."
+      }
+
       if (cut && file) {
         output =
           formatOutputTruncatedNotice({
             source: "shell",
             total: normalizedStats,
-            shown: { direction: "tail", ...outputStats(output) },
+            shown: { direction: useHead ? "head" : "tail", ...outputStats(output) },
             path: file,
           }) +
           "\n\n" +
@@ -1063,13 +1103,23 @@ export const ShellTool = Tool.define(
       }
       const durationMs = Date.now() - started
       const displayOutput = preview(display.value())
+
+      // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
+      // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
+      // 复用 compaction.ts isSimpleVerificationCommand 的命令白名单限定检测范围，
+      // 避免对非验证命令误判。error pattern 覆盖 tsc/eslint/python/mypy 等常见工具。
+      const isVerificationCmd = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(input.command.trim().toLowerCase()) ||
+        /^node\s+--check(\s|$)/.test(input.command.trim().toLowerCase()) ||
+        /^python\s+-m\s+py_compile(\s|$)/.test(input.command.trim().toLowerCase()) ||
+        /^tsc\s+--noemit(\s|$)/.test(input.command.trim().toLowerCase())
+      const hasErrors = isVerificationCmd && (
+        code !== null && code !== 0 ||
+        /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output)
+      )
+
       return {
         title: input.description,
         metadata: {
-          // Completion metadata preserves the final terminal screen for default
-          // UI rendering. The `output` field returned alongside this metadata is
-          // intentionally left on the existing raw/compressed/truncated path so
-          // right-click "model context output" and provider input stay unchanged.
           output: displayed ? displayOutput : preview(output),
           exit: code,
           description: input.description,
@@ -1077,6 +1127,8 @@ export const ShellTool = Tool.define(
           durationMs,
           diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
           diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
+          // [local-smark] hasErrors flag 供 TUI 和后续逻辑判断验证是否失败
+          hasErrors,
           ...(compressed.stats ? bashCompressionMetadata(compressed.stats) : {}),
           ...(cut && file ? { outputPath: file } : {}),
         },

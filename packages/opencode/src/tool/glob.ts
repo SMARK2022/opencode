@@ -71,10 +71,14 @@ export const GlobTool = Tool.define(
             Effect.map((chunk) => [...chunk]),
           )
 
+          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
+          const originalCount = files.length
           if (files.length > limit) {
             truncated = true
             files.length = limit
           }
+          // [local-smark] total: 截断前的真实文件数（非哨兵值）
+          const totalFiles = originalCount
           files.sort((a, b) => b.mtime - a.mtime)
 
           const output = []
@@ -83,8 +87,9 @@ export const GlobTool = Tool.define(
             output.push(...files.map((file) => file.path))
             if (truncated) {
               output.push("")
+              // [local-smark] 显示真实总数而非仅 "first 100"，帮助模型判断文件密度
               output.push(
-                `(Results are truncated: showing first ${limit} results. Consider using a more specific path or pattern.)`,
+                `(Results are truncated: showing first ${limit} results. ${totalFiles > limit ? `Total: ${totalFiles}+ files.` : ""} Consider using a more specific path or pattern.)`,
               )
             }
           }
@@ -93,6 +98,8 @@ export const GlobTool = Tool.define(
             title: path.relative(ins.worktree, search),
             metadata: {
               count: files.length,
+              // [local-smark] total: 截断前的真实文件数
+              total: totalFiles,
               truncated,
             },
             output: output.join("\n"),
