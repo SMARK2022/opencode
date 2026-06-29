@@ -11,6 +11,7 @@ import { PermissionV2 } from "../permission"
 import { SubagentPermissions } from "../permission/subagent"
 import { SessionV2 } from "../session"
 import { SessionStore } from "../session/store"
+import { FileEvidence } from "../session/file-evidence"
 import { Location } from "../location"
 import { SystemContext } from "../system-context"
 import { SystemContextRegistry } from "../system-context/registry"
@@ -27,6 +28,9 @@ export const Input = Schema.Struct({
   subagent_type: Schema.String.annotate({ description: "Agent type from the available agents in system context" }),
   task_id: Schema.String.pipe(Schema.optional).annotate({ description: "Resume this returned task_id only when continuing the same subagent conversation" }),
   command: Schema.String.pipe(Schema.optional),
+  inspected_files: Schema.optional(Schema.Literals(["none", "summary"])).annotate({
+    description: "Controls whether to pass parent session's inspected file list to the subagent. 'none': no file list (default for resume). 'summary': compact file path + range table (default for new subagents).",
+  }),
   background: Schema.Boolean.pipe(Schema.optional).annotate({ description: "Run independent work in the background; completion is delivered automatically. Requires experimental background subagents." }),
 })
 export const Output = Schema.Struct({ task_id: Schema.String, state: Schema.Literals(["running", "completed"]), output: Schema.String })
@@ -106,6 +110,12 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
         agent: agent.id, model, permissions: childPermission,
       }))
+      // 摘录冻结于本次父历史，排队的extension不能改采稍后的其他调用上下文。
+      const parentContext = (input.inspected_files ?? (input.task_id ? "none" : "summary")) === "summary"
+        ? FileEvidence.parentSummary(history.flatMap(message => message.type === "assistant" ? message.content.flatMap(part =>
+          part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.time.pruned === undefined && part.state.status === "completed"
+            ? [part.state.structured.read] : []) : [])) : undefined
+      const prompt = parentContext ? `${input.prompt}\n\n<parent_context>\n${parentContext}\n</parent_context>` : input.prompt
       const runTask = Effect.gen(function* () {
         const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
         // extension在旧段结束后才执行；本次审批身份不能提前改变仍活跃的旧provider轮。
@@ -116,7 +126,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
           if (current.agent !== agent.id) yield* sessions.switchAgent({ sessionID: child.id, agent: agent.id })
           if (model) yield* sessions.switchModel({ sessionID: child.id, model })
         }
-        yield* sessions.prompt({ sessionID: child.id, prompt: { text: input.prompt }, resume: false })
+        yield* sessions.prompt({ sessionID: child.id, prompt: { text: prompt }, resume: false })
         // 只复用durable runner，退出中断沿现有SessionExecution所有权链传递。
         yield* sessions.resume(child.id).pipe(Effect.onInterrupt(() => sessions.interrupt(child.id)))
         const latest = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")
@@ -127,7 +137,10 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         if (failed?.type === "tool" && failed.state.status === "error")
           return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${failed.state.error.message}` })
         return latest.content.filter(item => item.type === "text").map(item => item.text).join("\n")
-      }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Subagent failed (task_id: ${child.id})`, error })))
+      }).pipe(
+        // 父级通知与前台结果共用同一次成功文本归一；错误/取消不会被改成空成功。
+        Effect.map(text => !text.trim() ? "Subagent produced no output (may have been aborted or lacked required tools)." : text.length > 32_000 ? `${text.slice(0, 32_000)}\n...[truncated]` : text),
+        Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Subagent failed (task_id: ${child.id})`, error })))
       const notify = () => background.wait({ id: child.id }).pipe(Effect.flatMap(result => {
         if (!result.info || result.info.status === "running" || result.info.status === "cancelled") return Effect.void
         // 完成消息走父Session的durable admission与advisory wake，不递归运行V1或轮询进度。

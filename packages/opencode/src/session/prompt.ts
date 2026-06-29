@@ -1433,6 +1433,11 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        // [local-smark] nearOverflow 提示只注入一次：首次达到 80% usable 时注入，
+        // compaction 后重置（下一轮 compaction 周期可再次提示）。
+        // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
+        // 不会泄漏给 compaction 模型污染下一轮干净上下文。
+        let nearOverflowNotified = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1622,6 +1627,16 @@ const layer = Layer.effect(
               ? yield* selectDecideMessages({ messages: msgs, model, systemText })
               : msgs
             const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+            // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
+            if (!nearOverflowNotified && !isLastStep) {
+              const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
+              const estimatedInput = prior?.role === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
+              const usableTokens = usable({ cfg: yield* config.get(), model })
+              if (usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)) {
+                modelMsgs.push({ role: "user", content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions." })
+                nearOverflowNotified = true
+              }
+            }
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1679,6 +1694,7 @@ const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
+              nearOverflowNotified = false
               // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
               // 执行 compaction，不留可重放标记给下一轮 loop
               const compacted = yield* compaction.run({

@@ -87,6 +87,18 @@ describe("toLLMMessages", () => {
       .toContain("offset=101 for unread lines")
     const overlap = { ...defaultPage, content: "line\n".repeat(99) + "line", offset: 151, next: 251, read: { ...defaultPage.read, start: 151, end: 250, returned: 100 } }
     expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
+    const high = { ...overlap, offset: 121, next: 221, read: { ...overlap.read, start: 121, end: 220 } }
+    const highResult = JSON.stringify(results(read("high-first", defaultPage), read("high-next", high, { path: "note.txt", offset: 121, limit: 100 }))[1])
+    expect(highResult).toContain("stub_high_overlap_visible")
+    expect(highResult).toContain("Lines 121-220 have 80% overlap with visible read 121-200 (latest version, file unchanged); do NOT re-read.")
+    expect(highResult).toContain("offset=201 for unread lines")
+    const below = { ...high, offset: 122, next: 222, read: { ...high.read, start: 122, end: 221 } }
+    expect(JSON.stringify(results(read("below-first", defaultPage), read("below-next", below, { path: "note.txt", offset: 122, limit: 100 }))[1])).not.toContain("stub_high_overlap_visible")
+    // 被省略页的未见尾部不能反过来作为下一次去重凭证。
+    const tail = { ...high, offset: 201, content: "line\n".repeat(19) + "line", read: { ...high.read, start: 201, end: 220, returned: 20 } }
+    expect(results(read("tail-first", defaultPage), read("tail-high", high), read("tail-unseen", tail))[2]).toMatchObject({ type: "json" })
+    const changedHigh = { ...high, read: { ...high.read, modifiedMs: 2 } }
+    expect(results(read("changed-first", defaultPage), read("changed-high", changedHigh))[1]).toMatchObject({ type: "json" })
     // 缺少稳定版本、只有 stub 或未交付正文的结果仍不能证明覆盖。
     for (const partial of [
       { ...page, read: undefined },

@@ -16,10 +16,19 @@ const Receipt = Schema.Struct({
   stub: Schema.optional(Schema.Boolean),
 })
 
+export interface SearchReceipt {
+  readonly tool: "grep" | "glob"
+  readonly pattern: string
+  readonly path: string
+  readonly matches: number
+  readonly partial?: boolean
+}
+
 export const kind = "compaction_evidence_handoff"
 
 export const render = Effect.fn("FileEvidence.render")(function* (
   receipts: readonly unknown[], fs: FSUtil.Interface, worktree: string,
+  context: { readonly searches?: readonly SearchReceipt[]; readonly compactionCount?: number } = {},
 ) {
   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
   // 两代只转换真实已完成Read凭证，合并/预算/stat仍只有一个owner。
@@ -42,7 +51,15 @@ export const render = Effect.fn("FileEvidence.render")(function* (
     files.delete(key)
     files.set(key, { ...read, canonicalPath: absolute, ranges })
   }
-  if (files.size === 0) return undefined
+  const searches = new Map<string, SearchReceipt>()
+  for (const search of context.searches ?? []) {
+    if (!search.pattern) continue
+    // 完整pattern参与去重，展示截短不能合并两个不同的查询。
+    const key = JSON.stringify([search.tool, search.pattern, search.path])
+    searches.delete(key)
+    searches.set(key, search)
+  }
+  if (files.size === 0 && searches.size === 0) return undefined
   // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
   const visible = [...files.values()].toReversed().slice(0, 20)
   const rows = yield* Effect.forEach(visible, (file) =>
@@ -68,11 +85,14 @@ export const render = Effect.fn("FileEvidence.render")(function* (
     ),
   )
   return [
-    "## Evidence Handoff", "", "### Inspected Files",
-    "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows,
+    "## Evidence Handoff",
+    ...(rows.length ? ["", "### Inspected Files", "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows] : []),
     ...(files.size > visible.length ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`] : []),
+    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? "+" : ""} |`)] : []),
+    ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
     "", "### Lost Context Notice", "- Use current evidence before repeating reads or commands.",
     "- Treat stale evidence as advisory only.",
+    `- This is compaction #${context.compactionCount ?? 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
   ].join("\n")
 })
 
@@ -86,4 +106,25 @@ function formatModified(ms: number) {
   const date = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, "0")
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+export function parentSummary(receipts: readonly unknown[]) {
+  const parse = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.String, canonicalPath: Schema.optional(Schema.String), start: Schema.Number, end: Schema.Number, stub: Schema.optional(Schema.Boolean) }))
+  const files = new Map<string, { path: string; ranges: string[] }>()
+  for (const value of receipts) {
+    const parsed = parse(value)
+    if (Option.isNone(parsed) || parsed.value.stub) continue
+    const read = parsed.value
+    const key = read.canonicalPath || read.path
+    const ranges = [...(files.get(key)?.ranges ?? []), `${read.start}-${read.end}`]
+    // 此表仅传父级已见位置，不读盘或把历史时间伪装成当前新鲜度证明。
+    files.delete(key)
+    files.set(key, { path: read.path, ranges })
+  }
+  if (!files.size) return undefined
+  return [
+    "### Parent Session Inspected Files", "| path | ranges |", "|---|---|",
+    ...[...files.values()].toReversed().slice(0, 20).map(file => `| ${cell(file.path.split(/[\\/]/).slice(-3).join("/"))} | ${file.ranges.join(", ")} |`),
+    ...(files.size > 20 ? [`Omitted: ${files.size - 20} files due to budget.`] : []),
+  ].join("\n")
 }

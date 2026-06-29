@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gt, gte, lte, ne, or } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { Database } from "../database/database"
+import type { FileEvidence } from "./file-evidence"
 import { MessageDecodeError } from "./error"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
@@ -115,20 +116,39 @@ export const rawUserMessages = Effect.fn("SessionHistory.rawUserMessages")(funct
 })
 
 // 连续压缩仍从真实助手行读取凭证，旧表格不参与，边界之后的消息不纳入本次交接。
-export const readReceipts = Effect.fn("SessionHistory.readReceipts")(function* (
+export const evidence = Effect.fn("SessionHistory.evidence")(function* (
   db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number,
 ) {
   const rows = yield* db.select().from(SessionMessageTable).where(and(
-    eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), lte(SessionMessageTable.seq, throughSeq),
+    eq(SessionMessageTable.session_id, sessionID), or(eq(SessionMessageTable.type, "assistant"), eq(SessionMessageTable.type, "compaction")), lte(SessionMessageTable.seq, throughSeq),
   )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-  const messages = yield* Effect.forEach(rows, decodeMessageRow)
-  return messages.flatMap((message) => message.type === "assistant" && !hidden(message.metadata?.hidden)
+  const messages = (yield* Effect.forEach(rows, decodeMessageRow)).filter(message => !hidden(message.metadata?.hidden))
+  const receipts = messages.flatMap((message) => message.type === "assistant"
     ? message.content.flatMap((part) =>
         part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.state.status === "completed"
           ? [part.state.structured.read] : [],
       )
     : [],
   )
+  const searches: FileEvidence.SearchReceipt[] = []
+  for (const message of messages) {
+    if (message.type !== "assistant") continue
+    for (const part of message.content) {
+      if (part.type !== "tool" || part.provider?.executed === true || part.state.status !== "completed" || (part.name !== "grep" && part.name !== "glob")) continue
+      const pattern = part.state.input.pattern
+      if (typeof pattern !== "string" || !pattern) continue
+      const output = part.state.structured
+      // 数组领域结果经publisher.record包装为value；不能拿正文行数伪造匹配数。
+      const items = part.name === "grep" ? output.items : output.value
+      if (!Array.isArray(items)) continue
+      searches.push({ tool: part.name, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: items.length,
+        partial: part.name === "grep" ? output.partial === true || output.truncated === true || output.timedOut === true : typeof part.state.input.limit === "number" && items.length >= part.state.input.limit,
+      })
+    }
+  }
+  return { receipts, searches, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
 })
 
+export const readReceipts = (db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number) =>
+  evidence(db, sessionID, throughSeq).pipe(Effect.map(result => result.receipts))
 export * as SessionHistory from "./history"

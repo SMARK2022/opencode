@@ -916,6 +916,9 @@ describe("tool.task", () => {
       const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
+      // 检查实际默认模式广告，不能只依赖完整 Parameters 的 schema 快照。
+      expect(def.jsonSchema?.properties?.inspected_files).toMatchObject({ enum: ["none", "summary"] })
+      expect(def.jsonSchema?.properties?.background).toBeUndefined()
 
       const exit = yield* def
         .execute(

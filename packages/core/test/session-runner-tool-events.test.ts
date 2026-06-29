@@ -72,7 +72,7 @@ const result = LLMEvent.toolResult({
 test("local tool success serializes media base64 once and reconstructs from structured content", async () => {
   const { published, publisher } = capture()
   await Effect.runPromise(publisher.publish(call))
-  await Effect.runPromise(publisher.publish(result))
+  expect(await Effect.runPromise(publisher.publish(result))).toMatchObject({ failed: false, name: "read", input: call.input, callID: call.id })
 
   const success = published.find((event) => event.type === "session.next.tool.success.1")
   expect(success).toBeDefined()
@@ -99,7 +99,7 @@ test("provider-executed success retains its compatibility result", async () => {
 test("binary failure emits no success event", async () => {
   const { published, publisher } = capture()
   await Effect.runPromise(publisher.publish(call))
-  await Effect.runPromise(
+  const accepted = await Effect.runPromise(
     publisher.publish(
       LLMEvent.toolResult({
         id: call.id,
@@ -108,6 +108,9 @@ test("binary failure emits no success event", async () => {
       }),
     ),
   )
+  expect(accepted).toMatchObject({ failed: true, name: "read", input: call.input, callID: call.id })
+  const repeated = await Effect.runPromise(publisher.publish(LLMEvent.toolResult({ id: call.id, name: call.name, result: { type: "error", value: "duplicate" } })))
+  expect(repeated).toBeUndefined()
   expect(published.some((event) => event.type === "session.next.tool.success.1")).toBe(false)
   expect(published.some((event) => event.type === "session.next.tool.failed.1")).toBe(true)
 })

@@ -22,7 +22,7 @@ export const ReadRangeMeta = Schema.Struct({
   totalExact: Schema.Boolean,
   returned: Schema.Number,
   stub: Schema.Boolean,
-  stubStatus: Schema.optional(Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible"])),
+  stubStatus: Schema.optional(Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible", "stub_high_overlap_visible"])),
   coveredBy: Schema.optional(Schema.String),
   cut: Schema.optional(Schema.Boolean),
 })
@@ -54,6 +54,12 @@ export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: Re
   if (sameRange) return { status: "stub_same_range_visible" as const }
   const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
   if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
+  // 只使用同版本最佳单交集；多个重复页不能叠加出虚假的80%覆盖。
+  const overlap = findOverlapNote(visibleReads, current)
+  if (!overlap) return undefined
+  const [start, end] = overlap.split("-").map(Number)
+  if ((end - start + 1) / Math.max(1, current.end - current.start + 1) >= 0.8)
+    return { status: "stub_high_overlap_visible" as const, coveredBy: overlap }
   return undefined
 }
 
@@ -135,7 +141,7 @@ export function renderReadStub(input: {
   end: number
   total: number
   totalExact: boolean
-  status: "stub_same_range_visible" | "stub_covered_range_visible"
+  status: "stub_same_range_visible" | "stub_covered_range_visible" | "stub_high_overlap_visible"
   coveredBy?: string
 }) {
   // 两代共用可见覆盖末行，续读从已交付区间之后开始，不重复灌入正文。
@@ -151,7 +157,9 @@ export function renderReadStub(input: {
   const message =
     input.status === "stub_same_range_visible"
       ? `Lines ${input.start}-${input.end} are the latest version and already in context; do NOT re-read.\n${offsetExit}`
-      : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
+      : input.status === "stub_high_overlap_visible"
+        ? `Lines ${input.start}-${input.end} have ${Math.round((visibleEnd - Number(coverage.split("-")[0]) + 1) / Math.max(1, input.end - input.start + 1) * 100)}% overlap with visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
+        : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
   return [
     `<path>${escapeXmlText(input.path)}</path>`,
     `<type>file</type>`,

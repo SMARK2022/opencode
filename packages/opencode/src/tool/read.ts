@@ -6,7 +6,7 @@ import * as Tool from "./tool"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { LSP } from "@/lsp/lsp"
 import DESCRIPTION from "./read.txt"
-import { readOutline, type Outline } from "./read-outline"
+import { readOutline, readOutlineCached, type Outline } from "./read-outline"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
@@ -664,7 +664,9 @@ const stub = findReadStub(visibleReads, current)
 
       // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
       // #142：异步 outline
-const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset, file.totalExact))
+// [local-smark] 使用 readOutlineCached 替代 readOutline，
+// 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
+const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact))
       // #142：部分重叠仍返回内容，但附 note
       // #142：overlap 判定
 const overlap = findOverlapNote(visibleReads, current)
