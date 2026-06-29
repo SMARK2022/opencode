@@ -15,13 +15,14 @@ import { LocationMutation } from "@opencode-ai/core/location-mutation"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionStore } from "@opencode-ai/core/session/store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { WriteTool } from "@opencode-ai/core/tool/write"
 import { location } from "./fixture/location"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
-import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
+import { toolIdentity, executeTool, settleTool, toolDefinitions, toolHistory } from "./lib/tool"
 
 const sessionID = SessionV2.ID.make("ses_write_tool_test")
 const assertions: PermissionV2.AssertInput[] = []
@@ -63,7 +64,7 @@ const filesystem = Layer.effect(
   }),
 ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
 
-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, formatting?: { formatter: Config.Info["formatter"]; tool?: "edit" | "apply_patch" }) => {
+const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, formatting?: { formatter: Config.Info["formatter"]; tool?: "edit" | "apply_patch"; history?: ReturnType<typeof toolHistory> }) => {
   const activeLocation = Layer.succeed(
     Location.Service,
     Location.Service.of(location({ directory: AbsolutePath.make(directory) })),
@@ -85,6 +86,9 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+          ...(formatting?.tool === "edit" ? [
+            [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? formatting.history ?? [] : []) })] as const,
+          ] : []),
           ...(formatting ? [
             [Config.node, Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: Schema.decodeUnknownSync(Config.Info)({ formatter: formatting.formatter }) })]) }))] as const,
           ] : []),
@@ -199,7 +203,7 @@ describe("WriteTool", () => {
           }), { formatter })
           if (mode === "enabled") {
             const identity = { sessionID, ...toolIdentity }
-            const edit = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-edit", name: "edit", input: { path: resource, oldString: "const n = 2;", newString: "const n=3" } } }), { formatter, tool: "edit" })
+            const edit = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-edit", name: "edit", input: { path: resource, oldString: "const n = 2;", newString: "const n=3" } } }), { formatter, tool: "edit", history: toolHistory(resource, "write") })
             expect(edit.result.type === "text" ? edit.result.value : "").toContain("-const n = 2;\n+const n = 3;")
             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFconst n = 3;\n")
             const patch = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-patch", name: "apply_patch", input: { patchText: `*** Begin Patch\n*** Update File: ${resource}\n@@\n-const n = 3;\n+const n=4\n*** End Patch` } } }), { formatter, tool: "apply_patch" })

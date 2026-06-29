@@ -251,13 +251,13 @@ describe("ApplyPatchTool", () => {
     ),
   )
 
-  it.live("rejects moves before applying any hunk", () =>
+  it.live("moves with source BOM and reports both actual endpoints", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) => {
         reset()
         const source = path.join(tmp.path, "old.txt")
-        return Effect.promise(() => fs.writeFile(source, "before\n")).pipe(
+        return Effect.promise(() => Promise.all([fs.writeFile(source, "\uFEFFbefore\n"), fs.writeFile(path.join(tmp.path, "moved.txt"), "discard\n")])).pipe(
           Effect.andThen(
             withTool(tmp.path, (registry) =>
               Effect.gen(function* () {
@@ -268,9 +268,21 @@ describe("ApplyPatchTool", () => {
                       "*** Begin Patch\n*** Add File: created.txt\n+created\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-before\n+after\n*** End Patch",
                     ),
                   ),
-                ).toEqual({ type: "error", value: "apply_patch moves are not supported yet" })
-                expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(false)
-                expect(assertions).toEqual([])
+                ).toMatchObject({ type: "text", value: expect.stringContaining("-discard\n+after") })
+                expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
+                expect(yield* exists(source)).toBe(false)
+                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "moved.txt"), "utf8"))).toBe("\uFEFFafter\n")
+                expect(assertions).toMatchObject([{ action: "edit", resources: ["created.txt", "old.txt", "moved.txt"] }])
+                expect(readsBeforeEditApproval).toBe(0)
+                // 同路径Move等同条件更新，不能先写后把自身删除。
+                const same = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: moved.txt\n*** Move to: moved.txt\n@@\n-after\n+again\n*** End Patch", "same-path"))
+                expect(same.result.type).toBe("text")
+                expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(same.output?.structured).files).toMatchObject([{ file: "moved.txt", status: "modified", additions: 1, deletions: 1 }])
+                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "moved.txt"), "utf8"))).toBe("\uFEFFagain\n")
+                const fresh = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: moved.txt\n*** Move to: nested/final.txt\n@@\n-again\n+final\n*** End Patch", "new-destination"))
+                expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(fresh.output?.structured).files).toMatchObject([{ file: "moved.txt", status: "deleted", additions: 0, deletions: 1 }, { file: "nested/final.txt", status: "added", additions: 1, deletions: 0 }])
+                expect(yield* exists(path.join(tmp.path, "moved.txt"))).toBe(false)
+                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/final.txt"), "utf8"))).toBe("\uFEFFfinal\n")
               }),
             ),
           ),
@@ -299,6 +311,19 @@ describe("ApplyPatchTool", () => {
                 expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
                 expect(readsBeforeEditApproval).toBe(0)
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\n")
+                const local = path.join(active.path, "local.txt")
+                yield* Effect.promise(() => fs.writeFile(local, "local\n"))
+                const move = call(`*** Begin Patch\n*** Update File: local.txt\n*** Move to: ${target}\n@@\n-local\n+moved\n*** End Patch`, "external-move")
+                reset()
+                denyAction = "external_directory"
+                expect((yield* executeTool(registry, move)).type).toBe("error")
+                expect(assertions.map(item => item.action)).toEqual(["external_directory"])
+                expect(yield* Effect.promise(() => fs.readFile(local, "utf8"))).toBe("local\n")
+                reset()
+                expect((yield* executeTool(registry, move)).type).toBe("text")
+                expect(assertions[0]?.metadata).toMatchObject({ operation: "move", patchText: move.call.input.patchText })
+                expect(readsBeforeEditApproval).toBe(0)
+                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("moved\n")
               }),
             ),
           ),
@@ -350,7 +375,7 @@ describe("ApplyPatchTool", () => {
     ),
   )
 
-  it.live("rejects invalid later update before applying an earlier add", () =>
+  it.live("applies valid files while reporting a failed later update", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) => {
@@ -364,8 +389,9 @@ describe("ApplyPatchTool", () => {
                   "*** Begin Patch\n*** Add File: created.txt\n+created\n*** Update File: missing.txt\n@@\n-before\n+after\n*** End Patch",
                 ),
               ),
-            ).toEqual({ type: "error", value: "Unable to apply patch at missing.txt" })
-            expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(false)
+            ).toEqual({ type: "text", value: expect.stringMatching(/^Applied patch sequentially:\nA created\.txt\n\nChanged:\n```diff\n[\s\S]*\+created\n[\s\S]*LSP diagnostics unavailable[\s\S]*Failed to update 1 file\(s\):\nUnable to apply patch at missing\.txt$/) })
+            expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
+            expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "created.txt"), "utf8"))).toBe("created\n")
           }),
         )
       },
@@ -373,7 +399,7 @@ describe("ApplyPatchTool", () => {
     ),
   )
 
-  it.live("rejects add hunks targeting an existing file without replacing it", () =>
+  it.live("replaces an existing Add target and supports Delete then Add rewrites", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) => {
@@ -388,8 +414,14 @@ describe("ApplyPatchTool", () => {
                     registry,
                     call("*** Begin Patch\n*** Add File: existing.txt\n+replacement\n*** End Patch"),
                   ),
-                ).toEqual({ type: "error", value: "Unable to apply patch at existing.txt" })
-                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("sentinel\n")
+                ).toMatchObject({ type: "text", value: expect.stringContaining("-sentinel\n+replacement") })
+                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
+                const rewrite = yield* settleTool(registry, call("*** Begin Patch\n*** Delete File: existing.txt\n*** Add File: existing.txt\n+complete rewrite\n*** End Patch", "rewrite"))
+                const output = Schema.decodeUnknownSync(ApplyPatchTool.Output)(rewrite.output?.structured)
+                expect(output.applied).toMatchObject([{ type: "delete", resource: "existing.txt" }, { type: "add", resource: "existing.txt" }])
+                expect(output.files).toMatchObject([{ status: "deleted", additions: 0, deletions: 1 }, { status: "added", additions: 1, deletions: 0 }])
+                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("complete rewrite\n")
+                expect(readsBeforeEditApproval).toBe(0)
               }),
             ),
           ),
@@ -399,7 +431,7 @@ describe("ApplyPatchTool", () => {
     ),
   )
 
-  it.live("rejects an add target that appears during permission approval", () =>
+  it.live("reports the actual Add preimage written during permission approval", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) => {
@@ -413,8 +445,8 @@ describe("ApplyPatchTool", () => {
                 registry,
                 call("*** Begin Patch\n*** Add File: appeared.txt\n+replacement\n*** End Patch"),
               ),
-            ).toEqual({ type: "error", value: "Unable to apply patch at appeared.txt" })
-            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("winner\n")
+            ).toMatchObject({ type: "text", value: expect.stringContaining("-winner\n+replacement") })
+            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
           }),
         )
       },

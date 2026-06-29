@@ -311,6 +311,22 @@ describe("FileMutation", () => {
             .pipe(Effect.flip),
         ).toMatchObject({ _tag: "FileMutation.StaleContentError", path: target.canonical })
         expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
+        const mutation = yield* LocationMutation.Service
+        const files = yield* FileMutation.Service
+        const destination = yield* mutation.resolve({ path: "destination.txt" })
+        yield* Effect.promise(() => fs.writeFile(destination.canonical, "sentinel"))
+        // stale源必须在目的写入前拒绝；两端原文均不能因此改变。
+        expect(yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("older"), content: "replacement" }).pipe(Effect.flip)).toMatchObject({ _tag: "FileMutation.StaleContentError" })
+        expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
+        expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("sentinel")
+        // 真正Move仍调用同一个formatter并回报最终磁盘正文，而非请求片段。
+        const moved = yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("current"), content: "submitted",
+          format: file => Effect.promise(() => fs.writeFile(file, "formatted")).pipe(Effect.as(true)),
+        })
+        expect(moved).toMatchObject({ previous: "sentinel", text: "formatted", formattedContent: "formatted" })
+        expect(moved.diff).toContain("+formatted")
+        expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("formatted")
+        expect(yield* Effect.promise(() => fs.stat(targetPath).then(() => true, () => false))).toBe(false)
       }).pipe(provide(directory)),
     ),
   )

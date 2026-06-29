@@ -12,13 +12,14 @@ import { LocationMutation } from "@opencode-ai/core/location-mutation"
 import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionStore } from "@opencode-ai/core/session/store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { EditTool } from "@opencode-ai/core/tool/edit"
 import { location } from "./fixture/location"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
-import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
+import { toolIdentity, executeTool, settleTool, toolDefinitions, toolHistory } from "./lib/tool"
 
 const sessionID = SessionV2.ID.make("ses_edit_tool_test")
 const assertions: PermissionV2.AssertInput[] = []
@@ -78,7 +79,7 @@ const filesystem = Layer.effect(
   }),
 ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
 
-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>) => {
+const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = []) => {
   const activeLocation = Layer.succeed(
     Location.Service,
     Location.Service.of(location({ directory: AbsolutePath.make(directory) })),
@@ -99,6 +100,7 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
           [FSUtil.node, filesystem],
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
+          [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? history : []) })],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
       ),
@@ -121,11 +123,21 @@ describe("EditTool", () => {
       (tmp) => {
         reset()
         const target = path.join(tmp.path, "hello.txt")
+        const history: ReturnType<typeof toolHistory> = []
         return Effect.promise(() => fs.writeFile(target, "before\nrest\n")).pipe(
           Effect.andThen(
             withTool(tmp.path, (registry) =>
               Effect.gen(function* () {
                 expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toEqual(["edit"])
+                // 相同真实leaf先验证缺失/跨Session历史均拒绝，再显式提供当前文件的已读证据。
+                const blind = call({ path: "hello.txt", oldString: "before", newString: "after" })
+                expect(yield* executeTool(registry, blind)).toEqual({ type: "error", value: `File has not been read in this session: ${target}. Read it first to verify current content, then retry the edit.` })
+                history.push(...toolHistory("hello.txt"))
+                expect(yield* executeTool(registry, { ...blind, sessionID: SessionV2.ID.make("ses_other") })).toEqual({ type: "error", value: `File has not been read in this session: ${target}. Read it first to verify current content, then retry the edit.` })
+                expect(assertions).toEqual([])
+                expect(reads).toBe(0)
+                expect(writes).toEqual([])
+
                 expect(yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).toEqual(
                   [],
                 )
@@ -156,6 +168,7 @@ describe("EditTool", () => {
                 expect(assertions).toMatchObject([{ sessionID, action: "edit", resources: ["hello.txt"], save: ["*"] }])
                 expect(writes).toEqual([yield* Effect.promise(() => fs.realpath(target))])
               }),
+              history,
             ),
           ),
         )
@@ -174,6 +187,7 @@ describe("EditTool", () => {
           Effect.andThen(
             withTool(tmp.path, (registry) =>
               executeTool(registry, call({ path: target, oldString: "before", newString: "after" })),
+              toolHistory("absolute.txt", "write"),
             ),
           ),
           Effect.andThen((result) =>
@@ -199,6 +213,7 @@ describe("EditTool", () => {
           Effect.andThen(
             withTool(active.path, (registry) =>
               executeTool(registry, call({ path: target, oldString: "before", newString: "after" })),
+              toolHistory(target, "edit"),
             ),
           ),
           Effect.andThen((result) =>
@@ -232,6 +247,7 @@ describe("EditTool", () => {
           expect(
             yield* withTool(active.path, (registry) =>
               executeTool(registry, call({ path: external, oldString: "before", newString: "after" })),
+              toolHistory(external),
             ),
           ).toEqual({
             type: "error",
@@ -246,6 +262,7 @@ describe("EditTool", () => {
           expect(
             yield* withTool(active.path, (registry) =>
               executeTool(registry, call({ path: external, oldString: "before", newString: "after" })),
+              toolHistory(external),
             ),
           ).toEqual({
             type: "error",
@@ -295,6 +312,7 @@ describe("EditTool", () => {
                 expect(reads).toBe(0)
                 expect(writes).toEqual([])
               }),
+              toolHistory("secret.txt"),
             ),
           ),
         )
@@ -330,7 +348,7 @@ describe("EditTool", () => {
                 ).toEqual({
                   type: "error",
                   value:
-                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
+                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.\n\nClosest match at line 1:\nsame same",
                 })
                 expect(
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "same", newString: "after" })),
@@ -341,6 +359,7 @@ describe("EditTool", () => {
                 })
                 expect(writes).toEqual([])
               }),
+              toolHistory("matches.txt"),
             ),
           ),
         )
@@ -359,6 +378,7 @@ describe("EditTool", () => {
           Effect.andThen(
             withTool(tmp.path, (registry) =>
               settleTool(registry, call({ path: "all.txt", oldString: "same", newString: "after", replaceAll: true })),
+              toolHistory("all.txt"),
             ),
           ),
           Effect.andThen((settled) =>
@@ -367,14 +387,14 @@ describe("EditTool", () => {
               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after after after")
               expect(writes).toHaveLength(1)
               const literal = "$&! $1 $` $' $$"
-              const replaced = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: "after", newString: literal, replaceAll: true })))
+              const replaced = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: "after", newString: literal, replaceAll: true })), toolHistory("all.txt", "edit"))
               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe([literal, literal, literal].join(" "))
               expect(replaced.result).toMatchObject({ type: "text", value: expect.stringContaining(literal) })
               // 唯一变化在第七行，模型必须看到真实 diff，而非前六行输入片段。
               const original = "a\nb\nc\nd\ne\nf\ng\n"
               const final = "a\nb\nc\nd\ne\nf\nG\n"
               yield* Effect.promise(() => fs.writeFile(target, original))
-              const lastLine = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: original, newString: final })))
+              const lastLine = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: original, newString: final })), toolHistory("all.txt", "edit"))
               expect(lastLine.result).toMatchObject({ value: expect.stringContaining("-g\n+G") })
               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(final)
             }),
@@ -396,6 +416,7 @@ describe("EditTool", () => {
           // 真实 registry 结算还要校验逻辑 diff，不能只看到写盘正文正确。
           const settled = yield* withTool(tmp.path, (registry) =>
             settleTool(registry, call({ path: "windows.txt", oldString: "before\r\nrest", newString: "after\nrest" })),
+            toolHistory("windows.txt"),
           )
           const output = Schema.decodeUnknownSync(EditTool.Output)(settled.output?.structured)
           expect(output.replacements).toBe(1)
@@ -422,6 +443,7 @@ describe("EditTool", () => {
           Effect.andThen(
             withTool(tmp.path, (registry) =>
               executeTool(registry, call({ path: "concurrent.txt", oldString: "before", newString: "after" })),
+              toolHistory("concurrent.txt"),
             ),
           ),
           Effect.andThen((result) =>

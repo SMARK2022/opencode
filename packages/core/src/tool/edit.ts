@@ -6,6 +6,7 @@
  */
 export * as EditTool from "./edit"
 
+import path from "path"
 import { ToolFailure } from "@opencode-ai/llm"
 import { FileDiff } from "@opencode-ai/schema/file-diff"
 import { createTwoFilesPatch, diffLines } from "diff"
@@ -14,8 +15,11 @@ import { makeLocationNode } from "../effect/app-node"
 import { FileMutation } from "../file-mutation"
 import { FSUtil } from "../fs-util"
 import { LocationMutation } from "../location-mutation"
+import { Location } from "../location"
+import { SessionStore } from "../session/store"
 import { PermissionV2 } from "../permission"
 import { ToolRegistry } from "./registry"
+import { closestMatch } from "./edit-excerpt"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 import { Format } from "../format"
@@ -87,6 +91,8 @@ const layer = Layer.effectDiscard(
     const fs = yield* FSUtil.Service
     const permission = yield* PermissionV2.Service
     const format = yield* Format.Service
+    const location = yield* Location.Service
+    const sessions = yield* SessionStore.Service
 
     yield* tools
       .register({
@@ -129,6 +135,22 @@ const layer = Layer.effectDiscard(
                 }
 
                 const target = yield* unableToEdit(mutation.resolve({ path: input.path, kind: "file" }))
+                // 只使用本Session实际可见的完成态工具历史；条件写入新鲜度不能替代此前检查。
+                const resolveForCompare = (value: string) => {
+                  const resolved = path.resolve(location.directory, value)
+                  return process.platform === "win32" ? resolved.toLowerCase() : resolved
+                }
+                const filePath = path.resolve(location.directory, input.path)
+                const hasTouched = (yield* unableToEdit(sessions.context(context.sessionID))).some(message =>
+                  message.type === "assistant" && message.content.some(part => {
+                    if (part.type !== "tool" || part.state.status !== "completed") return false
+                    if (part.name !== "read" && part.name !== "write" && part.name !== "edit") return false
+                    return typeof part.state.input.path === "string" && resolveForCompare(part.state.input.path) === resolveForCompare(filePath)
+                  }))
+                if (!hasTouched) return yield* new ToolFailure({
+                  message: `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
+                })
+                // 目标正文仍须等两项权限通过才读取，源工具名与错误原话均不扩展。
                 const external = target.externalDirectory
                 if (external) {
                   yield* unableToEdit(
@@ -165,9 +187,11 @@ const layer = Layer.effectDiscard(
                 const newString = convertToLineEnding(normalizeLineEndings(input.newString), ending)
                 const replacements = countOccurrences(source.text, oldString)
                 if (replacements === 0) {
+                  const closest = closestMatch(source.text, oldString)
                   return yield* new ToolFailure({
                     message:
-                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
+                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation." +
+                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
                   })
                 }
                 if (replacements > 1 && input.replaceAll !== true) {
@@ -231,5 +255,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/edit",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
 })
