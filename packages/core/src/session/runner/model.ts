@@ -141,7 +141,18 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
     headers: claudecode ? Object.fromEntries(Object.entries(model.request.headers).filter(([key]) =>
       !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) :
       model.providerID === ProviderV2.ID.openai ? CodexHeaders.request(model.request.headers) : model.request.headers,
-    http: { body: httpBody },
+    http: {
+      body: {
+        // 同V1按实际provider/API识别流式默认值；显式model/variant参数仍优先。
+        ...(model.api.type === "aisdk" &&
+        ["zai", "zhipuai"].some(id => model.providerID.includes(id)) &&
+        model.api.package === "@ai-sdk/openai-compatible" &&
+        model.api.id.toLowerCase().includes("glm-5.2")
+          ? { tool_stream: true }
+          : {}),
+        ...httpBody,
+      },
+    },
     ...(anthropic || parallel ? { providerOptions: {
       ...(anthropic ? { anthropic: {
         thinking: body.thinking,

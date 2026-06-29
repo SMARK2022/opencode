@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import { LLM, ModelID } from "@opencode-ai/llm"
-import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
-import { DateTime, Effect, Stream } from "effect"
+import { Auth, LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
+import { DateTime, Effect, Schema, Stream } from "effect"
 import { Headers } from "effect/unstable/http"
 import { Token } from "@opencode-ai/core/util/token"
 import { Credential } from "@opencode-ai/core/credential"
@@ -134,6 +134,30 @@ describe("SessionRunnerModel", () => {
 
       expect(headers.authorization).toBe("Bearer settings-secret")
       expect(resolved.route.defaults.http?.body).toEqual({})
+      // 在唯一HTTP准备路径观察最终body，不把未合并HTTP扩展的protocol body当wire。
+      const bodies: unknown[] = []
+      for (const [provider, id, pkg, body] of [
+        ["zai", "GLM-5.2", "@ai-sdk/openai-compatible", {}],
+        ["zhipuai", "glm-5.2", "@ai-sdk/openai-compatible", { tool_stream: false }],
+        ["zai", "glm-4", "@ai-sdk/openai-compatible", {}],
+        ["other", "glm-5.2", "@ai-sdk/openai-compatible", {}],
+        ["zai", "glm-5.2", "@ai-sdk/openai", {}],
+      ] as const) {
+        const fixture = model({ type: "aisdk", package: pkg, url: "https://compatible.example/v1" })
+        const selected = yield* SessionRunnerModel.fromCatalogModel(ModelV2.Info.make({
+          ...fixture, providerID: ProviderV2.ID.make(provider),
+          api: { ...fixture.api, id: ModelV2.ID.make(id) },
+          request: { ...fixture.request, body: { ...fixture.request.body, ...body } },
+        }))
+        const route = selected.route.with({ auth: selected.route.auth.andThen(Auth.custom(input => Effect.sync(() => {
+          bodies.push(Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(input.body))
+          return input.headers
+        }))) })
+        yield* LLMClient.prepare(LLM.request({ model: route.model({ id: selected.id }), prompt: "Hello" }))
+      }
+      expect(bodies.slice(0, 2)).toMatchObject([{ model: "GLM-5.2", tool_stream: true }, { model: "glm-5.2", tool_stream: false }])
+      // provider、API模型ID和包三个条件各自有效，目录别名不能误启用。
+      for (const body of bodies.slice(2)) expect(body).not.toHaveProperty("tool_stream")
     }),
   )
 
