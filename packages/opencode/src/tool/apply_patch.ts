@@ -1,5 +1,6 @@
 import * as path from "path"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
+import type { InstanceContext } from "../project/instance-context"
 import * as Tool from "./tool"
 import { Bus } from "../bus"
 import { FileWatcher } from "../file/watcher"
@@ -15,6 +16,145 @@ import { File } from "../file"
 import { Format } from "../format"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
+
+// [local-smark] 从 patch hunk chunks 中提取期望的旧行文本，
+// 在 oldContent 中找到最近似的位置并返回上下文摘录。
+// 仅在 patch context 匹配失败时调用，帮助模型看到 actual content 而无需 re-read。
+// 限制摘录 5 行避免 error 消息过长。
+function extractActualExcerpt(oldContent: string, chunks: unknown): string | undefined {
+  // chunks 是 UpdateFileChunk[]，每个 chunk 有 old_lines: string[]
+  // 从第一个 chunk 的 old_lines 中提取搜索目标
+  let searchLine: string | undefined
+  if (Array.isArray(chunks)) {
+    for (const chunk of chunks) {
+      if (typeof chunk === "object" && chunk !== null) {
+        const c = chunk as Record<string, unknown>
+        const oldLines = c.old_lines
+        if (Array.isArray(oldLines)) {
+          for (const l of oldLines) {
+            if (typeof l === "string" && l.trim().length >= 3) {
+              searchLine = l.trim()
+              break
+            }
+          }
+        }
+      }
+      if (searchLine) break
+    }
+  }
+  if (!searchLine) return undefined
+  // 在 oldContent 中找到与 searchLine 字符重叠最高的行
+  const lines = oldContent.split("\n")
+  let bestIdx = -1
+  let bestScore = 0
+  for (let i = 0; i < lines.length; i++) {
+    const candidate = lines[i]!.trim()
+    if (candidate.length === 0) continue
+    const setA = new Set(searchLine.toLowerCase())
+    let common = 0
+    for (const ch of candidate.toLowerCase()) {
+      if (setA.has(ch)) common++
+    }
+    const score = common / Math.max(1, Math.min(searchLine.length, candidate.length))
+    if (score > bestScore) {
+      bestScore = score
+      bestIdx = i
+    }
+  }
+  if (bestIdx < 0 || bestScore < 0.3) return undefined
+  const start = Math.max(0, bestIdx - 1)
+  const end = Math.min(lines.length, bestIdx + 4)
+  return lines.slice(start, end).join("\n").slice(0, 500)
+}
+
+// [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
+// 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
+// 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界。
+type FileChange = {
+  filePath: string
+  oldContent: string
+  newContent: string
+  type: "add" | "update" | "delete" | "move"
+  movePath?: string
+  diff: string
+  additions: number
+  deletions: number
+  bom: boolean
+}
+
+const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function* (
+  hunk: Patch.Hunk,
+  filePath: string,
+  instance: InstanceContext,
+  afs: AppFileSystem.Interface,
+  ctx: Tool.Context,
+  patchText: string,
+) {
+  switch (hunk.type) {
+    case "add": {
+      const oldContent = ""
+      const newContent = hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
+      const next = Bom.split(newContent)
+      const diffOld = normalizeLineEndings(oldContent)
+      const diffNew = normalizeLineEndings(next.text)
+      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+      let additions = 0
+      let deletions = 0
+      for (const change of diffLines(diffOld, diffNew)) {
+        if (change.added) additions += change.count || 0
+        if (change.removed) deletions += change.count || 0
+      }
+      return { filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom }
+    }
+    case "update": {
+      const stats = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      if (!stats || stats.type === "Directory") {
+        return yield* Effect.fail(new Error(`Failed to read file to update: ${filePath}`))
+      }
+      const source = yield* Bom.readFile(afs, filePath)
+      const oldContent = source.text
+      let newContent = oldContent
+      let bom = source.bom
+      try {
+        const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks, Bom.join(source.text, source.bom))
+        newContent = fileUpdate.content
+        bom = fileUpdate.bom
+      } catch (error) {
+        const actualExcerpt = extractActualExcerpt(oldContent, hunk.chunks)
+        return yield* Effect.fail(new Error(`${error}` + (actualExcerpt ? `\n\nActual content near expected location:\n${actualExcerpt}` : "")))
+      }
+      const diffOld = normalizeLineEndings(oldContent)
+      const diffNew = normalizeLineEndings(newContent)
+      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+      let additions = 0
+      let deletions = 0
+      for (const change of diffLines(diffOld, diffNew)) {
+        if (change.added) additions += change.count || 0
+        if (change.removed) deletions += change.count || 0
+      }
+      const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+      if (movePath) {
+        yield* assertExternalDirectoryEffect(ctx, movePath, {
+          metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText },
+        })
+      }
+      return { filePath, oldContent, newContent, type: hunk.move_path ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom }
+    }
+    case "delete": {
+      const source = yield* Bom.readFile(afs, filePath)
+      const contentToDelete = source.text
+      const diffOld = normalizeLineEndings(contentToDelete)
+      const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
+      let deletions = 0
+      for (const change of diffLines(diffOld, "")) {
+        if (change.removed) deletions += change.count || 0
+      }
+      return { filePath, oldContent: contentToDelete, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom }
+    }
+    default:
+      return yield* Effect.fail(new Error(`Unknown hunk type: ${(hunk as { type: string }).type}`))
+  }
+})
 
 export const Parameters = Schema.Struct({
   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
@@ -70,141 +210,35 @@ export const ApplyPatchTool = Tool.define(
 
       let totalDiff = ""
 
+      // [local-smark] per-file atomicity：收集每个 hunk 的错误而非在第一个失败时立即返回。
+      // 成功的 hunk 进入 fileChanges 正常 apply；失败的 hunk 记录 error 在 output 中报告。
+      // 仅当全部 hunk 都失败时才返回 Effect.fail（不让空 patch 静默成功）。
+      // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
+      const hunkErrors: string[] = []
+
       for (const hunk of hunks) {
         const filePath = path.resolve(instance.directory, hunk.path)
         yield* assertExternalDirectoryEffect(ctx, filePath, {
-          // The external_directory gate runs before the final edit permission;
-          // carry patch intent so Auto review can judge more than the file path.
           metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
         })
 
-        switch (hunk.type) {
-          case "add": {
-            const oldContent = ""
-            const newContent =
-              hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
-            const next = Bom.split(newContent)
-            const diffOld = normalizeLineEndings(oldContent)
-            const diffNew = normalizeLineEndings(next.text)
-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
-
-            let additions = 0
-            let deletions = 0
-            for (const change of diffLines(diffOld, diffNew)) {
-              if (change.added) additions += change.count || 0
-              if (change.removed) deletions += change.count || 0
-            }
-
-            fileChanges.push({
-              filePath,
-              oldContent,
-              newContent: next.text,
-              type: "add",
-              diff,
-              additions,
-              deletions,
-              bom: next.bom,
-            })
-
-            totalDiff += diff + "\n"
-            break
-          }
-
-          case "update": {
-            // Check if file exists for update
-            const stats = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-            if (!stats || stats.type === "Directory") {
-              return yield* Effect.fail(
-                new Error(`apply_patch verification failed: Failed to read file to update: ${filePath}`),
-              )
-            }
-
-            const source = yield* Bom.readFile(afs, filePath)
-            const oldContent = source.text
-            let newContent = oldContent
-            let bom = source.bom
-
-            // Apply the update chunks to get new content
-            try {
-              const fileUpdate = Patch.deriveNewContentsFromChunks(
-                filePath,
-                hunk.chunks,
-                Bom.join(source.text, source.bom),
-              )
-              newContent = fileUpdate.content
-              bom = fileUpdate.bom
-            } catch (error) {
-              return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
-            }
-
-            const diffOld = normalizeLineEndings(oldContent)
-            const diffNew = normalizeLineEndings(newContent)
-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
-
-            let additions = 0
-            let deletions = 0
-            for (const change of diffLines(diffOld, diffNew)) {
-              if (change.added) additions += change.count || 0
-              if (change.removed) deletions += change.count || 0
-            }
-
-            const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
-            yield* assertExternalDirectoryEffect(ctx, movePath, {
-              // Moving to an external directory is a separate target gate; keep
-              // the same patch evidence but name the operation as the move leg.
-              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
-            })
-
-            fileChanges.push({
-              filePath,
-              oldContent,
-              newContent,
-              type: hunk.move_path ? "move" : "update",
-              movePath,
-              diff,
-              additions,
-              deletions,
-              bom,
-            })
-
-            totalDiff += diff + "\n"
-            break
-          }
-
-          case "delete": {
-            const source = yield* Bom.readFile(afs, filePath).pipe(
-              Effect.catch((error) =>
-                Effect.fail(
-                  new Error(
-                    `apply_patch verification failed: ${error instanceof Error ? error.message : String(error)}`,
-                  ),
-                ),
-              ),
-            )
-            const contentToDelete = source.text
-            const diffOld = normalizeLineEndings(contentToDelete)
-            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
-
-            let deletions = 0
-            for (const change of diffLines(diffOld, "")) {
-              if (change.removed) deletions += change.count || 0
-            }
-
-            fileChanges.push({
-              filePath,
-              oldContent: contentToDelete,
-              newContent: "",
-              type: "delete",
-              diff: deleteDiff,
-              additions: 0,
-              deletions,
-              bom: source.bom,
-            })
-
-            totalDiff += deleteDiff + "\n"
-            break
-          }
+        // 用 Effect.exit 捕获 hunk 处理的成功/失败
+        const exit = yield* Effect.exit(processSingleHunk(hunk, filePath, instance, afs, ctx, params.patchText))
+        if (Exit.isFailure(exit)) {
+          const err = Cause.squash(exit.cause)
+          hunkErrors.push(`${hunk.path}: ${err instanceof Error ? err.message : String(err)}`)
+          continue
         }
+        const change = exit.value
+        fileChanges.push(change)
+        totalDiff += change.diff + "\n"
+      }
+
+      // 全部 hunk 都失败时返回 error
+      if (fileChanges.length === 0) {
+        return yield* Effect.fail(new Error(
+          `apply_patch verification failed: all hunks failed.\n${hunkErrors.join("\n")}`,
+        ))
       }
 
       // Build per-file metadata for UI rendering (used for both permission and result)
@@ -299,6 +333,11 @@ export const ApplyPatchTool = Tool.define(
         return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
       })
       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
+
+      // [local-smark] per-file atomicity：部分 hunk 失败时在 output 中报告失败文件
+      if (hunkErrors.length > 0) {
+        output += `\n\nFailed to update ${hunkErrors.length} file(s):\n${hunkErrors.join("\n")}`
+      }
 
       let lspFoundErrors = false
       for (const change of fileChanges) {

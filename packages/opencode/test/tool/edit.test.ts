@@ -46,12 +46,36 @@ const init = Effect.fn("EditToolTest.init")(function* () {
   return yield* info.init()
 })
 
+// [local-smark] 构造包含 prior read 的 context，模拟生产环境中 edit 前已 read 文件的正常流程。
+// blind edit 检查要求 ctx.messages 中有指向同一文件的已完成 read/write/edit tool part。
+function ctxWithPriorRead(filePath: string): Tool.Context {
+  return {
+    ...ctx,
+    messages: [
+      {
+        info: { id: "msg_prior", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: ".", root: "." }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
+        parts: [
+          {
+            id: "p_read", messageID: "msg_prior", sessionID: ctx.sessionID,
+            type: "tool" as const, tool: "read", callID: "call_prior",
+            state: { status: "completed" as const, input: { filePath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
+          },
+        ],
+      },
+    ] as any,
+  }
+}
+
 const run = Effect.fn("EditToolTest.run")(function* (
   args: Tool.InferParameters<typeof EditTool>,
-  next: Tool.Context = ctx,
+  next?: Tool.Context,
 ) {
   const tool = yield* init()
-  return yield* tool.execute(args, next)
+  // [local-smark] 当未指定 next 且 oldString 非空时，自动注入 prior read context，
+  // 模拟生产环境中 edit 前已 read 文件的正常流程。
+  // 显式传入 next 的测试（如 blind edit 检查测试）使用传入的 context。
+  const context = next ?? (args.oldString !== "" ? ctxWithPriorRead(args.filePath) : ctx)
+  return yield* tool.execute(args, context)
 })
 
 const fail = Effect.fn("EditToolTest.fail")(function* (args: Tool.InferParameters<typeof EditTool>) {
@@ -207,6 +231,94 @@ describe("tool.edit", () => {
         expect(yield* fail({ filePath: filepath, oldString: "not in file", newString: "replacement" })).toBeInstanceOf(
           Error,
         )
+      }),
+    )
+
+    // [local-smark] 当 oldString 未匹配时，error 应包含 actual content 的最近似区域，
+    // 帮助模型自纠正而无需单独 re-read 文件。
+    it.instance("error includes closest match when oldString not found", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        // 文件内容含 "actual content"，模型搜索 "actual contnet"（拼写错误）
+        yield* put(filepath, "line1\nactual content here\nline3")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "actual contnet",
+          newString: "replacement",
+        })
+
+        expect(error).toBeInstanceOf(Error)
+        // error 消息应包含文件中的实际内容片段，帮助模型发现拼写差异
+        expect(error.message).toContain("actual content")
+      }),
+    )
+
+    // [local-smark] 当文件在当前 session 中从未被 read 或 write 过时，
+    // edit 应拒绝执行并提示先 read，避免 oldString 基于过期/假设内容匹配失败。
+    // 显式使用 ctx（messages 为空）模拟"从未读过"的场景。
+    it.instance("rejects edit on file not previously read or written", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "unread.txt")
+        yield* put(filepath, "content")
+
+        // 显式传入 ctx（无 prior read）使 blind edit 检查生效
+        const tool = yield* init()
+        const exit = yield* tool.execute({ filePath: filepath, oldString: "content", newString: "modified" }, ctx).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          const err = Cause.squash(exit.cause) as Error
+          expect(err.message).toContain("not been read")
+        }
+      }),
+    )
+
+    // 已经 read 过的文件可以正常 edit
+    // [local-smark] 通过 ctx.messages 模拟"已读过"的场景：
+    // 构造一个包含 read tool part 的 assistant message，使 edit 能检测到文件已被读过
+    it.instance("allows edit when messages contain prior read of same file", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "read-then-edit.txt")
+        yield* put(filepath, "original")
+
+        // 构造 ctx，messages 中包含一个已完成的 read tool part 指向同一文件
+        const ctxWithRead = {
+          ...ctx,
+          messages: [
+            {
+              info: { id: "msg_prior", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: test.directory, root: test.directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
+              parts: [
+                {
+                  id: "p_read",
+                  messageID: "msg_prior",
+                  sessionID: ctx.sessionID,
+                  type: "tool" as const,
+                  tool: "read",
+                  callID: "call_read",
+                  state: { status: "completed" as const, input: { filePath: filepath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
+                },
+              ],
+            },
+          ] as any,
+        }
+
+        // edit 应该成功，因为 messages 中有 prior read
+        const result = yield* run({ filePath: filepath, oldString: "original", newString: "modified" }, ctxWithRead)
+        expect(result.output).toContain("Edit applied successfully")
+      }),
+    )
+
+    // oldString 为空（创建文件）时不检查是否读过
+    it.instance("allows edit with empty oldString without prior read", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "new-file.txt")
+
+        const result = yield* run({ filePath: filepath, oldString: "", newString: "new content" })
+        expect(result.output).toContain("Edit applied successfully")
       }),
     )
 
@@ -493,8 +605,9 @@ describe("tool.edit", () => {
 
         const firstAsk = yield* Deferred.make<void>()
         let asks = 0
+        // [local-smark] delayedCtx 需要包含 prior read 才能通过 blind edit 检查
         const delayedCtx = {
-          ...ctx,
+          ...ctxWithPriorRead(filepath),
           ask: () =>
             Effect.gen(function* () {
               asks++

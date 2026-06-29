@@ -1005,4 +1005,21 @@ describe("tool.read binary detection", () => {
       expect(err.message).toContain("Cannot read binary file")
     }),
   )
+
+  // [local-smark] 二进制文件 error 应包含 type-specific 替代建议，
+  // 帮助模型知道用什么工具读取而非盲目重试。
+  it.live("suggests alternatives for binary file types", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      // .gz 文件应建议 gunzip
+      yield* put(path.join(dir, "archive.gz"), Buffer.from([0x1f, 0x8b, 0x08, 0x00]))
+      const gzErr = yield* fail(dir, { filePath: path.join(dir, "archive.gz") })
+      expect(gzErr.message).toContain("gunzip")
+
+      // .wasm 文件应建议 strings 或 hexdump
+      yield* put(path.join(dir, "module.wasm"), "not really wasm")
+      const wasmErr = yield* fail(dir, { filePath: path.join(dir, "module.wasm") })
+      expect(wasmErr.message).toContain("strings")
+    }),
+  )
 })

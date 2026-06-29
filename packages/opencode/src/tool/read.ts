@@ -472,6 +472,31 @@ export const ReadTool = Tool.define(
       return nonPrintableCount / bytes.length > 0.3
     }
 
+    // [local-smark] 根据二进制文件扩展名返回 type-specific 替代建议。
+    // 帮助模型知道用什么工具读取，避免盲目重试 read 工具。
+    // 数据库文件建议 bun:sqlite，压缩文件建议先解压，其他建议 strings/hexdump。
+    function getBinaryFileSuggestion(ext: string): string | undefined {
+      const map: Record<string, string> = {
+        ".gz": "Decompress with gunzip or bun -e with zlib first, then read.",
+        ".tar": "Extract with tar -xf first, then read individual files.",
+        ".zip": "Extract with unzip first, then read individual files.",
+        ".7z": "Extract with 7z first, then read individual files.",
+        ".db": "Use bun -e with bun:sqlite to query this database.",
+        ".vscdb": "Use bun -e with bun:sqlite to query this database.",
+        ".sqlite": "Use bun -e with bun:sqlite to query this database.",
+        ".exe": "Use strings or hexdump via bash to inspect binary content.",
+        ".dll": "Use strings or hexdump via bash to inspect binary content.",
+        ".so": "Use strings or hexdump via bash to inspect binary content.",
+        ".wasm": "Use strings or hexdump via bash to inspect binary content.",
+        ".class": "Use javap -c via bash to disassemble Java bytecode.",
+        ".jar": "Extract with jar -xf or unzip first, then read individual files.",
+        ".doc": "Use python-docx or convert to text via libreoffice --headless.",
+        ".docx": "Use python-docx or unzip to read XML content.",
+        ".pyc": "Use python -m dis or uncompyle6 to decompile.",
+      }
+      return map[ext]
+    }
+
     const run = Effect.fn("ReadTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
       ctx: Tool.Context,
@@ -615,7 +640,14 @@ export const ReadTool = Tool.define(
       }
 
       if (isBinaryFile(filepath, sample)) {
-        return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
+        // [local-smark] 根据文件扩展名提供 type-specific 替代建议，
+        // 帮助模型知道用什么工具读取而非盲目重试。
+        const ext = path.extname(filepath).toLowerCase()
+        const suggestion = getBinaryFileSuggestion(ext)
+        return yield* Effect.fail(new Error(
+          `Cannot read binary file: ${filepath}` +
+          (suggestion ? `\n${suggestion}` : ""),
+        ))
       }
 
       const file = yield* Effect.promise(() =>

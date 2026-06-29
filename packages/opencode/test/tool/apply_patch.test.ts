@@ -323,7 +323,8 @@ describe("tool.apply_patch freeform", () => {
 
       yield* expectFailure(
         execute({ patchText }, ctx),
-        "apply_patch verification failed: Failed to read file to update",
+        // [local-smark] per-file atomicity 后，单 hunk 失败走 "all hunks failed" 路径
+        "all hunks failed",
       )
     }),
   )
@@ -373,15 +374,21 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
-  it.instance("verification failure leaves no side effects", () =>
+  // [local-smark] per-file atomicity 后，多文件 patch 中成功的文件会被 apply。
+  // 此测试验证 add 成功但 update 失败时，add 的文件存在，update 的文件未变。
+  it.instance("partial success applies successful files when some fail", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
       const patchText =
         "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch"
 
-      yield* expectFailure(execute({ patchText }, ctx))
-      yield* expectReadFailure(path.join(test.directory, "created.txt"))
+      const result = yield* execute({ patchText }, ctx)
+      // add 成功：created.txt 应存在
+      expect(yield* readText(path.join(test.directory, "created.txt"))).toBe("hello\n")
+      // output 应同时包含成功和失败信息
+      expect(result.output).toContain("created.txt")
+      expect(result.output).toContain("missing.txt")
     }),
   )
 
@@ -528,6 +535,67 @@ EOF`
       yield* execute({ patchText }, ctx)
       // Result has ASCII quotes because that's what the patch specifies
       expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
+    }),
+  )
+
+  // [local-smark] 当 patch context 匹配失败时，error 应包含 actual content，
+  // 帮助模型看到文件中实际有什么而无需单独 re-read。
+  it.instance("error includes actual content when context mismatch", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "mismatch.txt")
+      // 文件含 "real content"，patch 搜索 "missing context"
+      yield* writeText(target, "line1\nreal content here\nline3\n")
+
+      const patchText =
+        "*** Begin Patch\n*** Update File: mismatch.txt\n@@\n-missing context\n+changed\n*** End Patch"
+
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const err = Cause.squash(exit.cause) as Error
+        // error 消息应包含文件中的实际内容
+        expect(err.message).toContain("real content")
+      }
+    }),
+  )
+
+  // [local-smark] per-file atomicity：多文件 patch 中一个文件失败时，
+  // 成功的文件应正常 apply，失败的文件在 output 中报告 error。
+  // 旧行为是整个 patch 失败（all-or-nothing），成功的 hunk 也被丢弃。
+  it.instance("applies successful files and reports failed files in multi-file patch", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const goodFile = path.join(test.directory, "good.txt")
+      const badFile = path.join(test.directory, "bad.txt")
+      yield* writeText(goodFile, "hello\n")
+      yield* writeText(badFile, "world\n")
+
+      // good.txt 的 context 正确，bad.txt 的 context 错误
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: good.txt",
+        "@@",
+        "-hello",
+        "+hi",
+        "*** Update File: bad.txt",
+        "@@",
+        "-missing line",
+        "+changed",
+        "*** End Patch",
+      ].join("\n")
+
+      const result = yield* execute({ patchText }, ctx)
+
+      // good.txt 应被成功修改
+      expect(yield* readText(goodFile)).toBe("hi\n")
+      // output 应同时包含成功和失败信息
+      expect(result.output).toContain("good.txt")
+      expect(result.output).toContain("bad.txt")
+      // bad.txt 内容不应被修改
+      expect(yield* readText(badFile)).toBe("world\n")
     }),
   )
 })

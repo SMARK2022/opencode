@@ -68,6 +68,38 @@ export const EditTool = Tool.define(
           const filePath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
+
+          // [local-smark] blind edit 检查：当 oldString 非空（非创建文件模式）时，
+          // 检查文件是否在当前 session 的消息历史中被 read/write/edit 接触过。
+          // 未接触过的文件可能有过期内容（auto-format、外部修改），
+          // oldString 基于假设会导致匹配失败。
+          // 用 path.resolve 规范化路径比较，避免正斜杠/反斜杠差异导致误拦截。
+          // Windows 下 NTFS 大小写不敏感，需 toLowerCase；Linux/macOS 大小写敏感，不应 lower。
+          // 遵循 read.ts canonicalReadPath 的同一平台分支范式。
+          // apply_patch 的 input 是 patchText 而非 filePath，无法简单匹配，不纳入检查。
+          if (params.oldString !== "") {
+            const resolveForCompare = (p: string) => {
+              const r = path.resolve(p)
+              return process.platform === "win32" ? r.toLowerCase() : r
+            }
+            const resolvedFilePath = resolveForCompare(filePath)
+            const hasTouched = ctx.messages.some((msg) =>
+              msg.info.role === "assistant" &&
+              msg.parts.some((part) => {
+                if (part.type !== "tool" || part.state.status !== "completed") return false
+                if (part.tool !== "read" && part.tool !== "write" && part.tool !== "edit") return false
+                const input = part.state.input as Record<string, unknown> | undefined
+                if (!input || typeof input.filePath !== "string") return false
+                return resolveForCompare(input.filePath) === resolvedFilePath
+              }),
+            )
+            if (!hasTouched) {
+              throw new Error(
+                `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
+              )
+            }
+          }
+
           yield* assertExternalDirectoryEffect(ctx, filePath, {
             // Include the intended edit operation so Auto reviewer decisions are
             // based on tool evidence, not just the external path glob.
@@ -686,6 +718,45 @@ export function trimDiff(diff: string): string {
   return trimmedLines.join("\n")
 }
 
+// [local-smark] 滑动窗口查找 content 中与 oldString 最相似的区域。
+// 用 oldString 首行与 content 各行做简单字符重叠比较，返回最佳匹配位置和摘录。
+// 仅在 replace() 抛出 notFound 错误时调用，不影响正常路径性能。
+// 限制摘录 5 行 / 500 字符，避免 error 消息过长导致上下文膨胀。
+function findClosestMatch(content: string, oldString: string): { line: number; excerpt: string } | undefined {
+  const contentLines = content.split("\n")
+  const oldLines = oldString.split("\n").filter((l) => l.trim().length > 0)
+  if (oldLines.length === 0) return undefined
+  const firstOld = oldLines[0]!.trim()
+  if (firstOld.length < 3) return undefined
+  let bestLine = -1
+  let bestScore = 0
+  for (let i = 0; i < contentLines.length; i++) {
+    const candidate = contentLines[i]!.trim()
+    if (candidate.length === 0) continue
+    // 简单字符重叠率：共同字符数 / 较短串长度
+    const score = charOverlap(firstOld, candidate)
+    if (score > bestScore) {
+      bestScore = score
+      bestLine = i
+    }
+  }
+  if (bestLine < 0 || bestScore < 0.3) return undefined
+  const start = Math.max(0, bestLine - 1)
+  const end = Math.min(contentLines.length, bestLine + 4)
+  const excerpt = contentLines.slice(start, end).join("\n").slice(0, 500)
+  return { line: start + 1, excerpt }
+}
+
+// 计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估
+function charOverlap(a: string, b: string): number {
+  const setA = new Set(a.toLowerCase())
+  let common = 0
+  for (const ch of b.toLowerCase()) {
+    if (setA.has(ch)) common++
+  }
+  return common / Math.max(1, Math.min(a.length, b.length))
+}
+
 export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
   if (oldString === newString) {
     throw new Error("No changes to apply: oldString and newString are identical.")
@@ -718,8 +789,14 @@ export function replace(content: string, oldString: string, newString: string, r
   }
 
   if (notFound) {
+    // [local-smark] 在 oldString 未匹配时，提供 actual content 的最近似区域，
+    // 帮助模型自纠正而无需单独 re-read 文件。
+    // 用滑动窗口逐行比较 oldString 首行与 content 各行的相似度，
+    // 返回相似度最高的区域摘要（限制 5 行避免上下文膨胀）。
+    const closest = findClosestMatch(content, oldString)
     throw new Error(
-      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
+      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
+        (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
     )
   }
   throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
