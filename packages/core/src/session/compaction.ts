@@ -102,6 +102,7 @@ type Dependencies = {
   readonly config: readonly Config.Entry[]
   readonly fs: FSUtil.Interface
   readonly worktree: string
+  readonly directory?: string
 }
 
 type Input = {
@@ -329,7 +330,7 @@ export const make = (dependencies: Dependencies) => {
       return false
     }
     // 只有可用摘要才stat当前磁盘；失败和取消不生成或替换旧交接快照。
-    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, evidence)
+    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, directory: dependencies.directory })
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,

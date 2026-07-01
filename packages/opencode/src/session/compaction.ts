@@ -615,7 +615,7 @@ const layer = Layer.effect(
       }
 
       if (result === "continue" && !processor.message.error) {
-        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1)
+        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1, ctx.directory)
         if (handoff) yield* session.updatePart({
           id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID,
           type: "text", text: handoff, synthetic: true,

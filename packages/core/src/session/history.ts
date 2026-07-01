@@ -131,10 +131,19 @@ export const evidence = Effect.fn("SessionHistory.evidence")(function* (
     : [],
   )
   const searches: FileEvidence.SearchReceipt[] = []
+  const commands: FileEvidence.CommandReceipt[] = []
   for (const message of messages) {
     if (message.type !== "assistant") continue
     for (const part of message.content) {
-      if (part.type !== "tool" || part.provider?.executed === true || part.state.status !== "completed" || (part.name !== "grep" && part.name !== "glob")) continue
+      if (part.type !== "tool" || part.provider?.executed === true || part.state.status !== "completed") continue
+      // 只采本边界内真正settle的本地Bash，展示命令文本不再次执行。
+      if (part.name === "bash" && typeof part.state.input.command === "string") {
+        commands.push({ command: part.state.input.command,
+          ...(typeof part.state.input.workdir === "string" ? { workdir: part.state.input.workdir } : {}),
+          ...(typeof part.state.structured.exit === "number" ? { exit: part.state.structured.exit } : {}),
+        })
+      }
+      if (part.name !== "grep" && part.name !== "glob") continue
       const pattern = part.state.input.pattern
       if (typeof pattern !== "string" || !pattern) continue
       const output = part.state.structured
@@ -146,7 +155,7 @@ export const evidence = Effect.fn("SessionHistory.evidence")(function* (
       })
     }
   }
-  return { receipts, searches, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
+  return { receipts, searches, commands, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
 })
 
 export const readReceipts = (db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number) =>

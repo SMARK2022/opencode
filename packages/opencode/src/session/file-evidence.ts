@@ -6,7 +6,7 @@ import type { SessionV1 } from "@opencode-ai/core/v1/session"
 
 export const kind = FileEvidence.kind
 
-export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1) =>
+export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1, directory = worktree) =>
   FileEvidence.render(messages.flatMap((message) => message.parts.flatMap((part) =>
     part.type === "tool" && part.tool === "read" && part.state.status === "completed"
       ? [part.state.metadata.read] : [],
@@ -16,5 +16,14 @@ export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, wo
     if (typeof pattern !== "string" || !pattern) return []
     const count = part.tool === "grep" ? part.state.metadata.totalMatches ?? part.state.metadata.matches : part.state.metadata.total ?? part.state.metadata.count
     return [{ tool: part.tool, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: typeof count === "number" ? count : 0 }]
+  })), directory, commands: messages.flatMap(message => message.parts.flatMap(part => {
+    if (part.type !== "tool" || part.tool !== "bash" || part.state.status !== "completed") return []
+    const input = part.state.input
+    if (typeof input.command !== "string" || !input.command.trim()) return []
+    return [{ command: input.command,
+      ...(typeof input.cwd === "string" ? { cwd: input.cwd } : {}),
+      ...(typeof input.workdir === "string" ? { workdir: input.workdir } : {}),
+      ...(typeof part.state.metadata.exit === "number" ? { exit: part.state.metadata.exit } : {}),
+    }]
   })) })
 

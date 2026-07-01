@@ -130,7 +130,7 @@ const layer = Layer.effect(
     const buildReminders = yield* SessionReminders.make
     const configuration = yield* config.entries()
     const fileSystem = yield* FSUtil.Service
-    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.directory })
+    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)

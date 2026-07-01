@@ -124,6 +124,22 @@ test("file handoff compares real disk versions before applying its bounded evide
     const untouched = inspected.length
     expect(yield* FileEvidence.render([{ ...receipts[0], stub: true }, { malformed: true }], observed, tmp.path)).toBeUndefined()
     expect(inspected).toHaveLength(untouched)
+    // 命令只作为已完成凭证进入共享渲染器，不能执行其管道或环境赋值。
+    const commands = Array.from({ length: 12 }, (_, index) => ({ command: `node --check file-${index}.js`, exit: 0 }))
+    const commandHandoff = yield* FileEvidence.render([], observed, tmp.path, {
+      commands: [...commands,
+        { command: "ENV=changed node --check file-4.js", exit: 1 },
+        { command: "TOKEN=sk-secret node --check piped.js | tee output.txt" },
+      ], directory: path.join(tmp.path, "src"), compactionCount: 2,
+    })
+    expect(commandHandoff).toContain("### Executed Commands")
+    expect(commandHandoff).toContain("| ENV=changed node --check file-4.js | src | 1 |")
+    expect(commandHandoff).toContain("| TOKEN=[redacted] node --check piped.js \\| tee output.txt | src | unknown |")
+    expect(commandHandoff).not.toContain("sk-secret")
+    expect(commandHandoff).not.toContain("| node --check file-0.js |")
+    expect(commandHandoff).toContain("Omitted: 3 executed commands due to evidence budget.")
+    expect(commandHandoff).toContain("This is compaction #2.")
+    expect(inspected).toHaveLength(untouched)
   }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
 })
 
