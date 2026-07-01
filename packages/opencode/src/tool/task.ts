@@ -15,53 +15,15 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
 import { Database } from "@opencode-ai/core/database/database"
+import { InstanceState } from "@/effect/instance-state"
+import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
 
-// [local-smark] 从父 session 的 messages 提取已读文件列表，
-// 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
-// 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
-// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致）。
-function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): string | undefined {
-  const files = new Map<string, { path: string; ranges: string[]; lastRead: number }>()
-  let seq = 0
-  for (const msg of messages) {
-    if (msg.info.role !== "assistant") continue
-    for (const part of msg.parts) {
-      if (part.type !== "tool" || part.tool !== "read") continue
-      if (part.state.status !== "completed") continue
-      if (part.state.time.compacted) continue
-      seq++
-      const meta = part.state.metadata?.read
-      if (!meta || typeof meta !== "object") continue
-      const m = meta as Record<string, unknown>
-      const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
-      const filePath = typeof m.path === "string" ? m.path : ""
-      if (!filePath) continue
-      if (m.stub === true) continue
-      const start = typeof m.start === "number" ? m.start : 0
-      const end = typeof m.end === "number" ? m.end : 0
-      const existing = files.get(canonicalPath || filePath)
-      if (existing) {
-        existing.ranges.push(`${start}-${end}`)
-        existing.lastRead = seq
-      } else {
-        files.set(canonicalPath || filePath, { path: filePath, ranges: [`${start}-${end}`], lastRead: seq })
-      }
-    }
-  }
-  if (files.size === 0) return undefined
-  const sorted = [...files.values()].sort((a, b) => b.lastRead - a.lastRead).slice(0, 20)
-  const lines = [
-    "### Parent Session Inspected Files",
-    "| path | ranges |",
-    "|---|---|",
-    ...sorted.map((f) => {
-      // [local-smark] 显示相对路径而非 basename，避免多包仓库中同名文件歧义
-      const rel = f.path.split(/[\\/]/).slice(-3).join("/")
-      return `| ${rel} | ${f.ranges.join(", ")} |`
-    }),
-  ]
-  if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
-  return lines.join("\n")
+// 只适配V1历史形状，聚合、预算与转义均由两代共用的Core owner承担。
+export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
+  return FileEvidence.parentSummary(messages.flatMap(message => message.info.role === "assistant"
+    ? message.parts.flatMap(part => part.type === "tool" && part.tool === "read" && part.state.status === "completed" && !part.state.time.compacted
+      ? [part.state.metadata.read] : [])
+    : []), worktree)
 }
 
 export interface TaskPromptOps {
@@ -294,9 +256,11 @@ export const TaskTool = Tool.define(
         // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
         // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
         // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
+        // worktree 用于计算相对路径，通过 InstanceState.context 获取（与 read.ts 同款用法）。
+        const instance = yield* InstanceState.context
         const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
         const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
-          ? buildParentInspectedFilesSummary(ctx.messages)
+          ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
           : undefined
 
         const result = yield* ops.prompt({

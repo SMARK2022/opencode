@@ -114,7 +114,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
       const parentContext = (input.inspected_files ?? (input.task_id ? "none" : "summary")) === "summary"
         ? FileEvidence.parentSummary(history.flatMap(message => message.type === "assistant" ? message.content.flatMap(part =>
           part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.time.pruned === undefined && part.state.status === "completed"
-            ? [part.state.structured.read] : []) : [])) : undefined
+            ? [part.state.structured.read] : []) : []), location.project.directory) : undefined
       const prompt = parentContext ? `${input.prompt}\n\n<parent_context>\n${parentContext}\n</parent_context>` : input.prompt
       const runTask = Effect.gen(function* () {
         const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id

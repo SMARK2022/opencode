@@ -28,4 +28,20 @@ it.live("preserves bounded search-only history and the compaction count", () =>
   }),
 )
 
+it.live("renders all executed commands with credentials redacted", () =>
+  Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
+    const commands = ["OPENAI_API_KEY=sk-secret node --check plain.js", "node --check piped-sentinel.js | tee out.txt", "node --check redirected-sentinel.js > out.txt", "node --check $(echo subcommand-sentinel).js", "bun test && echo dangerous-sentinel", `node --check ${"a".repeat(160)}.js --token=sk-token`]
+    const parts = commands.map(command => ({ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit: 0 } } }))
+    const messages = [{ info: { role: "assistant" }, parts }] as unknown as SessionV1.WithParts[]
+    const text = yield* CompactionFileEvidence.render(messages, fs, ".", 1)
+    expect(text).toContain("### Executed Commands")
+    for (const marker of ["piped-sentinel", "redirected-sentinel", "subcommand-sentinel", "dangerous-sentinel"]) expect(text).toContain(marker)
+    expect(text).toContain("OPENAI_API_KEY=[redacted]")
+    expect(text).not.toContain("sk-secret")
+    expect(text).not.toContain("sk-token")
+    expect(text).toContain("[cmd:")
+  }),
+)
+
 

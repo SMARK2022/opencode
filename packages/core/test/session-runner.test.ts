@@ -1081,8 +1081,23 @@ describe("SessionRunnerLLM", () => {
     yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "read-parent", name: "read" })
     yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "read-parent", tool: "read", input: { path: "/project/src/module.ts" }, provider: { executed: false } })
     yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "read-parent", structured: { read: { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 4, end: 8 } }, content: [], provider: { executed: false } })
+    // 同一父step内的重叠读取经真实投影进入Native Task，不能只测孤立helper。
+    yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "read-parent-second", name: "read" })
+    yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "read-parent-second", tool: "read", input: { path: "/project/src/module.ts" }, provider: { executed: false } })
+    yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "read-parent-second", structured: { read: { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 7, end: 12 } }, content: [], provider: { executed: false } })
+    yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "bash-parent", name: "bash" })
+    yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "bash-parent", tool: "bash", input: { command: "node --check module.ts | tee check.log", workdir: "src" }, provider: { executed: false } })
+    yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "bash-parent", structured: { exit: 7 }, content: [], provider: { executed: false } })
     yield* parentEvents.publish(SessionEvent.Step.Ended, { ...parentRead, finish: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
-    expect((yield* sessions.context(sessionID)).find(message => message.id === parentRead.assistantMessageID)).toMatchObject({ content: [{ type: "tool", name: "read", state: { status: "completed", structured: { read: { start: 4, end: 8 } } } }] })
+    const parentHistory = (yield* sessions.context(sessionID)).find(message => message.id === parentRead.assistantMessageID)
+    expect(parentHistory?.type === "assistant" ? parentHistory.content.flatMap(part =>
+      part.type === "tool" && part.name === "read" && part.state.status === "completed" ? [part.state.structured.read] : []) : []).toEqual([
+      { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 4, end: 8 },
+      { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 7, end: 12 },
+    ])
+    expect((yield* SessionHistory.evidence(db, sessionID, Number.MAX_SAFE_INTEGER)).commands).toEqual([
+      { command: "node --check module.ts | tee check.log", workdir: "src", exit: 7 },
+    ])
     yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer"), agent => {
       agent.mode = "subagent"
       agent.system = "Reviewer identity"
@@ -1134,7 +1149,7 @@ describe("SessionRunnerLLM", () => {
     expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
     expect(userTexts(actual!).join("\n")).toContain("Inspect the requested module")
     expect(userTexts(actual!).join("\n")).toContain("<parent_context>\n### Parent Session Inspected Files")
-    expect(userTexts(actual!).join("\n")).toContain("| project/src/module.ts | 4-8 |")
+    expect(userTexts(actual!).join("\n")).toContain("| src/module.ts | 4-12 |")
     // 同一task_id恢复同一durable子会话；第一次正文与第二次结果均保留在真实历史中。
     response = fragmentFixture("text", "task-second", ["Continued result"]).completeEvents
     const resumed = yield* invoke(childID)
