@@ -1106,7 +1106,7 @@ export const ShellTool = Tool.define(
 
       // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
       // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
-      // 复用 compaction.ts isSimpleVerificationCommand 的命令白名单限定检测范围，
+      // 使用独立 regex 限定检测范围（与 compaction.ts renderExecutedCommands 无关），
       // 避免对非验证命令误判。error pattern 覆盖 tsc/eslint/python/mypy 等常见工具。
       const isVerificationCmd = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(input.command.trim().toLowerCase()) ||
         /^node\s+--check(\s|$)/.test(input.command.trim().toLowerCase()) ||

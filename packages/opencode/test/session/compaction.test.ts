@@ -1055,10 +1055,11 @@ describe("session.compaction.process", () => {
         expect(text).toContain("### Inspected Files")
         expect(text).toContain("| src/compaction.ts | 1-170 | 200 | 2026-06-09 01:00:00 | current |")
         expect(text).toContain("| src/message-v2.ts | 220-359 | 1547 | 2026-06-09 02:00:00 | current |")
-        expect(text).toContain("### Verified Commands")
+        expect(text).toContain("### Executed Commands")
         expect(text).toContain("| bun typecheck | . | 0 |")
         expect(text).toContain("| 0 |")
-        expect(text).not.toContain("git status")
+        // [local-smark] 移除 isSimpleVerificationCommand 后，git status 不再被过滤
+        expect(text).toContain("git status")
         expect(text).toContain("### Outstanding Todos")
         expect(text).toContain("| completed | high | Read forensic report |")
         expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
@@ -1266,7 +1267,7 @@ describe("session.compaction.process", () => {
         const text = yield* readLatestSummaryText(session.id)
         expect(text).toContain("| src/old.ts | 1-10 | 10 | - | deleted |")
         expect(text).toContain("| node --check file-10.js | src | 1 |")
-        expect(text).toContain("Omitted: 1 verified commands due to evidence budget.")
+        expect(text).toContain("Omitted: 1 executed commands due to evidence budget.")
         expect(text).not.toContain("node --check file-0.js")
       }).pipe(withCompaction({ llm: stub.layer }))
     },
@@ -1327,7 +1328,7 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "renders verification commands without exposing unsafe shell content",
+    "renders executed commands with secret redaction",
     () => {
       const stub = llm()
       stub.push(reply("summary"))
@@ -1371,6 +1372,7 @@ describe("session.compaction.process", () => {
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
         const text = yield* readLatestSummaryText(session.id)
+        // [local-smark] secret redaction 仍然生效（redactCommand 独立于命令过滤）
         expect(text).toContain("OPENAI_API_KEY=[redacted]")
         expect(text).toContain("--token=[redacted]")
         expect(text).toContain("--api-key [redacted]")
@@ -1378,10 +1380,12 @@ describe("session.compaction.process", () => {
         expect(text).not.toContain("sk-secret")
         expect(text).not.toContain("sk-equals-secret")
         expect(text).not.toContain("sk-space-secret")
-        expect(text).not.toContain("piped-sentinel")
-        expect(text).not.toContain("redirected-sentinel")
-        expect(text).not.toContain("subcommand-sentinel")
-        expect(text).not.toContain("dangerous-sentinel")
+        // [local-smark] 移除 isSimpleVerificationCommand 后，含管道/重定向/&& 的命令
+        // 不再被过滤——它们会出现在 Executed Commands 中（redaction 仍生效）
+        expect(text).toContain("piped-sentinel")
+        expect(text).toContain("redirected-sentinel")
+        expect(text).toContain("subcommand-sentinel")
+        expect(text).toContain("dangerous-sentinel")
       }).pipe(withCompaction({ llm: stub.layer }))
     },
     { git: true },

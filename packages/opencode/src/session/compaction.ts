@@ -29,6 +29,7 @@ import { SessionEvent } from "@opencode-ai/core/session-event"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import path from "path"
 import { createHash } from "crypto"
+import { mergeRanges } from "@/util/range"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -324,15 +325,6 @@ function displayPath(input: string, worktree: string) {
   return display.replaceAll("\\", "/") || "."
 }
 
-function mergeRanges(ranges: Array<{ start: number; end: number }>) {
-  const sorted = ranges.toSorted((a, b) => a.start - b.start || a.end - b.end)
-  return sorted.reduce<Array<{ start: number; end: number }>>((result, range) => {
-    const last = result.at(-1)
-    if (!last || range.start > last.end + 1) return [...result, { ...range }]
-    last.end = Math.max(last.end, range.end)
-    return result
-  }, [])
-}
 
 function hash8(input: string) {
   // 这里只需要稳定短指纹来区分被截断的公开文本，不把它当安全哈希使用。
@@ -493,23 +485,6 @@ function stripLeadingEnvAssignments(input: string) {
   }
 }
 
-function isSimpleVerificationCommand(command: string) {
-  const trimmed = command.trim()
-  if (!trimmed) return false
-  // Evidence 只记录已经完成的简单验证命令。带管道、重定向、子命令或链式操作的
-  // shell 片段可能混入副作用，不能被压缩摘要误呈现为单纯 verification 结果。
-  if (/[|<>`;]/.test(trimmed) || trimmed.includes("$(") || trimmed.includes("&&") || trimmed.includes("||")) return false
-  const normalized = stripLeadingEnvAssignments(trimmed).toLowerCase()
-  return (
-    /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(normalized) ||
-    /^node\s+--check(\s|$)/.test(normalized) ||
-    /^python\s+-m\s+py_compile(\s|$)/.test(normalized) ||
-    /^tsc\s+--noemit(\s|$)/.test(normalized) ||
-    /^eslint(\s|$)/.test(normalized) ||
-    /^prettier\s+--check(\s|$)/.test(normalized)
-  )
-}
-
 function commandCwd(input: Record<string, unknown>, directory: string) {
   const legacy = stringField(input, "cwd")
   if (legacy) return legacy
@@ -520,12 +495,17 @@ function commandCwd(input: Record<string, unknown>, directory: string) {
   return path.isAbsolute(workdir) ? workdir : path.join(directory, workdir)
 }
 
-function renderVerifiedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
+// [local-smark] 渲染全部已执行命令（非仅验证命令）。
+// 移除了 isSimpleVerificationCommand 过滤——白名单机制漏掉合法命令（rtk 前缀、&& 链等），
+// 不如展示全部 executed commands，让模型自行判断。
+// secret redaction 由 redactCommand 独立处理，不依赖命令类型过滤。
+function renderExecutedCommands(input: { events: ToolEvent[]; directory: string; worktree: string }) {
   const commands = new Map<string, { command: string; cwd: string; exit: string; sequence: number }>()
   for (const event of input.events) {
     if (event.part.tool !== "bash") continue
     const command = stringField(event.part.state.input, "command")
-    if (!command || !isSimpleVerificationCommand(command)) continue
+    // 空命令跳过；非空命令一律保留（不再按验证白名单过滤）
+    if (!command) continue
     const cwd = commandCwd(event.part.state.input, input.directory)
     const exit = numberField(event.part.state.metadata, "exit")
     commands.set(`${canonicalEvidencePath(cwd, input.worktree)}\u0000${stripLeadingEnvAssignments(command)}`, {
@@ -539,12 +519,12 @@ function renderVerifiedCommands(input: { events: ToolEvent[]; directory: string;
   const rows = all.slice(0, EVIDENCE_COMMAND_LIMIT)
   const omitted = Math.max(0, all.length - rows.length)
   const output = [
-    "### Verified Commands",
+    "### Executed Commands",
     "| command | cwd | exit |",
     "|---|---|---:|",
     ...rows.map((item) => `| ${commandDisplay(item.command)} | ${evidenceCell(displayPath(item.cwd, input.worktree))} | ${item.exit} |`),
   ]
-  if (omitted > 0) output.push(`Omitted: ${omitted} verified commands due to evidence budget.`)
+  if (omitted > 0) output.push(`Omitted: ${omitted} executed commands due to evidence budget.`)
   return output.join("\n")
 }
 
@@ -618,7 +598,7 @@ function renderEvidenceHandoff(input: {
       "",
       yield* renderInspectedFiles({ events, fs: input.fs, worktree: input.worktree }),
       "",
-      renderVerifiedCommands({ events, directory: input.directory, worktree: input.worktree }),
+      renderExecutedCommands({ events, directory: input.directory, worktree: input.worktree }),
       "",
       // [local-smark] Search History section：保留 grep/glob 搜索历史，
       // 避免 compaction 后模型重复搜索已搜过的 pattern
