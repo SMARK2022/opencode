@@ -5,6 +5,9 @@ import path from "path"
 export const VOICE_FILE_PLACEHOLDER = "{file}"
 // 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
 export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
+// voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
+// 比 usage 显示阈值(>100，见 Prompt 组件 showCumulative)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
+export const VOICE_HINT_MIN_PROMPT_WIDTH = 140
 
 export type VoiceTranscriber = {
   command: string
@@ -208,6 +211,12 @@ async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
     // MCP 推导出的默认转写器形如 `node <agent-dir>/chatgpt.js ...`；脚本缺失时也要在录音前失败。
     throw new Error(`Voice transcriber script not found: ${script}`)
   }
+}
+
+// voice 提示是否在 footer 显示：仅当配置了转写器且 prompt 框足够宽时露出。
+// 纯显示判定，不影响 Alt+V 绑定本身——窄终端隐藏提示文案但快捷键仍可转录，避免引导文案挤占输入区。
+export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, promptWidth: number): boolean {
+  return transcriber !== undefined && promptWidth > VOICE_HINT_MIN_PROMPT_WIDTH
 }
 
 export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now()) {

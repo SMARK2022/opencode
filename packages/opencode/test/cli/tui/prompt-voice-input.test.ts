@@ -5,6 +5,7 @@ import {
   createVoiceInputController,
   transcribeVoiceFile,
   voiceInputStatusText,
+  voiceHintVisible,
   type VoiceRecorderHandle,
   type VoiceTranscriber,
 } from "../../../src/cli/cmd/tui/prompt-voice-input"
@@ -84,6 +85,19 @@ describe("prompt voice input", () => {
     )
     expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400)).toBe("Saving voice...")
     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
+  })
+
+  // voice 提示是 footer 的引导文案，窄终端会挤占输入区，必须延迟到 prompt 足够宽才显示。
+  // 阈值为开区间 ">140"：140 本身仍隐藏，与 usage 显示的 ">100" 同语义，避免边界行为漂移。
+  // 未配置转写器时无论多宽都不显示，避免引导用户使用未启用的能力。
+  // 该判定只管显示文案，不影响 Alt+V 绑定——窄终端仍可转录，测试只断言显示决策本身。
+  test("shows the voice hint only when a transcriber is configured and the prompt is wide enough", () => {
+    const transcriber: VoiceTranscriber = { command: "transcriber", args: ["{file}"] }
+    expect(voiceHintVisible(undefined, 999)).toBe(false)
+    expect(voiceHintVisible(transcriber, 100)).toBe(false)
+    expect(voiceHintVisible(transcriber, 140)).toBe(false)
+    expect(voiceHintVisible(transcriber, 141)).toBe(true)
+    expect(voiceHintVisible(transcriber, 200)).toBe(true)
   })
 
   // 这是完整的正常路径：第一次 toggle 开始录音，第二次 toggle 停止并转写。

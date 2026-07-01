@@ -1019,13 +1019,13 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
+      // 流式期间也允许发起/停止/取消录音：录音不写 prompt，转写文本落盘前由 submitInner 的
+      // voiceInputBusy 提交保护拦截，不会与 assistant 输出竞争 prompt；仅保留对话框/autocomplete/disabled 通用约束。
       enabled:
         inputTarget() !== undefined &&
         !props.disabled &&
         !auto()?.visible &&
-        dialog.stack.length === 0 &&
-        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
-        (!running() || voiceInputStatus().type === "recording"),
+        dialog.stack.length === 0,
       commands: [
         {
           name: "prompt.voice.toggle",
@@ -2068,7 +2068,9 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
-                  <Show when={tuiConfig.voice?.transcriber}>
+                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示(比 usage 的 >100 更晚)，窄终端把 chrome 让给更高频信息；
+                      不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
+                  <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
                     <text fg={theme.text}>
                       {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
                     </text>
