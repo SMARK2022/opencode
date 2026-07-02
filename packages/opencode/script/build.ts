@@ -6,6 +6,7 @@ import path from "path"
 import { createRequire } from "module"
 import { fileURLToPath } from "url"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import { resolveInstallTarget } from "./install-target"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -225,8 +226,22 @@ await $`rm -rf dist`
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
-  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
-  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+  // 只安装目标 OS/arch 的原生变体，避免在 macOS 上下载 win32 包触发 bun 的 IntegrityCheckFailed
+  const { os: installOs, cpu: installCpu } = resolveInstallTarget(osFilter, archFilter, singleFlag)
+
+  // bun 不会在完整性校验失败时自动重试（oven-sh/bun#26879）；
+  // 手动重试并清缓存，防止损坏的缓存 tarball 阻断 CI
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await $`bun install --os="${installOs}" --cpu="${installCpu}" @opentui/core@${pkg.dependencies["@opentui/core"]}`
+      await $`bun install --os="${installOs}" --cpu="${installCpu}" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+      break
+    } catch (e) {
+      if (attempt === 3) throw e
+      console.error(`bun install failed (attempt ${attempt}/3), clearing cache and retrying...`, e)
+      await $`bun pm cache rm`.quiet().nothrow()
+    }
+  }
 }
 for (const item of targets) {
   const name = [
