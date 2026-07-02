@@ -817,4 +817,72 @@ describe("permission precheck bash classifier", () => {
     //（既知残隙，非本次新增回归）。guard 防止有人误改启发式越权升 dangerous
     expect(bash("somecmd mkfs /dev/sda").level).not.toBe("dangerous")
   })
+
+  // ============================================================
+  // 解析器 fail-open 修复：splitCommands 遇未建模字符（>/$/glob/&/换行）
+  // 原本 return undefined 整条降级 general，使同条命令里的 cautious 命令
+  //（scp 等，仅存在于 token 层）被绕过。修复后：(1) fd-merge 重定向
+  //（2>&1 等，不写文件）跳过不 bail，token 层可达；(2) bail 字符仅让当前段
+  // opaque，不毒化兄弟干净段。文件重定向/$/glob/单&/换行 仍 general（既有边界）。
+  // ============================================================
+
+  test("marks scp cautious through fd-merge redirect because fd merge does not write files", () => {
+    // 2>&1 仅合并 stderr→stdout，不写文件；scp 仍应进 reviewer。当前实现下为 general（缺口）
+    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&1")).toMatchObject({ level: "cautious" })
+    // 1>&2 合并 stdout→stderr，同样良性
+    expect(bash("scp btsun@a100:/a/b H:/c/d 1>&2")).toMatchObject({ level: "cautious" })
+    // 2>&- 关闭 fd，不写文件
+    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&-")).toMatchObject({ level: "cautious" })
+    // 复合：fd-merge 段 + 后续普通段，scp 仍被切出
+    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&1; echo done")).toMatchObject({ level: "cautious" })
+    // 管道 + fd-merge：| 切分 + 2>&1 跳过，scp 段 cautious、grep 段 safe → max cautious
+    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&1 | grep x")).toMatchObject({ level: "cautious" })
+    // >&2 无前导 fd 数字（shell 等价 1>&2），同样良性 fd-merge → scp 仍 cautious
+    expect(bash("scp btsun@a100:/a/b H:/c/d >&2")).toMatchObject({ level: "cautious" })
+    // 只读命令 + fd-merge：git status 本身 safe，2>&1 不改 FS 效果 → 仍 safe（守卫：fd-merge 不降级只读命令）
+    expect(bash("git status 2>&1").level).toBe("safe")
+  })
+
+  test("does not misclassify bail-remnant fragments as commands", () => {
+    // `$` 切碎后的残余 "mkfs" 是变量名残骸，非真实命令——不能误判 dangerous 误拒。
+    // mkfs 仅存在于 token 层（SYSTEM_DESTRUCTIVE_COMMANDS），raw 层不捕，故走
+    // splitCommands 残余路径；与 :480 剥头启发式一致：token 层独有的 dangerous
+    // 不在碎片路径越权升级。
+    expect(bash("echo $mkfs")).toMatchObject({ level: "general" })
+    // 残余 "rm" 同理是变量名片段，不能误判 cautious（真实 rm 删除由 raw 层捕获）
+    expect(bash("echo $rm file")).toMatchObject({ level: "general" })
+    // setcap 也仅 token 层 dangerous，残余片段不越权升 dangerous
+    expect(bash("echo $setcap").level).not.toBe("dangerous")
+  })
+
+  test("keeps file redirection general because it changes filesystem effects", () => {
+    // >file 写文件，改 FS 效果——必须保持 general（回归守卫，:227 不退化）
+    expect(bash("echo hello > out.txt")).toMatchObject({ level: "general" })
+    // >>file 追加写文件，同样 general
+    expect(bash("echo hello >> out.txt")).toMatchObject({ level: "general" })
+    // 2>file 把 stderr 写入文件，仍是文件重定向 → general（非 fd-merge）
+    expect(bash("scp btsun@a100:/a/b H:/c/d 2>file")).toMatchObject({ level: "general" })
+  })
+
+  test("does not let opaque segment poison a cautious sibling", () => {
+    // 后段 $HOME 的 $ 让其段 opaque，但前段 scp 经 ; 切分为干净段仍 cautious（缺口：当前 general）
+    expect(bash("scp btsun@a100:/a/b H:/c/d; echo $HOME")).toMatchObject({ level: "cautious" })
+    // 后段 glob *.ts 让其段 opaque，前段 scp 仍 cautious
+    expect(bash("scp btsun@a100:/a/b H:/c/d; ls *.ts")).toMatchObject({ level: "cautious" })
+    // scp 在后段，前段 git status 干净 safe，max(safe, cautious)=cautious
+    expect(bash("git status; scp btsun@a100:/a/b H:/c/d")).toMatchObject({ level: "cautious" })
+    // 真实用例：fd-merge + PowerShell & 调用 + Get-Content，scp 段仍被切出（缺口：当前 general）
+    expect(bash('scp btsun@a100:/a/b H:/c/d 2>&1; & "D:/z.exe" e f; Get-Content g')).toMatchObject({
+      level: "cautious",
+    })
+  })
+
+  test("keeps unsupported separators and dynamic expansion general", () => {
+    // 单 & 仍 opaque → general（回归守卫，:69 不退化）
+    expect(bash("git status & rg TODO src")).toMatchObject({ level: "general" })
+    // 换行仍 opaque → general（回归守卫，:70 不退化；不能 split 否则变 safe）
+    expect(bash("git status\nrg TODO src")).toMatchObject({ level: "general" })
+    // $ 展开整段 opaque → general（回归守卫，:205 不退化）
+    expect(bash("echo $HOME")).toMatchObject({ level: "general" })
+  })
 })
