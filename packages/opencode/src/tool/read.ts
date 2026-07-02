@@ -17,6 +17,7 @@ import { readOutline, readOutlineCached, type Outline } from "./read-outline"
 import { Reference } from "@/reference/reference"
 import { Image } from "@/image/image"
 import { PartID } from "@/session/schema"
+import { mergeRanges } from "@/util/range"
 
 const DEFAULT_READ_LIMIT = 200
 const MAX_BYTES = 16 * 1024
@@ -26,9 +27,10 @@ const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const OVERLAP_MIN_LINES = 20
 const OVERLAP_MIN_RATIO = 0.3
-// [local-smark] 高重叠 suppress 阈值：当已可见读取与当前请求的重叠率 >= 80% 时，
-// 直接返回 stub（而非仅 note），避免大量部分重叠的重复读取。
-// 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
+// [local-smark] 高重叠 suppress 阈值：80% 时 suppress。
+// 当已可见读取与当前请求的重叠率 >= 80% 时，返回 stub 引导模型读取新内容。
+// 但如果实际内容比 stub 文案还短（< 300 字符），直接返回内容 + 短 notice，
+// 不 suppress（stub 文案约 300 字符，短读取可能只有几十字符）。
 const OVERLAP_SUPPRESS_RATIO = 0.8
 
 // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
@@ -254,6 +256,35 @@ function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
   return `${best.start}-${best.end}`
 }
 
+// [local-smark] 计算请求范围内未被任何同版本已可见读取覆盖的行区间。
+// 复用 mergeRanges（src/util/range.ts）合并已覆盖区间后再做减法。
+// 正确性红线：必须做同版本 filter（size+modifiedMs）——collectVisibleReads
+// 不做版本过滤，findOverlapNote/findReadStub 各自过滤。此处也必须过滤，
+// 否则会减算旧版本区间，错误地告诉模型"这些行没读过"。
+function computeUnreadRanges(
+  visibleReads: ReadMetadata[],
+  current: ReadMetadata,
+): Array<{ start: number; end: number }> {
+  // 收集同版本 visible reads 的区间
+  const covered = visibleReads
+    .filter((r) => r.size === current.size && r.modifiedMs === current.modifiedMs)
+    .map((r) => ({ start: r.start, end: r.end }))
+  if (covered.length === 0) return [{ start: current.start, end: current.end }]
+  // 合并已覆盖区间，再做减法得到未覆盖部分
+  const merged = mergeRanges(covered)
+  const unread: Array<{ start: number; end: number }> = []
+  let pos = current.start
+  for (const m of merged) {
+    // 当前位置到已覆盖区间起点之间有未覆盖的行
+    if (m.start > pos) unread.push({ start: pos, end: Math.min(m.start - 1, current.end) })
+    pos = Math.max(pos, m.end + 1)
+    if (pos > current.end) break
+  }
+  // 已覆盖区间结束后仍有未覆盖的行
+  if (pos <= current.end) unread.push({ start: pos, end: current.end })
+  return unread
+}
+
 function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
   return file.raw
     .map((line, i) => {
@@ -291,7 +322,8 @@ function renderReadOutput(input: {
     output.push("</outline>")
   }
 
-  if (input.overlap) output.push(`<note type="overlap" ranges="${input.overlap}" />`)
+  // [local-smark] overlap note 包含已可见范围 + 引导避免不必要的重复读取
+  if (input.overlap) output.push(`<note type="overlap" ranges="${input.overlap}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`)
   output.push("<content>", input.content, "</content>")
   if (input.more) output.push(`<more offset="${input.more.offset}" reason="${input.more.reason}" />`)
   return output.join("\n")
@@ -707,43 +739,54 @@ export const ReadTool = Tool.define(
       }
 
       // [local-smark] 高重叠 suppress：当已可见读取与当前请求的重叠率 >= 80% 时，
-      // 直接返回 stub 而非仅 note。这减少了大量部分重叠的重复读取（如偏移微调的重复读）。
+      // 返回 stub 而非仅 note。引导式文案告诉模型哪些行是新的、如何精确读取，
+      // 而非绝对禁止 "do NOT re-read"。内容 < 300 字符时不 suppress（见下方检查）。
       // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
-      // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
       const overlapRange = findOverlapNote(visibleReads, current)
       if (overlapRange) {
-        // 计算实际重叠比例
         const [overlapStart, overlapEnd] = overlapRange.split("-").map(Number)
         const overlapLines = overlapEnd - overlapStart + 1
         const requestedLines = Math.max(1, end - start + 1)
         if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) {
-          const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
-          const visibleEnd = overlapEnd
-          const nextOffset = visibleEnd + 1
-          const reachedEof = visibleEnd >= file.count
-          const offsetExit = reachedEof
-            ? "No unread lines remain (end of file reached); use grep to locate symbols."
-            : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
-          const message = `Lines ${start}-${end} have ${Math.round((overlapLines / requestedLines) * 100)}% overlap with visible read ${overlapRange} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
-          const output = [
-            `<path>${escapeXmlText(filepath)}</path>`,
-            `<type>file</type>`,
-            `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
-            `<range start="${start}" end="${end}" total="${file.count}" returned="0" />`,
-            `<stub status="stub_high_overlap_visible" covered_by="${overlapRange}">`,
-            message,
-            "</stub>",
-          ].join("\n")
-          return {
-            title,
-            output,
-            metadata: readToolMetadata({
-              preview: output,
-              truncated: false,
-              loaded: [] as string[],
-              read,
-            }),
+          // [local-smark] 如果实际内容比 stub 文案还短，直接返回内容 + 短 notice，
+          // 不 suppress——stub 文案约 300 字符，短读取（如 5 行）内容可能只有几十字符。
+          // 此时 suppress 反而浪费上下文预算，不如直接返回内容。
+          const contentLength = file.raw.join("\n").length
+          if (contentLength >= 300) {
+            const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
+            // [local-smark] 引导式文案：告诉模型已可见的范围、未读的新行、
+            // 不要用命令行工具重读、使用上下文中的内容或读取不同范围
+            const unread = computeUnreadRanges(visibleReads, current)
+            const message = unread.length === 0
+              ? `Lines ${start}-${end} fully covered by visible reads (same version, file unchanged); no new content to read. ` +
+                `Lines ${overlapRange} are already in context and current — avoid re-reading this range unnecessarily. ` +
+                `Use the content from your previous read.`
+              : `Lines ${overlapRange} already in context (latest version, file unchanged). ` +
+                `Avoid re-reading this range unnecessarily — use the content from your previous read. ` +
+                `New unread lines: ${unread.map((r) => `${r.start}-${r.end}`).join(", ")}. ` +
+                `Read offset=${unread[0]!.start} limit=${unread[0]!.end - unread[0]!.start + 1} for just the new content.`
+            const output = [
+              `<path>${escapeXmlText(filepath)}</path>`,
+              `<type>file</type>`,
+              `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
+              `<range start="${start}" end="${end}" total="${file.count}" returned="0" />`,
+              `<stub status="stub_high_overlap_visible" covered_by="${overlapRange}">`,
+              message,
+              "</stub>",
+            ].join("\n")
+            return {
+              title,
+              output,
+              metadata: readToolMetadata({
+                preview: output,
+                truncated: false,
+                loaded: [] as string[],
+                read,
+              }),
+            }
           }
+          // [local-smark] contentLength < 300：不 suppress，fall through 到正常 read
+          // 正常 read 会带 overlap note（见 renderReadOutput 中的 overlap 渲染）
         }
       }
 

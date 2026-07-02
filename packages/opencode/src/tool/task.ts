@@ -44,8 +44,8 @@ export function buildParentInspectedFilesSummary(messages: MessageV2.WithParts[]
       const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
       const filePath = typeof m.path === "string" ? m.path : ""
       if (!filePath) continue
-      // stub: true 表示 read 被完全抑制（如 high overlap suppress），跳过；
-      // stub: "high_overlap_visible" 保留——它记录了文件已被读过的事实
+      // [local-smark] stub: true 表示 read 被抑制（same range / covered range / high overlap），
+      // 这些 read 没有实际内容输出，不纳入 parent context 的文件列表。
       if (m.stub === true) continue
       const start = typeof m.start === "number" ? m.start : 0
       const end = typeof m.end === "number" ? m.end : 0

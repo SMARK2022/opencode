@@ -7,7 +7,8 @@ import * as path from "path"
 import { Effect, Schema, Semaphore } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
-import { createTwoFilesPatch, diffLines } from "diff"
+import { createTwoFilesPatch, diffLines, diffChars } from "diff"
+import type { Change } from "diff"
 import DESCRIPTION from "./edit.txt"
 import { File } from "../file"
 import { FileWatcher } from "../file/watcher"
@@ -741,10 +742,117 @@ function findClosestMatch(content: string, oldString: string): { line: number; e
     }
   }
   if (bestLine < 0 || bestScore < 0.3) return undefined
-  const start = Math.max(0, bestLine - 1)
-  const end = Math.min(contentLines.length, bestLine + 4)
-  const excerpt = contentLines.slice(start, end).join("\n").slice(0, 500)
-  return { line: start + 1, excerpt }
+  // [local-smark] 窗口按 oldString 行数缩放：确保 fileExcerpt 覆盖 oldString 对应区域
+  const oldLineCount = oldLines.length
+  const fileStart = Math.max(0, bestLine - 1)
+  const fileEnd = Math.min(contentLines.length, bestLine + oldLineCount + 2)
+  const fileExcerpt = contentLines.slice(fileStart, fileEnd).join("\n")
+  // [local-smark] 优先用字符级 diff（信息密度高，只显示差异部分）；
+  // 回退时用 head+tail excerpt（前 200 + 后 200 字符），确保末尾内容可见
+  const diffExcerpt = formatClosestMatchDiff(oldString, fileExcerpt, fileStart + 1, 500)
+  const excerpt = diffExcerpt || (() => {
+    const full = fileExcerpt
+    return full.length <= 500 ? full : full.slice(0, 200) + `\n...[${full.length - 400} chars omitted]...\n` + full.slice(-200)
+  })()
+  return { line: fileStart + 1, excerpt }
+}
+
+// [local-smark] 字符级 diff：diffLines 定位差异行，diffChars 显示字符级差异。
+// 解决长行场景下 .slice(0,500) 截断导致 ]; vs }; 不可见的问题。
+// diffLines 的 change.value 可含多行，用 oneChangePerToken 确保每个 change 一行。
+function formatClosestMatchDiff(
+  oldString: string,
+  fileExcerpt: string,
+  fileStartLine: number,
+  maxChars: number,
+): string {
+  // pendingRemoved 必须在函数内声明——跨调用持久化会导致配对错误
+  const pendingRemoved: string[] = []
+  const changes = diffLines(oldString, fileExcerpt, { oneChangePerToken: true })
+  // 先统计差异行比例，决定是否回退
+  let removedLines = 0
+  let addedLines = 0
+  let unchangedLines = 0
+  for (const c of changes) {
+    const lineCount = c.value.split("\n").filter((l) => l.length > 0).length
+    if (c.removed) removedLines += lineCount
+    else if (c.added) addedLines += lineCount
+    else unchangedLines += lineCount
+  }
+  // [local-smark] 差异行比例：用 max(removed, added) 代表不匹配的行位置数，
+  // 而非 removed+added（一个不匹配产生 1 removed + 1 added = 2，会膨胀比例）。
+  // 总行数用 max(old, file) 行数，避免短 oldString 对长 fileExcerpt 时比例失真。
+  const diffLineCount = Math.max(removedLines, addedLines)
+  const totalLineCount = Math.max(removedLines, addedLines) + unchangedLines
+  // 差异行 > 60% → 结构严重错位，回退 head+tail excerpt
+  if (totalLineCount > 0 && diffLineCount / totalLineCount > 0.6) return ""
+
+  const parts: string[] = []
+  let newIdx = 0
+  let totalChars = 0
+  let omitted = 0
+  for (const change of changes) {
+    const lines = change.value.split("\n").filter((l) => l.length > 0)
+    if (change.added) {
+      // 文件中的行——与上一个 removed 行做 diffChars
+      for (const line of lines) {
+        const oldLine = pendingRemoved.shift()
+        if (oldLine !== undefined) {
+          const formatted = formatCharDiffLine(fileStartLine + newIdx, oldLine, line)
+          if (formatted && totalChars + formatted.length < maxChars) {
+            parts.push(formatted)
+            totalChars += formatted.length + 1
+          } else if (formatted) {
+            omitted++
+          }
+        }
+        newIdx++
+      }
+    } else if (change.removed) {
+      // oldString 中的行——暂存，等待下一个 added 配对
+      for (const line of lines) pendingRemoved.push(line)
+    } else {
+      // 未变化行——跳过（不占用预算），只推进行号
+      newIdx += lines.length
+    }
+  }
+  if (parts.length === 0) return ""
+  // [local-smark] 截断标记：预算耗尽时告知模型还有更多差异
+  if (omitted > 0) parts.push(`...(+${omitted} more diff lines)`)
+  return parts.join("\n")
+}
+
+// [local-smark] 格式化单行字符级 diff：只输出变化点前后 30 字符的 context。
+// 例：行末 }; vs ]; → line 41: "    };" → "    ];"
+// 对 900 字符长行：只显示末尾 30 字符 + 差异，不显示公共前缀。
+function formatCharDiffLine(lineNum: number, oldLine: string, newLine: string): string | undefined {
+  const charDiff: Change[] = diffChars(oldLine, newLine)
+  // 找到第一个变化位置
+  let prefixLen = 0
+  for (const c of charDiff) {
+    if (c.added || c.removed) break
+    prefixLen += c.value.length
+  }
+  // 无差异
+  if (prefixLen >= oldLine.length && prefixLen >= newLine.length) return undefined
+  // 提取变化部分
+  let oldPart = ""
+  let newPart = ""
+  let suffix = ""
+  let inChange = false
+  for (const c of charDiff) {
+    if (c.removed) { oldPart += c.value; inChange = true }
+    else if (c.added) { newPart += c.value; inChange = true }
+    else if (inChange) { suffix = c.value.slice(0, 20); break }
+  }
+  if (!oldPart && !newPart) return undefined
+  // context：变化点前 30 字符 + 变化 + 变化后 20 字符
+  const contextChars = 30
+  const ctxStart = Math.max(0, prefixLen - contextChars)
+  const ctx = oldLine.slice(ctxStart, prefixLen)
+  // 截断过长的 context 和 suffix，控制总输出长度
+  const truncate = (s: string, max: number) => s.length <= max ? s : s.slice(0, max) + "..."
+  return `line ${lineNum}: "${truncate(ctx + oldPart + suffix, 80)}" → "${truncate(ctx + newPart + suffix, 80)}"`
 }
 
 // 计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估

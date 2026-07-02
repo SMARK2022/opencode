@@ -868,7 +868,8 @@ describe("tool.read visible context", () => {
       const first = yield* exec(dir, firstInput)
       const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
 
-      expect(second.output).toContain('<note type="overlap" ranges="150-199" />')
+        expect(second.output).toContain('<note type="overlap" ranges="150-199"')
+        expect(second.output).toContain("avoid re-reading this range unnecessarily")
       expect(second.output).toContain("<content>")
       expect(second.output).toContain("150: line150")
       expect(second.output).toContain("249: line249")
@@ -891,6 +892,125 @@ describe("tool.read visible context", () => {
       expect(third.output).toContain("<content>")
       expect(third.output).toContain("1: one")
       expect(third.output).not.toContain("<stub")
+    }),
+  )
+
+  // [local-smark] 80% overlap suppress 测试：阈值设为 80%，
+  // 80%+ 重叠且内容足够长时 suppress（返回 stub + 引导式文案）。
+  it.live("suppresses at 80% overlap with guided message pointing to unread lines", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "suppress80.txt")
+      // 200 行文件，请求 1-200，已读 1-160（80% 重叠）
+      yield* put(filePath, Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n"))
+      const firstInput = { filePath, offset: 1, limit: 160 }
+      const secondInput = { filePath, offset: 1, limit: 200 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      // suppress 触发：返回 stub 而非内容（内容 > 300 字符）
+      expect(second.output).toContain('<stub status="stub_high_overlap_visible"')
+      // 引导式文案：告诉模型哪些行是新的、如何精确读取
+      expect(second.output).toContain("New unread lines: 161-200")
+      expect(second.output).toContain("Read offset=161 limit=40")
+      // 告诉模型已可见的范围
+      expect(second.output).toContain("1-160")
+      // 引导避免不必要的重复读取
+      expect(second.output).toContain("re-reading this range unnecessarily")
+      // 不再使用 "do NOT re-read" 绝对禁止语气
+      expect(second.output).not.toContain("do NOT re-read")
+    }),
+  )
+
+  // [local-smark] 79% overlap 不 suppress：阈值以下仍返回完整内容 + note
+  it.live("does not suppress at 79% overlap, returns content with note", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "nosuppress79.txt")
+      // 200 行文件，请求 1-200，已读 1-158（79% 重叠 < 80%）
+      yield* put(filePath, Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n"))
+      const firstInput = { filePath, offset: 1, limit: 158 }
+      const secondInput = { filePath, offset: 1, limit: 200 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      // 不 suppress：返回 content 而非 stub
+      expect(second.output).toContain("<content>")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  // [local-smark] 短读取不 suppress：80% 重叠但内容 < 300 字符，
+  // 直接返回内容（stub 文案比内容还长时 suppress 无意义）。
+  // 注意：findOverlapNote 需 >= 20 行重叠才触发，5 行文件不会进入 suppress 分支。
+  it.live("does not suppress short read even at 80% overlap, returns content", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "shortread.txt")
+      // 5 行文件，请求 1-5，已读 1-4（80% 重叠，但内容仅 ~35 字符 < 300）
+      yield* put(filePath, "one\ntwo\nthree\nfour\nfive")
+      const firstInput = { filePath, offset: 1, limit: 4 }
+      const secondInput = { filePath, offset: 1, limit: 5 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      // 不 suppress：返回 content 而非 stub
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain("1: one")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  // [local-smark] 中等长度短读取不 suppress：25 行重叠（>= 20 行门控），
+  // 但内容 < 300 字符 → suppress 分支判断 contentLength < 300 → 不 suppress
+  it.live("does not suppress medium-short read under 300 chars even at 80% overlap", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "mediumshort.txt")
+      // 25 行文件，每行 ~5 字符，请求 1-25，已读 1-20（80% 重叠，>= 20 行门控通过）
+      // 内容约 125 字符 < 300 → 不 suppress
+      yield* put(filePath, Array.from({ length: 25 }, (_, i) => `l${i + 1}`).join("\n"))
+      const firstInput = { filePath, offset: 1, limit: 20 }
+      const secondInput = { filePath, offset: 1, limit: 25 }
+
+      const first = yield* exec(dir, firstInput)
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      // 不 suppress：返回 content + overlap note（内容 < 300 字符）
+      expect(second.output).toContain("<content>")
+      expect(second.output).not.toContain("<stub")
+      // 带 overlap notice（findOverlapNote 触发，>= 20 行）
+      expect(second.output).toContain('<note type="overlap"')
+      expect(second.output).toContain("avoid re-reading this range unnecessarily")
+    }),
+  )
+
+  // [local-smark] 多区间联合全覆盖：已读 1-160 + 161-200，请求 1-200
+  // computeUnreadRanges 应返回空，文案说 "no new content"
+  it.live("guided message says no new content when multiple reads fully cover request", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "fullcover.txt")
+      yield* put(filePath, Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n"))
+      const input1 = { filePath, offset: 1, limit: 160 }
+      const input2 = { filePath, offset: 161, limit: 40 }
+      const inputAll = { filePath, offset: 1, limit: 200 }
+
+      const first = yield* exec(dir, input1)
+      const second = yield* exec(dir, input2)
+      // 两个 read 的 messages 都传入，模拟上下文中已有两个区间
+      const third = yield* exec(dir, inputAll, {
+        ...ctx,
+        messages: [readMessage(input1, first), readMessage(input2, second)],
+      })
+
+      // 80% overlap（1-160 是 best 单区间 = 80%）→ suppress
+      expect(third.output).toContain('<stub status="stub_high_overlap_visible"')
+      // 多区间联合全覆盖 → "no new content"
+      expect(third.output).toContain("no new content")
     }),
   )
 })

@@ -255,6 +255,49 @@ describe("tool.edit", () => {
       }),
     )
 
+    // [local-smark] 字符级 diff 测试：2 行 oldString，第 1 行精确匹配，
+    // 第 2 行单字符不同（0 vs 1）。BlockAnchorReplacer 需 ≥3 行才触发，故 edit 失败。
+    // 差异比例 50% < 60% → 走 diff 路径，error 应显示字符级差异。
+    it.instance("closest match shows character-level diff for single-char mismatch", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "charmatch.txt")
+        // 文件用 x = 0，模型用 x = 1 匹配
+        yield* put(filepath, "return value;\nprivate int x = 0;")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "return value;\nprivate int x = 1;",
+          newString: "replacement",
+        })
+
+        expect(error).toBeInstanceOf(Error)
+        // diff 格式应同时显示 old 和 new 的差异部分
+        expect(error.message).toContain("x = 0")
+        expect(error.message).toContain("x = 1")
+      }),
+    )
+
+    // [local-smark] 回退策略测试：oldString 与文件结构严重错位（>60% 行不同）
+    // → 回退 head+tail excerpt 而非 diff（避免噪声）
+    it.instance("falls back to excerpt when oldString structure mismatches file", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "mismatch.txt")
+        yield* put(filepath, "public class Foo {\n    private int x;\n    public void bar() {\n        x = 42;\n    }\n}")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "def hello():\n    print('hello')\n    return True",
+          newString: "replacement",
+        })
+
+        expect(error).toBeInstanceOf(Error)
+        // 回退路径：显示文件实际内容（head+tail excerpt），不显示 diff 标记
+        expect(error.message).toContain("public class Foo")
+      }),
+    )
+
     // [local-smark] 当文件在当前 session 中从未被 read 或 write 过时，
     // edit 应拒绝执行并提示先 read，避免 oldString 基于过期/假设内容匹配失败。
     // 显式使用 ctx（messages 为空）模拟"从未读过"的场景。
