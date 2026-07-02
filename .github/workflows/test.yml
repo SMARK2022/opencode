@@ -1,4 +1,6 @@
 name: test
+# 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
+run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
   push:
