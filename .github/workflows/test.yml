@@ -1,4 +1,6 @@
 name: test
+# 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
+run-name: ${{ github.event.head_commit.message || github.workflow }}
 # #263：触发面收敛到 dev-smark——fork 分支的自有 CI，不随上游 dev 分支空转
 
 on:
