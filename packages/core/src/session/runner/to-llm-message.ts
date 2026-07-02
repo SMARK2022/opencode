@@ -194,11 +194,11 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
       // 与真实 leaf 共用呈现，generic 限幅后的短正文不能预热覆盖证明。
       if (item.state.content.length > 0 && !item.state.content.some((part) =>
           part.type === "text" && part.text === body)) return item
-      const stub = ReadPresentation.findReadStub(reads, page.read)
+      const stub = ReadPresentation.findReadStub(reads, page.read, page.content.length)
       const overlap = ReadPresentation.findOverlapNote(reads, page.read)
       if (!stub) reads.push(page.read)
       if (!stub && !overlap) return item
-      const text = stub ? ReadPresentation.renderReadStub({ ...page.read, ...stub }) : ReadPresentation.renderNativeRead(page, overlap)
+      const text = stub ? ReadPresentation.renderReadStub({ ...page.read, ...stub, unread: ReadPresentation.computeUnreadRanges(reads, page.read) }) : ReadPresentation.renderNativeRead(page, overlap)
       // 只替换当前模型正文；新规则和安全提醒保留，持久消息完全不改。
       const replacement = { type: "text" as const, text }
       return { ...item, state: { ...item.state,

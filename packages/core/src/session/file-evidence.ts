@@ -149,7 +149,7 @@ export function parentSummary(receipts: readonly unknown[], worktree: string) {
   const files = new Map<string, { path: string; ranges: { start: number; end: number }[] }>()
   for (const value of receipts) {
     const parsed = parse(value)
-    // 仅完全抑制的true不构成阅读凭证；旧字符串stub仍记录已读事实。
+    // same/covered/high overlap的stub:true都未交付正文；旧字符串标记仍保留已读事实。
     if (Option.isNone(parsed) || parsed.value.stub === true) continue
     const read = parsed.value
     const key = read.canonicalPath || read.path

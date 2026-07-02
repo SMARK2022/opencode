@@ -357,6 +357,14 @@ describe("EditTool", () => {
                   value:
                     "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
                 })
+                // 真实Native Edit失败必须显示900字符行末差异，不只证明孤立formatter可用。
+                const prefix = "p".repeat(900)
+                yield* Effect.promise(() => fs.writeFile(target, `return value;\n${prefix} private int x = 0;`))
+                const mismatch = yield* executeTool(registry, call({ path: "matches.txt", oldString: `return value;\n${prefix} private int x = 1;`, newString: "replacement" }))
+                expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("x = 0") })
+                expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("x = 1") })
+                expect(JSON.stringify(mismatch)).not.toContain("p".repeat(500))
+                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(`return value;\n${prefix} private int x = 0;`)
                 expect(writes).toEqual([])
               }),
               toolHistory("matches.txt"),
