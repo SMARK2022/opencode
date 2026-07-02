@@ -138,7 +138,7 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
 // Schema output is identical (`type: "number"`), so the LLM view is
 // unchanged; purely CLI-facing uses must now send numbers rather than strings.
 
-import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub } from "@opencode-ai/core/tool/read-presentation"
+import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub, computeUnreadRanges } from "@opencode-ai/core/tool/read-presentation"
 
 // V1 保留自己的消息适配，范围证明和模型呈现与原生读取共用。
 function readToolMetadata(input: Metadata) {
@@ -625,7 +625,7 @@ const current: ReadRangeMeta = {
       // #142：加载可见 reads
 const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath)
       // #142：stub 判定
-const stub = findReadStub(visibleReads, current)
+const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
       if (stub) {
         // #142：可见范围 stub，避免重复灌入相同内容
         const read = {
@@ -645,6 +645,7 @@ const stub = findReadStub(visibleReads, current)
           totalExact: file.totalExact,
           status: stub.status,
           coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
+          unread: computeUnreadRanges(visibleReads, current),
         })
         // #142：stub 只省略已见正文；新解析的目录规则必须实际交付后才能记入 loaded。
         if (loaded.length > 0) {

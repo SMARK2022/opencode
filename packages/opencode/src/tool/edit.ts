@@ -8,6 +8,7 @@ import { Effect, Schema, Semaphore } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
 import { createTwoFilesPatch, diffLines } from "diff"
+import { formatClosestMatchExcerpt } from "@opencode-ai/core/tool/edit-excerpt"
 import DESCRIPTION from "./edit.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
@@ -752,10 +753,12 @@ function findClosestMatch(content: string, oldString: string): { line: number; e
     }
   }
   if (bestLine < 0 || bestScore < 0.3) return undefined
-  const start = Math.max(0, bestLine - 1)
-  const end = Math.min(contentLines.length, bestLine + 4)
-  const excerpt = contentLines.slice(start, end).join("\n").slice(0, 500)
-  return { line: start + 1, excerpt }
+  // 按完整oldString缩放候选窗口，公共长前缀不应遮住行末字符差异。
+  const fileStart = Math.max(0, bestLine - 1)
+  const fileEnd = Math.min(contentLines.length, bestLine + oldLines.length + 2)
+  const fileExcerpt = contentLines.slice(fileStart, fileEnd).join("\n")
+  const excerpt = formatClosestMatchExcerpt(oldString, fileExcerpt, fileStart + 1)
+  return { line: fileStart + 1, excerpt }
 }
 
 // 计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估

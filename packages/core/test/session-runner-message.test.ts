@@ -90,10 +90,26 @@ describe("toLLMMessages", () => {
     const high = { ...overlap, offset: 121, next: 221, read: { ...overlap.read, start: 121, end: 220 } }
     const highResult = JSON.stringify(results(read("high-first", defaultPage), read("high-next", high, { path: "note.txt", offset: 121, limit: 100 }))[1])
     expect(highResult).toContain("stub_high_overlap_visible")
-    expect(highResult).toContain("Lines 121-220 have 80% overlap with visible read 121-200 (latest version, file unchanged); do NOT re-read.")
-    expect(highResult).toContain("offset=201 for unread lines")
+    expect(highResult).toContain("Lines 121-200 already in context (latest version, file unchanged).")
+    expect(highResult).toContain("Read offset=201 limit=20 for just the new content.")
     const below = { ...high, offset: 122, next: 222, read: { ...high.read, start: 122, end: 221 } }
     expect(JSON.stringify(results(read("below-first", defaultPage), read("below-next", below, { path: "note.txt", offset: 122, limit: 100 }))[1])).not.toContain("stub_high_overlap_visible")
+    // 25行/20行交集真正跨过重叠门，短正文仍交付内容而非更长的stub。
+    const shortSeen = { ...defaultPage, content: "x\n".repeat(19) + "x", read: { ...defaultPage.read, end: 20, total: 25, returned: 20 } }
+    const shortPage = { ...shortSeen, content: "x\n".repeat(24) + "x", read: { ...shortSeen.read, end: 25, returned: 25 } }
+    const shortResult = JSON.stringify(results(read("short-first", shortSeen), read("short-next", shortPage))[1])
+    expect(shortResult).toContain("<content>")
+    expect(shortResult).toContain("avoid re-reading this range unnecessarily")
+    expect(shortResult).not.toContain("<stub")
+    // 联合覆盖只决定未读指引；旧版本的尾页不能减去当前版本未读内容。
+    const seen = { ...defaultPage, content: "line\n".repeat(159) + "line", read: { ...defaultPage.read, end: 160, returned: 160 } }
+    const tailSeen = { ...defaultPage, content: "line\n".repeat(39) + "line", read: { ...defaultPage.read, start: 161, end: 200, returned: 40 } }
+    const fullyCovered = JSON.stringify(results(read("seen", seen), read("seen-tail", tailSeen), read("full", defaultPage))[2])
+    expect(fullyCovered).toContain("no new content to read")
+    const changedTail = { ...tailSeen, read: { ...tailSeen.read, modifiedMs: 2 } }
+    const stillUnread = JSON.stringify(results(read("seen2", seen), read("changed-tail", changedTail), read("full2", defaultPage))[2])
+    expect(stillUnread).toContain("New unread lines: 161-200")
+    expect(stillUnread).toContain("Read offset=161 limit=40")
     // 被省略页的未见尾部不能反过来作为下一次去重凭证。
     const tail = { ...high, offset: 201, content: "line\n".repeat(19) + "line", read: { ...high.read, start: 201, end: 220, returned: 20 } }
     expect(results(read("tail-first", defaultPage), read("tail-high", high), read("tail-unseen", tail))[2]).toMatchObject({ type: "json" })

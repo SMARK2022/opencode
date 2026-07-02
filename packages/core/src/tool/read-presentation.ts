@@ -2,6 +2,7 @@ export * as ReadPresentation from "./read-presentation"
 
 import { Schema } from "effect"
 import { FSUtil } from "../fs-util"
+import { mergeRanges } from "../util/range"
 export const OutlineOutput = Schema.Struct({ items: Schema.Array(Schema.String), truncated: Schema.Boolean })
 
 const MAX_LINE_LENGTH = 2000
@@ -47,13 +48,15 @@ export function formatModified(ms: number) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
-export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
+export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta, contentLength: number) {
   if (current.modifiedMs === undefined) return undefined
   const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
   if (sameRange) return { status: "stub_same_range_visible" as const }
   const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
   if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
+  // 只有高重叠分支比较正文字符数；完全相同或被覆盖的读取保持原stub语义。
+  if (contentLength < 300) return undefined
   // 只使用同版本最佳单交集；多个重复页不能叠加出虚假的80%覆盖。
   const overlap = findOverlapNote(visibleReads, current)
   if (!overlap) return undefined
@@ -75,6 +78,21 @@ export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current:
   // 源策略要求最佳单个交集同时达到两项门限，重复历史不能叠加成虚假的重叠。
   if (lines < OVERLAP_MIN_LINES || lines / Math.max(1, current.end - current.start + 1) < OVERLAP_MIN_RATIO) return undefined
   return `${best.start}-${best.end}`
+}
+
+export function computeUnreadRanges(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
+  // 联合范围仅计算指引；路径、版本与实际交付正文仍先过滤，不能改变80%触发口径。
+  const covered = mergeRanges(visibleReads.filter(read => read.canonicalPath === current.canonicalPath && !read.stub && read.size === current.size && read.modifiedMs === current.modifiedMs)
+    .map(read => ({ start: read.start, end: read.end })))
+  const unread: { start: number; end: number }[] = []
+  let pos = current.start
+  for (const range of covered) {
+    if (range.start > pos) unread.push({ start: pos, end: Math.min(range.start - 1, current.end) })
+    pos = Math.max(pos, range.end + 1)
+    if (pos > current.end) break
+  }
+  if (pos <= current.end) unread.push({ start: pos, end: current.end })
+  return unread
 }
 
 function renderContentLines(raw: readonly string[], offset: number) {
@@ -115,7 +133,8 @@ export function renderReadOutput(input: {
     output.push(input.outline.items.join("\n"))
     output.push("</outline>")
   }
-  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)
+  // 短正文仍原样交付，仅附既有范围与避免重复读取的原话。
+  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`)
   output.push("<content>", renderContentLines(input.raw, input.start), "</content>")
   if (input.cut) output.push(`<more offset="${input.end + 1}" reason="byte_limit" />`)
   else if (input.more) output.push(`<more offset="${input.end + 1}" reason="line_limit" />`)
@@ -143,6 +162,7 @@ export function renderReadStub(input: {
   totalExact: boolean
   status: "stub_same_range_visible" | "stub_covered_range_visible" | "stub_high_overlap_visible"
   coveredBy?: string
+  unread?: readonly { start: number; end: number }[]
 }) {
   // 两代共用可见覆盖末行，续读从已交付区间之后开始，不重复灌入正文。
   const visibleEnd = input.coveredBy ? Number(input.coveredBy.split("-")[1]) : input.end
@@ -154,11 +174,19 @@ export function renderReadStub(input: {
     : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
   const coverage = input.coveredBy ?? `${input.start}-${input.end}`
   // 版本与覆盖证明已由 findReadStub 核验，保留原话以消除模型的重读动机。
+  const unread = input.unread ?? []
   const message =
     input.status === "stub_same_range_visible"
       ? `Lines ${input.start}-${input.end} are the latest version and already in context; do NOT re-read.\n${offsetExit}`
       : input.status === "stub_high_overlap_visible"
-        ? `Lines ${input.start}-${input.end} have ${Math.round((visibleEnd - Number(coverage.split("-")[0]) + 1) / Math.max(1, input.end - input.start + 1) * 100)}% overlap with visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
+        ? unread.length === 0
+          ? `Lines ${input.start}-${input.end} fully covered by visible reads (same version, file unchanged); no new content to read. ` +
+            `Lines ${coverage} are already in context and current — avoid re-reading this range unnecessarily. ` +
+            `Use the content from your previous read.`
+          : `Lines ${coverage} already in context (latest version, file unchanged). ` +
+            `Avoid re-reading this range unnecessarily — use the content from your previous read. ` +
+            `New unread lines: ${unread.map(range => `${range.start}-${range.end}`).join(", ")}. ` +
+            `Read offset=${unread[0]!.start} limit=${unread[0]!.end - unread[0]!.start + 1} for just the new content.`
         : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
   return [
     `<path>${escapeXmlText(input.path)}</path>`,
