@@ -1046,6 +1046,49 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.live("rearms the 85 percent reminder across model windows within one drain", () => Effect.gen(function* () {
+    yield* setup
+    const sessions = yield* SessionV2.Service
+    const registry = yield* ToolRegistry.Service
+    const events = yield* EventV2.Service
+    const budgets = [12_000, 11_764, 11_000, 25_000, 11_764, 0, 11_764]
+    const choices = budgets.map((budget, index) => budget === 0 ? model : Model.make({
+      id: `window-${index}`, provider: "fake", route: OpenAIChat.route.with({ limits: { context: budget + 3_000, input: budget + 3_000, output: 1_000 } }),
+    }))
+    const prior = { sessionID, assistantMessageID: SessionMessage.ID.make("msg_prior_estimate"), timestamp: DateTime.makeUnsafe(0) }
+    // 真实持久事件提供上一轮prepared估算；fake运输不创建第二估算器或真实Provider。
+    yield* events.publish(SessionEvent.Step.Started, { ...prior, agent: "build", model: { id: ModelV2.ID.make("fake-model"), providerID: ProviderV2.ID.make("fake") },
+      inputEstimate: { bodyChars: 40_000, input: 10_000, confirmed: true } })
+    yield* events.publish(SessionEvent.Step.Ended, { ...prior, finish: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+    let phase = 0
+    currentModel = choices[0]!
+    yield* registry.register({ advance: Tool.make({
+      description: "Advance the fake model window", input: Schema.Struct({ phase: Schema.Number }), output: Schema.String,
+      execute: () => Effect.sync(() => { phase++; currentModel = choices[phase]!; return "advanced" }),
+    }) })
+    // 每次实际工具结算后切换窗口；不能靠多次resume的启动复位掩盖同drain缺陷。
+    responses = budgets.slice(1).map((_, index) => [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolInputStart({ id: `advance-${index}`, name: "advance" }),
+      LLMEvent.toolInputDelta({ id: `advance-${index}`, name: "advance", text: JSON.stringify({ phase: index }) }),
+      LLMEvent.toolInputEnd({ id: `advance-${index}`, name: "advance" }),
+      LLMEvent.toolCall({ id: `advance-${index}`, name: "advance", input: { phase: index } }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    ])
+    responses.push(fragmentFixture("text", "window-finished", ["done"]).completeEvents)
+    requests.length = 0
+    yield* sessions.prompt({ sessionID, prompt: Prompt.make({ text: "Exercise changing windows" }), resume: false })
+    yield* sessions.resume(sessionID)
+    const reminder = "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions."
+    expect(requests).toHaveLength(7)
+    expect(requests.map(request => userTexts(request).includes(reminder))).toEqual([false, true, false, false, true, false, true])
+    expect(requests.map(request => request.model.id)).toEqual(choices.map(choice => choice.id))
+    // 提醒只影响本次请求，不能成为下一轮摘要或持久用户原话。
+    expect(JSON.stringify(yield* sessions.context(sessionID))).not.toContain(reminder)
+    expect(phase).toBe(6)
+  }))
+
   it.live("executes and resumes canonical task sessions with durable results and scoped permissions", () => Effect.gen(function* () {
     yield* setup
     const registry = yield* ToolRegistry.Service

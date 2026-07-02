@@ -1433,8 +1433,9 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
-        // [local-smark] nearOverflow 提示只注入一次：首次达到 80% usable 时注入，
-        // compaction 后重置（下一轮 compaction 周期可再次提示）。
+        // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
+        // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
+        // 使后续再次达到 85% 时可以重新提示。
         // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
         // 不会泄漏给 compaction 模型污染下一轮干净上下文。
         let nearOverflowNotified = false
@@ -1628,13 +1629,19 @@ const layer = Layer.effect(
               : msgs
             const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
-            if (!nearOverflowNotified && !isLastStep) {
+            if (!isLastStep) {
               const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
               const estimatedInput = prior?.role === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
               const usableTokens = usable({ cfg: yield* config.get(), model })
-              if (usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)) {
-                modelMsgs.push({ role: "user", content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions." })
-                nearOverflowNotified = true
+              // 模型切换导致占比降低或无上限时复位，下次达到85%可重新提示。
+              const threshold = usableTokens > 0 ? Math.floor(usableTokens * 0.85) : 0
+              if (usableTokens > 0 && estimatedInput >= threshold) {
+                if (!nearOverflowNotified) {
+                  modelMsgs.push({ role: "user", content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions." })
+                  nearOverflowNotified = true
+                }
+              } else {
+                nearOverflowNotified = false
               }
             }
             const result = yield* handle.process({
