@@ -328,12 +328,15 @@ function evaluateShell(command: string, depth: number): Decision {
     if (decision.level === "dangerous" || decision.level === "cautious") return decision
   }
 
-  const commands = splitCommands(command)
-  // #197：分词失败意味着命令包含预检器无法理解的 shell 特性——不透明命令归为 general
-  if (!commands) return { level: "general", reason: "opaque shell command requires explicit approval" }
-
-  // #202：层级聚合——dangerous 优先，其次 cautious；全部 safe 才 safe；否则 general 传播
-  const decisions = commands.map((item) => evaluateCommand(item, depth))
+  // #355：splitCommands 对未建模语法按段降级为 opaque(general) 而非整条丢弃，
+  // #355：故一个 bail 字符不会藏掉同条命令里其它干净段的 cautious/dangerous
+  // #355：（修 `scp; echo $HOME` / `scp 2>&1` 类绕过）。
+  const { segments, opaque } = splitCommands(command)
+  const decisions = segments.map((item) => evaluateCommand(item, depth))
+  // #355：opaque 段以 general 参与 max 聚合：既不允许整条降为 safe，也保留干净
+  // #355：cautious 段的审查信号。无任何可分析段（整条 opaque）时回退 general，等价旧行为。
+  if (opaque) decisions.push({ level: "general", reason: "opaque shell segment requires explicit approval" })
+  if (decisions.length === 0) return { level: "general", reason: "opaque shell command requires explicit approval" }
   const dangerous = decisions.find((item) => item.level === "dangerous")
   // #202：单个 dangerous 子命令足以否决整条命令链
   if (dangerous) return dangerous
@@ -408,12 +411,32 @@ function evaluateCommand(command: string, depth: number): Decision {
   return { level: "general", reason: "unknown shell command" }
 }
 
-function splitCommands(command: string) {
-  // #197：分割器仅识别可组合安全命令的简单分隔符——动态展开/重定向/通配符/畸形空段返回 undefined 由调用方回退 general
-  const out: string[] = []
+function splitCommands(command: string): { segments: string[]; opaque: boolean } {
+  // #355：此分割器只识别可组合已安全命令的简单分隔符（; | && ||）。遇到未建模语法
+  // #355：（动态展开 $/反引号、子 shell ()、大括号 {}、glob *?[、文件重定向 ><、
+  // #355：后台单 &、换行）时，仅让**当前段**降级为 opaque(general) 并从下一字符起重开
+  // #355：新段，不毒化同条命令的其它干净段——故 `scp; echo $HOME` 中后段 `$` 不会
+  // #355：藏掉前段 scp 的 cautious。整条都 opaque 时等价旧的"整条→general"。
+  const segments: string[] = []
+  let opaque = false
+  // tainted 标记当前段是否由 bail 字符重开（即 bail 之后的残余片段）。残余片段
+  // 是被未建模语法切碎的 token 残骸（如 `echo $mkfs` 中 `$` 之后的 "mkfs"），
+  // 并非真实命令——分类它会把变量名误判为危险命令（mkfs→dangerous 误拒）。
+  // 故 tainted 段只记 opaque(general)，不入 segments 参与分类；分隔符会重置它，
+  // 因为分隔符之后是真实的新命令。与剥头启发式"不越权升 token 层 dangerous"一致。
+  let tainted = false
   let start = 0
   let quote = ""
   let escaped = false
+
+  // 分隔符处收尾当前段：非空且未 tainted→干净段入列；空段或 tainted 段→记 opaque
+  // （前导/尾部/连续分隔符的空侧、bail 残骸，保既有 general 而非 safe/误判）
+  const pushSegment = (end: number) => {
+    const segment = command.slice(start, end).trim()
+    if (segment && !tainted) segments.push(segment)
+    else opaque = true
+    tainted = false
+  }
 
   for (let i = 0; i < command.length; i++) {
     const char = command[i]
@@ -428,48 +451,66 @@ function splitCommands(command: string) {
     }
     if (quote) {
       if (char === quote) quote = ""
-      // #197：双引号片段仍可能展开变量或执行替换——视为不透明而非批准字面文本
-      else if (quote !== "'" && (char === "$" || char === "`")) return
+      // #355：双引号内 $/` 仍可能展开/替换——当前段 opaque 且 tainted，从下一字符起重开
+      else if (quote !== "'" && (char === "$" || char === "`")) {
+        opaque = true
+        tainted = true
+        start = i + 1
+      }
       continue
     }
     if (char === "'" || char === '"') {
       quote = char
       continue
     }
-    // #197：命令替换和变量展开可注入任意命令——$() 和 `` 可执行子进程，花括号可展开路径列表
-    if (char === "$" || char === "`" || char === "(" || char === ")" || char === "{" || char === "}") return
-    // #202：单个换行/回车也是 shell 命令分隔——splitter 只支持明确的 &&/||/;/| 组合，遇到未建模分隔符
-    // #202：整体降级为 general，不能让 `git status\nrm -rf ...` 被当成 safe 的 git 参数
-    if (char === "\n" || char === "\r") return
-    // #197：重定向可覆写文件、通配符可扩展到意外路径——这些特性使只读命令变为写入或遍历
-    if (char === ">" || char === "<" || char === "*" || char === "?" || char === "[") return
+
+    // #355：fd-merge 重定向（2>&1 / 1>&2 / >&2 / 2>&- 等）：仅合并或关闭 fd，不写文件，
+    // #355：属良性。原子消费 >/< + & + fd 数字串/- 并继续当前段，避免误 bail 让
+    // #355：`scp 2>&1` 因 `>` 或 `&` 落入 opaque 而绕过 scp 的 cautious 审查。
+    // #355：必须在下方 `>`/`<` 与单 `&` 的 bail 判断之前命中并 continue——否则 `2>&1`
+    // #355：里的 `&` 会触发单 `&` bail 使本改动失效。
+    if ((char === ">" || char === "<") && command[i + 1] === "&" && (/\d/.test(command[i + 2]) || command[i + 2] === "-")) {
+      let j = i + 2
+      if (command[j] === "-") j++
+      else while (/\d/.test(command[j])) j++
+      i = j - 1
+      continue
+    }
 
     const two = command.slice(i, i + 2)
     if (two === "&&" || two === "||") {
-      const segment = command.slice(start, i).trim()
-      if (!segment) return
-      out.push(segment)
+      pushSegment(i)
       i++
       start = i + 1
       continue
     }
-    // #202：单个 & 是后台执行/分隔符——未建模分隔符整体降级为 general，防止 `git status & rm -rf ...` 被切错
-    if (char === "&") return
     if (char === ";" || char === "|") {
-      const segment = command.slice(start, i).trim()
-      if (!segment) return
-      out.push(segment)
+      pushSegment(i)
       start = i + 1
+      continue
+    }
+
+    // #355：未建模 shell 语法：当前段 opaque（不入 segments），紧随其后字符起开始新段。
+    // #355：不再 return 整条，避免一个 bail 字符毒化已切出的干净 cautious 段。
+    // #355：单 `&`（后台）与换行在此 opaque 而非切分——保 `git status & rg`/`git status\nrg`
+    // #355：为 general，不能 split 否则会变 safe。
+    if (
+      char === "$" || char === "`" || char === "(" || char === ")" ||
+      char === "{" || char === "}" || char === "*" || char === "?" || char === "[" ||
+      char === ">" || char === "<" || char === "&" || char === "\n" || char === "\r"
+    ) {
+      opaque = true
+      tainted = true
+      start = i + 1
+      continue
     }
   }
 
-  // #197：不闭合引号或悬空转义表示命令不完整——解析不可靠时返回 undefined 由调用方回退 general
-  if (quote || escaped) return
-  const segment = command.slice(start).trim()
-  // #197：空段可能是语法错误或多余分隔符——拒绝而非忽略以防止意外组合
-  if (!segment) return
-  out.push(segment)
-  return out
+  // #355：未闭合引号/悬挂转义：末段 opaque（`git status '` → general，保既有行为）
+  if (quote || escaped) opaque = true
+  else pushSegment(command.length)
+
+  return { segments, opaque }
 }
 
 function tokenize(command: string) {
@@ -735,7 +776,7 @@ function cautiousRaw(command: string): string | undefined {
   if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
   if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
   const normalized = normalizeForRawScan(command)
-  // #220：持久化写入（重定向目标）——splitCommands 遇重定向返回 undefined，必须在 raw 层捕获
+  // #355：持久化写入（重定向目标）——splitCommands 遇重定向把该段降级为 opaque(general)，必须在 raw 层捕获
   if (RE_C_SHELL_RC_WRITE.test(normalized)) return "shell RC file modification enables persistent code execution"
   if (RE_C_GIT_HOOKS_WRITE.test(normalized)) return "git hook modification runs code on git operations"
   if (RE_C_CRON_WRITE.test(normalized)) return "cron directory write enables persistent scheduled execution"
