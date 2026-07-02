@@ -308,7 +308,10 @@ const layer = Layer.effect(
       const estimatedInput = prior?.type === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
       const usableTokens = compaction.inputBudget({ model })
       // 仅用前轮真实prepared快照作轻量提醒，本轮硬溢出仍走原压缩入口。
-      const nearOverflow = !decide && !isLastStep && !nearOverflowNotified.has(session.id) && usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)
+      const threshold = usableTokens > 0 ? Math.floor(usableTokens * 0.85) : 0
+      // 同一drain切大窗口或无上限后复位；仍处高位的模型切换不能重复灌入提醒。
+      if (!decide && !isLastStep && (usableTokens <= 0 || estimatedInput < threshold)) nearOverflowNotified.delete(session.id)
+      const nearOverflow = !decide && !isLastStep && !nearOverflowNotified.has(session.id) && usableTokens > 0 && estimatedInput >= threshold
       if (nearOverflow) nearOverflowNotified.add(session.id)
       const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
       const request = LLM.request({
