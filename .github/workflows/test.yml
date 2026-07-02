@@ -74,6 +74,20 @@ jobs:
             runner: windows-latest
             command: GITHUB_ACTIONS=false bun run --cwd packages/http-recorder test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
             junit: packages/http-recorder/.artifacts/unit/junit.xml
+          # macOS 覆盖 opencode/core 的平台分支；http-recorder 保留既有双平台矩阵。
+          # 与现有必过项使用相同 test/JUnit 契约，filewatcher 标志仍按 runner 判断。
+          - id: opencode-macos
+            label: packages/opencode
+            os_label: macOS
+            runner: macos-latest
+            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
+            junit: packages/opencode/.artifacts/unit/junit.xml
+          - id: core-macos
+            label: packages/core
+            os_label: macOS
+            runner: macos-latest
+            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
+            junit: packages/core/.artifacts/unit/junit.xml
     defaults:
       run:
         shell: bash
