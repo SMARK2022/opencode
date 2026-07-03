@@ -54,6 +54,8 @@ export class HttpOptions extends Schema.Class<HttpOptions>("LLM.HttpOptions")({
   body: Schema.optional(JsonSchema),
   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   query: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  // SSE原始字节空闲期限；false关闭，省略由唯一transport采用默认值。
+  chunkTimeout: Schema.optional(Schema.Union([Schema.Number, Schema.Literal(false)])),
 }) {}
 
 export namespace HttpOptions {
@@ -67,8 +69,9 @@ export const mergeHttpOptions = (...items: ReadonlyArray<HttpOptions | undefined
   const body = mergeJsonRecords(...items.map((item) => item?.body))
   const headers = mergeStringRecords(...items.map((item) => item?.headers))
   const query = mergeStringRecords(...items.map((item) => item?.query))
-  if (!body && !headers && !query) return undefined
-  return new HttpOptions({ body, headers, query })
+  const chunkTimeout = items.findLast(item => item?.chunkTimeout !== undefined)?.chunkTimeout
+  if (!body && !headers && !query && chunkTimeout === undefined) return undefined
+  return new HttpOptions({ body, headers, query, chunkTimeout })
 }
 
 export class GenerationOptions extends Schema.Class<GenerationOptions>("LLM.GenerationOptions")({

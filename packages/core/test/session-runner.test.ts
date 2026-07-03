@@ -763,7 +763,8 @@ describe("SessionRunnerLLM", () => {
           })),
         ).pipe(Stream.ensuring(Effect.sync(() => { stopped = true })))
         const fiber = yield* runner.run({ sessionID, force: true }).pipe(Effect.forkChild)
-        const minutes = timeout === false ? 7 : (timeout ?? 300_000) / 60_000
+        // 默认期限改为十分钟；虚拟时钟仍验证持续有chunk时也按总期限结束。
+        const minutes = timeout === false ? 7 : (timeout ?? 600_000) / 60_000
         for (let minute = 0; minute < minutes; minute++) {
           yield* Queue.take(waiting)
           yield* TestClock.adjust("1 minute")

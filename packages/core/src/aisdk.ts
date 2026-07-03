@@ -84,7 +84,8 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
   delete options.claudeCode
 
   const customFetch = options.fetch
-  const chunkTimeout = options.chunkTimeout
+  // 缺省启用三分钟SSE空闲期限，显式false仍沿原分支禁用。
+  const chunkTimeout = options.chunkTimeout ?? 180_000
   delete options.chunkTimeout
   options.fetch = async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const opts = { ...(init ?? {}) }
@@ -93,7 +94,7 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
       typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined,
       // 沿 SDK 原 options 合并顺序补总期限，false 不添信号，连续 SSE 活动不能延长请求。
       options.timeout !== false
-        ? AbortSignal.timeout(typeof options.timeout === "number" ? options.timeout : 300_000)
+        ? AbortSignal.timeout(typeof options.timeout === "number" ? options.timeout : 600_000)
         : undefined,
     ].filter((item): item is AbortSignal | AbortController => Boolean(item))
     const chunkAbortCtl = signals.find((item): item is AbortController => item instanceof AbortController)

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, Effect, Fiber, Layer, Logger, Random, Ref, References, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Random, Ref, References, Stream } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import { Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { LLM, LLMError } from "../src"
@@ -499,6 +499,52 @@ describe("RequestExecutor", () => {
       expectLLMError(error)
       expect(error.reason).toMatchObject({ _tag: "InvalidProviderOutput" })
       expect(yield* Ref.get(attempts)).toBe(1)
+      const encoder = new TextEncoder()
+      // 无timing元数据的真实HTTP body也需空闲失败，不能只测试日志或解析后的frame。
+      for (const chunkTimeout of [undefined, 50, false] as const) {
+        const raw = yield* Queue.unbounded<Uint8Array, Cause.Done>()
+        const consumed = yield* Queue.unbounded<void>()
+        const ready = yield* Deferred.make<void>()
+        const state = { ended: false, cancelled: false, attempts: 0 }
+        const body = yield* Stream.fromQueue(raw).pipe(
+          Stream.tap(() => Queue.offer(consumed, undefined)),
+          Stream.ensuring(Effect.sync(() => { state.cancelled = true })),
+          stream => Stream.toReadableStreamEffect(stream),
+        )
+        const native = LLM.request({ model, prompt: "idle", http: { chunkTimeout } })
+        const response = HttpClientResponse.fromWeb(request, new Response(body, { headers: { "content-type": "text/event-stream" } }))
+        const running = yield* HttpTransport.sseJson.with<unknown>().frames({ request, framing: Framing.sse }, native, {
+          http: { execute: () => Effect.sync(() => { state.attempts++; return response }) },
+        }).pipe(
+          Stream.tap(() => Deferred.succeed(ready, undefined)),
+          Stream.runDrain,
+          Effect.exit,
+          Effect.ensuring(Effect.sync(() => { state.ended = true })),
+          Effect.forkChild,
+        )
+        yield* Queue.offer(raw, encoder.encode("data: ready\n\n"))
+        yield* Deferred.await(ready)
+        yield* Queue.take(consumed)
+        const window = chunkTimeout === false ? 180_000 : chunkTimeout ?? 180_000
+        yield* TestClock.adjust(window - 1)
+        expect(state.ended).toBe(false)
+        // 注释没有provider frame，仍必须重置唯一原始字节期限。
+        yield* Queue.offer(raw, encoder.encode(": heartbeat\n\n"))
+        yield* Queue.take(consumed)
+        yield* Effect.yieldNow
+        yield* TestClock.adjust(window - 1)
+        expect(state.ended).toBe(false)
+        if (chunkTimeout === false) {
+          yield* Fiber.interrupt(running)
+        } else {
+          yield* TestClock.adjust(1)
+          const exit = yield* Fiber.join(running)
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toMatchObject({ reason: { _tag: "Transport" } })
+        }
+        expect(state.attempts).toBe(1)
+        expect(state.cancelled).toBe(true)
+      }
     }),
   )
 

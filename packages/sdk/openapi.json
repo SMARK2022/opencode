@@ -20767,7 +20767,7 @@
                     "enum": [false]
                   }
                 ],
-                "description": "Timeout in milliseconds for full requests to this provider. Set to false to disable timeout."
+                "description": "Timeout in milliseconds for full requests to this provider. Default is 600000 (10 minutes). Set to false to disable timeout."
               },
               "headerTimeout": {
                 "anyOf": [
@@ -20793,7 +20793,7 @@
                     "enum": [false]
                   }
                 ],
-                "description": "Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout."
+                "description": "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout."
               }
             },
             "additionalProperties": {}
