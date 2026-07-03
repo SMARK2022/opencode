@@ -513,6 +513,90 @@ describe("session.llm.stream", () => {
     })
   })
 
+  test("applies default overall and chunk timeouts when neither is configured", async () => {
+    // 行为级验证:用户未配置 timeout / chunkTimeout 时,provider 必须回退到默认值——
+    // 整请求绝对超时 600000ms(10 分钟)、chunk 空闲超时 180000ms(3 分钟)。
+    // 通过 fetch.start 诊断事件里的 timeoutMs / chunkTimeoutMs 字段断言默认值,无需真正等待超时;
+    // 同时断言 sse.end 出现,证明默认 chunk 超时已启用 wrapSSE(此前未配置时不启用)。
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "default-timeout-openai-compatible"
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await withInfoLog(async (logFile) => {
+      await using tmp = await tmpdir({
+        config: {
+          enabled_providers: [providerID],
+          provider: {
+            [providerID]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Default Timeout Provider",
+              // 故意不设置 timeout / chunkTimeout,触发默认回退路径
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1` },
+              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+            },
+          },
+        },
+      })
+
+      await withTestInstance({
+        directory: tmp.path,
+        fn: async (ctx) => {
+          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
+          const sessionID = SessionID.make("session-provider-default-timeout")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          // drain 走真实 provider→custom fetch→wrapSSE 链路(非 mock),故 SSE 里程碑能反映默认配置是否生效
+          await drain(
+            {
+              user: {
+                id: MessageID.make("msg_user-provider-default-timeout"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: agent.name,
+                model: { providerID: ProviderID.make(providerID), modelID: model.id },
+              },
+              sessionID,
+              model,
+              agent,
+              system: ["You are a helpful assistant."],
+              messages: [{ role: "user", content: "Hello" }],
+              tools: {},
+            },
+            ctx,
+          )
+        },
+      })
+
+      // 默认超时仅作安全上限:快路径流式毫秒级完成,不会真正触发 10 分钟/3 分钟死线
+      await request
+      const events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.end")))
+      // 默认 chunk 超时启用 wrapSSE,故完整 SSE 里程碑都会出现
+      expect(events.map((event) => event.phase)).toEqual([
+        "fetch.start",
+        "fetch.response",
+        "sse.first_chunk",
+        "sse.end",
+      ])
+      // 默认整请求绝对超时 10 分钟(从请求发起计时的硬死线)
+      expect(events.find((event) => event.phase === "fetch.start")?.timeoutMs).toBe("600000")
+      // 默认 chunk 空闲超时 3 分钟(两个 SSE 字节之间无数据才触发)
+      expect(events.find((event) => event.phase === "fetch.start")?.chunkTimeoutMs).toBe("180000")
+    })
+  })
+
   for (const item of [
     { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } } },
     { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" } },

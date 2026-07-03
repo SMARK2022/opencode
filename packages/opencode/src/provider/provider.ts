@@ -35,7 +35,12 @@ const log = Log.create({ service: "provider" })
 // Keep transport diagnostics under a separate service so provider catalogue
 // loading remains readable and callers can filter only fetch/SSE milestones.
 const fetchLog = Log.create({ service: "provider.fetch" })
-const DEFAULT_TIMEOUT_MS = 300_000
+// 整请求绝对超时:从 fetch 发起计时的硬死线,到点即中断(即使仍在持续来 chunk)。
+// 默认 10 分钟;其触发的 AbortSignal.timeout 错误在 message-v2 transportError 中归类为可重试。
+const DEFAULT_TIMEOUT_MS = 600_000
+// chunk 空闲超时:两个 SSE body 字节之间无数据达此时长才中止(心跳/注释字节会重置计时器)。
+// 默认 3 分钟,仅对真正挂起的连接生效;触发的 SSE_READ_TIMEOUT 同样可重试。
+const DEFAULT_CHUNK_TIMEOUT_MS = 180_000
 // Process-local correlation is enough here: the id only ties fetch.start,
 // fetch.response and SSE milestones inside one daemon log, never across runs.
 let providerFetchRequestID = 0
@@ -1834,11 +1839,15 @@ export const layer = Layer.effect(
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
           const opts = init ?? {}
-          const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+          // chunkTimeout 未配置时回退到默认空闲超时;显式正值优先,保持用户可覆盖
+          const chunkTimeoutMs =
+            typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : DEFAULT_CHUNK_TIMEOUT_MS
+          // 始终创建控制器:默认 chunk 超时启用 wrapSSE,对所有 SSE 响应统一施加空闲保护
+          const chunkAbortCtl = new AbortController()
           const signals: AbortSignal[] = []
 
           if (opts.signal) signals.push(opts.signal)
-          if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
+          signals.push(chunkAbortCtl.signal)
           if (options["timeout"] !== false)
             signals.push(AbortSignal.timeout(typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS))
 
@@ -1886,7 +1895,8 @@ export const layer = Layer.effect(
           timing(timingInput, "fetch.start", {
             method: opts.method,
             timeoutMs,
-            chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
+            // 复用已解析的回退值,使诊断日志反映真实生效的空闲超时(显式值或默认 3 分钟)
+            chunkTimeoutMs,
             bodyBytes: bodyBytes(opts.body),
           })
 
@@ -1910,8 +1920,8 @@ export const layer = Layer.effect(
             isSSE: contentType?.includes("text/event-stream") ?? false,
           })
 
-          if (!chunkAbortCtl) return res
-          return wrapSSE(res, chunkTimeout, chunkAbortCtl, timingInput)
+          // chunkAbortCtl 始终存在;wrapSSE 内部对非 event-stream / 空 body 响应会原样透传
+          return wrapSSE(res, chunkTimeoutMs, chunkAbortCtl, timingInput)
         }
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
