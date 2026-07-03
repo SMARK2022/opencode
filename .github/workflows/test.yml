@@ -1,4 +1,6 @@
 name: test
+# 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
+run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
   push:
@@ -65,6 +67,21 @@ jobs:
             runner: windows-latest
             command: bun run --cwd packages/http-recorder test:ci
             junit: packages/http-recorder/.artifacts/unit/junit.xml
+          # macOS 覆盖：opencode 和 core 包的 64+ 处 process.platform 分支此前从未在 CI 上验证过。
+          # 不添加 http-recorder-macos：该包无原生依赖也无平台特定代码，Linux+Windows 覆盖已充分。
+          # OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER 对 macos-latest 正确求值为 'false'，无需额外配置。
+          - id: opencode-macos
+            label: packages/opencode
+            os_label: macOS
+            runner: macos-latest
+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+            junit: packages/opencode/.artifacts/unit/junit.xml
+          - id: core-macos
+            label: packages/core
+            os_label: macOS
+            runner: macos-latest
+            command: bun run --cwd packages/core test:ci
+            junit: packages/core/.artifacts/unit/junit.xml
     defaults:
       run:
         shell: bash
