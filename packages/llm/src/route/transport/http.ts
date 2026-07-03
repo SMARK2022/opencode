@@ -1,5 +1,5 @@
 import { Cause, Clock, Effect, Schedule, Stream } from "effect"
-import { Headers, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
+import { Headers, HttpClientError, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
 import { FetchTiming } from "../http-timing"
 import { Auth } from "../auth"
 import { render as renderEndpoint } from "../endpoint"
@@ -10,7 +10,16 @@ import { LLMError, TransportReason, mergeJsonRecords, type LLMRequest } from "..
 
 function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LLMRequest) {
   const timing = FetchTiming.responses.get(response)
-  if (!timing || !response.headers["content-type"]?.includes("text/event-stream")) return response.stream
+  if (!response.headers["content-type"]?.includes("text/event-stream")) return response.stream
+  const chunkTimeout = request.http?.chunkTimeout ?? 180_000
+  // 必须在framing前按原始字节计时，心跳/注释也续期，且不依赖是否采集timing。
+  const stream = chunkTimeout === false ? response.stream : response.stream.pipe(Stream.timeoutOrElse({
+    duration: chunkTimeout,
+    orElse: () => Stream.fail(new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({
+      request: response.request, cause: new Cause.TimeoutError(),
+    }) })),
+  }))
+  if (!timing) return stream
   return Stream.unwrap(Effect.gen(function* () {
     let lastChunkAt = yield* Clock.currentTimeMillis
     let chunkCount = 0
@@ -25,7 +34,7 @@ function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LL
       })),
       Effect.annotateLogs({ service: "provider.fetch" }),
     )
-    return response.stream.pipe(
+    return stream.pipe(
       Stream.tap((chunk) => Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
         const gapMs = now - lastChunkAt

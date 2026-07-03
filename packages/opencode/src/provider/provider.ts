@@ -35,8 +35,9 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
-// 总超时约束握手后的整个请求，不能靠连续首包或分块活动无限续期。
-const DEFAULT_TIMEOUT_MS = 300_000
+// [local-smark] 整请求绝对超时:从 fetch 发起计时的硬死线,到点即中断(即使仍在持续来 chunk)。
+// 默认 10 分钟;其触发的 AbortSignal.timeout 错误在 message-v2 transportError 中归类为可重试。
+const DEFAULT_TIMEOUT_MS = 600_000
 // #168：归一化 provider 请求头；剥离非 string / 原 UA 后再写入权威 User-Agent
 // #168：供 resolveSDK / request / native 共用，禁止复制第二套解析
 export function requestHeaders(options: Readonly<Record<string, unknown>>) {
@@ -205,7 +206,9 @@ function timeoutController(ms: number) {
 // 共享包装显式接收请求身份与所属日志环境，普通SDK和Gateway不再依赖旧内联闭包。
 function timeoutFetch(options: Record<string, any>, model: { providerID: string; id: string }, bridge: EffectBridge.Shape) {
   const customFetch = options["fetch"]
-  const chunkTimeout = options["chunkTimeout"] ?? 300_000
+        // [local-smark] chunk 空闲超时:两个 SSE body 字节之间无数据达此时长才中止(心跳/注释字节会重置计时器)。
+        // 上游默认 300s 收紧为 180s——挂起连接更早暴露;触发的 SSE_READ_TIMEOUT 同样可重试,显式正值/false 仍可覆盖。
+        const chunkTimeout = options["chunkTimeout"] ?? 180_000
   const headerTimeout = options["headerTimeout"] ?? 300_000
   const timeout = options["timeout"]
 

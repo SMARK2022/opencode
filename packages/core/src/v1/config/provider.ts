@@ -131,10 +131,12 @@ export const Info = Schema.Struct({
         }),
         timeout: Schema.optional(
           Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
-            description: "Timeout in milliseconds for full requests to this provider. Set to false to disable timeout.",
+            // [local-smark] 整请求绝对超时默认 10 分钟(600000):从 fetch 发起计时的硬死线,
+            // 到点即中断(即使仍在持续来 chunk);显式数值/false 仍可覆盖。
+            description: "Timeout in milliseconds for full requests to this provider. Default is 600000 (10 minutes). Set to false to disable timeout.",
           }),
         ).annotate({
-          description: "Timeout in milliseconds for full requests to this provider. Set to false to disable timeout.",
+          description: "Timeout in milliseconds for full requests to this provider. Default is 600000 (10 minutes). Set to false to disable timeout.",
         }),
         headerTimeout: Schema.optional(
           Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
@@ -148,11 +150,12 @@ export const Info = Schema.Struct({
         chunkTimeout: Schema.optional(
           Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
             description:
-              "Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
+              // [local-smark] chunk 空闲超时默认 3 分钟:挂起连接更早暴露;显式正值/false 仍可覆盖。
+              "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
           }),
         ).annotate({
           description:
-            "Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
+              "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
         }),
       }),
       [Schema.Record(Schema.String, Schema.Any)],

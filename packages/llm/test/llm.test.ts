@@ -31,9 +31,10 @@ describe("llm constructors", () => {
       model: Model.make({ id: "fake-model", provider: "fake", route: chatRoute }),
       prompt: "Say hello.",
     })
-    const updated = LLM.updateRequest(base, {
+    const updated = LLM.updateRequest(LLM.updateRequest(base, { http: { chunkTimeout: 180_000 } }), {
       generation: { maxTokens: 20 },
       messages: [...base.messages, Message.assistant("Hi.")],
+      http: { chunkTimeout: false },
     })
 
     expect(updated).toBeInstanceOf(LLMRequest)
@@ -41,6 +42,8 @@ describe("llm constructors", () => {
     expect(updated.model).toEqual(base.model)
     expect(updated.generation).toEqual({ maxTokens: 20 })
     expect(updated.messages.map((message) => message.role)).toEqual(["user", "assistant"])
+    // 单独的false也必须通过HTTP merge，不能因没有body/header/query而被丢弃。
+    expect(updated.http?.chunkTimeout).toBe(false)
   })
 
   test("keeps request options separate from route defaults", () => {

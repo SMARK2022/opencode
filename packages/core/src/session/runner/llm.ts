@@ -477,7 +477,8 @@ const layer = Layer.effect(
         ),
         // 对整个消费 Effect 计一次总期限，不能用会被 chunks 重置的 Stream.timeout。
         (effect) => model.timeout === false ? effect : Effect.timeoutOrElse(effect, {
-          duration: model.timeout ?? 300_000,
+          // 原生provider turn与AISDK使用相同的十分钟缺省总期限。
+          duration: model.timeout ?? 600_000,
           // 只创建本次到期的运输错误；原 provider cause 与既有 flush/助手/用量结算保持。
           orElse: () => Effect.fail(new LLMError({
             module: "SessionRunner",

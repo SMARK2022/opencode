@@ -142,6 +142,8 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
       !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) :
       model.providerID === ProviderV2.ID.openai ? CodexHeaders.request(model.request.headers) : model.request.headers,
     http: {
+      // Catalog的运输设置经唯一HTTP合同传递，显式false不落入协议body。
+      chunkTimeout: model.api.settings?.chunkTimeout === false || typeof model.api.settings?.chunkTimeout === "number" ? model.api.settings.chunkTimeout : undefined,
       body: {
         // 同V1按实际provider/API识别流式默认值；显式model/variant参数仍优先。
         ...(model.api.type === "aisdk" &&

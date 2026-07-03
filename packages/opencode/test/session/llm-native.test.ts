@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { LLMEvent, ToolFailure } from "@opencode-ai/llm"
 import { LLMClient, RequestExecutor, WebSocketExecutor, type LLMClientShape } from "@opencode-ai/llm/route"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
-import { Effect, Fiber, Layer, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { TestClock } from "effect/testing"
 import { FetchHttpClient } from "effect/unstable/http"
 import { LLMNative } from "@/session/llm/native-request"
 import { LLMNativeRuntime } from "@/session/llm/native-runtime"
@@ -600,6 +601,54 @@ describe("session.llm-native.request", () => {
       release?.()
       yield* Fiber.join(fiber)
       expect(observed).toEqual(["tool-call", "tool-call", "finish", "tool-result", "tool-result"])
+    }),
+  )
+
+  it.effect("native provider deadlines default to ten minutes and honor overrides", () =>
+    Effect.gen(function* () {
+      for (const timeout of [undefined, 120_000, false] as const) {
+        const started = yield* Deferred.make<void>()
+        const state = { ended: false }
+        const chunkTimeout = timeout === false ? false : 42_000
+        const native = LLMNativeRuntime.stream({
+          model: baseModel,
+          provider: { ...providerInfo, options: { ...providerInfo.options, timeout, chunkTimeout } },
+          auth: undefined,
+          llmClient: {
+            prepare: () => Effect.die("unused"),
+            // 只替换运输：让真实native期限包裹一个已开始、尚未结束的provider流。
+            stream: (request) => {
+              expect(request.http?.chunkTimeout).toBe(chunkTimeout)
+              return Stream.fromEffect(Deferred.succeed(started, undefined)).pipe(Stream.flatMap(() => Stream.never))
+            },
+            generate: () => Effect.die("unused"),
+          },
+          messages: [], tools: {}, headers: {}, abort: new AbortController().signal,
+        })
+        if (native.type === "unsupported") throw new Error(native.reason)
+        const running = yield* native.stream.pipe(
+          Stream.runDrain,
+          Effect.exit,
+          Effect.onExit(() => Effect.sync(() => { state.ended = true })),
+          Effect.forkChild,
+        )
+        yield* Deferred.await(started)
+        // 默认跨过旧五分钟截断点；false则跨过十分钟，不能只测试快速成功。
+        const before = timeout === false ? 1_200_000 : timeout === undefined ? 300_001 : timeout - 1
+        yield* TestClock.adjust(before)
+        expect(state.ended).toBe(false)
+        if (timeout === false) {
+          yield* Fiber.interrupt(running)
+          continue
+        }
+        // 继续推进到实际死线，显式两分钟和缺省十分钟均须返回真实超时失败。
+        yield* TestClock.adjust((timeout ?? 600_000) - before)
+        const exit = yield* Fiber.join(running)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toMatchObject({
+          reason: { message: "Provider request timed out", kind: "timeout" },
+        })
+      }
     }),
   )
 

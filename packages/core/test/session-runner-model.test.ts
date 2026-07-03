@@ -49,7 +49,7 @@ describe("SessionRunnerModel", () => {
       const resolved = yield* SessionRunnerModel.fromCatalogModel(
         // 与 Catalog 相同的真实 limit 进入 route.with/ModelLimits，避免只测手造 LLM Model。
         ModelV2.Info.make({
-          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
+          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1", settings: { chunkTimeout: false } }),
           limit: { context: 204_800, input: 73_700, output: 20_000 },
         }),
       )
@@ -61,12 +61,14 @@ describe("SessionRunnerModel", () => {
         defaults: {
           headers: { "x-test": "header" },
           limits: { context: 204_800, input: 73_700, output: 20_000 },
-          http: { body: { custom_extension: { enabled: true } } },
+          http: { body: { custom_extension: { enabled: true } }, chunkTimeout: false },
         },
       })
       // 不止断言 route defaults；真实 prepare 必须经过协议 Schema 发出 snake_case 字段。
       const prepared = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello" }))
       expect(prepared.body).toHaveProperty("parallel_tool_calls", true)
+      // 关闭空闲期限只影响运输，不能作为OpenAI协议字段发出。
+      expect(prepared.body).not.toHaveProperty("chunkTimeout")
       // request 的显式 false 位于 model 默认之后，不能被默认 true 再次覆盖。
       const serial = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello",
         providerOptions: { openai: { parallelToolCalls: false } },

@@ -10,6 +10,7 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import {
   LLMError,
+  HttpOptions,
   LLMRequest,
   Tool as NativeTool,
   ToolFailure,
@@ -117,7 +118,13 @@ export function stream(input: StreamInput): StreamResult {
     headers: Object.fromEntries(headers),
   })
   // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
-  const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })
+  const chunkTimeout = input.provider.options.chunkTimeout
+  const advertised = LLMRequest.update(request, {
+    tools: [...request.tools, ...toDefinitions(tools)],
+    // 运输选项留在HTTP合同，原headers/body/query不能因增加期限而被覆盖。
+    http: HttpOptions.make({ ...request.http,
+      chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : undefined }),
+  })
   const stream = Stream.scoped(
     Stream.unwrap(
       Effect.gen(function* () {
@@ -128,7 +135,8 @@ export function stream(input: StreamInput): StreamResult {
           .stream(advertised, input.onRequestPrepared)
           .pipe(
             // 固定总期限只包 provider 流，活跃 chunks 不续期，结束后的本地工具等待仍归 settlement。
-            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 300_000).pipe(
+            // 同一provider的native入口也使用十分钟缺省，显式值与false不变。
+            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 600_000).pipe(
               Effect.andThen(Effect.fail(new LLMError({
                 module: "LLMNativeRuntime",
                 method: "stream",
