@@ -103,5 +103,4 @@ subagent 检查是硬性步骤，不允许省略，不允许降级为自检。�
 
 ## 创建 commit
 
-
 请为当前相关修改创建一次 commit。首先检查git status以及git diff --cached，提交信息按本仓库风格使用中文多行 message：第一行采用 `type(scope): 简短中文说明`，type 从 `fix/feat/refactor/test/chore` 中选择，scope 使用受影响模块；后续 1-2 段说明修改原因、行为边界或避免的回归风险。不要 amend，不要 push，不要提交无关文件。
