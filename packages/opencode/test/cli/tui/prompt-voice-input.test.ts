@@ -512,4 +512,100 @@ describe("prompt voice input", () => {
     expect(errors).toEqual([])
     expect(controller.status()).toEqual({ type: "idle" })
   })
+
+  // [local-smark] 以下测试覆盖 DialogPrompt / QuestionPrompt 新增 voice 接入所依赖的 controller 安全边界。
+  // 这些边界在主 Prompt 组件中已隐含覆盖，但对话框场景的生命周期更复杂
+  // （onCleanup + createEffect 可能先后触发 abort、textarea ref 可能已销毁），
+  // 需要独立锁定以防止未来重构破坏对话框 voice 的安全假设。
+
+  // abort 幂等性：onCleanup（组件卸载）和 createEffect（editing→false）可能在同一轮
+  // 事件循环中先后调用 abort。第二次 abort 必须是无副作用 no-op，不能抛错或重复释放 native 资源。
+  // 该边界保护 QuestionPrompt 中 createEffect + onCleanup 双重 cleanup 路径。
+  test("abort is idempotent when called from both onCleanup and createEffect", async () => {
+    let abortCount = 0
+    const controller = createVoiceInputController({
+      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
+      startRecorder: async () => ({
+        file: "voice.wav",
+        stop: async () => {},
+        abort: async () => { abortCount++ },
+      }),
+      transcribe: async () => "text",
+      insertText: () => {},
+    })
+
+    await controller.toggle()
+    // 模拟 onCleanup 和 createEffect 先后触发
+    await controller.abort()
+    await controller.abort()
+
+    // recorder 只被 abort 一次：cancel() 在第一次 abort 后 status 已是 idle，
+    // 第二次 abort 时 recorder 为 undefined，不会重复调用 abort()。
+    expect(abortCount).toBe(1)
+    expect(controller.status()).toEqual({ type: "idle" })
+  })
+
+  // abort 期间转写可能已发出但尚未 resolve；abort 后迟到结果不能触发 insertText。
+  // 这覆盖 QuestionPrompt 的 stale ref 场景：用户退出 editing 模式后 textarea 已销毁，
+  // 此时迟到的转写文本不能尝试插入到已销毁的 renderable。
+  test("does not invoke insertText after abort during in-flight transcription", async () => {
+    let transcribeSignal: AbortSignal | undefined
+    let transcribeStarted: () => void
+    const started = new Promise<void>((resolve) => { transcribeStarted = resolve })
+    let lateResolve: ((text: string) => void) | undefined
+    const inserted: string[] = []
+    const controller = createVoiceInputController({
+      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
+      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
+      transcribe: (_file, _transcriber, signal) => {
+        transcribeSignal = signal
+        transcribeStarted()
+        // 模拟 Process.run 被 signal kill 后 reject 的真实行为
+        return new Promise<string>((resolve, reject) => {
+          lateResolve = resolve
+          const timer = setInterval(() => {
+            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
+          }, 5)
+        })
+      },
+      insertText: (text) => inserted.push(text),
+    })
+
+    await controller.toggle()
+    const stopping = controller.toggle()
+    await started
+    // abort 模拟 QuestionPrompt editing→false 时的 createEffect 触发
+    await controller.abort()
+    await stopping
+    // 迟到的转写结果 resolve——controller 内部 generation 已 bump，insertText 不会被调用
+    lateResolve?.("late text")
+
+    // 给 microtask 一个 tick 让迟到 Promise 的 then 回调执行
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(transcribeSignal?.aborted).toBe(true)
+    expect(inserted).toEqual([])
+    expect(controller.status()).toEqual({ type: "idle" })
+  })
+
+  // insertText 回调中对已销毁 textarea 的守卫是 DialogPrompt/QuestionPrompt 的安全边界。
+  // controller 本身不判断 textarea 状态，但 insertText 回调必须由消费方守卫。
+  // 此测试验证 controller 在正常路径下调用 insertText 时传入的是转写文本，
+  // 让消费方的 isDestroyed 守卫可以正确拦截——即 controller 不会跳过 insertText 或传入空值。
+  test("insertText receives the full transcribed text for consumer-side guards to check", async () => {
+    const inserted: string[] = []
+    const controller = createVoiceInputController({
+      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
+      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
+      transcribe: async () => "hello world",
+      insertText: (text) => inserted.push(text),
+    })
+
+    await controller.toggle()
+    await controller.toggle()
+
+    // 消费方（DialogPrompt/QuestionPrompt）的 insertText 回调会检查 textarea.isDestroyed；
+    // controller 保证只在转写成功后调用一次 insertText，传入完整文本。
+    expect(inserted).toEqual(["hello world"])
+  })
 })

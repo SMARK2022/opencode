@@ -1,8 +1,14 @@
 import { TextareaRenderable, TextAttributes } from "@opentui/core"
+import { useRenderer } from "@opentui/solid"
 import { useTheme } from "../context/theme"
+import { useTuiConfig } from "../context/tui-config"
 import { useDialog, type DialogContext } from "./dialog"
-import { Show, createEffect, onMount, type JSX } from "solid-js"
+import { useToast } from "./toast"
+import { useBindings, useCommandShortcut } from "../keymap"
+import { PromptVoiceInput } from "../prompt-voice-input"
+import { PromptVoiceRecorder } from "../prompt-voice-recorder"
 import { Spinner } from "../component/spinner"
+import { Show, createEffect, onCleanup, onMount, createSignal, type JSX } from "solid-js"
 
 export type DialogPromptProps = {
   title: string
@@ -18,7 +24,64 @@ export type DialogPromptProps = {
 export function DialogPrompt(props: DialogPromptProps) {
   const dialog = useDialog()
   const { theme } = useTheme()
+  const tuiConfig = useTuiConfig()
+  const toast = useToast()
+  const renderer = useRenderer()
   let textarea: TextareaRenderable
+
+  // [local-smark] voice 输入：复用主 Prompt 的 createVoiceInputController，
+  // 让 DialogPrompt 的所有消费者（Goal 创建/编辑、Session 重命名、Provider 配置、Plugin API）
+  // 自动获得 alt+v / f8 语音转写能力，零新增配置面。
+  const [voiceInputStatus, setVoiceInputStatus] = createSignal<PromptVoiceInput.VoiceInputStatus>({
+    type: "idle",
+  })
+  const voiceInputBusy = () => voiceInputStatus().type !== "idle"
+  const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+  const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
+
+  function insertVoiceText(text: string) {
+    // isDestroyed 守卫：录音转写完成时 textarea 可能已被 busy/ESC 销毁，
+    // 向已销毁的 renderable 插入文本会抛错或静默失败。
+    if (!textarea || textarea.isDestroyed) return
+    textarea.insertText(text)
+    // 下一 tick 标脏布局，避免转写文本显示滞后一帧（与主 Prompt 的 insertVoiceText 行为一致）
+    setTimeout(() => {
+      if (!textarea || textarea.isDestroyed) return
+      textarea.getLayoutNode().markDirty()
+      renderer.requestRender()
+    }, 0)
+  }
+
+  const voiceInput = PromptVoiceInput.createVoiceInputController({
+    transcriber: () => tuiConfig.voice?.transcriber,
+    startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
+    insertText: insertVoiceText,
+    onStatus: setVoiceInputStatus,
+    onError: (message) => toast.show({ message, variant: "error" }),
+  })
+
+  // 组件卸载（ESC / dialog.clear / dialog.replace）时必须释放麦克风，
+  // 否则 native PvRecorder 进程会悬挂到转写超时（最长 90s）。
+  onCleanup(() => {
+    void voiceInput.abort()
+  })
+
+  // voice toggle keybind：复用 prompt.voice.toggle 命令和 prompt_voice_toggle 配置，
+  // 保持与主 Prompt 相同的肌肉记忆。busy 状态下禁用，避免与消费者异步操作竞争。
+  useBindings(() => ({
+    enabled: !props.busy,
+    commands: [
+      {
+        name: "prompt.voice.toggle",
+        title: "Toggle voice input",
+        category: "Dialog",
+        run() {
+          void voiceInput.toggle()
+        },
+      },
+    ],
+    bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
+  }))
 
   onMount(() => {
     dialog.setSize("medium")
@@ -61,6 +124,9 @@ export function DialogPrompt(props: DialogPromptProps) {
         <textarea
           onSubmit={() => {
             if (props.busy) return
+            // voice 转写进行中时拦截 submit，防止用户提交转写前的旧草稿。
+            // 转写最长 90s，期间用户按 Enter 不应触发 onConfirm。
+            if (voiceInputBusy()) return
             props.onConfirm?.(textarea.plainText)
           }}
           height={3}
@@ -80,9 +146,27 @@ export function DialogPrompt(props: DialogPromptProps) {
       </box>
       <box paddingBottom={1} gap={1} flexDirection="row">
         <Show when={!props.busy} fallback={<text fg={theme.textMuted}>processing...</text>}>
+          {/* 录音中显示红点 + 计时器和停止快捷键，让用户知道如何结束录音 */}
+          <Show when={voiceInputBusy()}>
+            <box flexDirection="row" gap={1}>
+              <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
+                <text fg={theme.error}>●</text>
+              </Show>
+              <text fg={theme.accent}>
+                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback)}
+              </text>
+            </box>
+          </Show>
           <text fg={theme.text}>
             enter <span style={{ fg: theme.textMuted }}>submit</span>
           </text>
+          {/* 对话框宽度远小于 140，不复用 voiceHintVisible；配置了转写器就始终露出快捷键提示。
+              录音中隐藏提示，避免与录音状态栏的 "f8 stop" 冗余显示。 */}
+          <Show when={tuiConfig.voice?.transcriber && !voiceInputBusy()}>
+            <text fg={theme.text}>
+              {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
+            </text>
+          </Show>
         </Show>
       </box>
     </box>
