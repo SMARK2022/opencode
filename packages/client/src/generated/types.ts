@@ -2395,6 +2395,13 @@ export type SessionsMessageOutput = {
       }
 }["data"]
 
+export type SessionsPreviewInput = {
+  readonly sessionIDs: { readonly sessionIDs: ReadonlyArray<string>; readonly limit?: number | undefined }["sessionIDs"]
+  readonly limit?: { readonly sessionIDs: ReadonlyArray<string>; readonly limit?: number | undefined }["limit"]
+}
+
+export type SessionsPreviewOutput = { readonly [x: string]: ReadonlyArray<string> }
+
 export type MessagesListInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
   readonly limit?: {

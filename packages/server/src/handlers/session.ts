@@ -1,5 +1,7 @@
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionGoal } from "@opencode-ai/core/session/goal"
+import { SessionPreview } from "@opencode-ai/core/session/preview"
+import { Database } from "@opencode-ai/core/database/database"
 import { DateTime, Effect, Stream } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
 import { Api } from "../api"
@@ -24,6 +26,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
     const session = yield* SessionV2.Service
     const clients = yield* EventClients.Service
     const goals = yield* SessionGoal.Service
+    const database = yield* Database.Service
 
     return handlers
       .handle(
@@ -401,5 +404,6 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           })
         }),
       )
+      .handle("session.preview", ctx => SessionPreview.load(database.db, ctx.payload))
   }),
 )
