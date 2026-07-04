@@ -3,20 +3,16 @@ import { makeGlobalNode } from "../effect/app-node"
 import { Database } from "../database/database"
 import { SessionID } from "@opencode-ai/schema/session-id"
 import { SessionGoalTable } from "./goal.sql"
-import { Goal, Status, Event } from "@opencode-ai/schema/session-goal"
+import { Goal, Status, Event, MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
 import { eq } from "drizzle-orm"
 import { Effect, Layer, Context, Schema, Option } from "effect"
 import { EventV2 } from "../event"
 import { SessionStore } from "./store"
 
-// #364：goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
-// 防止超长 objective 污染上下文或触发 provider 请求体过大
-const MAX_OBJECTIVE_CHARS = 4000
-
 // #364：goal 状态：只有 active 会触发自动续跑；
 // paused/blocked/complete 均为停止态，loop 正常退出不续跑
 // V1 与原生 runner 共用同一行状态，不增加第二套目标或预算状态机。
-export { Status, Goal, Event }
+export { Status, Goal, Event, MAX_OBJECTIVE_CHARS }
 
 export interface SetInput {
   // objective 缺省时仅更新 status/budget，要求已有 goal 存在
