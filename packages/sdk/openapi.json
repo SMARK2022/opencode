@@ -9551,14 +9551,11 @@
             }
           },
           "400": {
-            "description": "BadRequest | GoalApiError | InvalidRequestError",
+            "description": "GoalApiError | InvalidRequestError",
             "content": {
               "application/json": {
                 "schema": {
                   "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
-                    },
                     {
                       "$ref": "#/components/schemas/GoalApiError"
                     },

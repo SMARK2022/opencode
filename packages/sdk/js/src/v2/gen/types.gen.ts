@@ -11834,9 +11834,9 @@ export type SessionGoalSetData = {
 
 export type SessionGoalSetErrors = {
   /**
-   * BadRequest | GoalApiError | InvalidRequestError
+   * GoalApiError | InvalidRequestError
    */
-  400: EffectHttpApiErrorBadRequest | GoalApiError | InvalidRequestError
+  400: GoalApiError | InvalidRequestError
   /**
    * NotFoundError
    */
