@@ -773,7 +773,12 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(requests).toHaveLength(2)
     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("complete")
 
-    yield* goals.set(sessionID, { status: "active" })
+    // 用户恢复同一已完成目标，停用期间的用量不计入，既有预算和账目不能重置。
+    const completed = Option.getOrThrow(yield* goals.get(sessionID))
+    yield* goals.accountUsage(sessionID, 999, 99)
+    expect(yield* goals.set(sessionID, { status: "active" })).toMatchObject({ id: completed.id,
+      tokensUsed: completed.tokensUsed, timeUsedSeconds: completed.timeUsedSeconds,
+      tokenBudget: completed.tokenBudget, time: { created: completed.time.created } })
     responses = undefined
     response = []
     requests.length = 0
