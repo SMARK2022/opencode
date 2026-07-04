@@ -1,5 +1,5 @@
 import { createStore } from "solid-js/store"
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js"
 import { useRenderer } from "@opentui/solid"
 import type { TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
@@ -7,7 +7,11 @@ import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
 import { SplitBorder } from "../../ui/border"
 import { useTuiConfig } from "../../config"
-import { useBindings, useOpencodeModeStack } from "../../keymap"
+import { useBindings, useOpencodeModeStack, useCommandShortcut } from "../../keymap"
+import { PromptVoiceInput } from "../../prompt-voice-input"
+import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
+import { Spinner } from "../../component/spinner"
+import { useToast } from "../../ui/toast"
 
 const QUESTION_MODE = "question"
 
@@ -17,6 +21,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
   const modeStack = useOpencodeModeStack()
+  const toast = useToast()
 
   const questions = createMemo(() => props.request.questions)
   const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
@@ -31,6 +36,54 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
   })
 
   let textarea: TextareaRenderable | undefined
+
+  // [local-smark] voice 输入：custom answer textarea 只在 store.editing 时挂载，
+  // 退出编辑后 <Show> 会销毁 renderable 但 let textarea 仍持有旧引用（stale ref）。
+  // 因此 insertText 必须守卫 isDestroyed，且 editing→false 时必须 abort 进行中的录音。
+  const [voiceInputStatus, setVoiceInputStatus] = createSignal<PromptVoiceInput.VoiceInputStatus>({
+    type: "idle",
+  })
+  const voiceInputBusy = () => voiceInputStatus().type !== "idle"
+  const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+  const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
+
+  function insertVoiceText(text: string) {
+    // stale ref 守卫：退出 editing 后 textarea 已被 <Show> 销毁，
+    // 迟到的转写结果不能尝试插入到已销毁的 renderable。
+    if (!textarea || textarea.isDestroyed) return
+    textarea.insertText(text)
+    setTimeout(() => {
+      if (!textarea || textarea.isDestroyed) return
+      textarea.getLayoutNode().markDirty()
+      renderer.requestRender()
+    }, 0)
+  }
+
+  const voiceInput = PromptVoiceInput.createVoiceInputController({
+    transcriber: () => tuiConfig.voice?.transcriber,
+    startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
+    insertText: insertVoiceText,
+    onStatus: setVoiceInputStatus,
+    onError: (message) => toast.show({ message, variant: "error" }),
+  })
+
+  // 组件卸载时释放麦克风（session 结束、外部 revoke、single-select 自动回复）
+  onCleanup(() => {
+    void voiceInput.abort()
+  })
+
+  // editing→false 时中断录音/转写：用户按 ESC 或选择其他选项退出编辑模式后，
+  // textarea 已销毁，继续转写只会得到无法插入的文本并浪费麦克风资源。
+  // defer: true 避免挂载时 editing 初始值 false 触发无意义的 abort。
+  createEffect(
+    on(
+      () => store.editing,
+      (editing) => {
+        if (!editing) void voiceInput.abort()
+      },
+      { defer: true },
+    ),
+  )
 
   const question = createMemo(() => questions()[store.tab])
   const confirm = createMemo(() => !single() && store.tab === questions().length)
@@ -147,8 +200,19 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
           textarea?.setText("")
         },
       },
+      {
+        name: "prompt.voice.toggle",
+        title: "Toggle voice input",
+        category: "Question",
+        run() {
+          void voiceInput.toggle()
+        },
+      },
     ],
     bindings: [
+      // [local-smark] 复用 prompt.voice.toggle 绑定（与主 Prompt 同快捷键）；
+      // 仅 editing 模式生效——insertText 目标是 custom answer textarea，只在 editing 时存在
+      ...tuiConfig.keybinds.get("prompt.voice.toggle"),
       {
         key: "escape",
         desc: "Cancel answer edit",
@@ -163,6 +227,9 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
         desc: "Submit answer edit",
         group: "Question",
         cmd: () => {
+          // voice 转写进行中时拦截提交，防止用户提交转写前的旧草稿。
+          // 转写最长 90s，期间按 Enter 不应触发 pick/submit。
+          if (voiceInputBusy()) return
           const text = textarea?.plainText?.trim() ?? ""
           const prev = store.custom[store.tab]
 
@@ -505,6 +572,22 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
             </span>
           </text>
 
+          {/* [local-smark] 录音中显示红点/spinner + 状态文本；editing 且已配置转写器且空闲时显示快捷键提示 */}
+          <Show when={voiceInputBusy()}>
+            <box flexDirection="row" gap={1}>
+              <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
+                <text fg={theme.error}>●</text>
+              </Show>
+              <text fg={theme.accent}>
+                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback)}
+              </text>
+            </box>
+          </Show>
+          <Show when={store.editing && tuiConfig.voice?.transcriber && !voiceInputBusy()}>
+            <text fg={theme.text}>
+              {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
+            </text>
+          </Show>
           <text fg={theme.text}>
             esc <span style={{ fg: theme.textMuted }}>dismiss</span>
           </text>
