@@ -442,6 +442,8 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
           await Bun.sleep(10)
           return false
         }, { maxPasses: 300 })
+        // 导航到真实审查子会话后，页脚必须保留含连字符的代理名。
+        expect(app.captureCharFrame()).toContain("Permission-Reviewer")
         expect(app.captureCharFrame()).not.toContain("Click to collapse")
       }
     }, {}, { [childID]: () => [{ info: { ...info, id: "msg_reviewer_shared", sessionID: childID, agent: "permission-reviewer" },
@@ -484,7 +486,7 @@ async function withRenderedReview(
   // 默认审查子会话和Task子会话共用按ID分发的真实响应形状。
   const sessions: Record<string, () => typeof messages> = { [sessionID]: () => messages, ses_reviewer_child: () => [], ...children }
   const calls = createFetch((url) => {
-    const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }) })
+    const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }), ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}) })
     if (url.pathname === "/session") return json(Object.keys(sessions).map(details))
     const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
     if (match && sessions[match[1]]) {
