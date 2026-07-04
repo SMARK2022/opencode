@@ -70,7 +70,14 @@ test("non-shell auto review status opens the reviewer child session", async () =
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
       await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
 
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+      // 导航进入 reviewer 子会话后,SubagentFooter 从 title 提取 agent 名显示。
+      // 修复前: \w+ 不匹配连字符 → label 回退 "Subagent" → 此断言失败
+      // 修复后: [\w-]+ 匹配 "permission-reviewer" → label "Permission-Reviewer"
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("reviewer child visible")),
+      )
+      // 行为级断言: footer 必须显示完整 agent 名,不能因连字符回退为泛化 "Subagent"
+      expect(frame.some((line) => line.includes("Permission-Reviewer"))).toBe(true)
     },
     {},
     {},

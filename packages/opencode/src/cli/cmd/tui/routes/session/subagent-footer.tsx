@@ -22,7 +22,9 @@ export function SubagentFooter() {
   const subagentInfo = createMemo(() => {
     const s = session()
     if (!s) return { label: "Subagent", index: 0, total: 0 }
-    const agentMatch = s.title.match(/@(\w+) subagent/)
+    // agent 名可含连字符(如 permission-reviewer);\w 不含 '-',\w+ 在连字符处
+    // 截断导致正则整体匹配失败,label 回退为泛化的 "Subagent"。[\w-] 补上连字符。
+    const agentMatch = s.title.match(/@([\w-]+) subagent/)
     const label = agentMatch ? Locale.titlecase(agentMatch[1]) : "Subagent"
 
     if (!s.parentID) return { label, index: 0, total: 0 }
