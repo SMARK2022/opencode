@@ -4,6 +4,20 @@
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 - Prefer automation: execute requested actions without confirmation unless blocked by missing info or safety/irreversibility.
 
+## Agent skills
+
+### Issue tracker
+
+Issues for the SMARK fork live on GitHub at `SMARK2022/opencode` (the `origin` remote); use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The 5 canonical lifecycle labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) coexist with the team-assignment triage agent in `.opencode/agent/triage.md`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Style Guide
 
 ### General Principles
