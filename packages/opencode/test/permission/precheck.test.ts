@@ -694,6 +694,72 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
   })
 
+  // ============================================================
+  // 新增测试：遗漏的 git 状态变更子命令 + 全局 flag 绕过修复
+  // ============================================================
+  test("marks git checkout/switch/restore/apply/am cautious as working-tree mutations", () => {
+    // checkout/switch/restore 可丢弃未提交修改;apply/am 修改工作树
+    expect(bash("git checkout main")).toMatchObject({ level: "cautious" })
+    expect(bash("git checkout -- .")).toMatchObject({ level: "cautious" })
+    expect(bash("git switch feature/x")).toMatchObject({ level: "cautious" })
+    expect(bash("git restore .")).toMatchObject({ level: "cautious" })
+    expect(bash("git apply patch.diff")).toMatchObject({ level: "cautious" })
+    expect(bash("git am mbox")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks git filter-branch/update-ref/bisect/symbolic-ref/worktree/submodule cautious", () => {
+    // filter-branch 重写历史;update-ref 直接改引用;bisect checkout 不同提交;
+    // symbolic-ref 改符号引用;worktree 创建/删除工作树;submodule 可克隆+执行 hooks
+    expect(bash("git filter-branch --tree-filter 'rm f' HEAD")).toMatchObject({ level: "cautious" })
+    expect(bash("git update-ref refs/heads/main abc123")).toMatchObject({ level: "cautious" })
+    expect(bash("git bisect start")).toMatchObject({ level: "cautious" })
+    expect(bash("git symbolic-ref HEAD refs/heads/main")).toMatchObject({ level: "cautious" })
+    expect(bash("git worktree add ../path")).toMatchObject({ level: "cautious" })
+    expect(bash("git submodule update --init")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks git stash/config/remote/tag cautious except read-only forms", () => {
+    // stash: list 是只读;其余修改工作树或丢失暂存
+    expect(bash("git stash")).toMatchObject({ level: "cautious" })
+    expect(bash("git stash drop")).toMatchObject({ level: "cautious" })
+    // config: --get/--list 是只读(由 gitSafe 放行);其余可设 hooksPath 等危险配置
+    expect(bash("git config user.name x")).toMatchObject({ level: "cautious" })
+    expect(bash("git config core.hooksPath /tmp/hooks")).toMatchObject({ level: "cautious" })
+    // remote: 无参和 -v 是只读;add/remove 可将 push 重定向到攻击者仓库
+    expect(bash("git remote add origin url")).toMatchObject({ level: "cautious" })
+    // tag: 无参和 -l/--list 是只读;创建/删除修改仓库状态
+    expect(bash("git tag v1.0")).toMatchObject({ level: "cautious" })
+    expect(bash("git tag -d v1.0")).toMatchObject({ level: "cautious" })
+  })
+
+  test("keeps git read-only subcommands and init/fetch unaffected", () => {
+    // 只读例外不升 cautious,保持 safe 或 general
+    expect(bash("git stash list").level).toBe("general")
+    expect(bash("git config").level).toBe("general")
+    expect(bash("git config --get user.name").level).toBe("safe")
+    expect(bash("git config --list").level).toBe("safe")
+    expect(bash("git remote -v").level).toBe("safe")
+    expect(bash("git remote").level).toBe("general")
+    expect(bash("git tag").level).toBe("general")
+    expect(bash("git tag -l").level).toBe("general")
+    // init/fetch 保持 general:创建仓库和拉取远端引用是正常操作
+    expect(bash("git init").level).toBe("general")
+    expect(bash("git fetch origin").level).toBe("general")
+  })
+
+  test("marks git global flag prefixed commands cautious", () => {
+    // 全局 flag(-C/-c 等)可重定向到其他仓库或注入配置,即使子命令只读也需审查
+    expect(bash("git -C /other reset --hard")).toMatchObject({ level: "cautious" })
+    expect(bash("git -C /other status")).toMatchObject({ level: "cautious" })
+    expect(bash("git -c core.hooksPath=/tmp/hooks status")).toMatchObject({ level: "cautious" })
+    // 安全 boolean flag 后跟 unsafe global:单遍循环必须扫到 -C
+    expect(bash("git --no-pager -C /evil status")).toMatchObject({ level: "cautious" })
+    // --no-pager 不在 GIT_UNSAFE_GLOBAL 中,不影响 safe 命令
+    expect(bash("git --no-pager status").level).toBe("safe")
+    // --no-pager branch -D:旧代码因 tokens[1]="--no-pager" 漏判 branch,修复后正确 cautious
+    expect(bash("git --no-pager branch -D foo")).toMatchObject({ level: "cautious" })
+  })
+
   test("keeps cautious classification when shell metadata has environment assignments", () => {
     expect(
       PermissionPrecheck.evaluate({
@@ -805,9 +871,9 @@ describe("permission precheck bash classifier", () => {
     expect(bash("task npm ls").level).toBe("general")
     // 完全自定义子命令：剥头仍 unknown cmd → 保持 general
     expect(bash("task my-custom-step").level).toBe("general")
-    // git -C 重定向会改变 target repo；剥头只走 classifyTokens，不检 unsafe global
-    //（那是 gitSafe 的职责），故仍 general，符合 fail-safe
-    expect(bash("task git -C /evil status").level).toBe("general")
+    // git -C 重定向改变 target repo;classifyGit 的全局 flag 兜底现拦截为 cautious,
+    // 经穿透规则传播到未知前缀路径
+    expect(bash("task git -C /evil status").level).toBe("cautious")
   })
 
   test("preserves raw-layer dangerous despite unknown prefix shadowing", () => {
