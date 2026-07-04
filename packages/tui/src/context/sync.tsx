@@ -1117,14 +1117,17 @@ export const {
               sdk.client.session.status({ workspace: project.workspace.current() })
                 .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
             ])
-            // #364：goal fetch：非致命，失败不影响 session sync
-            // SDK 未重新生成，使用 as any 绕过方法不存在检查
+            // #368：SDK 未生成 session.goal 方法——as any 调用运行时 undefined→TypeError 被吞，
+            // goal 状态永不在会话打开时加载（/goal 误弹 Set）。改用 sdk.fetch 直调 GET，非致命。
             try {
-              const goalResp = await (sdk.client.session as any).goal(
-                { sessionID, workspace: project.workspace.current() },
-                { throwOnError: true },
-              )
-              setStore("session_goal", sessionID, goalResp?.data?.goal ?? undefined)
+              const url = new URL(`/session/${sessionID}/goal`, sdk.url)
+              const dir = result.path.directory || sdk.directory
+              if (dir) url.searchParams.set("directory", dir)
+              const resp = await sdk.fetch(url, { signal: sdk.signal })
+              if (resp.ok) {
+                const body = (await resp.json()) as { goal?: SessionGoalInfo }
+                setStore("session_goal", sessionID, body.goal ?? undefined)
+              }
             } catch {
               // goal 端点不可用时不阻塞 session sync
             }

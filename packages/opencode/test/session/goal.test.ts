@@ -419,3 +419,44 @@ it.instance(
     }),
   { git: true },
 )
+
+// [local-smark] 验证 goal HTTP API 端到端行为
+// SDK 未重新生成 goalSet/goalClear 方法，这些方法在运行时为 undefined
+// 确认 SDK Session2 类上不存在 goalSet/goalClear/goal 方法
+it.live(
+  "SDK Session2 class does not have goal methods (regression guard)",
+  () =>
+    Effect.gen(function* () {
+      const { createOpencodeClient } = yield* Effect.promise(() => import("@opencode-ai/sdk/v2"))
+      const client = createOpencodeClient({ baseUrl: "http://localhost:0" })
+      // SDK 未重新生成，goalSet/goalClear/goal 应为 undefined
+      // 如果 SDK 重新生成后这些方法存在，测试会失败，提醒移除 fetch 直接调用
+      expect((client.session as any).goalSet).toBeUndefined()
+      expect((client.session as any).goalClear).toBeUndefined()
+      expect((client.session as any).goal).toBeUndefined()
+    }),
+)
+
+// [local-smark] 验证 dialog-goal.tsx 不依赖 SDK 方法
+// dialog-goal.tsx 应使用 fetch 直接调用 HTTP 端点，而非 sdk.client.session.goalSet
+it.live(
+  "dialog-goal.tsx uses fetch not SDK method for goal API calls",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* Effect.promise(() => import("fs/promises"))
+      const path = yield* Effect.promise(() => import("path"))
+      // 目标仓库中 dialog-goal 位于 packages/tui，相对 packages/opencode 的
+      // 测试 cwd 需要向上两级再进入 tui 包（source 路径已迁移）
+      const content = yield* Effect.promise(() =>
+        fs.readFile(
+          path.join(process.cwd(), "../tui/src/component/dialog-goal.tsx"),
+          "utf-8",
+        ),
+      )
+      // 不应包含 as any 调用 SDK goal 方法的模式
+      expect(content).not.toContain("(sdk.client.session as any).goalSet")
+      expect(content).not.toContain("(sdk.client.session as any).goalClear")
+      // 应包含 fetch 直接调用
+      expect(content).toContain("sdk.fetch")
+    }),
+)
