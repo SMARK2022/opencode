@@ -1036,9 +1036,28 @@ function pythonRemovesFile(tokens: string[]) {
   return RE_C_PYTHON_FILE_REMOVE_CALL.test(tokens[tokens.findIndex((item) => item === "-c") + 1] ?? "")
 }
 
+// #365：git 全局 flag 中可重定向执行上下文的 flag。这些 flag 可将 git 操作指向
+// 其他仓库(-C/--git-dir/--work-tree)、注入配置(-c/--config-env)或替换
+// helper 二进制路径(--exec-path)。与 gitSafe 共用,消除重复。
+const GIT_UNSAFE_GLOBAL = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"])
+
 // #220：classifyGit——Git 子命令专项分类器，替代 cautiousGitSubcommand
 function classifyGit(tokens: string[]): Decision | undefined {
-  const sub = tokens[1]
+  // #365：单遍遍历:跳过全局 flag 找到真正的子命令,同时检测 unsafe global flag。
+  // unsafe global(-C/-c/--git-dir 等)可重定向 git 到其他仓库或注入配置
+  // (如 core.hooksPath),即使子命令本身只读(如 status),跨仓库操作仍需审查。
+  // 支持 flag=value 形式(如 --git-dir=/path)和裸 flag 形式(如 -C /path)。
+  let i = 1
+  while (i < tokens.length && tokens[i].startsWith("-")) {
+    const flag = tokens[i].includes("=") ? tokens[i].slice(0, tokens[i].indexOf("=")) : tokens[i]
+    if (GIT_UNSAFE_GLOBAL.has(flag))
+      return { level: "cautious", reason: "git global flag redirects execution context" }
+    // 安全的 boolean flag(--no-pager/--paginate 等)不消费参数,直接跳过。
+    // 极少数吃参数的全局 flag(如 --namespace)不在 GIT_UNSAFE_GLOBAL 中,
+    // 会将参数误当作子命令;但这些 flag 极少使用且命令仍落入 general(非 safe)。
+    i++
+  }
+  const sub = tokens[i]
   if (!sub) return undefined
   // #220: 特定高风险 git 操作
   if (sub === "reset" && tokens.includes("--hard"))
@@ -1049,9 +1068,38 @@ function classifyGit(tokens: string[]): Decision | undefined {
     return { level: "cautious", reason: "force push requires explicit approval" }
   // #220: 通用状态变更命令
   // #222：git rm 也加入 cautious——删除跟踪文件，改变仓库状态
-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv", "rm"].includes(sub))
+  // #365：补充 checkout/switch/restore/apply/am/filter-branch/update-ref/
+  // bisect/symbolic-ref/worktree/submodule 等遗漏子命令——它们修改索引、
+  // 历史、引用、工作树或远端状态，落入 general 会被自动放行。
+  if (
+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull",
+     "reset", "clean", "mv", "rm",
+     "checkout", "switch", "restore", "apply", "am",
+     "filter-branch", "update-ref", "bisect", "symbolic-ref",
+     "worktree", "submodule"].includes(sub)
+  )
     return { level: "cautious", reason: "git state-changing command requires explicit approval" }
-  if (sub === "branch" && !gitBranchSafe(tokens.slice(2)))
+
+  // #365：stash: list 是只读;其余(push/pop/drop/clear)修改工作树或丢失暂存
+  if (sub === "stash" && tokens[i + 1] !== "list")
+    return { level: "cautious", reason: "git stash modifies working tree state" }
+
+  // #365：config: 无参数仅打印 help(--get/--list 由 gitSafe 放行为 safe);
+  // 其余可设 hooksPath 等危险配置,需审查
+  if (sub === "config" && tokens[i + 1] && tokens[i + 1] !== "--get" && tokens[i + 1] !== "--list")
+    return { level: "cautious", reason: "git config modification requires explicit approval" }
+
+  // #365：remote: 无参数和 -v 是只读;add/remove/set-url 可将 push 重定向到攻击者仓库
+  if (sub === "remote" && tokens[i + 1] && tokens[i + 1] !== "-v")
+    return { level: "cautious", reason: "git remote modification requires explicit approval" }
+
+  // #365：tag: 无参数和 -l/--list 是只读;创建/删除标签修改仓库状态
+  if (sub === "tag" && tokens[i + 1] && tokens[i + 1] !== "-l" && tokens[i + 1] !== "--list")
+    return { level: "cautious", reason: "git tag creation or deletion requires explicit approval" }
+
+  // #365：分支操作：仅在非只读模式时为 cautious。用 tokens.slice(i + 1) 而非
+  // tokens.slice(2),以支持安全 boolean flag(如 --no-pager)前置的情况。
+  if (sub === "branch" && !gitBranchSafe(tokens.slice(i + 1)))
     return { level: "cautious", reason: "git branch mutation requires explicit approval" }
   return undefined
 }
@@ -1139,13 +1187,14 @@ function safeTokens(tokens: string[]) {
 function gitSafe(tokens: string[]) {
   // #197：仅只读 git 子命令安全——改变 config/worktree/exec-path 的 global flag 被拒绝，因可将安全子命令重定向到另一仓库或 helper
   // #202：--ext-diff/--textconv 可调用外部 diff/textconv 程序，read-looking 但有执行副作用，从 safe 排除
-  const unsafeGlobal = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"])
+  // #365：防御性冗余:主路径已在 classifyGit 拦截 unsafe global flag;
+  // 保留此检查防止未来 classifyGit 改动引入绕过。
   const unsafeReadFlag = new Set(["--ext-diff", "--textconv"])
   const safe = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame"])
   let subcommand: string | undefined
   for (let i = 1; i < tokens.length; i++) {
     // #197：unsafe global flag 可重定向 git 操作到另一仓库或注入配置——任何安全子命令在 -C/-c 下都不安全
-    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "="))) return false
+    if (GIT_UNSAFE_GLOBAL.has(tokens[i]) || Array.from(GIT_UNSAFE_GLOBAL).some((item) => tokens[i].startsWith(item + "="))) return false
     // #202：unsafe read flag 可执行外部 diff/textconv 程序——read-looking 但有执行副作用
     if (unsafeReadFlag.has(tokens[i])) return false
     // #197：git remote -v 仅列出远程——其他 remote 子命令可 add/rename/remove
