@@ -16,6 +16,9 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+// [local-smark] session preview: 直接查 DB 获取用户消息预览文本
+import { MessageTable, PartTable } from "@/session/session.sql"
+import { Database, sql } from "@/storage/db"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
@@ -31,6 +34,8 @@ import {
   ListQuery,
   MessagesQuery,
   PermissionResponsePayload,
+  // [local-smark] session preview payload schema
+  PreviewPayload,
   PromptPayload,
   RevertPayload,
   ShellPayload,
@@ -475,6 +480,78 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return { cleared }
     })
 
+    // [local-smark] session preview handler
+    // 单条 SQL 窗口函数查询批量获取多个 session 的最近 N 条用户消息文本，
+    // 替代 TUI 中每 session 独立分页调用 session.messages 的 N×M 模式。
+    // 过滤条件与 MessageV2.page(includeHidden=false) + textFromUserMessage 完全对齐：
+    // - role = 'user' 且 message 无 hidden 标记
+    // - part type = 'text' 且非 synthetic/ignored 且无 hidden 标记
+    // - EXISTS 子查询确保只排名有可见 text part 的用户消息（与当前代码跳过
+    //   无文本消息后继续扫描的行为一致）
+    const preview = Effect.fn("SessionHttpApi.preview")(function* (ctx: {
+      payload: typeof PreviewPayload.Type
+    }) {
+      const { sessionIDs, limit: rawLimit } = ctx.payload
+      if (sessionIDs.length === 0) return {} as Record<string, string[]>
+      const limit = rawLimit ?? 2
+
+      // 参数化 IN 子句，防止 SQL 注入；SQLite 参数上限 32766，400 远在限内
+      const idPlaceholders = sql.join(sessionIDs.map((id) => sql`${id}`), sql`, `)
+
+      const rows = Database.use((db) =>
+        db.all(sql`
+          WITH ranked_messages AS (
+            SELECT ${MessageTable.id} as message_id, ${MessageTable.session_id}, ${MessageTable.time_created},
+              ROW_NUMBER() OVER (
+                PARTITION BY ${MessageTable.session_id}
+                ORDER BY ${MessageTable.time_created} DESC, ${MessageTable.id} DESC
+              ) as msg_rn
+            FROM ${MessageTable}
+            WHERE json_extract(${MessageTable.data}, '$.role') = 'user'
+              AND json_type(${MessageTable.data}, '$.hidden') IS NULL
+              AND ${MessageTable.session_id} IN (${idPlaceholders})
+              AND EXISTS (
+                SELECT 1 FROM ${PartTable}
+                WHERE ${PartTable.message_id} = ${MessageTable.id}
+                  AND json_extract(${PartTable.data}, '$.type') = 'text'
+                  AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
+                  AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
+                  AND json_type(${PartTable.data}, '$.hidden') IS NULL
+              )
+          ),
+          preview_parts AS (
+            SELECT rm.session_id, rm.msg_rn, ${PartTable.id} as part_id,
+              json_extract(${PartTable.data}, '$.text') as text
+            FROM ranked_messages rm
+            INNER JOIN ${PartTable} ON ${PartTable.message_id} = rm.message_id
+              AND json_extract(${PartTable.data}, '$.type') = 'text'
+              AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
+              AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
+              AND json_type(${PartTable.data}, '$.hidden') IS NULL
+            WHERE rm.msg_rn <= ${limit}
+          )
+          SELECT session_id, msg_rn, group_concat(text, ' ') as joined_text
+          -- 子查询 ORDER BY 保证同一消息内多 text part 按 part.id 顺序拼接；
+          -- SQLite group_concat 不保证 GROUP BY 内顺序，需子查询喂入有序行
+          FROM (SELECT * FROM preview_parts ORDER BY part_id)
+          GROUP BY session_id, msg_rn
+          ORDER BY session_id, msg_rn
+        `),
+      ) as { session_id: string; msg_rn: number; joined_text: string | null }[]
+
+      // JS 侧完成空白归一化（与 textFromUserMessage 的
+      // .replace(/\s+/g, " ").trim() 对齐）并按 session 分组
+      const result: Record<string, string[]> = {}
+      for (const row of rows) {
+        // group_concat 对无匹配行返回 NULL；空文本跳过，与 if (text) 一致
+        const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()
+        if (!text) continue
+        if (!result[row.session_id]) result[row.session_id] = []
+        result[row.session_id].push(text)
+      }
+      return result
+    })
+
     return handlers
       .handle("list", list)
       .handle("status", status)
@@ -511,5 +588,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("goal", goalGet)
       .handle("goalSet", goalSet)
       .handle("goalClear", goalClear)
+      // [local-smark] session preview handler 注册
+      .handle("preview", preview as any)
   }),
 )

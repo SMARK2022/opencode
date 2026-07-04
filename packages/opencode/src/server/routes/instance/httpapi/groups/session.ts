@@ -153,6 +153,15 @@ export const GoalResponse = Schema.Struct({
 export const GoalClearResponse = Schema.Struct({
   cleared: Schema.Boolean,
 })
+// [local-smark] session preview: 批量获取多个 session 的最近 N 条用户消息文本
+// PreviewPayload 接收 session ID 列表和期望的预览行数；PreviewResponse 是
+// sessionID → 预览文本数组的映射，无用户消息的 session 不包含在响应中。
+// limit 约束在 1-10 防止异常大值导致 SQL 返回过多行
+export const PreviewPayload = Schema.Struct({
+  sessionIDs: Schema.Array(Schema.String),
+  limit: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10))),
+})
+export const PreviewResponse = Schema.Record(Schema.String, Schema.Array(Schema.String))
 
 export const SessionPaths = {
   list: root,
@@ -186,6 +195,8 @@ export const SessionPaths = {
   updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
   // goal 端点：每个 session 最多一个 current goal
   goal: `${root}/:sessionID/goal`,
+  // [local-smark] 预览端点：POST /session/preview，批量返回 session 预览文本
+  preview: `${root}/preview`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -596,6 +607,21 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.goal.clear",
             summary: "Clear session goal",
             description: "Remove the persistent goal from a session.",
+          }),
+        ),
+        // [local-smark] 批量预览端点：单次 POST 返回多个 session 的用户消息预览
+        // 替代 TUI 中 N×M 次 session.messages 分页调用，将 ~10s 阻塞降至 ~100ms
+        HttpApiEndpoint.post("preview", SessionPaths.preview, {
+          query: WorkspaceRoutingQuery,
+          payload: PreviewPayload,
+          success: described(PreviewResponse, "Session preview lines keyed by session ID"),
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.preview",
+            summary: "Batch session preview",
+            description:
+              "Retrieve the most recent user message text for multiple sessions in a single request.",
           }),
         ),
       )

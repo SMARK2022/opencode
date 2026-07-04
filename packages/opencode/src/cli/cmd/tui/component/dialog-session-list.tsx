@@ -2,7 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { createEffect, createMemo, createResource, createSignal, on, onMount, type JSX } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount, type JSX } from "solid-js"
 import { Locale } from "@/util/locale"
 import { useProject } from "@tui/context/project"
 import { useTheme } from "../context/theme"
@@ -16,17 +16,13 @@ import { openWorkspaceSelect, type WorkspaceSelection, warpWorkspaceSession } fr
 import { Spinner } from "./spinner"
 import { errorMessage } from "@/util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
-import type { Part, TextPart } from "@opencode-ai/sdk/v2"
 import { WorkspaceLabel } from "./workspace-label"
 import { useCommandShortcut } from "../keymap"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
 
 const SESSION_LIST_PREVIEW_LINES = 2
-const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
-const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
 const SESSION_LIST_PREVIEW_SESSION_LIMIT = 400
-const SESSION_LIST_PREVIEW_CONCURRENCY = 6
 
 export function DialogSessionList() {
   const dialog = useDialog()
@@ -42,76 +38,48 @@ export function DialogSessionList() {
   // [local-smark] Session list preview functionality
   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
 
-  function textFromUserMessage(parts: Part[]) {
-    return (parts.filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
-      .map((p) => p.text)
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim()
-  }
-
-  async function loadPreviewLines(sessionID: string) {
-    const lines: string[] = []
-    let before: string | undefined
-    let scanned = 0
-
-    while (lines.length < SESSION_LIST_PREVIEW_LINES && scanned < SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT) {
-      const limit = Math.min(SESSION_LIST_PREVIEW_PAGE_SIZE, SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT - scanned)
-      const result = await sdk.client.session.messages({
-        sessionID,
-        limit,
-        before,
-      })
-
-      const messages = result.data ?? []
-      scanned += limit
-
-      for (let i = messages.length - 1; i >= 0 && lines.length < SESSION_LIST_PREVIEW_LINES; i--) {
-        const message = messages[i]
-        if (message.info.role !== "user") continue
-
-        const text = textFromUserMessage(message.parts)
-        if (text) lines.push(text)
-      }
-
-      const cursor = result.response.headers.get("X-Next-Cursor")
-      if (!cursor) break
-      before = cursor
-    }
-
-    return lines
-  }
-
+  // [local-smark] session list preview: 批量获取预览文本
+  // 单次 POST /session/preview 替代原来 N×M 次 session.messages 分页调用。
+  // AbortController 保证 dialog 关闭或搜索切换时取消 in-flight 请求；
+  // signal.aborted 守卫防止已取消的响应覆盖新数据（竞态防护）
   createEffect(
     on(
       () => sessions(),
-      (sessions) => {
+      (currentSessions) => {
         if (SESSION_LIST_PREVIEW_LINES <= 0) return
 
-        const unloaded = sessions
+        const ids = currentSessions
           .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
-          .filter((s) => !(s.id in (previews() ?? {})))
+          .map((s) => s.id)
+        if (ids.length === 0) return
 
-        if (unloaded.length === 0) return
+        // 每次 sessions 变化创建新 controller；onCleanup 在下次触发或卸载时 abort
+        const controller = new AbortController()
+        onCleanup(() => controller.abort())
 
         void (async () => {
-          const next: Record<string, string[]> = {}
+          try {
+            // POST 请求需手动设置 directory query param（sdk.fetch 的 rewrite
+            // 仅处理 GET/HEAD），确保 workspace routing 中间件正确定位实例
+            const url = new URL("/session/preview", sdk.url)
+            const dir = sync.path.directory || sdk.directory
+            if (dir) url.searchParams.set("directory", dir)
 
-          for (let i = 0; i < unloaded.length; i += SESSION_LIST_PREVIEW_CONCURRENCY) {
-            const chunk = unloaded.slice(i, i + SESSION_LIST_PREVIEW_CONCURRENCY)
-
-            await Promise.all(
-              chunk.map(async (session) => {
-                try {
-                  const lines = await loadPreviewLines(session.id)
-                  if (lines.length > 0) next[session.id] = lines
-                } catch {}
-              }),
-            )
-          }
-
-          if (Object.keys(next).length > 0) {
-            setPreviews((prev) => ({ ...prev, ...next }))
+            const res = await sdk.fetch(url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sessionIDs: ids, limit: SESSION_LIST_PREVIEW_LINES }),
+              signal: controller.signal,
+            })
+            if (!res.ok) return
+            const data = (await res.json()) as Record<string, string[]>
+            // 竞态守卫：若请求完成时已被 abort，不覆盖新数据
+            // 无条件 setPreviews(data)：空响应也需覆盖，避免搜索切换后残留过期预览
+            if (!controller.signal.aborted) {
+              setPreviews(data)
+            }
+          } catch {
+            // 预览加载失败不阻塞 session list 显示
           }
         })()
       },
