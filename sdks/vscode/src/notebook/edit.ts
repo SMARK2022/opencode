@@ -30,6 +30,11 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
 const EDIT_TYPES = new Set(["insert", "edit", "delete"])
 // 十秒仅约束编辑同步，不复用运行格的执行超时或取消内核。
 const EDIT_SYNC_TIMEOUT_MS = 10_000
+// after-source 预览的行数和字符上限：让 agent 能从 edit 响应中精确复制
+// 前若干行作为下一次 oldCode，避免模型从记忆重建时字符漂移。
+// 与 plugin 层 NOTEBOOK_INSERT_PREVIEW_LINES / MAX_CHARS 保持同一量级。
+const AFTER_SOURCE_PREVIEW_LINES = 10
+const AFTER_SOURCE_PREVIEW_MAX_CHARS = 4 * 1024
 
 export async function editNotebook(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
@@ -48,6 +53,11 @@ export async function editNotebook(input: Record<string, unknown>) {
   // 空数组不能代表省略源码；在任何写入前拒绝，显式清空仍使用空字符串。
   rejectEmptySourceArray(input, "oldCode")
   rejectEmptySourceArray(input, "newCode")
+
+  // 非字符串数组（如对象数组）必须在变更前拦截，防止 sourceProp 静默返回
+  // undefined 后触发误导性 "newCode is required" 或静默 full-cell replace
+  rejectNonStringSourceArray(input, "oldCode")
+  rejectNonStringSourceArray(input, "newCode")
 
   // 结构编辑会改变 cellCount，差分基线必须在 applyEdit 前记录，不能在返回后反推原格数。
   const beforeCount = notebook.cellCount
@@ -442,6 +452,35 @@ function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" |
   }
 }
 
+// agent 偶尔把结构化对象数组（如 HTTP headers）传给 oldCode/newCode。
+// sourceProp 对非字符串数组返回 undefined，导致 "newCode is required" 误导性错误，
+// 或 oldCode 被静默忽略后执行 full-cell replacement 造成数据丢失。
+// 在任何 notebook 变更前拦截，给出明确的类型错误。
+function rejectNonStringSourceArray(input: Record<string, unknown>, key: "oldCode" | "newCode") {
+  const value = input[key]
+  if (Array.isArray(value) && !value.every((item) => typeof item === "string")) {
+    throw new Error(`${key} must be a string or an array of strings, but contains non-string items. Pass source code text, not structured objects.`)
+  }
+}
+
+// 从 afterSource 中提取前 N 行作为 oldCode 锚点预览。
+// CRLF 规范化为 LF：matchAndReplace 也会将两端的 CRLF 规范化为 LF 后匹配，
+// 所以预览用 LF 不会引入匹配差异，同时减少 token 消耗。
+function afterSourcePreview(source: string) {
+  const rawLines = source.replace(/\r\n/g, "\n").split("\n")
+  const lines = rawLines.at(-1) === "" ? rawLines.slice(0, -1) : rawLines
+  const linePreview = lines.slice(0, AFTER_SOURCE_PREVIEW_LINES).join("\n")
+  const text = linePreview.length > AFTER_SOURCE_PREVIEW_MAX_CHARS
+    ? linePreview.slice(0, AFTER_SOURCE_PREVIEW_MAX_CHARS)
+    : linePreview
+  return {
+    text,
+    truncated: lines.length > AFTER_SOURCE_PREVIEW_LINES || text.length < linePreview.length,
+    remainingLines: Math.max(0, lines.length - AFTER_SOURCE_PREVIEW_LINES),
+  }
+}
+
+
 async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
   // 提交前版本是本次修改的基线，不能在 applyEdit 的 await 返回后才采样。
   const beforeVersion = notebook.version
@@ -597,6 +636,22 @@ function compactEditResult(
     // 正文仅作 50 字符预览，完整新源码留在打开文档而非塞进操作差分。
     lines.push(`Preview: ${JSON.stringify(previewText(info.sourcePreview, 50))}`)
   }
+  // delete 操作的 afterSource 为空，不追加。
+  if (info.afterSource && info.editType !== "delete") {
+    const preview = afterSourcePreview(info.afterSource)
+    lines.push(`AfterSource (first ${preview.text.split("\n").length} lines, use as oldCode for next edit):`)
+    lines.push(preview.text)
+    if (preview.truncated) {
+      // 行数截断和字符截断是两种不同情况：行数超限时提示剩余行数；
+      // 行数未超但字符超限时提示字符截断，避免出现 "(... 0 more lines)" 误导
+      if (preview.remainingLines > 0) {
+        lines.push(`(... ${preview.remainingLines} more lines, use vscode_notebook_source for full cell)`)
+      } else {
+        lines.push(`(... line content truncated at ${AFTER_SOURCE_PREVIEW_MAX_CHARS} chars, use vscode_notebook_source for full cell)`)
+      }
+    }
+  }
+
 
   return {
     ran: false,

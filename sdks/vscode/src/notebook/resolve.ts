@@ -30,7 +30,10 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
     if (cells.length > 1) throw new Error(`Ambiguous notebook cell ID: ${cellId}`)
     if (cells.length === 1) return cells[0]
     // 显式 ID 不命中直接抛错，不能猜前缀或降级选择首格。
-    throw new Error(`Notebook cell not found: ${cellId}. The edit response contains updated cell IDs after type changes.`)
+    // cell ID 在 type-change（replaceCells）后失效，因为新 cell 获得新的 URI。
+    // 此错误被 edit/run/source/output 共用，消息不能只提 "edit response"。
+    // 建议调用 summary 获取当前 cell map，这是所有工具通用的恢复路径。
+    throw new Error(`Notebook cell not found: ${cellId}. Cell IDs change after type-change edits — call vscode_notebook_summary to get the current cell map.`)
   }
 
   // 显式 ID 的不命中或歧义先拒绝，不能被同时传入的数字位置掩盖。

@@ -98,10 +98,6 @@ let cachedRegistryBridge:
     }
   | undefined
 
-// 全局请求队列：序列化所有桥接 HTTP 请求，防止并发 notebook 工具调用竞争同一 VS Code 桥接
-// 全局串行化 CLI→bridge 调用，避免并发打乱会话状态
-let bridgeRequestQueue = Promise.resolve()
-
 // 注册目录：每个 VS Code 实例在此目录下写入一个 JSON 注册文件
 export function registryDir() {
 // 环境变量优先：允许测试和自定义安装指定注册目录路径
@@ -242,16 +238,16 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
 }
 
 // 调用桥接：向 VS Code 扩展发送 HTTP POST 请求，支持超时和中止
-// 对指定 bridge 发鉴权 HTTP，并走请求队列
+// 对指定bridge发鉴权HTTP，跨文件请求不再共用客户端队列。
 // CLI 桥接 API：callBridge — 发现/调用 VS Code notebook 能力
 export async function callBridge(input: CallInput): Promise<unknown> {
-  // 入队后 FIFO 执行；失败不阻塞后续任务
-  // 客户端全局串行：避免并发 callBridge 打穿扩展侧状态
-  // 请求队列：每次 callBridge 通过 enqueueBridgeRequest 序列化，确保同一时刻只有一个 HTTP 请求在途
-  return await enqueueBridgeRequest(() => callBridgeOnce(input))
+  // 全局请求队列已移除：服务端 withFileLock 已按 filePath 序列化同一文档的请求，
+  // 客户端不再需要全局 Promise 队列。之前的全局队列会把一个长时间 run（最长 50 分钟）
+  // 阻塞所有后续 summary/source/edit/env 操作，包括不同 notebook 的请求。
+  return await callBridgeOnce(input)
 }
 
-// 实际执行桥接调用的函数：从 callBridge 提取，由队列调度
+// 发现、鉴权、期限和错误传播仍由原调用路径承担。
 async function callBridgeOnce(input: CallInput): Promise<unknown> {
   await assertExistingLocalFilePath(input.filePath)
 // 解析桥接：通过工作区和文件路径匹配最佳桥接
@@ -299,21 +295,6 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
   const error = errorFromResponse(value)
   if (error) throw new Error(error)
   return value
-}
-
-// 桥接请求队列调度器：前一个请求完成（或失败）后才执行下一个，finally 确保队列不会卡住
-async function enqueueBridgeRequest<T>(operation: () => Promise<T>): Promise<T> {
-  const previous = bridgeRequestQueue
-  let release!: () => void
-  bridgeRequestQueue = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  await previous
-  try {
-    return await operation()
-  } finally {
-    release()
-  }
 }
 
 // 摘要提取：从桥接响应中提取 summary 字段
