@@ -5,6 +5,7 @@ import { useSync } from "@tui/context/sync"
 import { useSDK } from "@tui/context/sdk"
 import { useToast } from "@tui/ui/toast"
 import { createMemo } from "solid-js"
+import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
 
 // [local-smark] goal 管理 dialog
 // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
@@ -32,6 +33,16 @@ function useGoalApi(sessionID: string) {
 
   // POST /session/:id/goal — 设置或更新 goal
   const setGoal = async (input: { objective?: string; status?: string }) => {
+    // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
+    // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
+    // 提前拦截避免无效往返
+    if (input.objective !== undefined && input.objective.trim().length > MAX_OBJECTIVE_CHARS) {
+      toast.show({
+        message: `Goal objective must be at most ${MAX_OBJECTIVE_CHARS} characters`,
+        variant: "error",
+      })
+      return
+    }
     try {
       const resp = await sdk.fetch(goalUrl(), {
         method: "POST",
@@ -39,7 +50,11 @@ function useGoalApi(sessionID: string) {
         body: JSON.stringify(input),
       })
       if (!resp.ok) {
-        toast.show({ message: "Failed to update goal", variant: "error" })
+        // 服务器返回 NamedError 形态 {name, data:{message}}；提取 data.message
+        // 让用户看到具体原因（如 budget/无goal 等 client 未预判的拒绝）。
+        // 解析失败或无 message 时回退通用文案，兼容中间件非 JSON 响应
+        const body = await resp.json().catch(() => null)
+        toast.show({ message: body?.data?.message ?? "Failed to update goal", variant: "error" })
         return
       }
       dialog.clear()

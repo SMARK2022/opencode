@@ -153,6 +153,17 @@ export const GoalResponse = Schema.Struct({
 export const GoalClearResponse = Schema.Struct({
   cleared: Schema.Boolean,
 })
+// goal 校验失败的 wire 错误：携带具体原因（空/超长/budget/无goal）到 data.message，
+// 镜像 WorktreeApiError / ApiNotFoundError 的 Schema.ErrorClass + httpApiStatus 模式。
+// _tag 用 "GoalApiError" 避免与 domain GoalError(_tag="GoalError") 的 catchTag 冲突；
+// wire name 用 "GoalError" 对客户端可读
+export class GoalApiError extends Schema.ErrorClass<GoalApiError>("GoalApiError")(
+  {
+    name: Schema.Literal("GoalError"),
+    data: Schema.Struct({ message: Schema.String }),
+  },
+  { httpApiStatus: 400 },
+) {}
 // [local-smark] session preview: 批量获取多个 session 的最近 N 条用户消息文本
 // PreviewPayload 接收 session ID 列表和期望的预览行数；PreviewResponse 是
 // sessionID → 预览文本数组的映射，无用户消息的 session 不包含在响应中。
@@ -589,7 +600,7 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: GoalSetPayload,
           success: described(GoalResponse, "Updated session goal"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, GoalApiError, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.goal.set",
