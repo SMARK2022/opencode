@@ -131,7 +131,8 @@ const SettingsProvidersContent: Component<{ onBack?: () => void }> = (props) => 
     await serverSDK()
       .client.auth.remove({ providerID })
       .then(async () => {
-        await serverSDK().client.global.dispose()
+        // #362：不再调 global.dispose()——服务端 authRemove handler 已刷新 Provider 缓存。
+        // global.disposed 事件会触发 UI 刷新。
         showToast({
           variant: "success",
           icon: "circle-check",

@@ -4,7 +4,7 @@ import { mkdir, unlink } from "fs/promises"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-import { Effect } from "effect"
+import { Deferred, Effect } from "effect"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -16,6 +16,8 @@ import { Config } from "@/config/config"
 import { Env } from "../../src/env"
 import { Plugin } from "../../src/plugin/index"
 import { Provider } from "@/provider/provider"
+import { SessionRunState } from "@/session/run-state"
+import { SessionID } from "@/session/schema"
 
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Filesystem } from "@/util/filesystem"
@@ -85,7 +87,7 @@ const paid = (providers: Record<string, { models: Record<string, { cost: { input
 
 const languageBaseURL = (language: unknown) => (language as { config: { baseURL: string } }).config.baseURL
 
-const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node, Plugin.node])))
+const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node, Plugin.node, SessionRunState.node])))
 const experimentalModels = testEffect(providerLayer({ enableExperimentalModels: true }))
 
 const alphaProviderConfig = {
@@ -2268,6 +2270,61 @@ it.instance(
   },
 )
 
+// #362：invalidateAll 的核心行为：刷新 Provider.Service 缓存后，
+// 下次 list() 会重新读取 env/auth，反映最新的连接状态。
+// 这验证了 "auth 变更后不销毁实例、仅刷 provider 缓存" 的关键路径。
+it.instance("invalidateAll 后 provider.list 反映最新的 env 状态", () =>
+  Effect.gen(function* () {
+    // 设置 env → provider 初始化后包含 anthropic
+    yield* set("ANTHROPIC_API_KEY", "test-api-key")
+    const before = yield* list
+    expect(before[ProviderV2.ID.anthropic]).toBeDefined()
+
+    // 移除 env，但缓存仍持有旧数据（未刷新）
+    yield* remove("ANTHROPIC_API_KEY")
+    const stale = yield* list
+    expect(stale[ProviderV2.ID.anthropic]).toBeDefined()
+
+    // 等待真实 work 启动，再验证 Provider 失效不会触发其他服务的取消终结器。
+    const running = yield* SessionRunState.Service
+    const sessionID = SessionID.make("ses_provider_invalidation")
+    const started = yield* Deferred.make<void>()
+    yield* running.ensureRunning(
+      sessionID,
+      Effect.die("unexpected cancellation"),
+      Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+    ).pipe(Effect.exit, Effect.forkChild)
+    yield* Deferred.await(started)
+    // 刷新缓存后，下次 list 重新读取 env → anthropic 不再存在
+    yield* Provider.use.invalidateAll()
+    const busy = yield* running.assertNotBusy(sessionID).pipe(Effect.flip)
+    expect(busy.sessionID).toBe(sessionID)
+    const after = yield* list
+    expect(after[ProviderV2.ID.anthropic]).toBeUndefined()
+  }),
+)
+
+// #362：invalidateAll 不能破坏后续的 getLanguage 调用——
+// 缓存被清空后，下次 getLanguage 应惰性重建并正常返回。
+// 这验证了 invalidateAll 是安全的：不产生半态或损坏的缓存。
+it.instance("invalidateAll 后 getLanguage 仍能正常重建缓存", () =>
+  Effect.gen(function* () {
+    yield* set("ANTHROPIC_API_KEY", "test-api-key")
+    const provider = yield* Provider.Service
+    const model = yield* provider.getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("claude-sonnet-4-6"))
+    // 首次调用 → 初始化缓存
+    const lang1 = yield* provider.getLanguage(model)
+    expect(lang1).toBeDefined()
+
+    // 刷新缓存 → 清空
+    yield* Provider.use.invalidateAll()
+
+    // 再次调用 → 惰性重建，应正常返回
+    const model2 = yield* provider.getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("claude-sonnet-4-6"))
+    const lang2 = yield* provider.getLanguage(model2)
+    expect(lang2).toBeDefined()
+  }),
+)
 it.instance(
   "alias providers appear as independent list entries",
   Effect.gen(function* () {

@@ -1,4 +1,5 @@
 import { Auth } from "@/auth"
+import { refreshProviderCaches } from "@/server/global-lifecycle"
 
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -15,6 +16,8 @@ export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (han
       payload: Auth.Info
     }) {
       yield* auth.set(ctx.params.providerID, ctx.payload).pipe(Effect.orDie)
+      // #362：auth 写入后刷新 Provider 缓存（不杀会话），使下次请求获取新密钥
+      yield* refreshProviderCaches()
       return true
     })
 
@@ -22,6 +25,8 @@ export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (han
       params: { providerID: ProviderV2.ID }
     }) {
       yield* auth.remove(ctx.params.providerID).pipe(Effect.orDie)
+      // #362：auth 移除后同样刷新 Provider 缓存，使该 provider 不再出现在 connected 列表
+      yield* refreshProviderCaches()
       return true
     })
 

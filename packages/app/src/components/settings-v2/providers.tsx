@@ -128,7 +128,7 @@ export const SettingsProvidersV2: Component<{
     await serverSdk()
       .client.auth.remove({ providerID })
       .then(async () => {
-        await serverSdk().client.global.dispose()
+        // 认证入口负责刷新 Provider，断开连接不应取消其他运行中的会话。
         showToast({
           variant: "success",
           icon: "circle-check",

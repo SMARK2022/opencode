@@ -403,8 +403,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
             providerID: value.integrationID,
             auth: { type: "api", key: value.key },
           })
-          await legacy(value.location).instance.dispose()
-          await input.legacy().instance.dispose()
+          // V1 认证入口已刷新 Provider 缓存，保留实例及正在运行的会话。
         },
       },
       oauth: {
@@ -433,8 +432,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
             { providerID: value.integrationID, method, code: value.code },
             { throwOnError: true },
           )
-          await legacy(value.location).instance.dispose()
-          await input.legacy().instance.dispose()
+          // OAuth 完成同样由服务端刷新，不能通过销毁实例刷新凭据。
         },
         status: async (value: Parameters<ServerApi["integration"]["oauth"]["status"]>[0]) => {
           const method = Number(value.attemptID.split(":").at(-1))
@@ -442,8 +440,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
             { providerID: value.integrationID, method },
             { throwOnError: true },
           )
-          await legacy(value.location).instance.dispose()
-          await input.legacy().instance.dispose()
+          // 自动回调轮询完成后仅返回状态，不额外中断会话。
           return located(
             { status: "complete" as const, time: { created: Date.now(), expires: Date.now() } },
             value.location,
