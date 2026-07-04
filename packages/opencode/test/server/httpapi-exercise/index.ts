@@ -1335,6 +1335,39 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
+  // [local-smark] goal 端点 scenario
+  http.protected
+    .get("/session/{sessionID}/goal", "session.goal.get")
+    .seeded((ctx) => ctx.session({ title: "Goal get session" }))
+    .at((ctx) => ({ path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
+    .json(200, (body) => {
+      object(body)
+      check(body.goal === null, "new session should have no goal")
+    }),
+  http.protected
+    .post("/session/{sessionID}/goal", "session.goal.set")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Goal set session" }))
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { objective: "test objective" },
+    }))
+    .json(200, (body) => {
+      object(body)
+      const goal = (body as any).goal
+      check(goal?.objective === "test objective", "goal objective should match")
+      check(goal?.status === "active", "new goal should be active")
+    }),
+  http.protected
+    .delete("/session/{sessionID}/goal", "session.goal.clear")
+    .mutating()
+    .seeded((ctx) => ctx.session({ title: "Goal clear session" }))
+    .at((ctx) => ({ path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
+    .json(200, (body) => {
+      object(body)
+      check((body as any).cleared === false, "clearing non-existent goal should return false")
+    }),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))

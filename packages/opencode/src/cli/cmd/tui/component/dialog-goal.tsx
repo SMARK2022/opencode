@@ -4,22 +4,73 @@ import { useDialog } from "@tui/ui/dialog"
 import { useSync } from "@tui/context/sync"
 import { useSDK } from "@tui/context/sdk"
 import { useToast } from "@tui/ui/toast"
-import { createMemo, Show } from "solid-js"
+import { createMemo } from "solid-js"
 
 // [local-smark] goal 管理 dialog
-// 无 goal 时 → DialogPrompt 输入 objective 直接创建
-// 有 goal 时 → DialogSelect 选择 Edit/Pause/Resume/Clear
-// Edit 选中后用 dialog.replace 切换到 DialogPrompt（无返回导航，可接受）
+// SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
+// POST/DELETE 需手动设置 directory query param（sdk.fetch 的 rewrite 仅处理 GET/HEAD）
 
 interface DialogGoalProps {
   sessionID: string
 }
 
+// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭
+function useGoalApi(sessionID: string) {
+  const sdk = useSDK()
+  const sync = useSync()
+  const toast = useToast()
+  const dialog = useDialog()
+
+  // 构建带 directory query param 的 URL
+  // workspace routing 中间件通过 directory 定位实例
+  const goalUrl = () => {
+    const url = new URL(`/session/${sessionID}/goal`, sdk.url)
+    const dir = sync.path.directory || sdk.directory
+    if (dir) url.searchParams.set("directory", dir)
+    return url
+  }
+
+  // POST /session/:id/goal — 设置或更新 goal
+  const setGoal = async (input: { objective?: string; status?: string }) => {
+    try {
+      const resp = await sdk.fetch(goalUrl(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      })
+      if (!resp.ok) {
+        toast.show({ message: "Failed to update goal", variant: "error" })
+        return
+      }
+      dialog.clear()
+    } catch {
+      toast.show({ message: "Failed to update goal", variant: "error" })
+    }
+  }
+
+  // DELETE /session/:id/goal — 清除 goal
+  const clearGoal = async () => {
+    try {
+      const resp = await sdk.fetch(goalUrl(), {
+        method: "DELETE",
+      })
+      if (!resp.ok) {
+        toast.show({ message: "Failed to clear goal", variant: "error" })
+        return
+      }
+      dialog.clear()
+    } catch {
+      toast.show({ message: "Failed to clear goal", variant: "error" })
+    }
+  }
+
+  return { setGoal, clearGoal }
+}
+
 // 无 goal 时显示：输入 objective 创建新 goal
 export function DialogGoal(props: DialogGoalProps) {
   const dialog = useDialog()
-  const sdk = useSDK()
-  const toast = useToast()
+  const { setGoal } = useGoalApi(props.sessionID)
 
   return (
     <DialogPrompt
@@ -27,15 +78,8 @@ export function DialogGoal(props: DialogGoalProps) {
       placeholder="Enter your objective..."
       onConfirm={(value) => {
         // 空 objective 不允许创建
-        if (!value.trim()) {
-          toast.show({ message: "Objective must not be empty", variant: "error" })
-          return
-        }
-        // SDK 未重新生成，用 as any 绕过方法不存在检查
-        void (sdk.client.session as any)
-          .goalSet({ sessionID: props.sessionID, objective: value })
-          .then(() => dialog.clear())
-          .catch(() => toast.show({ message: "Failed to set goal", variant: "error" }))
+        if (!value.trim()) return
+        void setGoal({ objective: value })
       }}
       onCancel={() => dialog.clear()}
     />
@@ -46,26 +90,9 @@ export function DialogGoal(props: DialogGoalProps) {
 export function DialogGoalMenu(props: DialogGoalProps) {
   const dialog = useDialog()
   const sync = useSync()
-  const sdk = useSDK()
-  const toast = useToast()
+  const { setGoal, clearGoal } = useGoalApi(props.sessionID)
 
   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
-
-  // 调用 goalSet API 更新 status，出错时 toast 提示
-  const callSet = (input: { status?: string }) => {
-    void (sdk.client.session as any)
-      .goalSet({ sessionID: props.sessionID, ...input })
-      .then(() => dialog.clear())
-      .catch(() => toast.show({ message: "Failed to update goal", variant: "error" }))
-  }
-
-  // 调用 goalClear API 删除 goal
-  const callClear = () => {
-    void (sdk.client.session as any)
-      .goalClear({ sessionID: props.sessionID })
-      .then(() => dialog.clear())
-      .catch(() => toast.show({ message: "Failed to clear goal", variant: "error" }))
-  }
 
   return (
     <DialogSelect
@@ -73,10 +100,8 @@ export function DialogGoalMenu(props: DialogGoalProps) {
       options={[
         {
           title: "Edit objective",
-          // 显示当前 objective 作为描述
           description: goal()?.objective,
           value: "edit",
-          // 选中后替换 dialog 为 DialogPrompt 编辑模式
           onSelect: () => {
             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)
           },
@@ -87,7 +112,7 @@ export function DialogGoalMenu(props: DialogGoalProps) {
               title: "Pause",
               description: "Pause the active goal",
               value: "pause",
-              onSelect: () => callSet({ status: "paused" }),
+              onSelect: () => void setGoal({ status: "paused" }),
             }]
           : []),
         // paused/blocked 状态下显示 Resume 选项
@@ -96,14 +121,14 @@ export function DialogGoalMenu(props: DialogGoalProps) {
               title: "Resume",
               description: "Resume the goal to active",
               value: "resume",
-              onSelect: () => callSet({ status: "active" }),
+              onSelect: () => void setGoal({ status: "active" }),
             }]
           : []),
         {
           title: "Clear",
           description: "Remove the goal",
           value: "clear",
-          onSelect: () => callClear(),
+          onSelect: () => void clearGoal(),
         },
       ]}
     />
@@ -114,25 +139,17 @@ export function DialogGoalMenu(props: DialogGoalProps) {
 function DialogGoalEdit(props: DialogGoalProps) {
   const dialog = useDialog()
   const sync = useSync()
-  const sdk = useSDK()
-  const toast = useToast()
+  const { setGoal } = useGoalApi(props.sessionID)
 
   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
 
   return (
     <DialogPrompt
       title="Edit Goal Objective"
-      // 预填充当前 objective
       value={goal()?.objective}
       onConfirm={(value) => {
-        if (!value.trim()) {
-          toast.show({ message: "Objective must not be empty", variant: "error" })
-          return
-        }
-        void (sdk.client.session as any)
-          .goalSet({ sessionID: props.sessionID, objective: value })
-          .then(() => dialog.clear())
-          .catch(() => toast.show({ message: "Failed to update goal", variant: "error" }))
+        if (!value.trim()) return
+        void setGoal({ objective: value })
       }}
       onCancel={() => dialog.clear()}
     />

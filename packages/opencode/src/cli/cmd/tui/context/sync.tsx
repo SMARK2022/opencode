@@ -967,13 +967,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             sdk.client.session.status({ workspace: project.workspace.current() }),
           ])
           // [local-smark] goal fetch：非致命，失败不影响 session sync
-          // SDK 未重新生成，使用 as any 绕过方法不存在检查
+          // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
+          // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
           try {
-            const goalResp = await (sdk.client.session as any).goal(
-              { sessionID, workspace: project.workspace.current() },
-              { throwOnError: true },
-            )
-            setStore("session_goal", sessionID, goalResp?.data?.goal ?? undefined)
+            const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
+            if (resp.ok) {
+              const data = await resp.json()
+              setStore("session_goal", sessionID, data?.goal ?? undefined)
+            }
           } catch {
             // goal 端点不可用时不阻塞 session sync
           }
