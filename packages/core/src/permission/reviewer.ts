@@ -14,6 +14,7 @@ import { SessionProjector } from "../session/projector"
 import { SessionTable } from "../session/sql"
 import { createLLMEventPublisher } from "../session/runner/publish-llm-event"
 import { Slug } from "../util/slug"
+import { Token } from "../util/token"
 import { SessionV1 } from "../v1/session"
 import { makeLocationNode } from "../effect/app-node"
 import { LayerNodePlatform } from "../effect/app-node-platform"
@@ -106,7 +107,12 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
           text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${attemptPrompt}`,
         }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
-        const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
+        // 审查使用自己的确认样本；父对话和并行审查的未结算估计不能参与校准。
+        const samples = Token.inputHistory(yield* sessions.context(reviewerSession), selected.model)
+        let inputEstimate: SessionMessage.InputEstimate | undefined
+        const publisher = createLLMEventPublisher(events, {
+          sessionID: reviewerSession, agent: "permission-reviewer", model, inputEstimate: () => inputEstimate,
+        }, {
           permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
         })
         let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
@@ -119,6 +125,13 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
             description: "Submit the structured allow/deny decision for this permission review.",
             parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
           }) }),
+        }), (body) => Effect.sync(() => {
+          // 同一次compile的最终正文包含真正发出的工具；OAuth策略只归instructions，不重复归system正文。
+          inputEstimate = {
+            ...Token.estimateRequest(body, samples, selected.openaiOAuth ? [{ kind: "instructions", text: system }] : []),
+            contextLimit: selected.model.defaults?.limits?.context ?? selected.model.route.defaults.limits?.context ?? 0,
+          }
+          // Started读取本尝试的估算；原有Ended仍独立确认真实用量与费用。
         })).pipe(
           Stream.runForEach((event) => Effect.gen(function* () {
             if (event.type === "tool-error") return yield* protocolError
