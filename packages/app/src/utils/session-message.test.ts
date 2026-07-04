@@ -1,8 +1,40 @@
 import { describe, expect, test } from "bun:test"
 import type { SessionMessageInfo } from "@opencode-ai/client/promise"
 import { normalizeSessionMessages } from "./session-message"
+import { Schema } from "effect"
+import { SessionEvent } from "@opencode-ai/schema/session-event"
+import { createV2SessionReducer } from "../context/server-session-v2-reducer"
 
 describe("normalizeSessionMessages", () => {
+  test("renders native goal objectives through the same snapshot and live turn projection", () => {
+    const text = "<session-goal-continuation>\n<objective>\n A &amp; B\n&lt;tag&gt; &amp;lt; \n</objective>\nprivate budget\n</session-goal-continuation>"
+    const goal = { id: "msg_goal", type: "synthetic" as const, time: { created: 1 }, ...{ sessionID: "ses_1", text } }
+    const source = [
+      { id: "msg_internal", type: "synthetic", time: { created: 0 }, ...{ sessionID: "ses_1", text: "<objective>not a goal</objective>" } },
+      goal,
+      { id: "msg_after_goal", type: "assistant", agent: "build", model: { id: "model", providerID: "test" }, content: [], time: { created: 2 } },
+    ] satisfies SessionMessageInfo[]
+    const snapshot = normalizeSessionMessages("ses_1", source)
+    expect(snapshot.messages.map(message => message.id)).toEqual(["msg_goal", "msg_after_goal"])
+    expect(snapshot.messages[1]).toMatchObject({ parentID: "msg_goal" })
+    // 只把objective作为可见DTO；源XML与synthetic身份保持原样，字面实体沿用源解码顺序。
+    expect(snapshot.parts.get("msg_goal")?.[0]).toMatchObject({ text: "A & B\n<tag> <", synthetic: false })
+    expect(goal).toMatchObject({ type: "synthetic", text })
+    const event = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))({ id: "evt_goal", type: "session.next.synthetic",
+      durable: { aggregateID: "ses_1", seq: 1, version: 1 }, data: { sessionID: "ses_1", messageID: "msg_goal", timestamp: 1, text } })
+    const live = createV2SessionReducer().reduce([], event)
+    expect(live?.missing).toBeUndefined()
+    expect(normalizeSessionMessages("ses_1", live?.messages ?? []).parts.get("msg_goal")).toEqual(snapshot.parts.get("msg_goal"))
+    expect(live?.messages[0]).toMatchObject({ type: "synthetic", text })
+    // Reviewer优先于Goal识别；合法hidden仍隐藏，未标记内部消息仍不展示。
+    const reviewer = { ...goal, metadata: { permissionReviewerRequest: true } }
+    expect(normalizeSessionMessages("ses_1", [reviewer]).parts.get("msg_goal")?.[0]).toMatchObject({ text, synthetic: false,
+      metadata: { permissionReviewerRequest: true } })
+    expect(normalizeSessionMessages("ses_1", [{ ...goal, metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } }]).messages).toEqual([])
+    expect(normalizeSessionMessages("ses_1", [{ ...goal, ...{ text: "internal", description: "existing description" } }]).parts.get("msg_goal")?.[0])
+      .toMatchObject({ text: "existing description", synthetic: true })
+  })
+
   test("projects current turns into stable legacy rendering records", () => {
     const source = [
       { id: "msg_1", type: "agent-switched", agent: "build", time: { created: 1 } },

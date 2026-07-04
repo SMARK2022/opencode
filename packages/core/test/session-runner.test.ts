@@ -53,7 +53,6 @@ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Config } from "@opencode-ai/core/config"
-import { ConfigExperimental } from "@opencode-ai/core/config/experimental"
 import { ConfigCompaction } from "@opencode-ai/core/config/compaction"
 import { Tool } from "@opencode-ai/core/tool/tool"
 import {
@@ -283,6 +282,11 @@ const config = Layer.succeed(
       ]),
   }),
 )
+// 内外两张runner图都替换MCP Service，纯用例不创建连接/OAuth清理链。
+const mcp = Layer.succeed(McpTools.Service, McpTools.Service.of({
+  prepare: () => Effect.succeed(() => SystemContext.empty),
+}))
+
 let runnerMcp: McpTools.Interface | undefined
 const runnerLayer = (configuration = config) => AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
   [Snapshot.node, Snapshot.noopLayer],
@@ -292,6 +296,7 @@ const runnerLayer = (configuration = config) => AppNodeBuilder.build(LayerNode.g
   [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
   [SkillGuidance.node, skillGuidance],
   [ReferenceGuidance.node, referenceGuidance],
+  [McpTools.node, mcp],
   [PermissionV2.node, permission],
   [Config.node, configuration],
 ])
@@ -348,6 +353,7 @@ const testLayer = (configuration = config) =>
       [SkillGuidance.node, skillGuidance],
       [ReferenceGuidance.node, referenceGuidance],
       [Snapshot.node, Snapshot.noopLayer],
+      [McpTools.node, mcp],
       [SessionExecution.node, execution(configuration)],
       [Config.node, configuration],
     ],
@@ -687,7 +693,7 @@ const verifyPartialFlushOnInterruption = (kind: FragmentKind) =>
 const goalConfig = Layer.succeed(Config.Service, Config.Service.of({
   entries: () => Effect.succeed([new Config.Document({
     type: "document",
-    info: new Config.Info({ experimental: new ConfigExperimental.Experimental({ goals: true, goal_max_turns: 2 }) }),
+    info: new Config.Info({ goal_max_turns: 2 }),
   })]),
 }))
 const goalTests = testEffect(testLayer(goalConfig))
@@ -1004,7 +1010,8 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(1)
       expect(requests[0]?.model).toBe(model)
-      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["echo", "defect"])
+      // Goal默认注册也必须出现在模型工具清单中，不能只验证测试工具。
+      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect"])
       expect(requests[0]?.messages.map((message) => ({ role: message.role, content: message.content }))).toEqual([
         { role: "user", content: [{ type: "text", text: "First" }] },
         { role: "user", content: [{ type: "text", text: "Second" }] },
@@ -1299,7 +1306,7 @@ describe("SessionRunnerLLM", () => {
     expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
     expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("allow")
     const actual = requests.at(-1)
-    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
     expect(userTexts(actual!).join("\n")).toContain("Inspect the requested module")
     expect(userTexts(actual!).join("\n")).toContain("<parent_context>\n### Parent Session Inspected Files")
     expect(userTexts(actual!).join("\n")).toContain("| src/module.ts | 4-12 |")
@@ -1490,7 +1497,7 @@ describe("SessionRunnerLLM", () => {
           `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
         expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
-        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
       }))
       const db = (yield* Database.Service).db
       // 在同一持久Session切换工具，核对真实请求与调用结果而不是只测selector。
@@ -1507,7 +1514,7 @@ describe("SessionRunnerLLM", () => {
           LLMEvent.finish({ reason: "tool-calls" }),
         ], []]
         yield* session.resume(sessionID)
-        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect"] : ["defect", "echo"])
+        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect", "goal"] : ["defect", "echo", "goal"])
         expect(executions).toEqual(action === "deny" ? [] : ["allow"])
         const parts = requests[0]?.system.map(part => part.text) ?? []
         expect(parts.filter(part => part === "Initial context")).toHaveLength(1)
@@ -2660,7 +2667,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(1)
-      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["echo", "defect"])
+      // 默认Goal只改变广告集合，不改变本例的事件投影与工具执行边界。
+      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect"])
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Use tools" },
         {

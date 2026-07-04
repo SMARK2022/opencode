@@ -2,7 +2,6 @@ export * as GoalTool from "./goal"
 
 import { ToolFailure } from "@opencode-ai/llm"
 import { Effect, Layer, Schema } from "effect"
-import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
 import { SessionGoal } from "../session/goal"
 import { ToolRegistry } from "./registry"
@@ -10,9 +9,6 @@ import { Tool } from "./tool"
 import { Tools } from "./tools"
 
 const layer = Layer.effectDiscard(Effect.gen(function* () {
-  const config = yield* Config.Service
-  const entries = yield* config.entries()
-  if (Config.latest(entries, "experimental")?.goals !== true) return
   const tools = yield* Tools.Service
   const goals = yield* SessionGoal.Service
   yield* tools.register({
@@ -48,5 +44,5 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
 export const node = makeLocationNode({
   name: "tool/goal",
   layer,
-  deps: [Config.node, ToolRegistry.node, SessionGoal.node],
+  deps: [ToolRegistry.node, SessionGoal.node],
 })

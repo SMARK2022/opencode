@@ -68,10 +68,16 @@ export function reviewerRequestID(message: SessionMessageInfo) {
 export function syntheticTurn(message: SessionMessageInfo) {
   if (message.type !== "synthetic" || sessionMessageHidden(message)) return
   const reviewer = "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
-  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text : message.description
+  // 只提取真实Goal续跑包装；普通内部synthetic不能因含孤立objective而公开。
+  const objective = !reviewer && "text" in message && typeof message.text === "string"
+    ? message.text.match(/^<session-goal-continuation>[\s\S]*?<objective>([\s\S]*?)<\/objective>/)?.[1]
+    : undefined
+  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text
+    : objective !== undefined ? objective.trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    : message.description
   if (!text?.trim()) return
-  // 只展示明确标记的审查协议原文；普通synthetic仍遵循原有description展示约定。
-  return { text, reviewer }
+  // 解码顺序沿用源TUI；仅改变展示投影，审查原文和canonical XML都不回写。
+  return { text, reviewer, goal: objective !== undefined }
 }
 
 export function normalizeSessionMessages(sessionID: string, source: readonly SessionMessageInfo[]) {
@@ -111,7 +117,7 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
         model: { providerID: model.providerID, modelID: model.id, variant: model.variant },
       })
       parts.set(message.id, [{
-        ...textPart(sessionID, message.id, 0, synthetic.text, synthetic.reviewer ? false : true), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
+        ...textPart(sessionID, message.id, 0, synthetic.text, !(synthetic.reviewer || synthetic.goal)), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
       }])
       return
     }

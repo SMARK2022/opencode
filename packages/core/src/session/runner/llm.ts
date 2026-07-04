@@ -714,10 +714,10 @@ const layer = Layer.effect(
           promotion = "steer"
           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
           if (!needsContinuation && result.canContinueGoal && !(yield* SessionInput.hasPending(db, input.sessionID, "queue"))) {
-            const settings = Config.latest(configuration, "experimental")
+            const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 10
             const session = yield* getSession(input.sessionID)
             const agent = yield* agents.select(session.agent)
-            if (settings?.goals === true && continuation.turns < (settings.goal_max_turns ?? 10) &&
+            if (continuation.turns < maxGoalTurns &&
               !session.parentID && agent.id !== "decide" && result.step < (agent.info?.steps ?? Infinity)) {
               const goal = yield* goals.get(input.sessionID)
               if (Option.isSome(goal) && goal.value.status === "active") {
