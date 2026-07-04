@@ -74,6 +74,8 @@ export namespace ProviderTest {
           defaultModel: Effect.fn("TestProvider.defaultModel")(() =>
             Effect.succeed({ providerID: row.id, modelID: mdl.id }),
           ),
+          // #362：测试 fake 也需要实现 invalidateAll，保持 Interface 完整
+          invalidateAll: Effect.fn("TestProvider.invalidateAll")(() => Effect.void),
           ...override,
         }),
       ),

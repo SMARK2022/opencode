@@ -496,7 +496,11 @@ export const {
           // 原始SSE载荷仍按运行时字段识别，普通dispose不触发主动停机路径。
           const properties: unknown = event.properties
           if (!properties || typeof properties !== "object" ||
-            !("reason" in properties) || properties.reason !== "daemon-stop") break
+            !("reason" in properties) || properties.reason !== "daemon-stop") {
+            // 认证刷新只重新拉取客户端数据，保留现有会话与终端。
+            void bootstrap()
+            break
+          }
           daemonStopSeen = true
           // 提示走 epilogue；exit 的 reason 参数会被现有退出 owner 判作错误。
           setEpilogue("opencode daemon stopped.")
