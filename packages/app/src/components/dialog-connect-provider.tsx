@@ -332,7 +332,8 @@ export function DialogConnectProvider(props: { provider: string }) {
   })
 
   async function complete() {
-    await globalSDK.client.global.dispose()
+    // 不再调 global.dispose()——服务端 authSet/callback handler 已刷新 Provider 缓存。
+    // global.disposed 事件会触发 bootstrap.refetch() 使 UI 获取最新 provider 列表。
     dialog.close()
     showToast({
       variant: "success",

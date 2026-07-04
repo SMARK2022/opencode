@@ -3,6 +3,7 @@ import { Config } from "@/config/config"
 import { ModelsDev } from "@opencode-ai/core/models"
 import { Provider } from "@/provider/provider"
 import { ProviderID } from "@/provider/schema"
+import { refreshProviderCaches } from "@/server/global-lifecycle"
 import { mapValues } from "remeda"
 import { Effect, Schema } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -100,6 +101,8 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
           code: ctx.payload.code,
         }),
       )
+      // OAuth 回调内部已写入 auth，刷新 Provider 缓存使新凭据立即生效
+      yield* refreshProviderCaches()
       return true
     })
 

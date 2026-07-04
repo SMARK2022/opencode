@@ -89,6 +89,11 @@ async function closest(providerID: ProviderID, query: string[], ctx: InstanceCon
   return run(ctx, (provider) => provider.closest(providerID, query))
 }
 
+// 刷新 Provider.Service 全部目录的缓存条目——模拟 auth 变更后的服务端行为
+async function invalidateAll(ctx: InstanceContext) {
+  return run(ctx, (provider) => provider.invalidateAll())
+}
+
 async function getSmallModel(providerID: ProviderID, ctx: InstanceContext) {
   return run(ctx, (provider) => provider.getSmallModel(providerID))
 }
@@ -2830,4 +2835,69 @@ test("opencode loader keeps paid models when auth exists", async () => {
       } catch {}
     }
   }
+})
+
+// invalidateAll 的核心行为：刷新 Provider.Service 缓存后，
+// 下次 list() 会重新读取 env/auth，反映最新的连接状态。
+// 这验证了 "auth 变更后不销毁实例、仅刷 provider 缓存" 的关键路径。
+test("invalidateAll 后 provider.list 反映最新的 env 状态", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({ $schema: "https://opencode.ai/config.json" }),
+      )
+    },
+  })
+  await withTestInstance({
+    directory: tmp.path,
+    fn: async (ctx) => {
+      // 设置 env → provider 初始化后包含 anthropic
+      set(ctx, "ANTHROPIC_API_KEY", "test-api-key")
+      const before = await list(ctx)
+      expect(before[ProviderID.anthropic]).toBeDefined()
+
+      // 移除 env，但缓存仍持有旧数据（未刷新）
+      remove(ctx, "ANTHROPIC_API_KEY")
+      const stale = await list(ctx)
+      expect(stale[ProviderID.anthropic]).toBeDefined()
+
+      // 刷新缓存后，下次 list 重新读取 env → anthropic 不再存在
+      await invalidateAll(ctx)
+      const after = await list(ctx)
+      expect(after[ProviderID.anthropic]).toBeUndefined()
+    },
+  })
+})
+
+// invalidateAll 不能破坏后续的 getLanguage 调用——
+// 缓存被清空后，下次 getLanguage 应惰性重建并正常返回。
+// 这验证了 invalidateAll 是安全的：不产生半态或损坏的缓存。
+test("invalidateAll 后 getLanguage 仍能正常重建缓存", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({ $schema: "https://opencode.ai/config.json" }),
+      )
+    },
+  })
+  await withTestInstance({
+    directory: tmp.path,
+    fn: async (ctx) => {
+      set(ctx, "ANTHROPIC_API_KEY", "test-api-key")
+      const model = await getModel(ProviderID.anthropic, ModelID.make("claude-sonnet-4-20250514"), ctx)
+      // 首次调用 → 初始化缓存
+      const lang1 = await getLanguage(model, ctx)
+      expect(lang1).toBeDefined()
+
+      // 刷新缓存 → 清空
+      await invalidateAll(ctx)
+
+      // 再次调用 → 惰性重建，应正常返回
+      const model2 = await getModel(ProviderID.anthropic, ModelID.make("claude-sonnet-4-20250514"), ctx)
+      const lang2 = await getLanguage(model2, ctx)
+      expect(lang2).toBeDefined()
+    },
+  })
 })

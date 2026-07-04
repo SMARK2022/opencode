@@ -265,7 +265,8 @@ function AutoMethod(props: AutoMethodProps) {
       dialog.clear()
       return
     }
-    await sdk.client.instance.dispose()
+    // 不再调 instance.dispose()——服务端 authSet/callback handler 已刷新 Provider 缓存。
+    // 仅靠 bootstrap() 刷新 TUI 本地数据，运行中的会话不受影响。
     await sync.bootstrap()
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
   })
@@ -316,7 +317,7 @@ function CodeMethod(props: CodeMethodProps) {
           code: value,
         })
         if (!error) {
-          await sdk.client.instance.dispose()
+          // 不再调 instance.dispose()——服务端 callback handler 已刷新 Provider 缓存
           await sync.bootstrap()
           dialog.replace(() => <DialogModel providerID={props.providerID} />)
           return
@@ -389,7 +390,7 @@ function ApiMethod(props: ApiMethodProps) {
             ...(props.metadata ? { metadata: props.metadata } : {}),
           },
         })
-        await sdk.client.instance.dispose()
+        // 不再调 instance.dispose()——服务端 authSet handler 已刷新 Provider 缓存
         await sync.bootstrap()
         if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
           toast.show({

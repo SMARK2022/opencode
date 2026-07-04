@@ -16,7 +16,7 @@ import { iife } from "@/util/iife"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { pathToFileURL } from "url"
-import { Effect, Layer, Context, Schema, Types } from "effect"
+import { Effect, Layer, Context, Schema, Types, ScopedCache } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectPromise } from "@/effect/promise"
@@ -1153,6 +1153,9 @@ export interface Interface {
   ) => Effect.Effect<{ providerID: ProviderID; modelID: string } | undefined>
   readonly getSmallModel: (providerID: ProviderID) => Effect.Effect<Model | undefined>
   readonly defaultModel: () => Effect.Effect<{ providerID: ProviderID; modelID: ModelID }>
+  // 刷新所有目录的 Provider 缓存条目，不触发 SessionRunState 的 finalizer。
+  // auth 变更后调用，使下一次 getLanguage/getProvider 惰性重建并读取新密钥。
+  readonly invalidateAll: () => Effect.Effect<void>
 }
 
 interface State {
@@ -1774,6 +1777,12 @@ export const layer = Layer.effect(
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
+    // 仅刷新 Provider.Service 的 ScopedCache（所有目录），不触碰 SessionRunState
+    // 等其他服务的缓存——这是 "auth 变更不杀会话" 的结构性保证。
+    const invalidateAll = Effect.fn("Provider.invalidateAll")(() =>
+      ScopedCache.invalidateAll(state.cache),
+    )
+
     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
       try {
         using _ = log.time("getSDK", {
@@ -2124,7 +2133,7 @@ export const layer = Layer.effect(
       }
     })
 
-    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel })
+    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel, invalidateAll })
   }),
 )
 

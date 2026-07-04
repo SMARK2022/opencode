@@ -480,10 +480,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       if (event.type !== "message.part.delta") flushPartDeltas()
       switch (event.type) {
         case "global.disposed":
-          if (daemonStopReason(event) !== DisposedReason.DaemonStop) break
-          daemonStopSeen = true
-          exit.message.set("opencode daemon stopped.")
-          void exit()
+          if (daemonStopReason(event) === DisposedReason.DaemonStop) {
+            daemonStopSeen = true
+            exit.message.set("opencode daemon stopped.")
+            void exit()
+          } else {
+            // 非 DaemonStop 的 global.disposed 来自 auth 变更后的 Provider 缓存刷新。
+            // 不销毁实例，仅刷新 TUI 本地数据以获取最新 provider 列表。
+            void bootstrap()
+          }
           break
         case "server.connected":
           loggedPartDeltaApplications.clear()
