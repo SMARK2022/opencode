@@ -1,3 +1,4 @@
+import { Usage } from "@opencode-ai/llm"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { Config } from "@/config/config"
@@ -427,6 +428,8 @@ export const layer = Layer.effect(
           messageID: message.id,
           // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
           reviewID: input.reviewID,
+          // [local-smark] 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
+          message,
         }).pipe(
           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
           Effect.tapError((error) =>
@@ -451,7 +454,7 @@ export const layer = Layer.effect(
     function runReviewerStream(
       messages: readonly ModelMessage[],
       model: Provider.Model,
-      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
+      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: Assistant },
     ) {
       return Effect.acquireUseRelease(
         // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
@@ -486,6 +489,45 @@ export const layer = Layer.effect(
               ? messages.flatMap((message) => (message.role === "system" ? [message.content] : [])).join("\n")
               : undefined
             const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
+            // [local-smark] 提取 tool 定义常量，使 tool() 和 toolsText 共用同一 schema 序列化，
+            // 避免重复调用产生不一致的序列化结果
+            const assessmentSchema = ToolJsonSchema.fromSchema(Assessment)
+            const toolDescription = "Submit the structured allow/deny decision for this permission review."
+            // [local-smark] 计算 /context 面板所需的 per-component 字符 breakdown。reviewer 不走
+            // session.prompt 的 pre-stream estimate 路径，所以在此直接按字符占比
+            // 计算并附到 step-finish part，使 tokenAccounting 的 breakdown 非 null。
+            // 公式与 prompt.ts 一致：inputChars = [system, rawMessages, tools].join("\n").length
+            const toolsText = `Tool: permission_review_decision\n${toolDescription}\n${JSON.stringify(assessmentSchema)}`
+            // conversationMessages 排除 system message：非 OAuth 时 system 在 messages 中，
+            // OAuth 时 reviewerMessages 已过滤。system 单独计入 system/instructions 分区，
+            // 避免 messages.total 与 system 重复累加。
+            const conversationMessages = reviewerMessages.filter((m) => m.role !== "system")
+            const rawMessagesText = JSON.stringify(conversationMessages)
+            let userTextChars = 0
+            for (const m of conversationMessages) {
+              if (m.role !== "user") continue
+              userTextChars += typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length
+            }
+            const systemMessage = messages.find((m) => m.role === "system")
+            const systemText = typeof systemMessage?.content === "string" ? systemMessage.content : ""
+            const inputChars = [systemText, rawMessagesText, toolsText].join("\n").length
+            // OAuth 路径下 system 被提取为顶层 instructions：system 分区=0，instructions=systemText。
+            // 非 OAuth 路径下 system 保留为 system message：system=systemText，instructions=0。
+            const inputBreakdown = {
+              system: isOpenaiOauth ? 0 : systemText.length,
+              instructions: isOpenaiOauth ? systemText.length : 0,
+              skills: 0,
+              tools: toolsText.length,
+              messages: {
+                userText: userTextChars,
+                assistantText: 0,
+                reasoning: 0,
+                toolInput: 0,
+                toolOutput: 0,
+                attachments: 0,
+                total: rawMessagesText.length,
+              },
+            }
             const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
             // #261：Reviewer 复用主聊天 provider hook——Codex 清理不支持的 output caps、Copilot 禁用不兼容的 tool streaming
             // 合成消息不暴露 reviewer prompt 文本或证据——这些仍在有界 reviewer prompt 内
@@ -534,9 +576,9 @@ export const layer = Layer.effect(
               messages: [...reviewerMessages],
               tools: {
                 permission_review_decision: tool({
-                  description: "Submit the structured allow/deny decision for this permission review.",
+                  description: toolDescription,
                   // #209：ToolJsonSchema.fromSchema 将 Effect Assessment schema 转为 AI SDK jsonSchema——替代原 generateObject 的双重 schema
-                  inputSchema: jsonSchema(ToolJsonSchema.fromSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
+                  inputSchema: jsonSchema(assessmentSchema as Parameters<typeof jsonSchema>[0]),
                   // #209：execute 返回 title/metadata/output——SDK 调用此函数但真正持久化在 tool-call 事件处理器中完成
                   execute: async (assessment) => ({
                     title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
@@ -713,6 +755,46 @@ export const layer = Layer.effect(
                   // instead of treating it as an unrelated provider failure.
                   return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
 // #227：文本回退也失败时抛协议错误——触发外层 catchIf 的第二次尝试
+                }
+                // [local-smark] 镜像 processor.ts finish-step：持久化 provider 真实 usage 和 input breakdown。
+                // reviewer 不走 SessionProcessor 管道（安全边界：不暴露 prompt 给 chat plugin），
+                // 所以必须在此手动处理 finish-step 事件，否则 message.tokens 恒为初始 0 且
+                // 无 step-finish part → tokenAccounting 对 reviewer session 算出 input=0、breakdown=null。
+                if (event.type === "finish-step") {
+                  // persist 在此已被无子会话早退分支收窄为非 undefined，无需重复 guard
+                  const usage = Session.getUsage({
+                    model,
+                    // reviewer 直接消费 AI SDK，需在边界转换缓存和推理明细，不能把它们算作普通输入输出。
+                    usage: Usage.from({
+                      inputTokens: event.usage.inputTokens,
+                      outputTokens: event.usage.outputTokens,
+                      totalTokens: event.usage.totalTokens,
+                      reasoningTokens: event.usage.outputTokenDetails.reasoningTokens,
+                      cacheReadInputTokens: event.usage.inputTokenDetails.cacheReadTokens,
+                      cacheWriteInputTokens: event.usage.inputTokenDetails.cacheWriteTokens,
+                    }),
+                    metadata: event.providerMetadata,
+                  })
+                  // 就地更新可变 message 引用，使 runReviewerAgent 的最终 updateMessage 持久化真实 tokens/cost
+                  persist.message.tokens = usage.tokens
+                  persist.message.cost += usage.cost
+                  yield* session.updatePart({
+                    id: PartID.ascending(),
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    type: "step-finish",
+                    reason: event.finishReason,
+                    tokens: usage.tokens,
+                    cost: usage.cost,
+                    inputChars,
+                    inputBreakdown,
+                  })
+                  // [local-smark] 立即落库 message 行：finish-step 是流终止事件，但 runReviewerAgent 的
+                  // 最终 updateMessage 在 stream drain 之后才执行。若不在此立即写入，
+                  // DB 的 message.tokens 仍为 0，tokenAccounting 的 stepSF && !msgCompleted
+                  // 分支会取到 stale 0 而非 stepSF.tokens.input。
+                  yield* session.updateMessage(persist.message)
+                  return
                 }
                 if (event.type === "error") {
                   // #214：provider stream 错误必须保留原始形状直到 SessionRetry 分类

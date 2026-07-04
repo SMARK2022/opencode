@@ -15,6 +15,8 @@ import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { LLMClient, LLMEvent, LLMRequest, Model } from "@opencode-ai/llm"
 import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
+import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
+import { Auth } from "@opencode-ai/llm/route"
 import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
 import { PermissionTable } from "@opencode-ai/core/permission/sql"
 import { PermissionSaved } from "@opencode-ai/core/permission/saved"
@@ -43,11 +45,17 @@ let malformed = false
 let reviewBeforeStream: Deferred.Deferred<void> | undefined
 let reviewArrivals: Deferred.Deferred<void> | undefined
 let reviewScript: Stream.Stream<LLMEvent>[] | undefined
+let reviewOAuth = false
+const reviewBodies: unknown[] = []
 const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
   prepare: () => Effect.die("unused"),
   generate: () => Effect.die("reviewer must consume the actual provider stream"),
-  stream: (request) => Stream.unwrap(Effect.gen(function* () {
+  stream: (request, onPrepared) => Stream.unwrap(Effect.gen(function* () {
     reviewRequests.push(request)
+    // 真实协议lowering但不执行运输，分类必须观察与生产相同的prepared正文。
+    const prepared = yield* LLMClient.prepare(request)
+    reviewBodies.push(prepared.body)
+    if (onPrepared) yield* onPrepared(prepared.body)
     // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
     if (reviewScript) {
       const next = reviewScript.shift()
@@ -77,14 +85,18 @@ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
     }))))
   })),
 }))
-const reviewModel = SessionRunnerModel.layerWith((session) => {
+const reviewModel = Layer.succeed(SessionRunnerModel.Service, SessionRunnerModel.Service.of({ resolve: (session) => {
   reviewModels.push(session.model)
   // 真实reviewer仍执行，只在模型目录边界模拟已删除条目；默认解析及合法显式模型保持成功。
   if (session.model?.id === "removed-model") return Effect.fail(new SessionRunnerModel.ModelUnavailableError({
     providerID: session.model.providerID, modelID: session.model.id,
   }))
-  return Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route }))
-})
+  return Effect.succeed({
+    model: Model.make({ id: "review", provider: "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
+    pricing: [{ input: 1, output: 2, cache: { read: 0.5, write: 1 } }],
+    openaiOAuth: reviewOAuth,
+  })
+} }))
 const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
 
 const current = Layer.succeed(
@@ -637,6 +649,50 @@ describe("PermissionV2", () => {
   }))
 
   // 真实事件驱动审查、原工具和终态投影，验证收益在模型返回前后都可观察。
+  it.effect("persists native reviewer prepared input breakdown and provider usage", () => Effect.gen(function* () {
+    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      reviewOAuth = false
+      reviewScript = undefined
+      reviewSettings = new Config.Info({})
+    }))
+    const permissions = yield* PermissionV2.Service
+    const sessions = yield* SessionStore.Service
+    const database = yield* Database.Service
+    for (const oauth of [false, true]) {
+      reviewOAuth = oauth
+      reviewRequests.length = 0
+      reviewBodies.length = 0
+      reviewScript = [Stream.make(
+        LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls", usage: { inputTokens: 12, nonCachedInputTokens: 7, outputTokens: 7, reasoningTokens: 3, cacheReadInputTokens: 5 } }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      )]
+      expect(yield* permissions.ask(assertion({ action: "bash", resources: [`git add usage-${oauth}.ts`], metadata: { command: `git add usage-${oauth}.ts` } }))).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
+      if (!child) return yield* Effect.die("Expected durable reviewer child")
+      const answer = (yield* sessions.context(SessionV2.ID.make(child.id))).findLast(message => message.type === "assistant")
+      if (!answer || answer.type !== "assistant" || !answer.inputEstimate?.inputBreakdown) return yield* Effect.die("Expected persisted reviewer breakdown")
+      // 验证同一助手中的确认快照和真实缓存/推理分栏，不能用估算值覆盖provider用量。
+      expect(answer.tokens).toEqual({ input: 7, output: 4, reasoning: 3, cache: { read: 5, write: 0 } })
+      expect(answer.cost).toBeCloseTo(23.5 / 1_000_000, 12)
+      expect(answer.inputEstimate.confirmed).toBe(true)
+      expect(answer.inputEstimate.bodyChars).toBe(JSON.stringify(reviewBodies[0]).length)
+      const breakdown = answer.inputEstimate.inputBreakdown
+      expect(breakdown.tools).toBeGreaterThan(0)
+      expect(breakdown.messages.userText).toBeGreaterThan(0)
+      expect(breakdown.messages.assistantText).toBe(0)
+      // OAuth的策略正文只计instructions；JSON包装开销仍沿共享估算器分配。
+      if (oauth) expect(breakdown.instructions).toBeGreaterThan(0)
+      if (!oauth) {
+        expect(breakdown.system).toBeGreaterThan(0)
+        expect(breakdown.instructions).toBe(0)
+      }
+    }
+  }))
+
   it.effect("persists live native review traces and keeps outcomes through tool settlement", () => Effect.gen(function* () {
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
     assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
