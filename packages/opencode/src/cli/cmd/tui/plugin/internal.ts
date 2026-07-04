@@ -1,6 +1,7 @@
 import HomeFooter from "../feature-plugins/home/footer"
 import HomeTips from "../feature-plugins/home/tips"
 import SidebarContext from "../feature-plugins/sidebar/context"
+import SidebarGoal from "../feature-plugins/sidebar/goal"
 import SidebarMcp from "../feature-plugins/sidebar/mcp"
 import SidebarLsp from "../feature-plugins/sidebar/lsp"
 import SidebarTodo from "../feature-plugins/sidebar/todo"
@@ -24,6 +25,7 @@ export function internalTuiPlugins(flags: Pick<RuntimeFlags.Info, "experimentalE
     HomeFooter,
     HomeTips,
     SidebarContext,
+    SidebarGoal,
     SidebarMcp,
     SidebarLsp,
     SidebarTodo,

@@ -17,6 +17,12 @@ export function Footer() {
     if (route.data.type !== "session") return []
     return sync.data.permission[route.data.sessionID] ?? []
   })
+  // [local-smark] goal 状态：仅显示 active/blocked 时的彩色圆点
+  // paused/complete 不在 footer 显示，避免拥挤（sidebar 已有完整状态）
+  const goal = createMemo(() => {
+    if (route.data.type !== "session") return undefined
+    return sync.data.session_goal[route.data.sessionID]
+  })
   const directory = useDirectory()
   const connected = useConnected()
 
@@ -60,6 +66,12 @@ export function Footer() {
             </text>
           </Match>
           <Match when={connected()}>
+            {/* [local-smark] goal 状态指示：active=绿色●，blocked=红色■ */}
+            <Show when={goal() && (goal()!.status === "active" || goal()!.status === "blocked")}>
+              <text fg={goal()!.status === "active" ? theme.success : theme.error}>
+                {goal()!.status === "active" ? "●" : "■"} Goal
+              </text>
+            </Show>
             <Show when={permissions().length > 0}>
               <text fg={theme.warning}>
                 <span style={{ fg: theme.warning }}>△</span> {permissions().length} Permission

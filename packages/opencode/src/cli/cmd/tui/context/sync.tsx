@@ -38,6 +38,19 @@ import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 import { DisposedReason } from "@/server/event"
 
+// [local-smark] goal 类型定义（SDK 未重新生成前使用内联类型）
+// 字段与 src/session/goal.ts 的 Goal schema 对齐
+type SessionGoalInfo = {
+  sessionID: string
+  id: string
+  objective: string
+  status: "active" | "paused" | "complete" | "blocked"
+  tokenBudget: number | null
+  tokensUsed: number
+  timeUsedSeconds: number
+  time: { created: number; updated: number }
+}
+
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
   init: () => {
@@ -82,6 +95,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       }
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
+      // [local-smark] goal 状态：每个 session 最多一个 goal
+      session_goal: {
+        [sessionID: string]: SessionGoalInfo | undefined
+      }
     }>({
       provider_next: {
         all: [],
@@ -109,6 +126,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       mcp_resource: {},
       formatter: [],
       vcs: undefined,
+      // [local-smark] goal 初始为空
+      session_goal: {},
     })
 
     const event = useEvent()
@@ -588,6 +607,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           setStore("todo", event.properties.sessionID, event.properties.todos)
           break
 
+        // [local-smark] goal 事件：更新或清除 sidebar 中的 goal 状态
+        // TODO(sdk-regen): SDK 重新生成后移除 as string / as any，改用类型安全的 event.properties
+        case "session.goal.updated" as string:
+          setStore("session_goal", (event as any).properties.sessionID, (event as any).properties.goal)
+          break
+
+        case "session.goal.cleared" as string:
+          setStore("session_goal", (event as any).properties.sessionID, undefined)
+          break
+
         case "session.diff":
           setStore("session_diff", event.properties.sessionID, event.properties.diff)
           break
@@ -602,6 +631,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               }),
             )
           }
+          // [local-smark] 清理已删除 session 的 goal 状态，防止 store 泄漏
+          setStore("session_goal", event.properties.info.id, undefined)
           break
         }
         case "session.updated": {
@@ -935,6 +966,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             sdk.client.session.diff({ sessionID }),
             sdk.client.session.status({ workspace: project.workspace.current() }),
           ])
+          // [local-smark] goal fetch：非致命，失败不影响 session sync
+          // SDK 未重新生成，使用 as any 绕过方法不存在检查
+          try {
+            const goalResp = await (sdk.client.session as any).goal(
+              { sessionID, workspace: project.workspace.current() },
+              { throwOnError: true },
+            )
+            setStore("session_goal", sessionID, goalResp?.data?.goal ?? undefined)
+          } catch {
+            // goal 端点不可用时不阻塞 session sync
+          }
           setStore(
             produce((draft) => {
               const match = Binary.search(draft.session, sessionID, (s) => s.id)

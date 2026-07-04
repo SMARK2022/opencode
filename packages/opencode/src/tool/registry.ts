@@ -30,6 +30,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+import { GoalTool } from "./goal"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -46,6 +47,7 @@ import { LSP } from "@/lsp/lsp"
 import { Instruction } from "../session/instruction"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Bus } from "../bus"
+import { SessionGoal } from "@/session/goal"
 import { Agent } from "../agent/agent"
 import { Git } from "@/git"
 import { Skill } from "../skill"
@@ -138,6 +140,8 @@ export const layer: Layer.Layer<
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
+    // [local-smark] goal 工具：仅当 config.experimental.goals 启用时可见
+    const goaltool = yield* GoalTool
     const agent = yield* Agent.Service
 
     const state = yield* InstanceState.make<State>(
@@ -227,6 +231,9 @@ export const layer: Layer.Layer<
         }
 
         yield* config.get()
+        const cfg = yield* config.get()
+        // [local-smark] goal 工具仅在 experimental.goals 启用时可见
+        const goalsEnabled = cfg.experimental?.goals === true
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
@@ -246,6 +253,8 @@ export const layer: Layer.Layer<
           repo_overview: Tool.init(repoOverview),
           skill: Tool.init(skilltool),
           patch: Tool.init(patchtool),
+          // [local-smark] goal 工具：模型通过此工具标记 goal complete/blocked
+          goal: Tool.init(goaltool),
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
@@ -274,6 +283,8 @@ export const layer: Layer.Layer<
             tool.permission_review_decision,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+            // [local-smark] goal 工具：仅在 experimental.goals 启用时暴露给模型
+            ...(goalsEnabled ? [tool.goal] : []),
           ],
           task: tool.task,
           read: tool.read,
@@ -410,7 +421,9 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Instruction.defaultLayer),
       Layer.provide(AppFileSystem.defaultLayer),
       Layer.provide(Bus.layer),
-      Layer.provide(FetchHttpClient.layer),
+      // [local-smark] goal 工具依赖 SessionGoal.Service，
+      // 与 FetchHttpClient 合并提供避免超出 Layer.provide 参数上限
+      Layer.provide(Layer.mergeAll(SessionGoal.defaultLayer, FetchHttpClient.layer)),
       Layer.provide(Format.defaultLayer),
       Layer.provide(CrossSpawnSpawner.defaultLayer),
       Layer.provide(Ripgrep.defaultLayer),

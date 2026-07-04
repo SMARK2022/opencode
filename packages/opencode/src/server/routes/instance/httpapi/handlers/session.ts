@@ -7,6 +7,7 @@ import { PermissionID } from "@/permission/schema"
 import { SessionRequestUsage } from "@/session/request-usage"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
+import { SessionGoal } from "@/session/goal"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
@@ -25,6 +26,7 @@ import {
   CommandPayload,
   DiffQuery,
   ForkPayload,
+  GoalSetPayload,
   InitPayload,
   ListQuery,
   MessagesQuery,
@@ -54,6 +56,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
+    const goalSvc = yield* SessionGoal.Service
     const summary = yield* SessionSummary.Service
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
@@ -428,8 +431,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       yield* requireSession(ctx.params.sessionID)
       const usage = yield* SessionRequestUsage.Service
-      // assistant 明细属于具体 request_usage 记录；先确认父请求存在，
-      // 避免缺失 request 被误解释成“存在但 assistant 为空”的成功列表。
       const result = yield* usage.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
         Effect.mapError(() => new HttpApiError.NotFound({})),
       )
@@ -437,6 +438,41 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* usage.assistants({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID }).pipe(
         Effect.mapError(() => new HttpApiError.NotFound({})),
       )
+    })
+
+    // goal handler：读取当前 session 的持久化 goal
+    const goalGet = Effect.fn("SessionHttpApi.goalGet")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const result = yield* goalSvc.get(ctx.params.sessionID)
+      // Option → null 映射，便于 JSON 序列化
+      return { goal: result._tag === "Some" ? result.value : null }
+    })
+
+    // goal set handler：创建或更新 goal
+    // objective 缺省时仅更新 status/budget，要求已有 goal
+    // GoalError（校验失败）映射为 400，其他错误正常传播
+    const goalSet = Effect.fn("SessionHttpApi.goalSet")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof GoalSetPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const goal = yield* goalSvc.set(ctx.params.sessionID, {
+        objective: ctx.payload.objective,
+        status: ctx.payload.status,
+        tokenBudget: ctx.payload.tokenBudget,
+      }).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
+      return { goal }
+    })
+
+    // goal clear handler：删除 goal
+    const goalClear = Effect.fn("SessionHttpApi.goalClear")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const cleared = yield* goalSvc.clear(ctx.params.sessionID)
+      return { cleared }
     })
 
     return handlers
@@ -471,5 +507,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("requestUsageList", requestUsageList as any)
       .handle("requestUsageGet", requestUsageGet as any)
       .handle("requestUsageAssistants", requestUsageAssistants as any)
+      // goal endpoint handler 注册
+      .handle("goal", goalGet)
+      .handle("goalSet", goalSet)
+      .handle("goalClear", goalClear)
   }),
 )

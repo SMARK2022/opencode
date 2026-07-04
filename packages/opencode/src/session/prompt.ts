@@ -11,6 +11,7 @@ import { ModelID, ProviderID } from "../provider/schema"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+import { SessionGoal } from "./goal"
 import { Bus } from "../bus"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "./system"
@@ -391,6 +392,8 @@ export const layer = Layer.effect(
     const references = yield* Reference.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    // [local-smark] goal 服务：用于 break 点检查 active goal 并注入续跑 prompt
+    const goalSvc = yield* SessionGoal.Service
     const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
     const runner = Effect.fn("SessionPrompt.runner")(function* () {
       return yield* EffectBridge.make()
@@ -811,7 +814,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         abort: options.abortSignal!,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
-        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps },
+        // [local-smark] goalSvc 传入 ctx.extra，使 goal tool 能调用 SessionGoal.Service
+        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps, goalSvc },
         agent: input.agent.name,
         messages: input.messages,
         metadata: (val) =>
@@ -2088,6 +2092,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        // [local-smark] goal 续跑计数器：独立于 step，
+        // 防止 step++ 在 continue 路径被跳过导致无限循环
+        let goalTurns = 0
         // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
         // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
         // 使后续再次达到 85% 时可以重新提示。
@@ -2122,6 +2129,61 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             !hasToolCalls &&
             lastUser.id < lastAssistant.id
           ) {
+            // [local-smark] goal 续跑检查：assistant 正常结束后，
+            // 如果 session 有 active goal 且未达上限，注入续跑 prompt 并 continue。
+            // 续跑 prompt 作为 synthetic user message 注入，保留 synthetic=true
+            // 避免 <system-reminder> 包裹和 title 生成干扰。
+            // TUI 通过 goalText 渲染为 "↻ Goal continuation" 标签消息。
+            // 使用独立 goalTurns 计数器防止无限循环（step++ 在 continue 后跳过）。
+            // 仅对主 session（无 parentID）和非 decide agent 生效。
+            const cfg = yield* config.get()
+            const maxGoalTurns = cfg.experimental?.goal_max_turns ?? 10
+            if (
+              cfg.experimental?.goals === true &&
+              maxGoalTurns > 0 &&
+              !session.parentID &&
+              goalTurns < maxGoalTurns
+            ) {
+              const goalOpt = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              if (goalOpt._tag === "Some") {
+                const goal = goalOpt.value
+                // 读取 lastUser 的 agent 以判断是否 decide agent
+                const goalAgent = yield* agents.get(lastUser.agent)
+                // decide agent 用于路由决策，不参与 goal 续跑
+                // maxSteps 限制同样适用于 goal 续跑，防止超出 agent 步数预算
+                const maxSteps = goalAgent?.steps ?? Infinity
+                if (
+                  goal.status === "active" &&
+                  goalAgent &&
+                  !isDecideAgent(goalAgent) &&
+                  step < maxSteps
+                ) {
+                  goalTurns++
+                  // 注入 synthetic user message 作为续跑 prompt
+                  // noReply=true 避免递归触发 loop；source="system_continue" 供 request usage 追踪
+                  // orDie 将 Image.Error 转为 defect，保持 runLoop 的 error 类型为 never
+                  // [local-smark] 注入续跑 prompt 作为 synthetic user message
+                  // 保留 synthetic=true 避免：
+                  // 1) 被 <system-reminder> 包裹稀释指令语义
+                  // 2) 干扰 title 生成（title 只在单条 real user message 时触发）
+                  // TUI 中通过检查 source="system_continue" 渲染为带标签的续跑消息
+                  yield* prompt({
+                    sessionID,
+                    noReply: true,
+                    source: "system_continue",
+                    agent: lastUser.agent,
+                    model: { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID },
+                    parts: [{
+                      type: "text",
+                      synthetic: true,
+                      text: SessionGoal.continuationPrompt(goal),
+                    }],
+                  }).pipe(Effect.orDie)
+                  yield* slog.info("goal continuation", { goalTurns, step })
+                  continue
+                }
+              }
+            }
             yield* slog.info("exiting loop")
             break
           }
@@ -2442,6 +2504,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
 
             if (result === "stop") return "break" as const
+            // [local-smark] goal token/time 计费：assistant message 完成后，
+            // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
+            if (handle.message.tokens && handle.message.time.completed) {
+              const tokenDelta =
+                handle.message.tokens.input +
+                handle.message.tokens.output +
+                handle.message.tokens.reasoning
+              const timeDelta = Math.max(
+                0,
+                Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
+              )
+              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
+            }
             if (result === "compact") {
               // Provider overflow happens after a real assistant attempt, so run
               // compaction immediately against the current session snapshot rather
@@ -2643,6 +2718,8 @@ export const defaultLayer = Layer.suspend(() =>
         Bus.layer,
         CrossSpawnSpawner.defaultLayer,
         RuntimeFlags.defaultLayer,
+        // [local-smark] goal 服务依赖 Bus，提供 goal CRUD 和续跑 prompt
+        SessionGoal.defaultLayer,
       ),
     ),
   ),

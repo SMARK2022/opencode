@@ -37,6 +37,7 @@ import { PtyTicket } from "@/pty/ticket"
 import { Question } from "@/question"
 import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
+import { SessionGoal } from "@/session/goal"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRequestUsage } from "@/session/request-usage"
@@ -217,6 +218,8 @@ export function createRoutes(
       SessionPrompt.defaultLayer,
       SessionRevert.defaultLayer,
       SessionRequestUsage.defaultLayer,
+      // [local-smark] goal HTTP handler 依赖 SessionGoal.Service
+      SessionGoal.defaultLayer,
       SessionShare.defaultLayer,
       SessionRunState.defaultLayer,
       SessionStatus.defaultLayer,

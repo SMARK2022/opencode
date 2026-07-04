@@ -388,6 +388,8 @@ export type TuiState = {
     status: (sessionID: string) => SessionStatus | undefined
     permission: (sessionID: string) => ReadonlyArray<PermissionRequest>
     question: (sessionID: string) => ReadonlyArray<QuestionRequest>
+    // [local-smark] goal 状态读取
+    goal: (sessionID: string) => TuiSidebarGoalItem | undefined
   }
   part: (messageID: string) => ReadonlyArray<Part>
   lsp: () => ReadonlyArray<TuiSidebarLspItem>
@@ -446,6 +448,18 @@ export type TuiSidebarFileItem = {
   file: string
   additions: number
   deletions: number
+}
+
+// [local-smark] goal sidebar 面板数据类型
+export type TuiSidebarGoalItem = {
+  sessionID: string
+  id: string
+  objective: string
+  status: "active" | "paused" | "complete" | "blocked"
+  tokenBudget: number | null
+  tokensUsed: number
+  timeUsedSeconds: number
+  time: { created: number; updated: number }
 }
 
 export type TuiHostSlotMap = {

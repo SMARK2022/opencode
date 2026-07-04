@@ -171,6 +171,10 @@ function stateApi(sync: ReturnType<typeof useSync>): TuiPluginApi["state"] {
       question(sessionID) {
         return sync.data.question[sessionID] ?? []
       },
+      // [local-smark] goal 读取：返回当前 session 的 goal 或 undefined
+      goal(sessionID: string) {
+        return sync.data.session_goal[sessionID]
+      },
     },
     part(messageID) {
       return sync.data.part[messageID] ?? []
