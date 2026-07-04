@@ -74,7 +74,9 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const rendered = history.slice(-120).map((message) => {
         const text = render(message)
         const role: PermissionReviewerPrompt.TranscriptEntry["role"] = message.type === "user" ? "user" : message.type === "shell" ? "tool" : "assistant"
-        return { role, text: truncate(text, 1000), truncated: text.length > 1000 }
+        // 真实用户末尾可能包含授权；仅用户条目增大预算并保尾，不扩大工具证据。
+        const limit = role === "user" ? 2000 : 1000
+        return { role, text: truncate(text, limit, role === "user"), truncated: text.length > limit }
       })
       const visible = rendered.filter((entry) => entry.text.trim())
       const keep = new Set<number>()
@@ -284,8 +286,15 @@ function render(message: SessionMessage.Message) {
 }
 
 // 单段和整条截短都留下显式证据标记，而不是静默丢弃剩余内容。
-function truncate(text: string, limit = 4000) {
-  return text.length <= limit ? text : text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
+function truncate(text: string, limit = 4000, preserveTail = false) {
+  if (text.length <= limit) return text
+  if (preserveTail) {
+    // 与V1同样保留头部60%和尾部40%，省略标记仍反映真实缺失量。
+    const head = Math.floor(limit * 0.6)
+    const tail = limit - head
+    return text.slice(0, head) + `\n<truncated chars="${text.length - limit}" />\n` + text.slice(text.length - tail)
+  }
+  return text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
 }
 
 export const node = makeLocationNode({ service: Service, layer,
