@@ -33,6 +33,8 @@ const sessionID = SessionV2.ID.make("ses_bash_tool_test")
 const assertions: PermissionV2.AssertInput[] = []
 const runs: Array<{
   readonly command: string
+  readonly executable: string
+  readonly spawnShell?: string | boolean
   readonly cwd?: string
   readonly shell?: string | boolean
   readonly args?: readonly string[]
@@ -82,8 +84,11 @@ const appProcess = Layer.succeed(
         const argument = command.args.at(-1)
         // 只观察外层脚本块中的原始命令；偏好行数和末尾流重定向不属于用户输入。
         const script = command.args.includes("-EncodedCommand") && argument !== undefined ? Buffer.from(argument, "base64").toString("utf16le") : undefined
-        const original = script === undefined ? argument ?? command.command : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
-        runs.push({ command: original, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
+        const original = script === undefined
+          ? command.options.shell === false && Shell.name(command.command) === "cmd" ? (argument ?? "").slice(1, -1) : argument ?? command.command
+          : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
+        runs.push({ command: original, executable: command.command, spawnShell: command.options.shell, cwd: command.options.cwd,
+          shell: command.options.shell === false ? command.command : command.options.shell,
           args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
         // 原有 process 替身必须履行新的观察回调契约，不能让 settlement 测试得到空原文。
         return (options?.onOutput ? options.onOutput(result.output ?? result.stdout) : Effect.void).pipe(
@@ -236,6 +241,10 @@ describe("BashTool", () => {
               },
             })
             expect(runs).toMatchObject([{ command: "pwd", cwd: realpathSync(tmp.path) }])
+            // 审批原文与实际spawn分开核对，默认PowerShell仍由下方独立字节期望验证。
+            expect(runs[0]?.executable).toBe(Shell.acceptable())
+            expect(runs[0]?.spawnShell).toBe(false)
+            if (!Shell.ps(Shell.acceptable())) expect(runs[0]?.args).toEqual(Shell.name(Shell.acceptable()) === "cmd" ? ["/d", "/s", "/c", '"pwd"'] : ["-c", "pwd"])
             // 检查真正交给进程边界的选择，不能只验证system里显示了哪个shell。
             expect(runs[0]?.shell).toBe(Shell.acceptable())
             expect(runs[0]?.options).toMatchObject({
@@ -377,6 +386,11 @@ describe("BashTool", () => {
                   expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
                   expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
                   expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
+                  // cmd与PowerShell保留同一审批原文，但进程入口必须都是显式executable。
+                  expect(runs[0]?.executable).toBe(Shell.acceptable(shell))
+                  expect(runs[0]?.spawnShell).toBe(false)
+                  if (cmd) expect(runs[0]?.args).toEqual(["/d", "/s", "/c", `"${command}"`])
+                  if (!cmd) expect(Buffer.from(runs[0]?.args?.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
                   // 原命令观察不代替spawn契约；PowerShell必须实际使用非交互的编码argv。
                   if (!cmd) expect(runs[0]?.args?.slice(0, 6)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand"])
                 }
@@ -393,6 +407,7 @@ describe("BashTool", () => {
               expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
               expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
               expect(runs).toMatchObject([{ command, shell: gitBash }])
+              expect(runs).toMatchObject([{ executable: gitBash, args: ["-c", command], spawnShell: false }])
             }), appProcess, gitBash)
           })))
       },
@@ -1022,6 +1037,10 @@ describe("BashTool", () => {
             if (command === "crossline-redaction") expect(text).not.toContain(credential)
             expect(runs).toHaveLength(1)
             expect(runs[0]?.command).toBe(command)
+            // 压缩仍按原脚本分类，不能因测试观察raw argv而换掉分类输入。
+            expect(runs[0]?.spawnShell).toBe(false)
+            if (Shell.ps(Shell.acceptable())) expect(Buffer.from(runs[0]?.args?.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
+            else expect(runs[0]?.args).toEqual(Shell.name(Shell.acceptable()) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command])
             if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
             if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
             if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: plainClixml ? { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: 8, compressionCompressedBytes: 8, compressionSavedBytes: 0 } : { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
