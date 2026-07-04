@@ -23,7 +23,10 @@ export async function notebookSource(input: Record<string, unknown>) {
   if (!filePath) throw new Error("filePath is required")
   const notebook = await resolveNotebook(filePath)
   // limit 与字节预算分别约束正文数量和 UTF-8 输出，400 只作为缺省页大小。
-  const limit = Math.max(1, numberProp(input, "limit") ?? 400)
+  // requestedLimit 区分"用户显式传了 limit"和"使用默认值"：
+  // 仅在未显式传 limit 且指定了 cellId 时自动扩展到整个 cell，避免破坏显式分页
+  const requestedLimit = numberProp(input, "limit")
+  let limit = Math.max(1, requestedLimit ?? 400)
   // 行数预算与字节预算互补，大量空行或短行虽少占字节也不能无限占用提示版面。
   const offset = Math.max(1, numberProp(input, "offset") ?? 1)
 
@@ -42,6 +45,13 @@ export async function notebookSource(input: Record<string, unknown>) {
 
   if (targetCellIndex !== undefined && ranges.has(targetCellIndex)) {
     const range = ranges.get(targetCellIndex)!
+    // 指定 cellId 但未显式传 limit 时，自动扩展到整个 cell 行数（上限 1000）。
+    // 数据库取证显示 source_before_edit 成功率反而低于 edit_before_edit，
+    // 根因是 agent 分页读取后 oldCode 跨越页面边界。自动扩展让 agent 一次
+    // 获取完整 cell，16KB 字节上限仍作为硬边界。
+    if (requestedLimit === undefined) {
+      limit = Math.max(limit, Math.min(range.end - range.start + 1, 1000))
+    }
     if (input.offset !== undefined) {
       if (offset >= range.start && offset <= range.end) {
         // 全局续读行号优先，避免同一数值也可作局部偏移时跳过上一页指定的继续位置。

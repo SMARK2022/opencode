@@ -61,6 +61,10 @@ type SavedMetadata = {
 
 // 三十秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
 const PROBE_TIMEOUT_MS = 30_000
+// selectKernel 打开内核选择器 UI 后可能无限期阻塞等待用户交互。
+// 客户端 120s 超时会直接中止操作，agent 无法获得有用信息。
+// 服务端在 15s 内超时并返回 selection-requested，让 agent 继续工作。
+const SELECT_KERNEL_TIMEOUT_MS = 15_000
 const decoder = new TextDecoder("utf-8")
 const RESTART_CMD = "jupyter.restartkernel"
 const CONFIG_SECTION = "jupyter"
@@ -209,13 +213,21 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   }
   const selStart = Date.now()
   // 命令列表只作诊断，是否接受或取消以实际调用结果为准。
-  const selection = await Promise.resolve(vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
-    notebookUri: notebook.uri,
-    skipIfAlreadySelected: true,
-  })).then(
-    (result) => ({ result, error: undefined }),
-    (error: unknown) => ({ result: undefined, error: error instanceof Error ? error.message : String(error) }),
-  )
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  const selection = await Promise.race([
+    Promise.resolve(vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
+      notebookUri: notebook.uri,
+      skipIfAlreadySelected: true,
+    })).then(
+      (result) => ({ result, error: undefined }),
+      (error: unknown) => ({ result: undefined, error: error instanceof Error ? error.message : String(error) }),
+    ),
+    new Promise<{ result: undefined; error: undefined }>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve({ result: undefined, error: undefined }), SELECT_KERNEL_TIMEOUT_MS)
+    }),
+  ]).finally(() => {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle)
+  })
   const selectKernelInfo = {
     invoked: selection.error === undefined,
     result: selection.result,
@@ -240,7 +252,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
     path: primaryPath,
     reason,
     status,
-    summary: selection.error !== undefined ? `Kernel selection command failed: ${selection.error}.` : "Kernel selection command completed.",
+    summary: selection.error !== undefined ? `Kernel selection command failed: ${selection.error}.` : selection.result === undefined ? "Kernel selection was invoked without a confirmed command result." : "Kernel selection command completed.",
     data: {
       notebook: notebookMeta,
       jupyter: jupyterInfo,
@@ -266,7 +278,7 @@ function configureResult(input: {
     configured: "Notebook is ready for cell execution.",
     selected: "Kernel selection was accepted. Proceed to run cells; the kernel will start on first execution.",
     "needs-selection": "No kernel was selected or accepted. Select a kernel manually from the notebook toolbar, then call configure to verify.",
-    "selection-requested": "No active kernel was confirmed. Retry configure or select a kernel manually.",
+    "selection-requested": "The kernel picker may still be open or the command returned no explicit result. Select a kernel manually from the notebook toolbar, then call configure to verify.",
     failed: "Check Jupyter/Python extensions and workspace trust.",
   }[input.status]
   return {
