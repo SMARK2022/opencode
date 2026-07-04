@@ -1,4 +1,4 @@
-import { beforeEach, expect, mock, test } from "bun:test"
+import { beforeEach, expect, mock, spyOn, test } from "bun:test"
 
 const NotebookCellKind = { Markup: 1, Code: 2 } as const
 const EndOfLine = { LF: 1, CRLF: 2 } as const
@@ -17,6 +17,9 @@ let commandLists = {
   all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
 }
 let executedCommands: string[] = []
+// selectKernel 的返回值可被单个测试覆盖：默认 true（立即接受），
+// 测试可设为永不结算的 promise 来模拟用户未交互的超时场景。
+let selectKernelResult: unknown = true
 // Keep extension activation injectable per test. Most notebook tests should see
 // no Jupyter/Python extension, while restart/configure tests can provide only the
 // public shape they need; this avoids a broad mock that would hide missing-env
@@ -107,7 +110,7 @@ mock.module("vscode", () => ({
     executeCommand: async (command: string) => {
       executedCommands.push(command)
       if (command === "notebook.cell.execute") executeSelectedCell()
-      if (command === "notebook.selectKernel") return true
+      if (command === "notebook.selectKernel") return selectKernelResult
       return undefined
     },
   },
@@ -147,6 +150,7 @@ beforeEach(() => {
     all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
   }
   executedCommands = []
+  selectKernelResult = true
   extensionLookup = new Map()
   notebookListeners.clear()
   textListeners.clear()
@@ -288,6 +292,150 @@ test("insert result identifies the inserted cell ID before reporting shifted cel
   expect(typeof insertedCellId).toBe("string")
   expect(result.summary).toContain(`Inserted: c2 id=${insertedCellId}`)
   expect(result.summary.indexOf("Inserted:")).toBeLessThan(result.summary.indexOf("Shifted:"))
+})
+
+// ---------------------------------------------------------------------------
+// after-source 预览：edit 响应摘要必须包含足够多的 after-source 行，
+// 让 agent 能精确复制作为下一次 edit 的 oldCode，避免模型重建字符漂移。
+// ---------------------------------------------------------------------------
+
+test("string-match edit summary includes after-source preview for the next oldCode anchor", async () => {
+  activeNotebook.cellAt(1).document.setText("line_a\nline_b\nline_c\nline_d")
+  // 对 cell 2 做局部替换：line_b → line_B，cell 其余行保持不变
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "line_b", newCode: "line_B" })
+  // after-source 预览必须包含 cell 的完整首行，让 agent 知道 cell 当前从哪行开始
+  expect(result.summary).toContain("AfterSource")
+  expect(result.summary).toContain("line_a")
+  expect(result.summary).toContain("line_B")
+  expect(result.summary).toContain("line_c")
+})
+
+test("full-cell replace edit summary includes after-source preview of the new content", async () => {
+  // full-cell replace（不传 oldCode）后 agent 需要知道 cell 的完整新内容
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: "new_alpha\nnew_beta\nnew_gamma" })
+  expect(result.summary).toContain("AfterSource")
+  expect(result.summary).toContain("new_alpha")
+  expect(result.summary).toContain("new_gamma")
+})
+
+test("delete edit summary does not include after-source preview", async () => {
+  // delete 后 cell 内容为空，AfterSource 没有意义且会误导 agent
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "delete" })
+  expect(result.summary).not.toContain("AfterSource")
+})
+
+test("after-source preview is bounded to ten lines with a truncation indicator", async () => {
+  // 超过 10 行的 cell 只显示前 10 行，避免 edit 摘要膨胀
+  const lines = Array.from({ length: 15 }, (_, i) => `row_${i + 1}`)
+  activeNotebook.cellAt(1).document.setText(lines.join("\n"))
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: "replaced_first\n" + lines.slice(1).join("\n") })
+  expect(result.summary).toContain("AfterSource")
+  expect(result.summary).toContain("row_10")
+  // 第 11~15 行不应出现在预览中
+  expect(result.summary).not.toContain("row_15")
+  expect(result.summary).toContain("more lines")
+})
+
+// ---------------------------------------------------------------------------
+// 非字符串数组检测：agent 偶尔会把结构化对象数组传给 oldCode/newCode，
+// sourceProp 静默返回 undefined 会导致 "newCode is required" 误导性错误，
+// 或 oldCode 被忽略后静默执行 full-cell replacement 造成数据丢失。
+// ---------------------------------------------------------------------------
+
+test("edit rejects non-string items in newCode array with a clear type error", async () => {
+  await expect(
+    editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [{ key: "val" }] as unknown as string[] }),
+  ).rejects.toThrow("must be a string or an array of strings")
+})
+
+test("edit rejects non-string items in oldCode array before any cell mutation", async () => {
+  // oldCode 含非字符串项时必须在 notebook 变更前抛出，防止静默 full-cell replace
+  await expect(
+    editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: [1, 2] as unknown as string[], newCode: "print('safe')" }),
+  ).rejects.toThrow("must be a string or an array of strings")
+  // cell 内容未被修改
+  expect(activeNotebook.cellAt(1).document.getText()).toBe("print('ready')")
+})
+
+test("edit still accepts empty-string oldCode for full-cell replacement", async () => {
+  // oldCode: "" 是 falsy，历史上有 45 次成功使用此模式做 full-cell replacement；
+  // 非字符串数组检测不能破坏此兼容路径
+  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "", newCode: "print('replaced')" })
+  expect((result.data as Record<string, unknown>).applied).toBe(true)
+  expect(activeNotebook.cellAt(1).document.getText()).toBe("print('replaced')")
+})
+
+// ---------------------------------------------------------------------------
+// source 自动扩展 limit：指定 cellId 但不传 limit 时，应返回整个 cell 内容
+// （上限 1000 行），避免 agent 分页读取后 oldCode 跨越页面边界。
+// ---------------------------------------------------------------------------
+
+test("source returns full cell content when cellId is specified without explicit limit", async () => {
+  // 创建一个超过默认 limit(400) 行的 cell，验证不传 limit 时能一次返回全部
+  const bigLines = Array.from({ length: 450 }, (_, i) => `big_line_${i + 1}`)
+  activeNotebook.cellAt(1).document.setText(bigLines.join("\n"))
+  const result = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2) })
+  // 返回的行数应覆盖整个 cell（450 行），而非被默认 limit 400 截断
+  expect((result.data as Record<string, unknown>).returned).toBe(450)
+  expect(result.summary).toContain("big_line_450")
+  expect(result.summary).not.toContain("Use offset=")
+})
+
+// ---------------------------------------------------------------------------
+// configure 超时：selectKernel 打开内核选择器 UI 后可能无限期阻塞，
+// 服务端需在 15s 内超时并返回 selection-requested，让 agent 继续工作。
+// ---------------------------------------------------------------------------
+
+test("configure returns selection-requested when selectKernel does not resolve in time", async () => {
+  // 模拟用户未交互：selectKernel 返回永不结算的 promise
+  selectKernelResult = new Promise(() => {})
+  // 安装 Jupyter 扩展以满足 configure 前置条件；getKernel 返回 undefined
+  // 表示尚无活跃内核，configure 会继续调用 selectKernel
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: { kernels: { getKernel: async () => undefined } },
+    async activate() { this.isActive = true; return this.exports },
+  })
+  // 加速测试：将 >=10s 的 setTimeout 回调立即执行，模拟 selectKernel 超时
+  const originalSetTimeout = globalThis.setTimeout
+  spyOn(globalThis, "setTimeout").mockImplementation(((cb: Function, delay?: number) => {
+    if (delay !== undefined && delay >= 10_000) { cb(); return 0 as never }
+    return originalSetTimeout(cb as TimerHandler, delay) as never
+  }) as never)
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "configure" })
+
+  mock.restore()
+  // 超时后应返回 selection-requested，而非阻塞或失败
+  const data = result.data as Record<string, unknown>
+  expect(data.status).toBe("selection-requested")
+  expect(result.summary).toContain("selection-requested")
+})
+
+test("configure returns configured when selectKernel immediately accepts and kernel is active", async () => {
+  // 正常路径：selectKernel 立即返回 true，且内核已活跃
+  selectKernelResult = true
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: {
+      kernels: {
+        getKernel: async () => ({
+          language: "python",
+          status: "idle",
+          async *executeCode(_code: string, _token: unknown) {
+            yield { items: [{ mime: "text/plain", data: new TextEncoder().encode("__OPENCODE_RUNTIME_PROBE_START__\n{\"language\":\"python\"}\n__OPENCODE_RUNTIME_PROBE_END__") }] }
+          },
+        }),
+      },
+    },
+    async activate() { this.isActive = true; return this.exports },
+  })
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "configure" })
+  const data = result.data as Record<string, unknown>
+  expect(data.status).toBe("configured")
 })
 
 async function expectHeader(result: { summary: string }, label: string) {

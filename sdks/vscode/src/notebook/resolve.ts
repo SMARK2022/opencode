@@ -35,7 +35,10 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
       .getCells()
       .find((candidate) => cellIdentifiers(candidate).some((id) => id.replace(/^#/, "") === stripped))
     if (cell) return cell
-    throw new Error(`Notebook cell not found: ${cellId}. The edit response contains updated cell IDs after type changes.`)
+    // cell ID 在 type-change（replaceCells）后失效，因为新 cell 获得新的 URI。
+    // 此错误被 edit/run/source/output 共用，消息不能只提 "edit response"。
+    // 建议调用 summary 获取当前 cell map，这是所有工具通用的恢复路径。
+    throw new Error(`Notebook cell not found: ${cellId}. Cell IDs change after type-change edits — call vscode_notebook_summary to get the current cell map.`)
   }
 
   if (cellIndex !== undefined) return notebook.cellAt(cellIndex)

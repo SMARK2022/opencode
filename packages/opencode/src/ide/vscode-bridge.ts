@@ -81,8 +81,6 @@ let cachedRegistryBridge:
     }
   | undefined
 
-let bridgeRequestQueue = Promise.resolve()
-
 export function registryDir() {
   return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
 }
@@ -183,7 +181,10 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
 }
 
 export async function callBridge(input: CallInput): Promise<unknown> {
-  return await enqueueBridgeRequest(() => callBridgeOnce(input))
+  // 全局请求队列已移除：服务端 withFileLock 已按 filePath 序列化同一文档的请求，
+  // 客户端不再需要全局 Promise 队列。之前的全局队列会把一个长时间 run（最长 50 分钟）
+  // 阻塞所有后续 summary/source/edit/env 操作，包括不同 notebook 的请求。
+  return await callBridgeOnce(input)
 }
 
 async function callBridgeOnce(input: CallInput): Promise<unknown> {
@@ -224,20 +225,6 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
   const error = errorFromResponse(value)
   if (error) throw new Error(error)
   return value
-}
-
-async function enqueueBridgeRequest<T>(operation: () => Promise<T>) {
-  const previous = bridgeRequestQueue
-  let release!: () => void
-  bridgeRequestQueue = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  await previous
-  try {
-    return await operation()
-  } finally {
-    release()
-  }
 }
 
 export function summaryOnly(value: unknown) {

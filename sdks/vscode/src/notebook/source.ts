@@ -29,7 +29,10 @@ export async function notebookSource(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
   if (!filePath) throw new Error("filePath is required")
   const notebook = await resolveNotebook(filePath)
-  const limit = Math.max(1, numberProp(input, "limit") ?? 400)
+  // requestedLimit 区分"用户显式传了 limit"和"使用默认值"：
+  // 仅在未显式传 limit 且指定了 cellId 时自动扩展到整个 cell，避免破坏显式分页
+  const requestedLimit = numberProp(input, "limit")
+  let limit = Math.max(1, requestedLimit ?? 400)
   const offset = Math.max(1, numberProp(input, "offset") ?? 1)
 
   const ranges = computeVirtualRanges(notebook)
@@ -48,6 +51,13 @@ export async function notebookSource(input: Record<string, unknown>) {
 
   if (targetCellIndex !== undefined && ranges.has(targetCellIndex)) {
     const range = ranges.get(targetCellIndex)!
+    // 指定 cellId 但未显式传 limit 时，自动扩展到整个 cell 行数（上限 1000）。
+    // 数据库取证显示 source_before_edit 成功率反而低于 edit_before_edit，
+    // 根因是 agent 分页读取后 oldCode 跨越页面边界。自动扩展让 agent 一次
+    // 获取完整 cell，16KB 字节上限仍作为硬边界。
+    if (requestedLimit === undefined) {
+      limit = Math.max(limit, Math.min(range.end - range.start + 1, 1000))
+    }
     if (input.offset !== undefined) {
       if (offset >= range.start && offset <= range.end) {
         globalStart = offset

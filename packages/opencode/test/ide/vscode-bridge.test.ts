@@ -132,6 +132,42 @@ describe("vscode bridge discovery", () => {
     )
     await expect(fs.stat(path.join(dir, `${staleId}.json`))).rejects.toThrow()
   })
+
+  // ---------------------------------------------------------------------------
+  // 全局请求队列已移除：不同文件的 callBridge 请求应能并发执行，
+  // 不被客户端全局 Promise 队列序列化。服务端 withFileLock 仍按文件序列化。
+  // ---------------------------------------------------------------------------
+  test("does not serialize concurrent callBridge requests for different files", async () => {
+    const cwd = "/tmp/concurrent-project"
+    const fileA = path.join(cwd, "a.ipynb")
+    const fileB = path.join(cwd, "b.ipynb")
+    const dir = await tempRegistry()
+    // 两个 bridge server 分别绑定不同 active notebook，使 resolveBridge
+    // 通过 active 匹配将 fileA 路由到 serverA、fileB 路由到 serverB
+    using serverA = await postBridgeServer()
+    using serverB = await postBridgeServer()
+    await writeEntry(dir, "11111111-1111-1111-1111-111111111111", serverA.port, cwd, Date.now(), { notebook: fileA })
+    await writeEntry(dir, "22222222-2222-2222-2222-222222222222", serverB.port, cwd, Date.now() + 1, { notebook: fileB })
+
+    // 创建磁盘文件以满足 assertExistingLocalFilePath
+    await fs.mkdir(cwd, { recursive: true })
+    await fs.writeFile(fileA, "")
+    await fs.writeFile(fileB, "")
+    tempDirs.push(cwd)
+
+    // serverA 的 POST 处理被阻塞直到 releaseA 被调用；
+    // 如果全局队列仍在，serverB 的请求会被 serverA 阻塞，promise 会超时
+    const callA = VscodeBridge.callBridge({ cwd, path: "/notebook/summary", body: { filePath: fileA }, filePath: fileA, timeoutMs: 5_000 })
+    // 给 callA 一点时间进入 fetch（确保它先占住队列——如果队列存在的话）
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // callB 应该能立即完成，不被 callA 阻塞
+    const resultB = await VscodeBridge.callBridge({ cwd, path: "/notebook/summary", body: { filePath: fileB }, filePath: fileB, timeoutMs: 5_000 })
+    expect(resultB).toBeDefined()
+
+    // 释放 callA
+    serverA.release()
+    await callA
+  })
 })
 
 async function tempRegistry() {
@@ -141,7 +177,7 @@ async function tempRegistry() {
   return dir
 }
 
-async function writeEntry(dir: string, id: string, port: number, workspace: string, updatedAt = Date.now()) {
+async function writeEntry(dir: string, id: string, port: number, workspace: string, updatedAt = Date.now(), active?: { notebook?: string }) {
   await fs.writeFile(
     path.join(dir, `${id}.json`),
     JSON.stringify({
@@ -158,7 +194,7 @@ async function writeEntry(dir: string, id: string, port: number, workspace: stri
       createdAt: updatedAt,
       updatedAt,
       workspaceFolders: [{ name: path.basename(workspace), uri: `file://${workspace}`, fsPath: workspace }],
-      active: {},
+      active: active ?? {},
       capabilities: { notebook: true },
     }),
   )
@@ -179,6 +215,47 @@ async function bridgeServer() {
   if (!address || typeof address === "string") throw new Error("missing test server port")
   return {
     port: address.port,
+    [Symbol.dispose]() {
+      server.close()
+    },
+  }
+}
+
+// POST bridge server：第一个 POST 请求会被阻塞直到 release() 被调用，
+// 用于验证客户端移除全局队列后不同文件的请求能真正并发。
+async function postBridgeServer() {
+  let release!: () => void
+  const blocked = new Promise<void>((resolve) => { release = resolve })
+  const server = http.createServer((request, response) => {
+    if (request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ ok: true }))
+      return
+    }
+    if (request.method === "POST") {
+      let body = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => { body += chunk })
+      request.on("end", async () => {
+        // 第一个请求阻塞直到 release；通过 body 中 filePath 区分
+        const parsed = JSON.parse(body || "{}")
+        if (parsed.filePath && parsed.filePath.includes("a.ipynb")) {
+          await blocked
+        }
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(JSON.stringify({ ran: false, summary: "ok", data: {} }))
+      })
+      return
+    }
+    response.writeHead(404)
+    response.end()
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!address || typeof address === "string") throw new Error("missing test server port")
+  return {
+    port: address.port,
+    release,
     [Symbol.dispose]() {
       server.close()
     },

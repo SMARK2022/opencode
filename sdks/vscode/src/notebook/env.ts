@@ -110,6 +110,10 @@ const RESTART_CMD = "jupyter.restartkernel"
 const CONFIG_SECTION = "jupyter"
 const CONFIG_KEY = "askForKernelRestart"
 const PROBE_TIMEOUT_MS = 30_000
+// selectKernel 打开内核选择器 UI 后可能无限期阻塞等待用户交互。
+// 客户端 120s 超时会直接中止操作，agent 无法获得有用信息。
+// 服务端在 15s 内超时并返回 selection-requested，让 agent 继续工作。
+const SELECT_KERNEL_TIMEOUT_MS = 15_000
 const DIRTY_SETTLE_TIMEOUT_MS = 10_000
 const decoder = new TextDecoder("utf-8")
 
@@ -327,10 +331,23 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   let selectKernelError: string | undefined
 
   try {
-    selectKernelResult = await vscode.commands.executeCommand("notebook.selectKernel", {
-      notebookUri: notebook.uri,
-      skipIfAlreadySelected: true,
+    // selectKernel 可能打开内核选择器 UI 并无限期阻塞；
+    // 用 Promise.race 加 15s 超时，超时后视为 selection-requested
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<undefined>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(undefined), SELECT_KERNEL_TIMEOUT_MS)
     })
+    try {
+      selectKernelResult = await Promise.race([
+        vscode.commands.executeCommand("notebook.selectKernel", {
+          notebookUri: notebook.uri,
+          skipIfAlreadySelected: true,
+        }),
+        timeoutPromise,
+      ])
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle)
+    }
     selectKernelInvoked = true
   } catch (error) {
     selectKernelError = error instanceof Error ? error.message : String(error)
@@ -468,8 +485,9 @@ function resolveConfigureStatus(
     return {
       status: "selection-requested",
       statusSummary: [
-        "Kernel selection command completed without an explicit boolean result.",
-        "No active kernel was confirmed. Retry configure or select a kernel manually.",
+        "Kernel selection was invoked but did not confirm a kernel.",
+        "The picker may be open in VS Code waiting for user input, or the command returned no explicit result.",
+        "Select a kernel manually from the notebook toolbar, then call configure to verify.",
       ].join(" "),
     }
   }
