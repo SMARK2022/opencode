@@ -107,6 +107,7 @@ test("session methods use the public HTTP contract", async () => {
       if (url.includes("/message/")) return Response.json({ data: modelSwitchedMessage })
       if (url.endsWith("/api/session/active")) return Response.json({ data: { ses_test: { type: "running" } } })
       if (init?.method === "POST" && url.endsWith("/api/session")) return Response.json(session)
+      if (url.endsWith("/api/session/preview")) return Response.json({ ses_test: ["latest user", "earlier user"] })
       if (init?.method === "POST") return new Response(null, { status: 204 })
       return Response.json({ data: [session.data], cursor: { next: "next" } })
     },
@@ -137,6 +138,9 @@ test("session methods use the public HTTP contract", async () => {
   for await (const event of client.sessions.events({ sessionID: "ses_test", after: 0 })) events.push(event)
   await client.sessions.interrupt({ sessionID: "ses_test" })
   const message = await client.sessions.message({ sessionID: "ses_test", messageID: "msg_model" })
+  // 生成客户端必须暴露真实批量POST，不得回到逐会话分页。
+  const previews = await client.sessions.preview({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 })
+  expect(previews).toEqual({ ses_test: ["latest user", "earlier user"] })
 
   expect(page.cursor.next).toBe("next")
   expect(active).toEqual({ ses_test: { type: "running" } })
@@ -162,7 +166,9 @@ test("session methods use the public HTTP contract", async () => {
     ["GET", "http://localhost:3000/api/session/ses_test/event?after=0"],
     ["POST", "http://localhost:3000/api/session/ses_test/interrupt"],
     ["GET", "http://localhost:3000/api/session/ses_test/message/msg_model"],
+    ["POST", "http://localhost:3000/api/session/preview"],
   ])
+  expect(requests.at(-1)?.init?.body).toBe(JSON.stringify({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 }))
   const body = requests.find((request) => request.url.endsWith("/api/session/ses_test/prompt"))?.init?.body
   if (typeof body !== "string") throw new Error("Expected JSON request body")
   expect(JSON.parse(body)).toEqual({

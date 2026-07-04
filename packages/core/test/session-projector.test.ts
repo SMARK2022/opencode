@@ -29,9 +29,12 @@ import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { Location } from "@opencode-ai/core/location"
 import { SessionHistory } from "@opencode-ai/core/session/history"
+import { SessionPreview } from "@opencode-ai/core/session/preview"
 import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
+const previewIt = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node]),
+  [[Database.node, Database.layerFromPath(":memory:")]]))
 const sessionsLayer = AppNodeBuilder.build(SessionV2.node, [[SessionExecution.node, SessionExecution.noopLayer]])
 const sessionID = SessionV2.ID.make("ses_projector_test")
 const created = DateTime.makeUnsafe(0)
@@ -52,6 +55,83 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  previewIt.effect("batches previews from each real message store without compaction or inbox leakage", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const events = yield* EventV2.Service
+      const a = SessionV2.ID.make("ses_preview_a")
+      const b = SessionV2.ID.make("ses_preview_b")
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values([a, b].map(id => ({ id, project_id: Project.ID.global,
+        slug: id, directory: "/project", title: id, version: "test" }))).run()
+      const promote = (sessionID: SessionV2.ID, id: string, text: string) => Effect.gen(function* () {
+        const input = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make(id), sessionID,
+          prompt: Prompt.make({ text }), delivery: "steer" })
+        yield* SessionInput.promoteSteers(db, events, sessionID, input.admittedSeq)
+        return input.id
+      })
+      yield* promote(a, "msg_preview_old", "old before compaction")
+      const hidden = yield* promote(a, "msg_preview_hidden", "hidden")
+      yield* events.publish(SessionEvent.MessagesHidden, { sessionID: a, timestamp: created, messageIDs: [hidden],
+        hidden: SessionMessage.Hidden.make({ time: 0, reason: "permission-reviewer-protocol-retry" }) })
+      const visible = yield* promote(a, "msg_preview_false", "false marker")
+      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, visible)).get()
+      if (!row) return yield* Effect.die("Missing projected preview user")
+      // 非法隐藏值保留可见性，防止把metadata键存在误当作协议隐藏。
+      yield* db.update(SessionMessageTable).set({ data: { ...row.data, metadata: { hidden: false } } })
+        .where(eq(SessionMessageTable.id, visible)).run()
+      yield* promote(a, "msg_preview_middle", "middle")
+      yield* events.publish(SessionEvent.Synthetic, { sessionID: a, messageID: SessionMessage.ID.make("msg_preview_synthetic"),
+        timestamp: created, text: "internal synthetic" })
+      const compactionID = SessionMessage.ID.make("msg_preview_compaction")
+      yield* events.publish(SessionEvent.Compaction.Started, { sessionID: a, messageID: compactionID, timestamp: created, reason: "manual" })
+      yield* events.publish(SessionEvent.Compaction.Ended, { sessionID: a, messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(1), reason: "manual", text: "summary", recent: "recent" })
+      yield* promote(a, "msg_preview_latest", " latest\n  user ")
+      const pending = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_preview_pending"), sessionID: a,
+        prompt: Prompt.make({ text: "pending inbox" }), delivery: "queue" })
+      yield* promote(b, "msg_preview_b_first", "b first")
+      yield* promote(b, "msg_preview_b_latest", "b latest")
+      expect((yield* SessionInput.find(db, pending.id))?.promotedSeq).toBeUndefined()
+      expect(yield* SessionPreview.load(db, { sessionIDs: [] })).toEqual({})
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] })).toEqual({
+        [a]: ["latest user", "middle"], [b]: ["b latest", "b first"],
+      })
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 })).toEqual({ [a]: ["latest user"] })
+      // 全量窗口证明压缩前正文仍可取，hidden/synthetic/inbox都不能占名额。
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 10 })).toEqual({
+        [a]: ["latest user", "middle", "false marker", "old before compaction"],
+      })
+      const v1 = (text: string | undefined, options: { hidden?: boolean; synthetic?: boolean; ignored?: boolean; partHidden?: boolean } = {}) => Effect.gen(function* () {
+        const id = SessionV1.MessageID.ascending()
+        yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID: a, info: { id, sessionID: a, role: "user",
+          time: { created: 10 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
+          ...(options.hidden ? { hidden: { time: 0, reason: "undo" as const } } : {}) } })
+        if (text !== undefined) yield* events.publish(SessionV1.Event.PartUpdated, { sessionID: a, time: 10, part: {
+          id: SessionV1.PartID.ascending(), sessionID: a, messageID: id, type: "text", text,
+          synthetic: options.synthetic, ignored: options.ignored,
+          ...(options.partHidden ? { hidden: { time: 0, reason: "undo" as const } } : {}),
+        } })
+        return id
+      })
+      const first = yield* v1(" part1\n")
+      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID: a, time: 10, part: {
+        id: SessionV1.PartID.ascending(), sessionID: a, messageID: first, type: "text", text: " part2 ",
+      } })
+      yield* v1("second")
+      yield* v1("hidden", { hidden: true })
+      yield* v1("synthetic", { synthetic: true })
+      yield* v1("ignored", { ignored: true })
+      yield* v1("part hidden", { partHidden: true })
+      yield* v1(undefined)
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] }, "v1")).toEqual({ [a]: ["second", "part1 part2"] })
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 }, "v1")).toEqual({ [a]: ["second"] })
+      // 同一Session内的两代表不能互相补查，Native结果不受V1新行影响。
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["latest user", "middle"] })
+      expect(yield* SessionPreview.load(db, { sessionIDs: [] }, "v1")).toEqual({})
+    }),
+  )
+
   it.effect("persists request-owned tool diffs through the native completion event", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db

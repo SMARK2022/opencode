@@ -398,6 +398,22 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
           }),
         ),
     )
+    .add(
+      // 批量请求没有单一Session归属，不能套用:sessionID的Location中间件。
+      HttpApiEndpoint.post("session.preview", "/api/session/preview", {
+        payload: Schema.Struct({
+          sessionIDs: Schema.Array(Schema.String),
+          limit: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10))),
+        }),
+        success: Schema.Record(Schema.String, Schema.Array(Schema.String)),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "v2.session.preview",
+          summary: "Batch session preview",
+          description: "Retrieve the most recent user message text for multiple sessions in a single request.",
+        }),
+      ),
+    )
     .annotateMerge(
       OpenApi.annotations({
         title: "sessions",

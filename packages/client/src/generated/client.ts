@@ -43,6 +43,8 @@ import type {
   SessionsInterruptOutput,
   SessionsMessageInput,
   SessionsMessageOutput,
+  SessionsPreviewInput,
+  SessionsPreviewOutput,
   MessagesListInput,
   MessagesListOutput,
   ModelsListInput,
@@ -533,6 +535,18 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+      preview: (input: SessionsPreviewInput, requestOptions?: RequestOptions) =>
+        request<SessionsPreviewOutput>(
+          {
+            method: "POST",
+            path: `/api/session/preview`,
+            body: { sessionIDs: input["sessionIDs"], limit: input["limit"] },
+            successStatus: 200,
+            declaredStatuses: [401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ),
     },
     messages: {
       list: (input: MessagesListInput, requestOptions?: RequestOptions) =>

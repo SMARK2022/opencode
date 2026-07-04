@@ -90,6 +90,19 @@ export const GoalResponse = Schema.Struct({
 export const GoalClearResponse = Schema.Struct({
   cleared: Schema.Boolean,
 })
+// [local-smark] session preview: 批量获取多个 session 的最近 N 条用户消息文本
+// PreviewPayload 接收 session ID 列表和期望的预览行数；PreviewResponse 是
+// sessionID → 预览文本数组的映射，无用户消息的 session 不包含在响应中。
+// limit 约束在 1-10 防止异常大值导致 SQL 返回过多行
+// (session 上限 400 由 TUI 侧切片控制，服务端不再重复限制)。
+export const PreviewPayload = Schema.Struct({
+  // [local-smark] sessionIDs 顺序不保证与响应键序一致——响应以 session_id 为键的映射
+  sessionIDs: Schema.Array(Schema.String),
+  limit: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10))),
+})
+// [local-smark] 响应省略无用户消息的 session——消费方按需回退占位文本，
+// 避免空数组与未拉取两种状态在 UI 上无法区分
+export const PreviewResponse = Schema.Record(Schema.String, Schema.Array(Schema.String))
 
 export const SessionPaths = {
   list: root,
@@ -120,6 +133,10 @@ export const SessionPaths = {
   updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
   // #364：goal 端点：每个 session 最多一个 current goal
   goal: `${root}/:sessionID/goal`,
+  // [local-smark] 预览端点：POST /session/preview，批量返回 session 预览文本；
+  // POST 语义而非 GET——sessionID 列表作为 payload 传输，规避 URL 长度限制
+  // 路径不含 :sessionID，需要 workspace-routing 添加例外避免品牌校验
+  preview: `${root}/preview`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -526,6 +543,24 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.goal.clear",
             summary: "Clear session goal",
             description: "Clear the persistent goal for a session.",
+          }),
+        ),
+        // [local-smark] 批量预览端点：单次 POST 返回多个 session 的用户消息预览
+        // 替代 TUI 中 N×M 次 session.messages 分页调用，将 ~10s 阻塞降至 ~100ms
+        // 过滤条件与 MessageV2.page(includeHidden=false) + textFromUserMessage 对齐
+        HttpApiEndpoint.post("preview", SessionPaths.preview, {
+          query: WorkspaceRoutingQuery,
+          payload: PreviewPayload,
+          success: described(PreviewResponse, "Session preview lines keyed by session ID"),
+          // [local-smark] 错误面仅 BadRequest：payload 非法；未知 session 静默省略
+          // （预览是尽力而为的展示数据，缺失不构成客户端错误）
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.preview",
+            summary: "Batch session preview",
+            description:
+              "Retrieve the most recent user message text for multiple sessions in a single request.",
           }),
         ),
       )

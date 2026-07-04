@@ -1,4 +1,3 @@
-import type { Part, TextPart } from "@opencode-ai/sdk/v2"
 import { useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
@@ -56,15 +55,10 @@ export function matchesDialogSessionSearch(
 
 // #115：会话列表预览默认 2 行
 const SESSION_LIST_PREVIEW_LINES = 2
-// #120：分页拉取消息页大小
-const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
-// #120：最多扫描消息条数，避免全历史
-const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
 // #120：同时预加载预览的会话数上限
 // #306：预览上限从 50 提到 400，预览覆盖更完整，避免滚动时再触发补拉。
+// #366：预览内容由批量端点一次性返回，本文件不再分页拉取/解析消息 parts。
 const SESSION_LIST_PREVIEW_SESSION_LIMIT = 400
-// #120：会话预览并发度
-const SESSION_LIST_PREVIEW_CONCURRENCY = 6
 
 export function DialogSessionList() {
   const dialog = useDialog()
@@ -82,44 +76,25 @@ export function DialogSessionList() {
   // #120：sessionID -> 多行用户消息预览（非单行再折词）
   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
 
-  // #120：从用户消息 parts 提取纯文本
-  function textFromUserMessage(parts: Part[]) {
-    return (parts.filter((p) => p.type === "text" && !(p as any).synthetic && !(p as any).ignored) as TextPart[])
-      .map((p) => p.text)
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim()
-  }
-
-  // #120：分页向后扫消息，收集最多 N 条用户文本行
-  async function loadPreviewLines(sessionID: string) {
-    const lines: string[] = []
-    let before: string | undefined
-    let scanned = 0
-    while (lines.length < SESSION_LIST_PREVIEW_LINES && scanned < SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT) {
-      const limit = Math.min(SESSION_LIST_PREVIEW_PAGE_SIZE, SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT - scanned)
-      const result = await sdk.client.session.messages({
-        sessionID,
-        limit,
-        before,
-      } as any)
-      // #120：只认 data 数组契约（与 tip sync 一致）
-      const messages = Array.isArray((result as any)?.data) ? ((result as any).data as any[]) : []
-      scanned += limit
-      for (let i = messages.length - 1; i >= 0 && lines.length < SESSION_LIST_PREVIEW_LINES; i--) {
-        const message = messages[i]
-        if (message.info?.role !== "user") continue
-        const text = textFromUserMessage((message.parts ?? []) as Part[])
-        if (text) lines.push(text)
-      }
-      const cursor =
-        typeof (result as any)?.response?.headers?.get === "function"
-          ? (result as any).response.headers.get("X-Next-Cursor")
-          : undefined
-      if (!cursor) break
-      before = cursor
-    }
-    return lines
+  // [local-smark] #366：批量预览——单次 POST /session/preview 拉取全部未加载
+  // session 的预览文本，替代逐 session 分页扫描（N×M 次请求 → 1 次）。
+  // 服务端过滤条件与旧 textFromUserMessage 完全对齐（非 synthetic/ignored
+  // 的用户 text part），返回键为 sessionID、值为按新→旧排序的预览行数组。
+  // SDK client 生成物上不存在 preview 方法，as any 调用会在运行时变成
+  // undefined(...) 同步 TypeError 被 catch 吞掉；sdk.fetch 的 rewrite 仅处理
+  // GET/HEAD，POST 需手动带 directory query param（#368 useGoalApi 同模式）
+  async function loadPreviewsBatch(sessionIDs: string[], signal: AbortSignal) {
+    const url = new URL("/session/preview", sdk.url)
+    const dir = sync.path.directory || sdk.directory
+    if (dir) url.searchParams.set("directory", dir)
+    const resp = await sdk.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionIDs, limit: SESSION_LIST_PREVIEW_LINES }),
+      signal,
+    })
+    if (!resp.ok) return {}
+    return (await resp.json()) as Record<string, string[]>
   }
 
   createEffect(
@@ -133,23 +108,19 @@ export function DialogSessionList() {
           .filter((s) => !(s.id in (previews() ?? {})))
         if (unloaded.length === 0) return
         void (async () => {
-          const next: Record<string, string[]> = {}
-          // #120：按并发度分块预取
-          for (let i = 0; i < unloaded.length; i += SESSION_LIST_PREVIEW_CONCURRENCY) {
-            const chunk = unloaded.slice(i, i + SESSION_LIST_PREVIEW_CONCURRENCY)
-            await Promise.all(
-              chunk.map(async (session) => {
-                try {
-                  const lines = await loadPreviewLines(session.id)
-                  if (lines.length > 0) next[session.id] = lines
-                } catch {
-                  // #120：预览失败不阻断列表
-                }
-              }),
-            )
-          }
-          if (Object.keys(next).length > 0) {
-            setPreviews((prev) => ({ ...prev, ...next }))
+          // #366：竞态防护——每次 sessions 变化创建新 controller；onCleanup 在下次
+          // 触发或卸载时 abort，防止已取消的旧批量响应覆盖新数据（source AbortController 语义）。
+          const controller = new AbortController()
+          onCleanup(() => controller.abort())
+          try {
+            // #366：一次批量请求覆盖所有未加载会话；无用户消息的 session
+            // 不在响应中——调用方按需跳过，与旧逻辑的 lines.length 守卫等价
+            const next = await loadPreviewsBatch(unloaded.map((s) => s.id), controller.signal)
+            if (!controller.signal.aborted && Object.keys(next).length > 0) {
+              setPreviews((prev) => ({ ...prev, ...next }))
+            }
+          } catch {
+            // #120：预览失败不阻断列表
           }
         })()
       },
