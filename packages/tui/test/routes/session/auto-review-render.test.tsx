@@ -411,7 +411,7 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
         ? { status: "error", input, error: "auto reviewer denied", metadata, time: { start: 1, end: 2 } }
         : scenario === "running-output"
           ? { status: "running", input, metadata, title: "running", time: { start: 1 } }
-          : { status: "completed", input, metadata, output: "", title: "completed", time: { start: 1, end: 2 } },
+          : { status: "completed", input, metadata, output: scenario === "generic" ? "GENERIC_OUTPUT" : "", title: "completed", time: { start: 1, end: 2 } },
     }
     await withRenderedReview([{ info, parts: [part] }], async (app) => {
       await waitForReviewFrame(app, async (frame) => {
@@ -424,6 +424,8 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
       const lines = app.captureCharFrame().split("\n")
       const reviewRows = lines.filter((line) => line.includes("auto review"))
       expect(reviewRows).toHaveLength(plain ? 0 : 1)
+      // 缺省KV必须显示真实非空generic输出，空字符串不会经过被修改的分支。
+      if (scenario === "generic") expect(lines.join("\n")).toContain("GENERIC_OUTPUT")
       if (plain) {
         expect(lines.join("\n")).not.toContain("% Patch")
         return
