@@ -6,6 +6,7 @@ import { BashTool } from "./bash"
 import { ApplyPatchTool } from "./apply-patch"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
+import { GoalTool } from "./goal"
 import { GrepTool } from "./grep"
 import { NotebookTools } from "./notebook"
 import { QuestionTool } from "./question"
@@ -38,6 +39,7 @@ export const node = makeLocationNode({
     BashTool.node,
     EditTool.node,
     GlobTool.node,
+    GoalTool.node,
     GrepTool.node,
     NotebookTools.node,
     QuestionTool.node,

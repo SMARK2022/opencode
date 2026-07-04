@@ -1532,6 +1532,19 @@ function UserMessage(props: {
       .filter(Boolean)
     return texts.join("\n\n")
   })
+  // #364：goal 续跑 prompt：synthetic 消息也渲染，
+  // 但用 "Goal continuation" 标签区分，让用户知道这一轮是 goal 驱动的
+  const goalText = createMemo(() => {
+    const texts = props.parts
+      .map((x) => {
+        if (x.type === "text" && x.synthetic) {
+          return x.text
+        }
+        return null
+      })
+      .filter(Boolean)
+    return texts.join("\n\n")
+  })
   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
@@ -1544,6 +1557,35 @@ function UserMessage(props: {
 
   return (
     <>
+      {/* #364：goal 续跑 prompt 渲染：synthetic 消息用特殊样式显示， */}
+      {/* 让用户知道这是 goal 驱动的续跑而非用户输入 */}
+      <Show when={goalText()}>
+        <box
+          id={props.message.id}
+          border={["left"]}
+          borderColor={theme.textMuted}
+          customBorderChars={SplitBorder.customBorderChars}
+          marginTop={props.index === 0 ? 0 : 1}
+          flexShrink={0}
+        >
+          <box
+            paddingTop={1}
+            paddingBottom={1}
+            paddingLeft={2}
+            backgroundColor={theme.backgroundPanel}
+            flexShrink={0}
+          >
+            <text fg={theme.textMuted}>
+              <b>↻ Goal continuation</b>
+            </text>
+            {/* [local-smark] 续跑 prompt 内容来自 SessionGoal.continuationPrompt， */}
+            {/* 含 objective、剩余预算与已用量，模型无需回读历史 goal 记录 */}
+            <text fg={theme.textMuted} wrapMode="word">
+              {goalText()}
+            </text>
+          </box>
+        </box>
+      </Show>
       <Show when={text()}>
         <box
           id={props.message.id}

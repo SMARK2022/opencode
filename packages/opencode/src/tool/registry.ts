@@ -30,6 +30,8 @@ import { WebSearchTool } from "./websearch"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
+// #364：goal tool 注册进 V2 registry——受 tools 配置开关与 selection 过滤约束
+import { GoalTool } from "./goal"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -46,6 +48,7 @@ import { Instruction } from "../session/instruction"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Agent } from "../agent/agent"
+import { SessionGoal } from "@/session/goal"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { BackgroundJob } from "@/background/job"
@@ -118,6 +121,8 @@ const layer = Layer.effect(
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
+    // #364：goal 工具：仅当 config.experimental.goals 启用时可见
+    const goaltool = yield* GoalTool
     const agent = yield* Agent.Service
     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
@@ -207,7 +212,9 @@ const layer = Layer.effect(
           }
         }
 
-        yield* config.get()
+        const cfg = yield* config.get()
+        // #364：goal 工具仅在 experimental.goals 启用时可见
+        const goalsEnabled = cfg.experimental?.goals === true
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
@@ -225,6 +232,8 @@ const layer = Layer.effect(
           skill: Tool.init(skilltool),
           patch: Tool.init(patchtool),
           question: Tool.init(question),
+          // #364：goal 工具：模型通过此工具标记 goal complete/blocked
+          goal: Tool.init(goaltool),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           permission_review_decision: Tool.init(permissionReviewDecision),
@@ -251,6 +260,8 @@ const layer = Layer.effect(
             tool.patch,
             tool.permission_review_decision,
             ...(tool.execute ? [tool.execute] : []),
+            // #364：goal 工具：仅在 experimental.goals 启用时暴露给模型
+            ...(goalsEnabled ? [tool.goal] : []),
             // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],
@@ -447,6 +458,7 @@ export const node = LayerNode.make({
     Plugin.node,
     Question.node,
     Todo.node,
+    SessionGoal.node,
     Agent.node,
     Skill.node,
     Session.node,

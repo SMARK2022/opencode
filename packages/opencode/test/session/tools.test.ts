@@ -142,6 +142,9 @@ it.effect("preserves running tool start time across metadata updates", () =>
       processor,
       bypassAgentCheck: false,
       messages: [],
+      // #364：SessionTools.resolve 新增必填 goalSvc——本测试不触达 goal tool，
+      // 以最小 stub 满足 Interface（方法均返回空值 Effect）。
+      goalSvc: { get: () => Effect.succeed(null), set: () => Effect.succeed(null), clear: () => Effect.succeed(false), accountUsage: () => Effect.void } as never,
       promptOps: {} as never,
     })
     const execute = tools.timing.execute

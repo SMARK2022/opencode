@@ -39,6 +39,9 @@ export const groupNames = {
 
 export const endpointNames = {
   "session.messages": "list",
+  // 使用既有别名入口，避免Goal清除与revert.clear在同一客户端组重名。
+  "session.goal.set": "goalSet",
+  "session.goal.clear": "goalClear",
   "integration.connect.key": "connectKey",
   "integration.connect.oauth": "connectOauth",
   "integration.attempt.status": "attemptStatus",

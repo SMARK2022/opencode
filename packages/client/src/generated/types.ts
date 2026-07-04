@@ -516,6 +516,63 @@ export type SessionsGetOutput = {
   }
 }["data"]
 
+export type SessionsGoalInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SessionsGoalOutput = {
+  readonly goal: {
+    readonly sessionID: string
+    readonly id: string
+    readonly objective: string
+    readonly status: "active" | "paused" | "complete" | "blocked"
+    readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
+    readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
+    readonly time: {
+      readonly created: number | "Infinity" | "-Infinity" | "NaN"
+      readonly updated: number | "Infinity" | "-Infinity" | "NaN"
+    }
+  } | null
+}
+
+export type SessionsGoalSetInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly objective?: {
+    readonly objective?: string | undefined
+    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+    readonly tokenBudget?: number | null | undefined
+  }["objective"]
+  readonly status?: {
+    readonly objective?: string | undefined
+    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+    readonly tokenBudget?: number | null | undefined
+  }["status"]
+  readonly tokenBudget?: {
+    readonly objective?: string | undefined
+    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+    readonly tokenBudget?: number | null | undefined
+  }["tokenBudget"]
+}
+
+export type SessionsGoalSetOutput = {
+  readonly goal: {
+    readonly sessionID: string
+    readonly id: string
+    readonly objective: string
+    readonly status: "active" | "paused" | "complete" | "blocked"
+    readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
+    readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
+    readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
+    readonly time: {
+      readonly created: number | "Infinity" | "-Infinity" | "NaN"
+      readonly updated: number | "Infinity" | "-Infinity" | "NaN"
+    }
+  }
+}
+
+export type SessionsGoalClearInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
+
+export type SessionsGoalClearOutput = { readonly cleared: boolean }
+
 export type SessionsSwitchAgentInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
   readonly agent: { readonly agent: string }["agent"]

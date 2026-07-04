@@ -39,6 +39,7 @@ import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionCompaction } from "../../src/session/compaction"
+import { SessionGoal } from "../../src/session/goal"
 import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
@@ -228,6 +229,7 @@ const promptRoot = LayerNode.group([
   SessionProcessor.node,
   Image.node,
   SessionCompaction.node,
+  SessionGoal.node,
   SessionRevert.node,
   Instruction.node,
   SystemPrompt.node,

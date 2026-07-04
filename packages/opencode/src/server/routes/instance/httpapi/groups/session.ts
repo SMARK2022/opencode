@@ -3,6 +3,7 @@ import { Permission } from "@/permission"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 import { Session } from "@/session/session"
+import { SessionGoal } from "@/session/goal"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionPrompt } from "@/session/prompt"
@@ -76,6 +77,19 @@ export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput
 export const PermissionResponsePayload = Schema.Struct({
   response: PermissionV1.Reply,
 })
+// #364：goal set/update payload：objective 缺省时仅更新 status/budget
+// tokenBudget: null = 清除预算，正数 = 设置预算，缺省 = 不改
+export const GoalSetPayload = Schema.Struct({
+  objective: Schema.optional(Schema.String),
+  status: Schema.optional(SessionGoal.Status),
+  tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
+})
+export const GoalResponse = Schema.Struct({
+  goal: Schema.NullOr(SessionGoal.Goal),
+})
+export const GoalClearResponse = Schema.Struct({
+  cleared: Schema.Boolean,
+})
 
 export const SessionPaths = {
   list: root,
@@ -104,6 +118,8 @@ export const SessionPaths = {
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
   updatePart: `${root}/:sessionID/message/:messageID/part/:partID`,
+  // #364：goal 端点：每个 session 最多一个 current goal
+  goal: `${root}/:sessionID/goal`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -471,6 +487,47 @@ export const SessionApi = HttpApi.make("session")
           success: Schema.Array(SessionRequestUsage.AssistantUsageSchema),
           error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" })),
+      )
+      .add(
+        // #364：goal 端点：GET 读取当前 goal，POST 设置/更新，DELETE 清除
+        HttpApiEndpoint.get("goal", SessionPaths.goal, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(GoalResponse, "Session goal"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.goal",
+            summary: "Get session goal",
+            description: "Retrieve the current persistent goal for a session.",
+          }),
+        ),
+        HttpApiEndpoint.post("goalSet", SessionPaths.goal, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          payload: GoalSetPayload,
+          success: described(GoalResponse, "Updated session goal"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.goal.set",
+            summary: "Set session goal",
+            description: "Create or update the persistent goal for a session. If objective is omitted, only status/budget are updated.",
+          }),
+        ),
+        // [local-smark] DELETE 幂等：goal 不存在时仍返回 cleared=false 而非 404
+        HttpApiEndpoint.delete("goalClear", SessionPaths.goal, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(GoalClearResponse, "Cleared session goal"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.goal.clear",
+            summary: "Clear session goal",
+            description: "Clear the persistent goal for a session.",
+          }),
+        ),
       )
       .annotateMerge(
         OpenApi.annotations({

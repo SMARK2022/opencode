@@ -35,6 +35,7 @@ import { ProviderAuth } from "@/provider/auth"
 import { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { SessionCompaction } from "@/session/compaction"
+import { SessionGoal } from "@/session/goal"
 import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
 import { SessionProcessor } from "@/session/processor"
@@ -245,6 +246,7 @@ const app = LayerNode.group([
   PermissionCircuitBreaker.node,
   PermissionSaved.node,
   Todo.node,
+  SessionGoal.node,
   Session.node,
   SessionProjector.node,
   SessionStatus.node,
