@@ -108,6 +108,15 @@ test("dialog prompt submit wins when return is also input newline", async () => 
     await wait(() => prompt.app.renderer.currentFocusedEditor instanceof TextareaRenderable)
     const textarea = prompt.app.renderer.currentFocusedEditor
     if (!(textarea instanceof TextareaRenderable)) throw new Error("expected focused dialog textarea")
+    // 高度只改变显示窗口；内容回缩后原提交快捷键和草稿必须保持。
+    await prompt.app.renderOnce()
+    expect(textarea.height).toBe(3)
+    textarea.setText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"))
+    await prompt.app.renderOnce()
+    expect(textarea.height).toBe(9)
+    textarea.setText("draft")
+    await prompt.app.renderOnce()
+    expect(textarea.height).toBe(3)
 
     prompt.app.mockInput.pressEnter()
 
