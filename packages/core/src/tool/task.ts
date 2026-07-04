@@ -1,10 +1,13 @@
 export * as TaskTool from "./task"
 
 import { ToolFailure } from "@opencode-ai/llm"
-import { ConfigProvider, Effect, Layer, Schema, Scope } from "effect"
+import { ConfigProvider, DateTime, Effect, Layer, Schema, Scope } from "effect"
 import { AgentV2 } from "../agent"
 import { BackgroundJob } from "../background-job"
 import { Config } from "../config"
+import { EventV2 } from "../event"
+import { SessionEvent } from "../session/event"
+import { SessionMessage } from "../session/message"
 import { makeLocationNode } from "../effect/app-node"
 import type { LocationNode } from "../effect/app-node"
 import { PermissionV2 } from "../permission"
@@ -39,6 +42,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
   const tools = yield* Tools.Service
   const agents = yield* AgentV2.Service
   const sessions = yield* SessionV2.Service
+  const events = yield* EventV2.Service
   const store = yield* SessionStore.Service
   const permission = yield* PermissionV2.Service
   const background = yield* BackgroundJob.Service
@@ -117,7 +121,6 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
             ? [part.state.structured.read] : []) : []), location.project.directory) : undefined
       const prompt = parentContext ? `${input.prompt}\n\n<parent_context>\n${parentContext}\n</parent_context>` : input.prompt
       const runTask = Effect.gen(function* () {
-        const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
         // extension在旧段结束后才执行；本次审批身份不能提前改变仍活跃的旧provider轮。
         if (existing) {
           // extension真正开始后才替换旧权限；入队时不能改掉仍运行的上一段。
@@ -127,19 +130,30 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
           if (model) yield* sessions.switchModel({ sessionID: child.id, model })
         }
         yield* sessions.prompt({ sessionID: child.id, prompt: { text: prompt }, resume: false })
-        // 只复用durable runner，退出中断沿现有SessionExecution所有权链传递。
-        yield* sessions.resume(child.id).pipe(Effect.onInterrupt(() => sessions.interrupt(child.id)))
-        const latest = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")
-        // 本轮没有助手输出时不能误返回恢复前的旧结果。
-        if (latest?.type !== "assistant" || latest.id === before) return ""
-        if (latest.error) return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${latest.error.message}` })
-        const failed = latest.content.findLast(item => item.type === "tool" && item.state.status === "error")
-        if (failed?.type === "tool" && failed.state.status === "error")
-          return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${failed.state.error.message}` })
-        return latest.content.filter(item => item.type === "text").map(item => item.text).join("\n")
+        // 两轮共用真实runner及错误检查；每轮重读前像，不能误认上轮旧助手文本。
+        const runOnce = Effect.gen(function* () {
+          const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
+          yield* sessions.resume(child.id).pipe(Effect.onInterrupt(() => sessions.interrupt(child.id)))
+          const latest = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")
+          if (latest?.type !== "assistant" || latest.id === before) return ""
+          if (latest.error) return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${latest.error.message}` })
+          const failed = latest.content.findLast(item => item.type === "tool" && item.state.status === "error")
+          if (failed?.type === "tool" && failed.state.status === "error")
+            return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${failed.state.error.message}` })
+          return latest.content.filter(item => item.type === "text").map(item => item.text).join("\n")
+        })
+        let text = yield* runOnce
+        if (!text.trim()) {
+          // 只提醒一次，不重派Task/授权或改变子会话身份；取消仍由既有Effect链退出。
+          yield* events.publish(SessionEvent.Synthetic, { sessionID: child.id, messageID: SessionMessage.ID.create(),
+            timestamp: yield* DateTime.now,
+            text: "No text output was produced in your previous turn. Please provide a text response to the task above." })
+          text = yield* runOnce
+        }
+        return text
       }).pipe(
         // 父级通知与前台结果共用同一次成功文本归一；错误/取消不会被改成空成功。
-        Effect.map(text => !text.trim() ? "Subagent produced no output (may have been aborted or lacked required tools)." : text.length > 32_000 ? `${text.slice(0, 32_000)}\n...[truncated]` : text),
+        Effect.map(text => !text.trim() ? "Subagent produced no output (may have been aborted or lacked required tools). You may resume this task with the task_id above to continue." : text.length > 32_000 ? `${text.slice(0, 32_000)}\n...[truncated]` : text),
         Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Subagent failed (task_id: ${child.id})`, error })))
       const notify = () => background.wait({ id: child.id }).pipe(Effect.flatMap(result => {
         if (!result.info || result.info.status === "running" || result.info.status === "cancelled") return Effect.void
@@ -171,5 +185,5 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
 
 export const node: LocationNode<never> = makeLocationNode({
   name: "tool/task", layer,
-  deps: [ToolRegistry.node, AgentV2.node, SessionV2.node, SessionStore.node, PermissionV2.node, BackgroundJob.node, Config.node, Location.node, SystemContextRegistry.node],
+  deps: [ToolRegistry.node, AgentV2.node, SessionV2.node, SessionStore.node, PermissionV2.node, BackgroundJob.node, Config.node, Location.node, SystemContextRegistry.node, EventV2.node],
 })
