@@ -42,6 +42,8 @@ import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "@tui/component/dialog-agent"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
 import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
+// [local-smark] goal dialog
+import { DialogGoal, DialogGoalMenu } from "@tui/component/dialog-goal"
 // [local-smark] DialogTool for tool selection
 import { DialogTool } from "@tui/component/dialog-tool"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
@@ -505,6 +507,25 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         run: () => {
           dialog.replace(() => <DialogSessionList />)
         },
+      },
+      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单
+      {
+        name: "goal.manage",
+        title: "Set or manage goal",
+        slashName: "goal",
+        run: () => {
+          if (route.data.type !== "session") return
+          // 类型守卫后提取 sessionID，避免 union 类型推断问题
+          const sessionID = route.data.sessionID
+          const goal = sync.data.session_goal[sessionID]
+          if (goal) {
+            dialog.replace(() => <DialogGoalMenu sessionID={sessionID} />)
+          } else {
+            dialog.replace(() => <DialogGoal sessionID={sessionID} />)
+          }
+        },
+        category: "Session",
+        suggested: route.data.type === "session",
       },
       {
         name: "session.new",

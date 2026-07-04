@@ -1470,26 +1470,21 @@ function UserMessage(props: {
 }) {
   const ctx = use()
   const local = useLocal()
+  // [local-smark] text memo：包含 synthetic 消息的 objective 提取
+  // synthetic goal 续跑消息不显示原始 XML prompt，只提取 objective 作为用户消息文本
   const text = createMemo(() => {
     const texts = props.parts
       .map((x) => {
-        if (x.type === "text" && !x.synthetic) {
-          return x.text
-        }
-        return null
-      })
-      .filter(Boolean)
-    return texts.join("\n\n")
-  })
-  // [local-smark] goal 续跑 prompt：synthetic 消息也渲染，
-  // 但用 "Goal continuation" 标签区分，让用户知道这一轮是 goal 驱动的
-  const goalText = createMemo(() => {
-    const texts = props.parts
-      .map((x) => {
-        if (x.type === "text" && x.synthetic) {
-          return x.text
-        }
-        return null
+        if (x.type !== "text") return null
+        // 非 synthetic 文本直接使用
+        if (!x.synthetic) return x.text
+        // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体
+        const m = x.text.match(/<objective>([\s\S]*?)<\/objective>/)
+        if (!m) return null
+        return m[1].trim()
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
       })
       .filter(Boolean)
     return texts.join("\n\n")
@@ -1506,33 +1501,6 @@ function UserMessage(props: {
 
   return (
     <>
-      {/* [local-smark] goal 续跑 prompt 渲染：synthetic 消息用特殊样式显示， */}
-      {/* 让用户知道这是 goal 驱动的续跑而非用户输入 */}
-      <Show when={goalText()}>
-        <box
-          id={props.message.id}
-          border={["left"]}
-          borderColor={theme.textMuted}
-          customBorderChars={SplitBorder.customBorderChars}
-          marginTop={props.index === 0 ? 0 : 1}
-          flexShrink={0}
-        >
-          <box
-            paddingTop={1}
-            paddingBottom={1}
-            paddingLeft={2}
-            backgroundColor={theme.backgroundPanel}
-            flexShrink={0}
-          >
-            <text fg={theme.textMuted}>
-              <b>↻ Goal continuation</b>
-            </text>
-            <text fg={theme.textMuted} wrapMode="word">
-              {goalText()}
-            </text>
-          </box>
-        </box>
-      </Show>
       <Show when={text()}>
         <box
           id={props.message.id}

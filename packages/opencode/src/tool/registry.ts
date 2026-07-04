@@ -140,7 +140,7 @@ export const layer: Layer.Layer<
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
-    // [local-smark] goal 工具：仅当 config.experimental.goals 启用时可见
+    // [local-smark] goal 工具：始终注册
     const goaltool = yield* GoalTool
     const agent = yield* Agent.Service
 
@@ -232,8 +232,6 @@ export const layer: Layer.Layer<
 
         yield* config.get()
         const cfg = yield* config.get()
-        // [local-smark] goal 工具仅在 experimental.goals 启用时可见
-        const goalsEnabled = cfg.experimental?.goals === true
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
@@ -283,8 +281,8 @@ export const layer: Layer.Layer<
             tool.permission_review_decision,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
-            // [local-smark] goal 工具：仅在 experimental.goals 启用时暴露给模型
-            ...(goalsEnabled ? [tool.goal] : []),
+            // [local-smark] goal 工具：始终暴露给模型，不再需要 experimental 开关
+            tool.goal,
           ],
           task: tool.task,
           read: tool.read,

@@ -3,6 +3,7 @@ import { Effect, Exit, Layer, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { SessionGoal } from "@/session/goal"
 import { Bus } from "@/bus"
+import { Config } from "@/config/config"
 import { Storage } from "@/storage/storage"
 import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -26,6 +27,8 @@ const it = testEffect(
       Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
       Layer.provide(BackgroundJob.defaultLayer),
     ),
+    // [local-smark] Config 层供 goal_max_turns 顶层读取测试
+    Config.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
   ),
 )
@@ -371,6 +374,23 @@ it.instance(
       yield* sessions.remove(session.id)
       const result = yield* goalSvc.get(session.id)
       expect(Option.isNone(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+// [local-smark] 验证 goal_max_turns 从顶层 config 读取，不在 experimental 下
+// goal 功能不再需要 experimental.goals 开关，始终可用
+it.instance(
+  "goal_max_turns is readable from top-level config without experimental gate",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* Config.Service
+      const cfg = yield* config.get()
+      // goal_max_turns 在顶层可读，默认 10
+      const maxTurns = (cfg as any).goal_max_turns ?? 10
+      expect(maxTurns).toBe(10)
+      // experimental.goals 不再存在，goal 功能始终可用
+      expect((cfg as any).experimental?.goals).toBeUndefined()
     }),
   { git: true },
 )

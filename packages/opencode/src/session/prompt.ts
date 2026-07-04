@@ -2137,9 +2137,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // 使用独立 goalTurns 计数器防止无限循环（step++ 在 continue 后跳过）。
             // 仅对主 session（无 parentID）和非 decide agent 生效。
             const cfg = yield* config.get()
-            const maxGoalTurns = cfg.experimental?.goal_max_turns ?? 10
+            // [local-smark] goal 续跑不再需要 experimental 开关，始终可用
+            const maxGoalTurns = cfg.goal_max_turns ?? 10
             if (
-              cfg.experimental?.goals === true &&
               maxGoalTurns > 0 &&
               !session.parentID &&
               goalTurns < maxGoalTurns

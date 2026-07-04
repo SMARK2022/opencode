@@ -286,6 +286,10 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10
+  goal_max_turns: Schema.optional(NonNegativeInt).annotate({
+    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
+  }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),
@@ -298,14 +302,6 @@ export const Info = Schema.Struct({
       }),
       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
         description: "Continue the agent loop when a tool call is denied",
-      }),
-      // goal 功能开关：启用后 /goal 命令和自动续跑可用
-      goals: Schema.optional(Schema.Boolean).annotate({
-        description: "Enable persistent session goals with auto-continue",
-      }),
-      // 单个 goal 最多自动续跑轮数，防止无限循环
-      goal_max_turns: Schema.optional(NonNegativeInt).annotate({
-        description: "Maximum auto-continue turns per goal (default: 10)",
       }),
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
