@@ -115,8 +115,9 @@ export function DialogGoalMenu(props: DialogGoalProps) {
               onSelect: () => void setGoal({ status: "paused" }),
             }]
           : []),
-        // paused/blocked 状态下显示 Resume 选项
-        ...(goal()?.status === "paused" || goal()?.status === "blocked"
+        // paused/blocked/complete 状态下显示 Resume 选项
+        // complete 也允许 Resume：用户可能需要让模型重新验证或继续完善已完成的目标
+        ...(goal()?.status === "paused" || goal()?.status === "blocked" || goal()?.status === "complete"
           ? [{
               title: "Resume",
               description: "Resume the goal to active",

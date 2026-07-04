@@ -192,6 +192,44 @@ it.instance(
   { git: true },
 )
 
+// [local-smark] 验证 complete → active 转换：用户 Resume 已完成的 goal
+// 数据层 set 函数无状态转换限制，complete → active 应直接生效。
+// 累计用量必须保留——budget 跨 resume 边界持续追踪，不能重置。
+it.instance(
+  "resume complete goal back to active preserves usage",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "finish project", tokenBudget: 10_000 })
+      // 模拟 goal 运行中累计用量
+      yield* goalSvc.accountUsage(session.id, 3000, 120)
+      // 模型标记 complete
+      yield* goalSvc.set(session.id, { status: "complete" })
+
+      // complete 后 accountUsage 不应计费（status !== "active"）
+      yield* goalSvc.accountUsage(session.id, 999, 99)
+
+      const completed = yield* goalSvc.get(session.id)
+      expect(Option.isSome(completed)).toBe(true)
+      if (Option.isSome(completed)) {
+        expect(completed.value.status).toBe("complete")
+        expect(completed.value.tokensUsed).toBe(3000)
+      }
+
+      // 用户 Resume：complete → active
+      const resumed = yield* goalSvc.set(session.id, { status: "active" })
+      expect(resumed.status).toBe("active")
+      // 累计用量保留，budget 跨 resume 边界持续追踪
+      expect(resumed.tokensUsed).toBe(3000)
+      expect(resumed.timeUsedSeconds).toBe(120)
+      expect(resumed.tokenBudget).toBe(10_000)
+    }),
+  { git: true },
+)
+
 it.instance(
   "clear removes the goal",
   () =>
