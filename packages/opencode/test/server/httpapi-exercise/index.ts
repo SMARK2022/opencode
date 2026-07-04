@@ -1368,6 +1368,21 @@ const scenarios: Scenario[] = [
       object(body)
       check((body as any).cleared === false, "clearing non-existent goal should return false")
     }),
+  // [local-smark] session preview 端点 scenario
+  // 批量预览端点返回 Record<sessionID, string[]>，空 sessionIDs 返回空对象
+  http.protected
+    .post("/session/preview", "session.preview")
+    .seeded((ctx) => ctx.session({ title: "Preview session" }))
+    .at((ctx) => ({
+      path: route("/session/preview", {}),
+      headers: ctx.headers(),
+      body: { sessionIDs: [], limit: 2 },
+    }))
+    .json(200, (body) => {
+      object(body)
+      // 空 sessionIDs 返回空对象
+      check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
+    }),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))
