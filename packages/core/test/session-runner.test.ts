@@ -1286,6 +1286,7 @@ describe("SessionRunnerLLM", () => {
     })))
     const first = yield* invoke()
     expect(first.result.type).toBe("text")
+    expect(requests).toHaveLength(1)
     expect(taskAssertions).toMatchObject([{ action: "task", resources: ["research"], sessionID,
       agent: "plan", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
     const output = Schema.decodeUnknownSync(TaskTool.Output)(first.output?.structured)
@@ -1339,9 +1340,85 @@ describe("SessionRunnerLLM", () => {
     expect((yield* sessions.context(child.id)).findLast(message => message.type === "user")).toMatchObject({ text: expect.stringContaining("<parent_context>") })
     const without = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
     expect((yield* sessions.context(SessionV2.ID.make(without.task_id))).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
-    response = fragmentFixture("text", "empty-child", ["   "]).completeEvents
-    const empty = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
-    expect(empty.output).toBe("Subagent produced no output (may have been aborted or lacked required tools).")
+    const nudge = "No text output was produced in your previous turn. Please provide a text response to the task above."
+    const fallback = "Subagent produced no output (may have been aborted or lacked required tools). You may resume this task with the task_id above to continue."
+    const blank = fragmentFixture("text", "empty-child", ["   "]).completeEvents
+    const answer = fragmentFixture("text", "nudge-child", ["nudge result"]).completeEvents
+    // 复用有旧答案的child，覆盖无助手、纯空白、二轮空白及二轮无新助手，不能返回历史成功。
+    for (const [first, second, expected] of [[blank, answer, "nudge result"], [[], answer, "nudge result"],
+      [blank, blank, fallback], [blank, [], fallback]] as const) {
+      const history = yield* sessions.context(child.id)
+      const count = requests.length
+      const approvals = taskAssertions.length
+      responses = [Array.from(first), Array.from(second)]
+      const nudged = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(childID, "research", "none")).output?.structured)
+      expect(nudged).toMatchObject({ task_id: childID, state: "completed", output: expected })
+      expect(requests.length - count).toBe(2)
+      expect(taskAssertions.length - approvals).toBe(1)
+      expect(userTexts(requests.at(-1)!).at(-1)).toBe(nudge)
+      const after = yield* sessions.context(child.id)
+      const added = after.filter(message => !history.some(previous => previous.id === message.id))
+      // 提醒是持久synthetic，不是新用户admission；模型、agent和完整权限保持同一子会话。
+      expect(added.filter(message => message.type === "synthetic")).toMatchObject([{ text: nudge }])
+      expect(added.filter(message => message.type === "user")).toHaveLength(1)
+      expect(added.filter(message => message.type === "assistant").every(message => message.agent === child.agent && message.model.id === parentModel.id)).toBe(true)
+      expect((yield* sessions.get(child.id)).model).toEqual(child.model)
+      expect(yield* store.permissions(child.id)).toEqual(inherited)
+    }
+    // 第二轮有部分文本也不能掩盖模型失败或provider已执行工具的失败。
+    for (const toolError of [false, true]) {
+      const count = requests.length
+      responses = [blank, [
+        ...fragmentFixture("text", "nudge-partial", ["partial response"]).partialEvents,
+        LLMEvent.textEnd({ id: "nudge-partial" }),
+        ...(toolError ? [
+          LLMEvent.toolInputStart({ id: "nudge-failed-call", name: "write" }),
+          LLMEvent.toolInputDelta({ id: "nudge-failed-call", name: "write", text: '{"path":"README.md"}' }),
+          LLMEvent.toolInputEnd({ id: "nudge-failed-call", name: "write" }),
+          LLMEvent.toolCall({ id: "nudge-failed-call", name: "write", input: { path: "README.md" }, providerExecuted: true }),
+          LLMEvent.toolError({ id: "nudge-failed-call", name: "write", message: "nudge failed" }),
+          LLMEvent.toolResult({ id: "nudge-failed-call", name: "write", result: { type: "error", value: "nudge failed" } }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
+        ] : [LLMEvent.providerError({ message: "nudge failed" })]),
+      ]]
+      const failed = yield* invoke(childID, "research", "none")
+      expect(failed.result).toEqual({ type: "error", value: `Subagent failed (task_id: ${childID}): nudge failed` })
+      expect(requests.length - count).toBe(2)
+    }
+    // 用现有provider门控分别取消首轮及提醒轮；迟到放行不能把cancel改成成功或触发第三轮。
+    for (const round of [0, 1]) {
+      const before = yield* sessions.context(child.id)
+      const count = requests.length
+      const firstGate = yield* Deferred.make<void>()
+      const firstStarted = yield* Deferred.make<void>()
+      const secondGate = yield* Deferred.make<void>()
+      const secondStarted = yield* Deferred.make<void>()
+      streamGate = firstGate
+      streamStarted = firstStarted
+      responses = [blank, answer]
+      const waiting = yield* invoke(childID, "research", "none").pipe(Effect.forkChild)
+      yield* Deferred.await(firstStarted)
+      if (round === 1) {
+        streamGate = secondGate
+        streamStarted = secondStarted
+        yield* Deferred.succeed(firstGate, undefined)
+        yield* Deferred.await(secondStarted)
+      }
+      yield* Fiber.interrupt(waiting)
+      const exit = yield* Fiber.await(waiting)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+      yield* Deferred.succeed(firstGate, undefined)
+      yield* Deferred.succeed(secondGate, undefined)
+      const background = yield* BackgroundJob.Service
+      expect((yield* background.get(childID))?.status).toBe("cancelled")
+      expect(yield* sessions.active).not.toContain(child.id)
+      expect(requests.length - count).toBe(round + 1)
+      expect((yield* sessions.context(child.id)).filter(message => message.type === "synthetic" && !before.some(old => old.id === message.id))).toHaveLength(round)
+      streamGate = undefined
+      streamStarted = undefined
+    }
+    responses = undefined
     response = fragmentFixture("text", "large-child", ["x".repeat(32_001)]).completeEvents
     const large = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
     expect(large.output).toBe("x".repeat(32_000) + "\n...[truncated]")

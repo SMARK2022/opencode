@@ -51,6 +51,12 @@ const BACKGROUND_UPDATED = [
   "Work on non-overlapping tasks, or briefly tell the user what you sent and end your response.",
 ].join("\n")
 
+// 子 agent 未产出文本时的温和提醒：仅指出事实并请求文本回应，
+// 不限制工具/不覆盖指令/不强加格式——任务要求由主 agent 原始 prompt 已定义。
+// 文案是提问而非命令：避免覆盖或与子 agent 的原始任务指令冲突。
+const NO_OUTPUT_NUDGE =
+  "No text output was produced in your previous turn. Please provide a text response to the task above."
+
 const BaseParameterFields = {
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
   prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
@@ -288,10 +294,43 @@ export const TaskTool = Tool.define(
           return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
         }
         let text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
-        // [local-smark] 空结果验证：子 agent 未产出任何文本时返回提示，
-        // 返回裸字符串由调用方统一包裹，避免 <task_result> 双重嵌套。
+        // 子 agent 未产出文本时注入一轮温和提醒，让它至少回应任务需求。
+        // 不限制工具/不覆盖指令/不强加格式——任务要求由主 agent 原始 prompt 已定义。
+        // abort 已发生时跳过 nudge：已 aborted 的 signal 不会再触发 abort 事件，
+        // 新 runner 无法被取消，继续 nudge 会浪费 token
+        // 双条件：文本为空才值得 nudge；abort 后不再发起新回合（已无法取消）。
+        // 空文本判定用 trim()：纯空白输出对主 agent 同样没有信息量。
+        if ((!text || text.trim().length === 0) && !ctx.abort.aborted) {
+          // synthetic 提醒沿正常持久化与计费路径执行，只在界面隐藏。
+          const retry = yield* ops.prompt({
+            messageID: MessageID.ascending(),
+            sessionID: nextSession.id,
+            model: { modelID: model.modelID, providerID: model.providerID },
+            variant: next.model ? undefined : variant,
+            agent: next.name,
+            parts: [{ type: "text" as const, text: NO_OUTPUT_NUDGE, synthetic: true }],
+          })
+          // 第二轮与首轮遵守同一错误契约，不能把部分文本或空结果当成成功。
+          if (retry.info.role === "assistant" && retry.info.error) {
+            const message =
+              "message" in retry.info.error.data && typeof retry.info.error.data.message === "string"
+                ? retry.info.error.data.message
+                : retry.info.error.name
+            return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${message}`))
+          }
+          const failed = retry.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
+          if (failed?.type === "tool" && failed.state.status === "error") {
+            return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
+          }
+          // 重读 findLast：nudge 回合的最后一个 text 才是子 agent 的最终答复。
+          text = retry.parts.findLast((item) => item.type === "text")?.text ?? ""
+        }
+        // nudge 仍空（或 abort 跳过了 nudge）时回退静态提示，
+        // 引导主 agent 用 task_id 恢复
         if (!text || text.trim().length === 0) {
-          text = "Subagent produced no output (may have been aborted or lacked required tools)."
+          // 静态兜底保留原始语义（可能被 abort 或缺工具），仅追加 resume 指引。
+          text =
+            "Subagent produced no output (may have been aborted or lacked required tools). You may resume this task with the task_id above to continue."
         }
         // [local-smark] result 截断预算：32KB（约 8K tokens），防止大结果撑爆父上下文
         const TASK_RESULT_MAX_CHARS = 32_000
