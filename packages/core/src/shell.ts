@@ -179,7 +179,12 @@ function info(file: string): Item {
 }
 
 export function cmd(file: string, command: string, platform: string = process.platform) {
-  if (platform !== "win32" || !ps(file)) return { command, args: [], shell: file }
+  if (platform !== "win32" || !ps(file)) {
+    // 显式shell argv避开Bun/macOS shell+detached丢stdout；cmd保留AutoRun与引号控制。
+    // cmd /s会剥去最外层引号；包装整个脚本才能保留可执行路径与参数原有引号。
+    return { command: file, args: name(file) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command], shell: false }
+  }
+  // Windows PowerShell仍走既有UTF-16传输及UTF-8输出，不重复解释脚本文本。
   // UTF-16LE base64 只传输脚本文本；Console 与管道生产端使用无 BOM 的 UTF-8。
   const script = [
     "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",

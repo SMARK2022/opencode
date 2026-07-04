@@ -377,6 +377,8 @@ export const make = Effect.gen(function* () {
               stdio: stdios(sin, sout, serr, extra),
               detached: command.options.detached ?? process.platform !== "win32",
               shell: command.options.shell,
+              // cmd自行解析/c脚本；Node的反斜杠转义会破坏其中路径和嵌套引号。
+              windowsVerbatimArguments: process.platform === "win32" && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(command.command),
               windowsHide: process.platform === "win32",
             }),
             Effect.fnUntraced(function* ([proc, signal]) {

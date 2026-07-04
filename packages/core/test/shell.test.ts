@@ -89,6 +89,11 @@ describe("shell", () => {
   })
 
   test("builds command args per shell family", () => {
+    // 显式启动shell；Windows名称去扩展名依赖真实宿主，只在Windows验证cmd路径。
+    expect(Shell.cmd("/bin/sh", "echo hi", "linux")).toEqual({ command: "/bin/sh", args: ["-c", "echo hi"], shell: false })
+    if (process.platform === "win32") expect(Shell.cmd("cmd.exe", "echo hi", "win32")).toEqual({
+      command: "cmd.exe", args: ["/d", "/s", "/c", '"echo hi"'], shell: false,
+    })
     expect(Shell.args("/bin/sh", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
     expect(Shell.args("/usr/bin/fish", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
     const zsh = Shell.args("/bin/zsh", "echo hi", "/tmp")
