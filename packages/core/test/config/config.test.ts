@@ -56,12 +56,15 @@ describe("Config", () => {
   it.effect("migrates auto permissions without dropping denies or agent configuration", () =>
     Effect.sync(() => {
       // 全局与 agent 均保留 auto，控制项独立迁移，静态拒绝不被覆盖。
-      for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
+      for (const goal_max_turns of [0, 3]) for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
         const legacy = Schema.decodeUnknownSync(ConfigV1.Info)({
-          model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
+          goal_max_turns, model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
           experimental: { primary_tools: ["write", "bash"] },
         })
         const info = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate(legacy))
+        // 真实两代decoder与迁移同时接受0/非默认上限，不能以空配置桩证明字段生效。
+        expect(info.goal_max_turns).toBe(goal_max_turns)
+        expect(legacy.goal_max_turns).toBe(goal_max_turns)
         expect(info.model).toBe("test/model")
         expect(info.approvals_reviewer).toBe("auto_review")
         expect(info.auto_review).toMatchObject({ strict: true, fallback: "user" })

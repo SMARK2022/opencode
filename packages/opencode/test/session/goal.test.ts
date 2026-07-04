@@ -10,10 +10,14 @@ import { InstanceStore } from "@/project/instance-store"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { Config } from "@/config/config"
+import { TestConfig } from "../fixture/config"
 import { testEffect } from "../lib/effect"
 
 // #364：测试 layer 组装：SessionGoal 依赖 EventV2Bridge + Database，
 // Session 依赖 InstanceStore 等，使用与 session.test.ts 相同的模式。
+// [local-smark] Config 层供 goal_max_turns 顶层读取测试；TestConfig 提供
+// 空配置桩（get 返回 {}），goal_max_turns 缺省回退到 10 的断言因此成立。
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
@@ -23,6 +27,7 @@ const it = testEffect(
       SessionProjector.node,
       CrossSpawnSpawner.node,
       InstanceStore.node,
+      Config.node,
     ]),
     [
       [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
@@ -30,6 +35,7 @@ const it = testEffect(
         InstanceBootstrap.node,
         Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
       ],
+      [Config.node, TestConfig.layer()],
     ],
   ),
 )
@@ -393,6 +399,23 @@ it.instance(
       yield* sessions.remove(session.id)
       const result = yield* goalSvc.get(session.id)
       expect(Option.isNone(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+// [local-smark] 验证 goal_max_turns 从顶层 config 读取，不在 experimental 下
+// goal 功能不再需要 experimental.goals 开关，始终可用
+it.instance(
+  "goal_max_turns is readable from top-level config without experimental gate",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* Config.Service
+      const cfg = yield* config.get()
+      // goal_max_turns 在顶层可读，默认 10（TestConfig 空桩下回退到默认值）
+      const maxTurns = (cfg as any).goal_max_turns ?? 10
+      expect(maxTurns).toBe(10)
+      // experimental.goals 不再存在，goal 功能始终可用
+      expect((cfg as any).experimental?.goals).toBeUndefined()
     }),
   { git: true },
 )

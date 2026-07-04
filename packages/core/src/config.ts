@@ -9,7 +9,7 @@ import { FSUtil } from "./fs-util"
 import { Global } from "./global"
 import { Location } from "./location"
 import { Policy } from "./policy"
-import { AbsolutePath } from "./schema"
+import { AbsolutePath, NonNegativeInt } from "./schema"
 import { ConfigAgent } from "./config/agent"
 import { ConfigAutoReview } from "./config/auto-review"
 import { ConfigAttachments } from "./config/attachments"
@@ -109,6 +109,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   plugins: ConfigPlugin.Plugins.pipe(Schema.optional).annotate({
     description: "Ordered external plugin packages to load",
+  }),
+  // 上限跨两代配置保持同义；0禁用续跑而不隐藏Goal工具。
+  goal_max_turns: NonNegativeInt.pipe(Schema.optional).annotate({
+    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
   }),
   experimental: ConfigExperimental.Experimental.pipe(Schema.optional),
   providers: Schema.Record(Schema.String, ConfigProvider.Info).pipe(Schema.optional),

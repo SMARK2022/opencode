@@ -121,7 +121,7 @@ const layer = Layer.effect(
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
-    // #364：goal 工具：仅当 config.experimental.goals 启用时可见
+    // [local-smark] goal 工具：始终注册（0367 起无 experimental 开关）
     const goaltool = yield* GoalTool
     const agent = yield* Agent.Service
     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
@@ -212,9 +212,6 @@ const layer = Layer.effect(
           }
         }
 
-        const cfg = yield* config.get()
-        // #364：goal 工具仅在 experimental.goals 启用时可见
-        const goalsEnabled = cfg.experimental?.goals === true
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
@@ -260,8 +257,8 @@ const layer = Layer.effect(
             tool.patch,
             tool.permission_review_decision,
             ...(tool.execute ? [tool.execute] : []),
-            // #364：goal 工具：仅在 experimental.goals 启用时暴露给模型
-            ...(goalsEnabled ? [tool.goal] : []),
+            // [local-smark] goal 工具：始终暴露给模型，不再需要 experimental 开关
+            tool.goal,
             // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],

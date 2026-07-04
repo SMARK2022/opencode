@@ -49,6 +49,8 @@ import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
+// [local-smark] goal dialog：无 goal 时设置框，有 goal 时管理菜单
+import { DialogGoal, DialogGoalMenu } from "./component/dialog-goal"
 import { DialogWorkspaceList } from "./component/dialog-workspace-list"
 import { DialogConsoleOrg } from "./component/dialog-console-org"
 import { ThemeProvider, useTheme } from "./context/theme"
@@ -635,6 +637,26 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         run: () => {
           dialog.replace(() => <DialogSessionList />)
         },
+      },
+      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单。
+      // goal 功能 0367 起始终可用（不再需要 experimental.goals 开关）
+      {
+        name: "goal.manage",
+        title: "Set or manage goal",
+        slashName: "goal",
+        run: () => {
+          if (route.data.type !== "session") return
+          // 类型守卫后提取 sessionID，避免 union 类型推断问题
+          const sessionID = route.data.sessionID
+          const goal = sync.data.session_goal[sessionID]
+          if (goal) {
+            dialog.replace(() => <DialogGoalMenu sessionID={sessionID} />)
+          } else {
+            dialog.replace(() => <DialogGoal sessionID={sessionID} />)
+          }
+        },
+        category: "Session",
+        suggested: route.data.type === "session",
       },
       {
         name: "session.new",
