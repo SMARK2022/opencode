@@ -11,6 +11,12 @@ import type {
   SessionsActiveOutput,
   SessionsGetInput,
   SessionsGetOutput,
+  SessionsGoalInput,
+  SessionsGoalOutput,
+  SessionsGoalSetInput,
+  SessionsGoalSetOutput,
+  SessionsGoalClearInput,
+  SessionsGoalClearOutput,
   SessionsSwitchAgentInput,
   SessionsSwitchAgentOutput,
   SessionsSwitchModelInput,
@@ -344,6 +350,40 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+      goal: (input: SessionsGoalInput, requestOptions?: RequestOptions) =>
+        request<SessionsGoalOutput>(
+          {
+            method: "GET",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
+            successStatus: 200,
+            declaredStatuses: [404, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      goalSet: (input: SessionsGoalSetInput, requestOptions?: RequestOptions) =>
+        request<SessionsGoalSetOutput>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
+            body: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
+            successStatus: 200,
+            declaredStatuses: [400, 404, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      goalClear: (input: SessionsGoalClearInput, requestOptions?: RequestOptions) =>
+        request<SessionsGoalClearOutput>(
+          {
+            method: "DELETE",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
+            successStatus: 200,
+            declaredStatuses: [404, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ),
       switchAgent: (input: SessionsSwitchAgentInput, requestOptions?: RequestOptions) =>
         request<SessionsSwitchAgentOutput>(
           {

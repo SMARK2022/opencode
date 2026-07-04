@@ -31,6 +31,9 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 import { ContextSnapshotDecodeError } from "@opencode-ai/core/session/error"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionGoal } from "@opencode-ai/core/session/goal"
+import { GoalTool } from "@opencode-ai/core/tool/goal"
+import GOAL_DESCRIPTION from "../../opencode/src/tool/goal.txt"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { Prompt } from "@opencode-ai/core/session/prompt"
@@ -50,6 +53,7 @@ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Config } from "@opencode-ai/core/config"
+import { ConfigExperimental } from "@opencode-ai/core/config/experimental"
 import { ConfigCompaction } from "@opencode-ai/core/config/compaction"
 import { Tool } from "@opencode-ai/core/tool/tool"
 import {
@@ -66,7 +70,7 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, References, Schema, Stream } from "effect"
+import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, References, Schema, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -280,7 +284,7 @@ const config = Layer.succeed(
   }),
 )
 let runnerMcp: McpTools.Interface | undefined
-const runnerLayer = AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
+const runnerLayer = (configuration = config) => AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
   [Snapshot.node, Snapshot.noopLayer],
   [LayerNodePlatform.llmClient, client],
   [SessionRunnerModel.node, models],
@@ -289,9 +293,9 @@ const runnerLayer = AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node,
   [SkillGuidance.node, skillGuidance],
   [ReferenceGuidance.node, referenceGuidance],
   [PermissionV2.node, permission],
-  [Config.node, config],
+  [Config.node, configuration],
 ])
-const execution = Layer.effect(
+const execution = (configuration = config) => Layer.effect(
   SessionExecution.Service,
   Effect.gen(function* () {
     runnerMcp = yield* McpTools.Service
@@ -306,8 +310,8 @@ const execution = Layer.effect(
       interrupt: coordinator.interrupt,
     })
   }),
-).pipe(Layer.provide(runnerLayer))
-const it = testEffect(
+).pipe(Layer.provide(runnerLayer(configuration)))
+const testLayer = (configuration = config) =>
   AppNodeBuilder.build(
     LayerNode.group([
       Database.node,
@@ -320,6 +324,8 @@ const it = testEffect(
       ToolRegistry.node,
       ToolOutputStore.node,
       ToolRegistry.toolsNode,
+      SessionGoal.node,
+      GoalTool.node,
       echoNode,
       Catalog.node,
       SessionRunnerModel.node,
@@ -342,11 +348,11 @@ const it = testEffect(
       [SkillGuidance.node, skillGuidance],
       [ReferenceGuidance.node, referenceGuidance],
       [Snapshot.node, Snapshot.noopLayer],
-      [SessionExecution.node, execution],
-      [Config.node, config],
+      [SessionExecution.node, execution(configuration)],
+      [Config.node, configuration],
     ],
-  ).pipe(Layer.provide(Layer.succeed(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment)))),
-)
+  ).pipe(Layer.provide(Layer.succeed(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment))))
+const it = testEffect(testLayer())
 const sessionID = SessionV2.ID.make("ses_runner_test")
 const otherSessionID = SessionV2.ID.make("ses_runner_other")
 
@@ -677,6 +683,109 @@ const verifyPartialFlushOnInterruption = (kind: FragmentKind) =>
       },
     ])
   })
+
+const goalConfig = Layer.succeed(Config.Service, Config.Service.of({
+  entries: () => Effect.succeed([new Config.Document({
+    type: "document",
+    info: new Config.Info({ experimental: new ConfigExperimental.Experimental({ goals: true, goal_max_turns: 2 }) }),
+  })]),
+}))
+const goalTests = testEffect(testLayer(goalConfig))
+
+goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+  Effect.gen(function* () {
+    yield* setup
+    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
+    const session = yield* SessionV2.Service
+    const goals = yield* SessionGoal.Service
+    // 共享存储直接走内存DB和真实投影，不借Git初始化或产品生命周期证明CRUD。
+    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+    yield* goals.accountUsage(sessionID, 500, 10)
+    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+    expect(yield* goals.set(sessionID, { status: "paused" }).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
+    for (const invalid of [{ objective: "   " }, { objective: "a".repeat(4001) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
+      expect(yield* goals.set(sessionID, invalid).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
+    }
+    const original = yield* goals.set(sessionID, { objective: "  original  ", tokenBudget: 50000 })
+    expect(original).toMatchObject({ status: "active", objective: "original", tokensUsed: 0, timeUsedSeconds: 0 })
+    expect(original.id).toBeTruthy()
+    yield* goals.accountUsage(sessionID, 1000, 30)
+    const revised = yield* goals.set(sessionID, { objective: "revised" })
+    expect(revised).toMatchObject({ id: original.id, objective: "revised", tokensUsed: 1000, timeUsedSeconds: 30, tokenBudget: 50000, time: { created: original.time.created } })
+    // 用户停止态均不计费，恢复后仍沿原目标ID和账目继续，而非另建目标。
+    for (const status of ["paused", "complete", "blocked"] as const) {
+      expect(yield* goals.set(sessionID, { status })).toMatchObject({ objective: "revised", status })
+      yield* goals.accountUsage(sessionID, 999, 99)
+      expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ tokensUsed: 1000, timeUsedSeconds: 30 })
+    }
+    yield* goals.set(sessionID, { status: "active" })
+    yield* goals.accountUsage(sessionID, 234, 26)
+    const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
+    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with status", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
+    expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
+    expect(yield* goals.set(sessionID, { tokenBudget: 100000 })).toMatchObject({ tokenBudget: 100000 })
+    const escaped = SessionGoal.continuationPrompt(yield* goals.set(sessionID, { objective: "fix <script> & <style> tags" }))
+    expect(escaped).toContain("&lt;script&gt;")
+    expect(escaped).toContain("&amp;")
+    expect(escaped).not.toContain("<script>")
+    expect(escaped).not.toContain("<style>")
+    // 幂等清除后真正移除旧账目，后面的runner用例从新的目标开始。
+    expect(yield* goals.clear(sessionID)).toBe(true)
+    expect(yield* goals.clear(sessionID)).toBe(false)
+    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+
+    yield* goals.set(sessionID, { objective: "Finish the native task", tokenBudget: 1 })
+    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
+    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queued input" }), delivery: "queue", resume: false })
+    const normal = [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { inputTokens: 2, nonCachedInputTokens: 2, outputTokens: 1 } }),
+      LLMEvent.finish({ reason: "stop" }),
+    ]
+    responses = [normal, normal, normal, normal]
+    requests.length = 0
+    yield* session.resume(sessionID)
+    // 已排队输入先提升；随后恰好两次合成续跑，预算仅记录，不提前截断。
+    expect(requests).toHaveLength(4)
+    expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
+    expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
+    expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
+    expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description.replaceAll("\r\n", "\n")).toBe(GOAL_DESCRIPTION.replaceAll("\r\n", "\n").trimEnd())
+    const active = yield* goals.get(sessionID)
+    expect(Option.getOrThrow(active).status).toBe("active")
+    expect(Option.getOrThrow(active).tokensUsed).toBe(12)
+
+    responses = [[
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { status: "complete" } }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    ], normal]
+    requests.length = 0
+    yield* session.resume(sessionID)
+    // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
+    expect(requests).toHaveLength(2)
+    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("complete")
+
+    yield* goals.set(sessionID, { status: "active" })
+    responses = undefined
+    response = []
+    requests.length = 0
+    yield* session.resume(sessionID)
+    // 无 step-finish 的 EOF 不能被当作正常完成后再自动续跑。
+    expect(requests).toHaveLength(1)
+    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
+    // 删除沿真实共享生命周期事件投影；Goal只能由外键级联清理，不能先clear伪造成功。
+    const events = yield* EventV2.Service
+    yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: SessionV1.SessionInfo.make({
+      id: sessionID, projectID: Project.ID.global, slug: sessionID, directory: "/project", title: "test", version: "test",
+      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 0, updated: 0 },
+    }) })
+    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+    const database = yield* Database.Service
+    expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)).toBeUndefined()
+  }),
+)
 
 describe("SessionRunnerLLM", () => {
   it.effect("records Native stream and tool milestones without logging payloads", () =>

@@ -7,6 +7,7 @@ import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
+import { SessionGoal } from "@/session/goal"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionPrompt } from "@/session/prompt"
@@ -27,6 +28,7 @@ import {
   CommandPayload,
   DiffQuery,
   ForkPayload,
+  GoalSetPayload,
   InitPayload,
   ListQuery,
   MessagesQuery,
@@ -60,6 +62,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
+    const goalSvc = yield* SessionGoal.Service
     const summary = yield* SessionSummary.Service
     const events = yield* EventV2Bridge.Service
     const scope = yield* Scope.Scope
@@ -489,6 +492,45 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     return yield* usageSvc.assistants(ctx.params)
   })
 
+  // #364：goal handler：读取当前 session 的持久化 goal
+  const goalGet = Effect.fn("SessionHttpApi.goalGet")(function* (ctx: {
+    params: { sessionID: SessionID }
+  }) {
+    // requireSession 先校验 session 存在性，未命中直接 404
+    yield* requireSession(ctx.params.sessionID)
+    const result = yield* goalSvc.get(ctx.params.sessionID)
+    // Option → null 映射，便于 JSON 序列化
+    return { goal: result._tag === "Some" ? result.value : null }
+  })
+
+  // #364：goal set handler：创建或更新 goal
+  // objective 缺省时仅更新 status/budget，要求已有 goal
+  // GoalError（校验失败）映射为 400，其他错误正常传播
+  const goalSet = Effect.fn("SessionHttpApi.goalSet")(function* (ctx: {
+    params: { sessionID: SessionID }
+    payload: typeof GoalSetPayload.Type
+  }) {
+    yield* requireSession(ctx.params.sessionID)
+    const goal = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.set(ctx.params.sessionID, {
+      objective: ctx.payload.objective,
+      status: ctx.payload.status,
+      tokenBudget: ctx.payload.tokenBudget,
+    })).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
+    // [local-smark] GoalError→400 映射保持错误面契约：校验失败不伪装成 5xx
+    return { goal }
+  })
+
+  // #364：goal clear handler：删除 goal
+  // [local-smark] DELETE 幂等：goal 不存在时 cleared=false 而非报错，
+  // 使客户端重复清除或竞态清除不产生用户可见失败
+  const goalClear = Effect.fn("SessionHttpApi.goalClear")(function* (ctx: {
+    params: { sessionID: SessionID }
+  }) {
+    yield* requireSession(ctx.params.sessionID)
+    const cleared = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.clear(ctx.params.sessionID))
+    return { cleared }
+  })
+
     return handlers
       .handle("list", list)
       .handle("status", status)
@@ -520,5 +562,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     .handle("requestUsageList", requestUsageList)
     .handle("requestUsageGet", requestUsageGet)
     .handle("requestUsageAssistants", requestUsageAssistants)
+    // #364：goal endpoint handler 注册
+    .handle("goal", goalGet)
+    .handle("goalSet", goalSet)
+    .handle("goalClear", goalClear)
   }),
 )

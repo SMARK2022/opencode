@@ -36,6 +36,7 @@ import { SessionContextEpoch } from "../context-epoch"
 import { SessionCompaction } from "../compaction"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
+import { SessionGoal } from "../goal"
 import { SessionInput } from "../input"
 import { SessionMessage } from "../message"
 import { SessionInputTable } from "../sql"
@@ -116,6 +117,7 @@ const layer = Layer.effect(
     const models = yield* SessionRunnerModel.Service
     const mcpTools = yield* McpTools.Service
     const store = yield* SessionStore.Service
+    const goals = yield* SessionGoal.Service
     const location = yield* Location.Service
     const systemContext = yield* SystemContextRegistry.Service
     const skillGuidance = yield* SkillGuidance.Service
@@ -205,10 +207,14 @@ const layer = Layer.effect(
       }
     })
 
+    // 仅当前 drain 持有待注入目标；不新增调度器或崩溃后自动恢复。
+    type GoalContinuation = { goal?: SessionGoal.Goal; turns: number }
+
     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      continuation: GoalContinuation,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
     ) {
       const session = yield* getSession(sessionID)
@@ -233,7 +239,22 @@ const layer = Layer.effect(
               promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
               promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
             }
-            if (promoted > 0) currentStep = 1
+            if (promoted > 0) {
+              currentStep = 1
+              continuation.goal = undefined
+            }
+          }
+          // 新用户输入优先；合成续跑保留当前步数额度，并由原历史投影持久化。
+          if (continuation.goal) {
+            const goal = yield* goals.get(session.id)
+            continuation.goal = undefined
+            if (Option.isSome(goal) && goal.value.status === "active") {
+              yield* events.publish(SessionEvent.Synthetic, {
+                sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
+                text: SessionGoal.continuationPrompt(goal.value),
+              })
+              continuation.turns++
+            }
           }
         })).pipe(Effect.onExit((promotionExit) => Effect.gen(function* () {
           const promoted = yield* db.select({ id: SessionInputTable.id, seq: SessionInputTable.promoted_seq }).from(SessionInputTable)
@@ -584,12 +605,22 @@ const layer = Layer.effect(
           }
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
+          if (stepSettlement && !publisher.hasProviderError()) {
+            // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
+            const tokens = stepSettlement.tokens
+            const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(Effect.ignore)
+          }
           if (publisher.hasActiveAssistant() && !stepSettlement) {
             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
             yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))
             // 只补消息和账本终态；raw EOF 的成功返回及原 continuation 契约保持。
           }
-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
+          return {
+            needsContinuation: !publisher.hasProviderError() && needsContinuation,
+            canContinueGoal: !!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown"),
+            step: currentStep,
+          }
         }),
       )
     }, Effect.scoped)
@@ -597,31 +628,32 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
-    ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
+      continuation: GoalContinuation,
+    ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly canContinueGoal: boolean; readonly step: number }, RunError>
 
-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step).pipe(
+    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, continuation) {
+      return yield* runTurnAttempt(sessionID, promotion, step, continuation).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* Effect.die("Post-compaction provider attempt cannot recover another overflow")
             yield* Effect.yieldNow
-            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
+            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, continuation)
           }),
         ),
       )
     })
 
-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow).pipe(
+    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, continuation) {
+      return yield* runTurnAttempt(sessionID, promotion, step, continuation, compaction.compactAfterOverflow).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             yield* Effect.yieldNow
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
-              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
-            return yield* runTurn(sessionID, undefined, defect.transition.step)
+              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, continuation)
+            return yield* runTurn(sessionID, undefined, defect.transition.step, continuation)
           }),
         ),
       )
@@ -670,16 +702,32 @@ const layer = Layer.effect(
       if (!input.force && !hasSteer && !hasQueue) return
       yield* failInterruptedTools(input.sessionID)
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
+      const continuation: GoalContinuation = { turns: 0 }
       let shouldRun = input.force || hasSteer || hasQueue
       while (shouldRun) {
         let needsContinuation = true
         let step = 1
         while (needsContinuation) {
-          const result = yield* runTurn(input.sessionID, promotion, step)
+          const result = yield* runTurn(input.sessionID, promotion, step, continuation)
           needsContinuation = result.needsContinuation
           step = result.step + 1
           promotion = "steer"
           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
+          if (!needsContinuation && result.canContinueGoal && !(yield* SessionInput.hasPending(db, input.sessionID, "queue"))) {
+            const settings = Config.latest(configuration, "experimental")
+            const session = yield* getSession(input.sessionID)
+            const agent = yield* agents.select(session.agent)
+            if (settings?.goals === true && continuation.turns < (settings.goal_max_turns ?? 10) &&
+              !session.parentID && agent.id !== "decide" && result.step < (agent.info?.steps ?? Infinity)) {
+              const goal = yield* goals.get(input.sessionID)
+              if (Option.isSome(goal) && goal.value.status === "active") {
+                continuation.goal = goal.value
+                needsContinuation = true
+                // 下个安全边界也检查 queue，避免候选 Goal 抢占刚到达的用户输入。
+                promotion = "queue"
+              }
+            }
+          }
         }
         shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")
         promotion = shouldRun ? "queue" : undefined
@@ -703,6 +751,7 @@ export const node = makeLocationNode({
     SessionRunnerModel.node,
     McpTools.node,
     SessionStore.node,
+    SessionGoal.node,
     Location.node,
     SystemContextRegistry.node,
     SkillGuidance.node,

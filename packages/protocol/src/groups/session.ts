@@ -2,6 +2,7 @@ import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { SessionInput } from "@opencode-ai/schema/session-input"
 import { PromptInput } from "@opencode-ai/schema/prompt-input"
 import { Session } from "@opencode-ai/schema/session"
+import { SessionGoal } from "@opencode-ai/schema/session-goal"
 import { Project } from "@opencode-ai/schema/project"
 import { AbsolutePath, NonNegativeInt, PositiveInt, RelativePath, statics } from "@opencode-ai/schema/schema"
 import { Workspace } from "@opencode-ai/schema/workspace"
@@ -170,6 +171,30 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
             description: "Retrieve a session by ID.",
           }),
         ),
+    )
+    .add(
+      // 沿既有Session归属中间件读取同一Goal，缺少目标不等于Session不存在。
+      HttpApiEndpoint.get("session.goal", "/api/session/:sessionID/goal", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ goal: Schema.NullOr(SessionGoal.Goal) }),
+        error: SessionNotFoundError,
+      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal", summary: "Get session goal" })),
+      HttpApiEndpoint.post("session.goal.set", "/api/session/:sessionID/goal", {
+        params: { sessionID: Session.ID },
+        payload: Schema.Struct({
+          objective: Schema.optional(Schema.String),
+          status: Schema.optional(SessionGoal.Status),
+          // 缺省保留预算，null清除，数值由唯一存储owner校验。
+          tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
+        }),
+        success: Schema.Struct({ goal: SessionGoal.Goal }),
+        error: [InvalidRequestError, SessionNotFoundError],
+      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.set", summary: "Set session goal" })),
+      HttpApiEndpoint.delete("session.goal.clear", "/api/session/:sessionID/goal", {
+        params: { sessionID: Session.ID },
+        success: Schema.Struct({ cleared: Schema.Boolean }),
+        error: SessionNotFoundError,
+      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.clear", summary: "Clear session goal" })),
     )
     .add(
       HttpApiEndpoint.post("session.switchAgent", "/api/session/:sessionID/agent", {

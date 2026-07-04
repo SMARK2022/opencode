@@ -19,6 +19,7 @@ import path from "path"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { SessionSummary } from "../../src/session/summary"
+import { SessionGoal } from "../../src/session/goal"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
@@ -83,6 +84,7 @@ const root = LayerNode.group([
   SessionPrompt.node,
   Session.node,
   SessionProjector.node,
+  SessionGoal.node,
   SessionSummary.node,
   Database.node,
   CrossSpawnSpawner.node,

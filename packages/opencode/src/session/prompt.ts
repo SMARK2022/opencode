@@ -14,6 +14,7 @@ import { Provider } from "@/provider/provider"
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+import { SessionGoal } from "./goal"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
@@ -271,6 +272,8 @@ const layer = Layer.effect(
     const llm = yield* LLM.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    // #364：goal 服务：用于 break 点检查 active goal 并注入续跑 prompt
+    const goalSvc = yield* SessionGoal.Service
     // #173：同 session 并发 cancel 串行，避免双写终态竞态
     const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
     const database = yield* Database.Service
@@ -1433,6 +1436,9 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        // #364：goal 续跑计数器：独立于 step，
+        // 防止 step++ 在 continue 路径被跳过导致无限循环
+        let goalTurns = 0
         // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
         // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
         // 使后续再次达到 85% 时可以重新提示。
@@ -1480,6 +1486,56 @@ const layer = Layer.effect(
                 tool: orphan.tool,
                 callID: orphan.callID,
               })
+            }
+            // #364：goal 续跑检查：assistant 正常结束后，
+            // 如果 session 有 active goal 且未达上限，注入续跑 prompt 并 continue。
+            // 续跑 prompt 作为 synthetic user message 注入，保留 synthetic=true
+            // 避免 <system-reminder> 包裹和 title 生成干扰。
+            // TUI 通过 goalText 渲染为 "↻ Goal continuation" 标签消息。
+            // 使用独立 goalTurns 计数器防止无限循环（step++ 在 continue 后跳过）。
+            // 仅对主 session（无 parentID）和非 decide agent 生效。
+            const cfg = yield* config.get()
+            const maxGoalTurns = cfg.experimental?.goal_max_turns ?? 10
+            if (
+              cfg.experimental?.goals === true &&
+              maxGoalTurns > 0 &&
+              !session.parentID &&
+              goalTurns < maxGoalTurns
+            ) {
+              const goalOpt = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              if (goalOpt._tag === "Some") {
+                const goal = goalOpt.value
+                // 读取 lastUser 的 agent 以判断是否 decide agent
+                const goalAgent = yield* agents.get(lastUser.agent)
+                // decide agent 用于路由决策，不参与 goal 续跑
+                // maxSteps 限制同样适用于 goal 续跑，防止超出 agent 步数预算
+                const maxSteps = goalAgent?.steps ?? Infinity
+                if (
+                  goal.status === "active" &&
+                  goalAgent &&
+                  !isDecideAgent(goalAgent) &&
+                  step < maxSteps
+                ) {
+                  goalTurns++
+                  // 注入 synthetic user message 作为续跑 prompt
+                  // noReply=true 避免递归触发 loop；source="system_continue" 供 request usage 追踪
+                  // orDie 将 Image.Error 转为 defect，保持 runLoop 的 error 类型为 never
+                  yield* prompt({
+                    sessionID,
+                    noReply: true,
+                    source: "system_continue",
+                    agent: lastUser.agent,
+                    model: { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID },
+                    parts: [{
+                      type: "text",
+                      synthetic: true,
+                      text: SessionGoal.continuationPrompt(goal),
+                    }],
+                  }).pipe(Effect.orDie)
+                  yield* Effect.logInfo("goal continuation", { goalTurns, step })
+                  continue
+                }
+              }
             }
             yield* Effect.logInfo("exiting loop", { "session.id": sessionID })
             break
@@ -1582,6 +1638,7 @@ const layer = Layer.effect(
                   bypassAgentCheck,
                   messages: msgs,
                   promptOps,
+                  goalSvc,
                 }).pipe(
                   Effect.provideService(Plugin.Service, plugin),
                   Effect.provideService(Permission.Service, permission),
@@ -1700,6 +1757,19 @@ const layer = Layer.effect(
             }
 
             if (result === "stop") return "break" as const
+            // #364：goal token/time 计费：assistant message 完成后，
+            // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
+            if (handle.message.tokens && handle.message.time.completed) {
+              const tokenDelta =
+                handle.message.tokens.input +
+                handle.message.tokens.output +
+                handle.message.tokens.reasoning
+              const timeDelta = Math.max(
+                0,
+                Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
+              )
+              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
+            }
             if (result === "compact") {
               nearOverflowNotified = false
               // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
@@ -1999,6 +2069,7 @@ export const node = LayerNode.make({
     Provider.node,
     SessionProcessor.node,
     SessionCompaction.node,
+    SessionGoal.node,
     Plugin.node,
     Command.node,
     Config.node,

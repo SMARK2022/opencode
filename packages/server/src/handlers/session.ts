@@ -1,4 +1,5 @@
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionGoal } from "@opencode-ai/core/session/goal"
 import { DateTime, Effect, Stream } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
 import { Api } from "../api"
@@ -6,6 +7,7 @@ import { SessionsCursor } from "@opencode-ai/protocol/groups/session"
 import {
   ConflictError,
   InvalidCursorError,
+  InvalidRequestError,
   MessageNotFoundError,
   ServiceUnavailableError,
   SessionNotFoundError,
@@ -21,6 +23,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
   Effect.gen(function* () {
     const session = yield* SessionV2.Service
     const clients = yield* EventClients.Service
+    const goals = yield* SessionGoal.Service
 
     return handlers
       .handle(
@@ -104,6 +107,30 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               ),
             ),
           }
+        }),
+      )
+      .handle(
+        "session.goal",
+        Effect.fn(function* (ctx) {
+          const goal = yield* goals.get(ctx.params.sessionID)
+          return { goal: goal._tag === "Some" ? goal.value : null }
+        }),
+      )
+      .handle(
+        "session.goal.set",
+        Effect.fn(function* (ctx) {
+          // 仅领域校验映射400；数据库defect及取消保持原有错误语义。
+          const goal = yield* goals.set(ctx.params.sessionID, ctx.payload).pipe(
+            Effect.mapError(error => new InvalidRequestError({ message: error.message })),
+          )
+          return { goal }
+        }),
+      )
+      .handle(
+        "session.goal.clear",
+        Effect.fn(function* (ctx) {
+          // Session存在性由中间件校验；重复清除仍返回false而非404。
+          return { cleared: yield* goals.clear(ctx.params.sessionID) }
         }),
       )
       .handle(

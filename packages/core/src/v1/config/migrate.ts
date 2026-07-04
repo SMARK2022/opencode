@@ -75,9 +75,11 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     plugins: info.plugin?.map((plugin) =>
       typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
     ),
-    // 旧primary_tools必须到达真实Native Task，不能在schema迁移时静默丢弃。
-    experimental: (info.experimental?.policies || info.experimental?.primary_tools) && {
+    experimental: info.experimental && {
+      // Goal开关与原有子代理限制同时透传，不改变已有action归一化。
       policies: info.experimental.policies, primary_tools: info.experimental.primary_tools?.map(normalizeAction),
+      goals: info.experimental.goals,
+      goal_max_turns: info.experimental.goal_max_turns,
     },
     providers: providers(info.provider),
   }

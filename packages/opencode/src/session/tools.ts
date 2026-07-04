@@ -17,6 +17,7 @@ import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSch
 import { Effect, Exit } from "effect"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
+import { SessionGoal } from "./goal"
 import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
 import { EffectBridge } from "@/effect/bridge"
@@ -89,6 +90,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
+  goalSvc: SessionGoal.Interface
+  // [local-smark] goalSvc 由 prompt 层注入而非 tools 层自取——
+  // SessionGoal 依赖 Database，经 prompt 的 layer 传递可避免 tools 层重复接线
 }) {
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
@@ -104,7 +108,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     abort: options.abortSignal!,
     messageID: input.processor.message.id,
     callID: options.toolCallId,
-    extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
+    // #364：goalSvc 传入 ctx.extra，使 goal tool 能调用 SessionGoal.Service
+    extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps, goalSvc: input.goalSvc },
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>

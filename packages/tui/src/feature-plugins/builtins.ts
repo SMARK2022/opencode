@@ -3,6 +3,7 @@ import HomeFooter from "./home/footer"
 import HomeTips from "./home/tips"
 import SidebarContext from "./sidebar/context"
 import SidebarFiles from "./sidebar/files"
+import SidebarGoal from "./sidebar/goal"
 import SidebarFooter from "./sidebar/footer"
 import SidebarLsp from "./sidebar/lsp"
 import SidebarMcp from "./sidebar/mcp"
@@ -23,6 +24,7 @@ export function createBuiltinPlugins(options: { experimentalEventSystem: boolean
     HomeFooter,
     HomeTips,
     SidebarContext,
+    SidebarGoal,
     SidebarMcp,
     SidebarLsp,
     SidebarTodo,

@@ -321,6 +321,8 @@ export function createTuiPluginApi(opts: Opts = {}): HostPluginApi {
         status: opts.state?.session?.status ?? (() => undefined),
         permission: opts.state?.session?.permission ?? (() => []),
         question: opts.state?.session?.question ?? (() => []),
+        // #364：goal mock 方法
+        goal: opts.state?.session?.goal ?? (() => undefined),
       },
       part: opts.state?.part ?? (() => []),
       lsp: opts.state?.lsp ?? (() => []),
