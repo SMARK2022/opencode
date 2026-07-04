@@ -30,6 +30,7 @@ import {
   CommandPayload,
   DiffQuery,
   ForkPayload,
+  GoalApiError,
   GoalSetPayload,
   InitPayload,
   ListQuery,
@@ -519,8 +520,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       objective: ctx.payload.objective,
       status: ctx.payload.status,
       tokenBudget: ctx.payload.tokenBudget,
-    })).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
-    // [local-smark] GoalError→400 映射保持错误面契约：校验失败不伪装成 5xx
+    })).pipe(
+      // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
+      // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
+      // 校验失败仍映射为 4xx，保持错误面契约：不伪装成 5xx
+      Effect.catchTag("GoalError", (error) =>
+        Effect.fail(new GoalApiError({ name: "GoalError", data: { message: error.message } })),
+      ),
+    )
     return { goal }
   })
 

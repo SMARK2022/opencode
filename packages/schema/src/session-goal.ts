@@ -4,6 +4,9 @@ import { define, inventory } from "./event"
 import { optional } from "./schema"
 import { SessionID } from "./session-id"
 
+// 客户端预检与服务端校验共用静态上限，不能从界面导入持久化服务层。
+export const MAX_OBJECTIVE_CHARS = 4000
+
 // [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
 // 由 tool 或用户显式切换——loop 不自动迁移状态，避免与用户意图冲突。
 export const Status = Schema.Literals(["active", "paused", "complete", "blocked"] as const)
