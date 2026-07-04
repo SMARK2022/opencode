@@ -18,6 +18,20 @@ Valid types are `feat`, `fix`, `docs`, `chore`, `refactor`, and `test`. Scopes a
 
 Examples: `fix(tui): simplify thinking toggle styling`, `docs: update contributing guide`, `chore(sdk): regenerate types`.
 
+## Agent skills
+
+### Issue tracker
+
+Issues for the SMARK fork live on GitHub at `SMARK2022/opencode` (the `origin` remote); use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The 5 canonical lifecycle labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) coexist with the team-assignment triage agent in `.opencode/agent/triage.md`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Style Guide
 
 ### General Principles
