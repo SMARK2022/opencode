@@ -499,12 +499,12 @@ describe("PermissionV2", () => {
     const evidenceRows = [
       ...Array.from({ length: 45 }, (_, index) => ({
         id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
-        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST AUTHORIZATION" : `Follow-up ${index}` },
+        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION" : index === 44 ? "m".repeat(1500) + "Follow-up 44" : `Follow-up ${index}` },
       })),
       {
         id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 46,
         data: { time: { created: 46 }, agent: "test", model: { id: "review", providerID: "test" },
-          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) }] },
+          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) + "ASSISTANT_TAIL" }] },
       },
       { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 47, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 47 }, text: "SYNTHETIC AUTHORIZATION" } },
     ]
@@ -537,6 +537,12 @@ describe("PermissionV2", () => {
     expect(reviewText).toContain("shortened")
     expect(reviewText).not.toContain("PRIVATE REASONING")
     expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
+    // 观察真实发往模型的文本；原生路径也要保留用户尾授权而非只测V1辅助函数。
+    const reviewBody = reviewRequests[0]?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")
+    expect(reviewBody).toContain("FIRST_CONTEXT_")
+    expect(reviewBody).toContain('<truncated chars="533" />')
+    expect(reviewBody).toContain("m".repeat(1500) + "Follow-up 44")
+    expect(reviewBody).not.toContain("ASSISTANT_TAIL")
     // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
     // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。
     reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "override/reviewer" }) })
