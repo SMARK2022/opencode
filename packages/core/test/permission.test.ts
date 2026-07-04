@@ -649,6 +649,27 @@ describe("PermissionV2", () => {
   }))
 
   // 真实事件驱动审查、原工具和终态投影，验证收益在模型返回前后都可观察。
+  it.effect("reviews migrated git mutations while keeping read-only exceptions on the primary path", () => Effect.gen(function* () {
+    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+    assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
+    reviewRequests.length = 0
+    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewSettings = new Config.Info({}) }))
+    const permissions = yield* PermissionV2.Service
+    // 命令只是权限载荷；真实分类和审查运行，测试绝不调用Git或shell。
+    const commands = ["git checkout main", "git --no-pager branch -D feature", "git -C /other status", "task git -C /evil status", "git stash drop", "git config core.hooksPath /tmp/hooks"]
+    for (const command of commands) {
+      const before = reviewRequests.length
+      expect(yield* permissions.ask(assertion({ action: "bash", resources: [command], metadata: { command } }))).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(before + 1)
+    }
+    // 同一auto入口保留源只读/general例外，不能把所有Git操作都强制送审。
+    for (const command of ["git --no-pager status", "git config --get user.name", "git remote -v", "git stash list"]) {
+      expect(yield* permissions.ask(assertion({ action: "bash", resources: [command], metadata: { command } }))).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(commands.length)
+    }
+  }))
+
   it.effect("persists native reviewer prepared input breakdown and provider usage", () => Effect.gen(function* () {
     yield* setup([{ action: "*", resource: "*", effect: "auto" }])
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
