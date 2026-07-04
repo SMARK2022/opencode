@@ -265,7 +265,9 @@ export function Session() {
   const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_enabled", true)
   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
   const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
-  const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
+  // 默认 true：goal、MCP、ChatGPT 等 generic 工具的返回结果默认以块状显示，
+  // 与 bash 等内置工具一致。旧用户的 kv.json 中若已持久化 false 则不受影响。
+  const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", true)
 
   const wide = createMemo(() => dimensions().width > 120)
   const sidebarVisible = createMemo(() => {
