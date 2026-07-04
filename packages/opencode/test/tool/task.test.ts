@@ -951,4 +951,189 @@ describe("tool.task", () => {
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
     }),
   )
+
+  // [local-smark] 空结果温和提醒：子 agent 未产出文本时注入一轮 nudge，
+  // 让它至少回应任务需求。nudge 不限制工具/不覆盖指令/不强加格式。
+  it.instance("injects a nudge round when sub-agent produces no text output", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let promptCalls = 0
+      // 首次 prompt 返回空文本模拟子 agent 探索后未产出；
+      // nudge 注入后第二次返回有效文本
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            promptCalls++
+            return reply(input, promptCalls === 1 ? "" : "forced summary")
+          }),
+        loop: (input) => Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "done")),
+      }
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // nudge 触发：prompt 被调用两次，结果含 nudge 产出的文本
+      expect(promptCalls).toBe(2)
+      expect(result.output).toContain("forced summary")
+    }),
+  )
+
+  it.instance("does not inject nudge when sub-agent produces text", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let promptCalls = 0
+      const promptOps = stubOps({
+        text: "normal result",
+        onPrompt: () => {
+          promptCalls++
+        },
+      })
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // 有文本时 nudge 不触发：prompt 仅调用一次
+      expect(promptCalls).toBe(1)
+      expect(result.output).toContain("normal result")
+    }),
+  )
+
+  it.instance("falls back to static string with resume hint when nudge also produces no text", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let promptCalls = 0
+      // 两轮都返回空文本，nudge 仍空时回退含 resume 提示的静态字符串
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            promptCalls++
+            return reply(input, "")
+          }),
+        loop: (input) => Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "")),
+      }
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // nudge 触发但仍空：prompt 调用两次，回退含 resume 提示
+      expect(promptCalls).toBe(2)
+      expect(result.output).toContain("Subagent produced no output")
+      expect(result.output).toContain("You may resume this task")
+    }),
+  )
+
+  it.instance("does not inject nudge when abort signal fires before nudge", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const ready = defer<SessionPrompt.PromptInput>()
+      const cancelled = defer<SessionID>()
+      const abort = new AbortController()
+      let promptCalls = 0
+      // 首次 prompt 阻塞直到 cancel resolve，返回空文本模拟 abort 后的 lastAssistant
+      const promptOps: TaskPromptOps = {
+        cancel: (sessionID) =>
+          Effect.sync(() => {
+            cancelled.resolve(sessionID)
+          }),
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.promise(() => {
+            promptCalls++
+            ready.resolve(input)
+            return cancelled.promise
+          }).pipe(Effect.as(reply(input, ""))),
+        loop: (input) => Effect.succeed(reply({ sessionID: input.sessionID, parts: [] }, "")),
+      }
+
+      const fiber = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: abort.signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild)
+
+      // 等待首次 prompt 被调用后 abort；cancel resolve 使首次 prompt 返回空文本
+      yield* Effect.promise(() => ready.promise)
+      abort.abort()
+      yield* Effect.promise(() => cancelled.promise)
+
+      const exit = yield* Fiber.await(fiber)
+      expect(Exit.isSuccess(exit)).toBe(true)
+      if (Exit.isSuccess(exit)) {
+        // abort 已发生：nudge 不触发，prompt 仅调用一次，回退静态提示
+        expect(promptCalls).toBe(1)
+        expect(exit.value.output).toContain("Subagent produced no output")
+      }
+    }),
+  )
 })
