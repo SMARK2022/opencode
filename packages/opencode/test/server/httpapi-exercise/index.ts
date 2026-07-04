@@ -1769,6 +1769,31 @@ const scenarios: Scenario[] = [
       object(body)
       check((body as any).cleared === false, "clearing non-existent goal should return false")
     }),
+  // [local-smark] session preview 端点 scenario
+  // 批量预览端点返回 Record<sessionID, string[]>，空 sessionIDs 返回空对象
+  // 解决 0366 引入端点缺少 scenario 导致 --fail-on-missing 报 missing=1
+  http.protected
+    .post("/session/preview", "session.preview")
+    .seeded((ctx) => ctx.session({ title: "Preview session" }))
+    .at((ctx) => ({
+      path: route("/session/preview", {}),
+      headers: ctx.headers(),
+      body: { sessionIDs: [], limit: 2 },
+    }))
+    .json(200, (body) => {
+      object(body)
+      // 空 sessionIDs 返回空对象
+      check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
+    }),
+  // Native批量端点单独登记，不能用旧/session/preview覆盖新公开路由。
+  http.protected
+    .post("/api/session/preview", "v2.session.preview")
+    .inProject({ git: false })
+    .at(ctx => ({ path: "/api/session/preview", headers: ctx.headers(), body: { sessionIDs: [], limit: 2 } }))
+    .json(200, body => {
+      object(body)
+      check(Object.keys(body).length === 0, "empty native sessionIDs should return empty object")
+    }),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))
