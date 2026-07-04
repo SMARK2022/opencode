@@ -44,7 +44,11 @@ const VOICE_RECORDER_DEVICE_INDEX = -1
 // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
 const VOICE_RECORDER_BUFFERED_FRAMES = 250
 // queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
-const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.75))
+// macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
+// 导致 drainBufferedFrames 误判缓冲耗尽而提前终止（丢失尾部 queued 帧）。
+// 0.9 系数给出 28ms 阈值：queued read（~5ms）留 23ms 余量，live read（~32ms 帧周期）仍可正确区分。
+// 28ms 距 32ms 仅 4ms，但调度抖动只会膨胀测量值、不会缩短，因此 4ms 间隙不可被抖动闭合。
+const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
 // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
 const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
 

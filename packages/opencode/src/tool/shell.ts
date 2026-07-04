@@ -447,8 +447,13 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     )
   }
 
-  return ChildProcess.make(command, [], {
-    shell,
+  // 不使用 spawn 的 shell 选项；改为显式传递 shell 路径和 -c 参数。
+  // Bun macOS 上 shell 选项 + detached 组合存在 stdout 管道未建立的 bug，
+  // 导致 echo test 退出码 0 但输出为空。显式 -c 在所有平台行为等价且避免该 bug。
+  // cmd.exe 需保留 /d（禁用 AutoRun 注册表命令）和 /s（规范引号剥离）标志。
+  const n = Shell.name(shell)
+  const shellArgs = n === "cmd" ? ["/d", "/s", "/c", command] : ["-c", command]
+  return ChildProcess.make(shell, shellArgs, {
     cwd,
     env,
     stdin: "ignore",

@@ -214,6 +214,27 @@ describe("tool.shell", () => {
     60_000,
   )
 
+  // 回归：cmd() 从 spawn 的 shell 选项改为显式 -c 参数后，
+  // 必须验证含引号、管道的命令仍被 shell 正确解析。
+  // 仅在非 Windows 平台运行：tr 和单引号语义是 POSIX shell 专属。
+  if (process.platform !== "win32") {
+    each("handles commands with quotes and shell metacharacters", () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
+          const result = yield* run({
+            command: "echo 'hello world' | tr a-z A-Z",
+            description: "Echo with quotes and pipe",
+          })
+          expect(result.metadata.exit).toBe(0)
+          expect(result.metadata.output).toContain("HELLO WORLD")
+        }),
+      ),
+      60_000,
+    )
+  }
+
   it.live("falls back from terminal-only configured shell", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped({ config: { shell: "fish" } })

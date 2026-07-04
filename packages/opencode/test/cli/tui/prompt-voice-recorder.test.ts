@@ -173,6 +173,9 @@ describe("prompt voice recorder", () => {
   // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
   // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
   // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
+  // macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
+  // 导致 drainBufferedFrames 误判缓冲耗尽而提前终止。
+  // 生产代码的 DRAIN_BLOCKED_READ_MS 阈值需留出足够余量（28ms = 0.9×32ms）。
   test("writes audio buffered during a stalled TUI tick before stopping", async () => {
     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
 
