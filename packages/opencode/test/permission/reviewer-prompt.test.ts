@@ -211,10 +211,11 @@ describe("permission reviewer prompt", () => {
   })
 
   test("transcript reports shortening for retained entries even when marker adds length", () => {
+    // 用户消息的截断阈值已从 1000 提升到 2000，fixture 需超过新阈值才会触发截断
     const transcript = PermissionReviewerTranscript.fromMessages([
       {
         info: userInfo("msg_user_slightly_long"),
-        parts: [textPart("msg_user_slightly_long", "prt_slightly_long", "x".repeat(1001))],
+        parts: [textPart("msg_user_slightly_long", "prt_slightly_long", "x".repeat(2001))],
       },
     ])
 
@@ -279,5 +280,71 @@ describe("permission reviewer prompt", () => {
       "<no retained transcript entries>",
       "Some retained conversation entries had no visible authorization evidence after hidden, synthetic, and reasoning content was excluded.",
     ])
+  })
+
+  // ---------------------------------------------------------------------------
+  // 头尾保留截断：用户授权常出现在长消息末尾（如 "## 创建 commit"），
+  // 只保留头部会丢失尾部授权证据，导致 reviewer 误判为 unknown 而 fail-closed。
+  // ---------------------------------------------------------------------------
+
+  test("user message truncation preserves both head and tail content", () => {
+    // 模拟真实场景：长指令前缀 + 末尾授权指令，总长超过 2000 字符阈值
+    const head = "TDD_INSTRUCTIONS_" + "x".repeat(2500)
+    const tail = "## 创建 commit"
+    const transcript = PermissionReviewerTranscript.fromMessages([
+      {
+        info: userInfo("msg_user_long_with_auth"),
+        parts: [textPart("msg_user_long_with_auth", "prt_long", head + "\n" + tail)],
+      },
+    ])
+
+    expect(transcript.entryTruncated).toBe(true)
+    // 头部内容必须保留（提供上下文）
+    expect(transcript.entries[0].text).toContain("TDD_INSTRUCTIONS_")
+    // 尾部授权必须保留（这是修复的核心目标）
+    expect(transcript.entries[0].text).toContain("## 创建 commit")
+  })
+
+  test("user message under 2000 chars is not truncated", () => {
+    // 用户消息预算提升到 2000：1500 字符的用户消息不应被截断
+    const transcript = PermissionReviewerTranscript.fromMessages([
+      {
+        info: userInfo("msg_user_medium"),
+        parts: [textPart("msg_user_medium", "prt_medium", "x".repeat(1500))],
+      },
+    ])
+
+    expect(transcript.entryTruncated).toBe(false)
+    expect(transcript.entries[0].text).toBe("x".repeat(1500))
+  })
+
+  test("assistant message still uses 1000 char entry limit", () => {
+    // 非用户消息的截断阈值不变：1001 字符的 assistant 消息仍被截断
+    const transcript = PermissionReviewerTranscript.fromMessages([
+      {
+        info: assistantInfo("msg_assistant_1001"),
+        parts: [textPart("msg_assistant_1001", "prt_1001", "y".repeat(1001))],
+      },
+    ])
+
+    expect(transcript.entryTruncated).toBe(true)
+  })
+
+  test("assistant message truncation does not preserve tail", () => {
+    // 非用户消息仍使用头部截断（preserveTail=false），不保留尾部
+    const head = "HEAD_CONTENT"
+    const tail = "TAIL_CONTENT_SHOULD_NOT_APPEAR"
+    const padding = "z".repeat(1000)
+    const transcript = PermissionReviewerTranscript.fromMessages([
+      {
+        info: assistantInfo("msg_assistant_head_only"),
+        parts: [textPart("msg_assistant_head_only", "prt_head", head + padding + tail)],
+      },
+    ])
+
+    expect(transcript.entryTruncated).toBe(true)
+    expect(transcript.entries[0].text).toContain("HEAD_CONTENT")
+    // assistant 消息不保留尾部 — 与既有行为一致
+    expect(transcript.entries[0].text).not.toContain("TAIL_CONTENT_SHOULD_NOT_APPEAR")
   })
 })

@@ -4,6 +4,11 @@ import type { PermissionReviewerPrompt } from "./prompt"
 const ENTRY_LIMIT = 40
 const PART_CHAR_LIMIT = 4000
 const ENTRY_CHAR_LIMIT = 1000
+// 用户消息是授权证据的主要来源；长指令 + 末尾授权（如 "## 创建 commit"）
+// 可能超过 1000 字符。给用户消息更大预算，减少末尾授权被截断的概率。
+// worst case 40 × 2000 = 80k 字符，是旧 40 × 1000 = 40k 的 2 倍，
+// 对任何 ≥128k context 的 reviewer 模型是安全的。
+const ENTRY_CHAR_LIMIT_USER = 2000
 type RenderedEntry = PermissionReviewerPrompt.TranscriptEntry & { truncated: boolean }
 
 export function fromMessages(messages: readonly MessageV2.WithParts[]): PermissionReviewerPrompt.TranscriptDelta {
@@ -15,7 +20,11 @@ export function fromMessages(messages: readonly MessageV2.WithParts[]): Permissi
   const visibleMessages = messages.filter((message) => !message.info.hidden)
   const rendered = visibleMessages.map((message) => {
       const text = message.parts.map(renderPart).filter((part): part is string => Boolean(part?.trim())).join("\n")
-      const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
+      // 用户消息使用更大预算并保留尾部：授权指令常出现在长消息末尾，
+      // 只保留头部会丢失尾部授权证据导致 reviewer fail-closed 误拒。
+      // 非用户消息保持原有 1000 字符头部截断，避免作用域蔓延到 tool 输出。
+      const isUser = message.info.role === "user"
+      const entry = truncateWithFlag(text, isUser ? ENTRY_CHAR_LIMIT_USER : ENTRY_CHAR_LIMIT, isUser)
       return {
         role: message.info.role,
         text: entry.text,
@@ -87,13 +96,25 @@ function renderTool(part: MessageV2.ToolPart) {
 }
 
 function truncate(text: string, limit = PART_CHAR_LIMIT) {
-  return truncateWithFlag(text, limit).text
+  // truncate 用于 part/tool 输出截断，不保留尾部：tool 输出的尾部截断
+  // 不是授权证据丢失问题，保持原有行为避免作用域蔓延
+  return truncateWithFlag(text, limit, false).text
 }
 
-function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT) {
+function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT, preserveTail = false) {
   // The marker records exactly how much was omitted so policy can treat missing
   // evidence conservatively instead of assuming the hidden tail was benign.
   if (text.length <= limit) return { text, truncated: false }
+  if (preserveTail) {
+    // 头尾保留：头部 60% 提供上下文，尾部 40% 保留末尾授权证据。
+    // 截断标记位于中间，chars 仍精确等于被省略的字符数。
+    const head = Math.floor(limit * 0.6)
+    const tail = limit - head
+    return {
+      text: text.slice(0, head) + `\n<truncated chars="${text.length - limit}" />\n` + text.slice(text.length - tail),
+      truncated: true,
+    }
+  }
   return { text: text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`, truncated: true }
 }
 
