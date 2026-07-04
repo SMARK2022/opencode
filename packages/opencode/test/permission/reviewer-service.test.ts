@@ -8,6 +8,7 @@ import { Plugin } from "../../src/plugin"
 import { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session/session"
+import { MessageV2 } from "../../src/session/message-v2"
 import { SessionID } from "../../src/session/schema"
 import { ProjectID } from "../../src/project/schema"
 import { testEffect } from "../lib/effect"
@@ -214,6 +215,79 @@ describe("permission reviewer service", () => {
     }),
   )
   // [local-smark] reviewer 默认模型来源回归结束
+
+  // [local-smark] reviewer token/breakdown 持久化测试开始
+  // 验证 finish-step handler 将 provider 真实 usage 和 inputBreakdown 持久化到
+  // step-finish part，修复 reviewer session 的 input=0 和 /context breakdown 为空。
+  const tokenFixture = reviewerTokenCaptureFixture({ type: "api", key: "test-key" })
+  const tokenTest = testEffect(tokenFixture.layer)
+
+  tokenTest.effect("persists reviewer token usage and input breakdown in step-finish part", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* reviewer.review(reviewInput("review_token", undefined, SessionID.make("session_parent")))
+
+      // fake SSE 的 response.completed 携带 usage: { input_tokens: 1, output_tokens: 1 }。
+      // AI SDK 将其解析为 finish-step 事件；handler 调用 Session.getUsage 后
+      // adjustedInputTokens = 1 - 0 - 0 = 1（无 cache）。
+      const stepFinish = tokenFixture.parts.find((p) => p.type === "step-finish") as
+        | MessageV2.StepFinishPart
+        | undefined
+      expect(stepFinish).toBeDefined()
+      expect(stepFinish!.tokens.input).toBe(1)
+      expect(stepFinish!.tokens.output).toBe(1)
+
+      // inputBreakdown + inputChars 使 tokenAccounting 的 breakdown 分配非 null
+      expect(stepFinish!.inputChars).toBeGreaterThan(0)
+      expect(stepFinish!.inputBreakdown).toBeDefined()
+      // 非 OAuth：system 保留为 system message，instructions 为 0
+      expect(stepFinish!.inputBreakdown!.system).toBeGreaterThan(0)
+      expect(stepFinish!.inputBreakdown!.instructions).toBe(0)
+      // permission_review_decision 工具定义计入 tools
+      expect(stepFinish!.inputBreakdown!.tools).toBeGreaterThan(0)
+      // transcript + planned action 计入 userText
+      expect(stepFinish!.inputBreakdown!.messages.userText).toBeGreaterThan(0)
+      // reviewer 上下文无历史 assistant 消息
+      expect(stepFinish!.inputBreakdown!.messages.assistantText).toBe(0)
+    }),
+  )
+
+  // OAuth 路径：system message 被提取为顶层 instructions，breakdown 的
+  // system/instructions 分区必须反映这一路由差异
+  const oauthTokenFixture = reviewerTokenCaptureFixture(oauthAuth())
+  const oauthTokenTest = testEffect(oauthTokenFixture.layer)
+
+  oauthTokenTest.effect("routes system chars to instructions breakdown for OAuth reviewer", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* reviewer.review(reviewInput("review_token_oauth", undefined, SessionID.make("session_parent")))
+
+      const stepFinish = oauthTokenFixture.parts.find((p) => p.type === "step-finish") as
+        | MessageV2.StepFinishPart
+        | undefined
+      expect(stepFinish).toBeDefined()
+      expect(stepFinish!.inputBreakdown).toBeDefined()
+      // OAuth：system 内容被提取为 instructions，system 分区为 0
+      expect(stepFinish!.inputBreakdown!.system).toBe(0)
+      expect(stepFinish!.inputBreakdown!.instructions).toBeGreaterThan(0)
+      expect(stepFinish!.inputBreakdown!.messages.userText).toBeGreaterThan(0)
+    }),
+  )
+
+  // non-persist 路径（无 sessionID）：不写任何 part，验证 finish-step handler
+  // 的 persist guard 不会在无 session 场景产生副作用
+  const noSessionTokenFixture = reviewerTokenCaptureFixture({ type: "api", key: "test-key" })
+  const noSessionTokenTest = testEffect(noSessionTokenFixture.layer)
+
+  noSessionTokenTest.effect("writes no step-finish part when reviewer has no session", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      // 不传 sessionID → reviewerSession=undefined → non-persist 路径
+      yield* reviewer.review(reviewInput("review_token_nosession"))
+      expect(noSessionTokenFixture.parts.find((p) => p.type === "step-finish")).toBeUndefined()
+    }),
+  )
+  // [local-smark] reviewer token/breakdown 持久化测试结束
 })
 
 function reviewerFixture(
@@ -558,6 +632,88 @@ function staleParentModelFixture() {
   }
 }
 // [local-smark] staleParentModelFixture 结束
+
+// [local-smark] reviewer token/breakdown 持久化验证 fixture
+// 复用 parentSessionModelFixture 的 sessionID + Session.Service mock 结构，
+// 但 updatePart 捕获所有写入的 part，用于断言 step-finish part 是否携带
+// provider 真实 usage（tokens/cost）和 per-component inputBreakdown。
+// 支持 API key 和 OAuth 两种 auth，以验证 system/instructions 路由差异。
+function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
+  const parts: MessageV2.Part[] = []
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      // fake SSE 始终返回携带 usage 的 response.completed，使 AI SDK 发出
+      // finish-step 事件——这是 handler 持久化真实 usage 的触发点
+      new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model,
+    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+    getLanguage: Effect.fn("ReviewerTokenTest.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent"),
+    slug: "test",
+    projectID: ProjectID.make("project_test"),
+    directory: "/tmp",
+    title: "Test",
+    agent: "auto",
+    model: { id: model.id, providerID: model.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: Date.now(), updated: Date.now() },
+  }
+  // reviewer child session mock：getReviewerSession 会复用它
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (msg) => Effect.succeed(msg),
+    // 捕获所有 updatePart 调用，用于断言 step-finish part 的 tokens 和 inputBreakdown
+    updatePart: (part) => {
+      parts.push(part)
+      return Effect.succeed(part)
+    },
+  })
+  return {
+    parts,
+    layer: PermissionReviewer.layer.pipe(
+      Layer.provide(
+        TestConfig.layer({
+          get: () =>
+            Effect.succeed({
+              permission: {
+                approvals_reviewer: "auto_review",
+                auto_review: {
+                  model: `${OPENAI_PROVIDER_ID}/gpt-5`,
+                  policy: "Reviewer token test policy.",
+                },
+              },
+            }),
+        }),
+      ),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer(authInfo)),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+    ),
+  }
+}
 
 function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string } = {}) {
   return Layer.succeed(

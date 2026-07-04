@@ -395,6 +395,8 @@ export const layer = Layer.effect(
           sessionID: session.id,
           messageID: message.id,
           reviewID: input.reviewID,
+          // 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
+          message,
         }).pipe(
           Effect.tapError((error) =>
             Effect.gen(function* () {
@@ -414,7 +416,7 @@ export const layer = Layer.effect(
     function runReviewerStream(
       messages: readonly ModelMessage[],
       model: Provider.Model,
-      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
+      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: MessageV2.Assistant },
     ) {
       return Effect.acquireUseRelease(
         Effect.sync(() => new AbortController()),
@@ -444,6 +446,45 @@ export const layer = Layer.effect(
               ? messages.flatMap((message) => (message.role === "system" ? [message.content] : [])).join("\n")
               : undefined
             const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
+            // 提取 tool 定义常量，使 tool() 和 toolsText 共用同一 schema 序列化，
+            // 避免 toJsonSchema(Assessment) 被调用两次产生不一致的序列化结果
+            const assessmentSchema = toJsonSchema(Assessment)
+            const toolDescription = "Submit the structured allow/deny decision for this permission review."
+            // 计算 /context 面板所需的 per-component 字符 breakdown。reviewer 不走
+            // session.prompt 的 pre-stream estimate 路径，所以在此直接按字符占比
+            // 计算并附到 step-finish part，使 tokenAccounting 的 breakdown 非 null。
+            // 公式与 prompt.ts:2283 一致：inputChars = [system, rawMessages, tools].join("\n").length
+            const toolsText = `Tool: permission_review_decision\n${toolDescription}\n${JSON.stringify(assessmentSchema)}`
+            // conversationMessages 排除 system message：非 OAuth 时 system 在 messages 中，
+            // OAuth 时 reviewerMessages 已过滤。system 单独计入 system/instructions 分区，
+            // 避免 messages.total 与 system 重复累加。
+            const conversationMessages = reviewerMessages.filter((m) => m.role !== "system")
+            const rawMessagesText = JSON.stringify(conversationMessages)
+            let userTextChars = 0
+            for (const m of conversationMessages) {
+              if (m.role !== "user") continue
+              userTextChars += typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length
+            }
+            const systemMessage = messages.find((m) => m.role === "system")
+            const systemText = typeof systemMessage?.content === "string" ? systemMessage.content : ""
+            const inputChars = [systemText, rawMessagesText, toolsText].join("\n").length
+            // OAuth 路径下 system 被提取为顶层 instructions：system 分区=0，instructions=systemText。
+            // 非 OAuth 路径下 system 保留为 system message：system=systemText，instructions=0。
+            const inputBreakdown = {
+              system: isOpenaiOauth ? 0 : systemText.length,
+              instructions: isOpenaiOauth ? systemText.length : 0,
+              skills: 0,
+              tools: toolsText.length,
+              messages: {
+                userText: userTextChars,
+                assistantText: 0,
+                reasoning: 0,
+                toolInput: 0,
+                toolOutput: 0,
+                attachments: 0,
+                total: rawMessagesText.length,
+              },
+            }
             const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
             // Reviewer requests intentionally stay outside the main SessionProcessor
             // pipeline, but provider compatibility still lives in the existing chat
@@ -504,8 +545,8 @@ export const layer = Layer.effect(
               messages: [...reviewerMessages],
               tools: {
                 permission_review_decision: tool({
-                  description: "Submit the structured allow/deny decision for this permission review.",
-                  inputSchema: jsonSchema(toJsonSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
+                  description: toolDescription,
+                  inputSchema: jsonSchema(assessmentSchema as Parameters<typeof jsonSchema>[0]),
                   execute: async (assessment) => ({
                     title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
                     metadata: assessment,
@@ -655,6 +696,35 @@ export const layer = Layer.effect(
                   // through the same hidden retry as missing or malformed input
                   // instead of treating it as an unrelated provider failure.
                   return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
+                }
+                // 镜像 processor.ts finish-step：持久化 provider 真实 usage 和 input breakdown。
+                // reviewer 不走 SessionProcessor 管道（安全边界：不暴露 prompt 给 chat plugin），
+                // 所以必须在此手动处理 finish-step 事件，否则 message.tokens 恒为初始 0 且
+                // 无 step-finish part → tokenAccounting 对 reviewer session 算出 input=0、breakdown=null。
+                if (event.type === "finish-step") {
+                  // persist 在此已被 !persist 早退分支（service.ts 上方）收窄为非 undefined，
+                  // 与其他 persist 路径 handler 一致，无需重复 guard
+                  const usage = Session.getUsage({ model, usage: event.usage, metadata: event.providerMetadata })
+                  // 就地更新可变 message 引用，使 runReviewerAgent 的最终 updateMessage 持久化真实 tokens/cost
+                  persist.message.tokens = usage.tokens
+                  persist.message.cost += usage.cost
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    type: "step-finish",
+                    reason: event.finishReason,
+                    tokens: usage.tokens,
+                    cost: usage.cost,
+                    inputChars,
+                    inputBreakdown,
+                  } satisfies MessageV2.StepFinishPart)
+                  // 立即落库 message 行：finish-step 是流终止事件，但 runReviewerAgent 的
+                  // 最终 updateMessage 在 stream drain 之后才执行。若不在此立即写入，
+                  // DB 的 message.tokens 仍为 0，tokenAccounting 的 stepSF && !msgCompleted
+                  // 分支会取到 stale 0 而非 stepSF.tokens.input。
+                  yield* sessions.updateMessage(persist.message)
+                  return
                 }
                 if (event.type === "error") {
                   // Provider stream errors must keep their original shape until
