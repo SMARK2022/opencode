@@ -324,6 +324,7 @@ export type SessionsListOutput = {
         readonly deletions: number
         readonly patch: string
       }>
+      readonly revertedPaths?: ReadonlyArray<string>
     }
   }>
   readonly cursor: { readonly previous?: string | null; readonly next?: string | null }
@@ -430,6 +431,7 @@ export type SessionsCreateOutput = {
         readonly deletions: number
         readonly patch: string
       }>
+      readonly revertedPaths?: ReadonlyArray<string>
     }
   }
 }["data"]
@@ -512,6 +514,7 @@ export type SessionsGetOutput = {
         readonly deletions: number
         readonly patch: string
       }>
+      readonly revertedPaths?: ReadonlyArray<string>
     }
   }
 }["data"]
@@ -743,6 +746,7 @@ export type SessionsStageOutput = {
       readonly deletions: number
       readonly patch: string
     }>
+    readonly revertedPaths?: ReadonlyArray<string>
   }
 }["data"]
 
@@ -1564,6 +1568,7 @@ export type SessionsHistoryOutput = {
               readonly deletions: number
               readonly patch: string
             }>
+            readonly revertedPaths?: ReadonlyArray<string>
           }
         }
       }
@@ -2192,6 +2197,7 @@ export type SessionsEventsOutput =
             readonly deletions: number
             readonly patch: string
           }>
+          readonly revertedPaths?: ReadonlyArray<string>
         }
       }
     }

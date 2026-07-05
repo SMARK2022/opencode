@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Schema } from "effect"
+import { DateTime, Effect, Layer, Schema } from "effect"
 import { asc, eq, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { DatabaseMigration } from "@opencode-ai/core/database/migration"
@@ -31,6 +31,7 @@ import { Location } from "@opencode-ai/core/location"
 import { SessionHistory } from "@opencode-ai/core/session/history"
 import { SessionPreview } from "@opencode-ai/core/session/preview"
 import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
+import { SessionRevert } from "@opencode-ai/core/session/revert"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
 const previewIt = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node]),
@@ -545,6 +546,66 @@ describe("SessionProjector", () => {
       })
     }),
   )
+
+  it.effect("stages tool-owned native revert paths and preserves metadata-free history", () => {
+    const restores: [RelativePath, Snapshot.ID][][] = []
+    const directory = AbsolutePath.make("/project/app")
+    return Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const events = yield* EventV2.Service
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "revert",
+        directory, title: "revert", version: "test" }).run()
+      const session = { id: sessionID, projectID: Project.ID.global, title: "revert", location: { directory },
+        cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created, updated: created } }
+      const first = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_revert_first"), sessionID,
+        prompt: Prompt.make({ text: "edit mine" }), delivery: "steer" })
+      yield* SessionInput.promoteSteers(db, events, sessionID, first.admittedSeq)
+      const assistantMessageID = SessionMessage.ID.make("msg_revert_assistant")
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp: created, agent: "build", model, snapshot: "tree_before" })
+      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, callID: "write", name: "write", timestamp: created })
+      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, callID: "write", tool: "write", input: {}, provider: { executed: false }, timestamp: created })
+      yield* events.publish(SessionEvent.Tool.Success, { sessionID, assistantMessageID, callID: "write", timestamp: created,
+        structured: { target: "/project/app/mine.ts", resource: "mine.ts", existed: false, diff: "+mine\n" }, content: [], provider: { executed: false } })
+      const settlement = { sessionID, assistantMessageID, timestamp: created, finish: "stop", cost: 0,
+        tokens: session.tokens, snapshot: "tree_after", files: [RelativePath.make("app/mine.ts"), RelativePath.make("app/other.ts")] }
+      yield* events.publish(SessionEvent.Step.Ended, settlement)
+      // 真实Step投影含同目录其他会话文件；生产plan必须只留下本工具触碰的项目相对键。
+      const revert = yield* SessionRevert.stage({ session, messageID: first.id })
+      expect(restores).toEqual([[[RelativePath.make("app/mine.ts"), Snapshot.ID.make("tree_before")]]])
+      expect(revert.files?.map(file => file.path)).toEqual([RelativePath.make("app/mine.ts")])
+      expect((yield* db.select({ revert: SessionTable.revert }).from(SessionTable).get())?.revert?.files).toEqual(revert.files)
+      yield* SessionRevert.clear({ ...session, revert })
+      expect(restores[1]).toEqual([[RelativePath.make("app/mine.ts"), Snapshot.ID.make("tree_current")]])
+      expect((yield* db.select({ revert: SessionTable.revert }).from(SessionTable).get())?.revert).toBeNull()
+      // 再次撤回沿用上次原树和精确文件清单，不能把未触碰文件加入恢复Map。
+      yield* SessionRevert.stage({ session: { ...session, revert }, messageID: first.id })
+      expect(restores[2]).toEqual([[RelativePath.make("app/mine.ts"), Snapshot.ID.make("tree_before")]])
+      const later = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_revert_legacy"), sessionID,
+        prompt: Prompt.make({ text: "old shell turn" }), delivery: "steer" })
+      yield* SessionInput.promoteSteers(db, events, sessionID, later.admittedSeq)
+      const legacy = SessionMessage.ID.make("msg_revert_legacy_assistant")
+      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: legacy, timestamp: created, agent: "build", model, snapshot: "tree_legacy" })
+      yield* events.publish(SessionEvent.Step.Ended, { ...settlement, assistantMessageID: legacy, files: [RelativePath.make("app/legacy.ts")] })
+      const legacyRevert = yield* SessionRevert.stage({ session, messageID: later.id })
+      expect(restores[3]).toEqual([[RelativePath.make("app/legacy.ts"), Snapshot.ID.make("tree_legacy")]])
+      expect(legacyRevert.files?.map(file => file.path)).toEqual([RelativePath.make("app/legacy.ts")])
+      // 显式仅撤消息时不进行文件恢复；未知边界保持原typed错误，而非成功空结果。
+      const messageOnly = yield* SessionRevert.stage({ session, messageID: later.id, files: false })
+      expect(messageOnly.files).toEqual([])
+      expect(restores).toHaveLength(4)
+      expect(yield* SessionRevert.stage({ session, messageID: SessionMessage.ID.make("msg_missing") }).pipe(Effect.flip)).toBeInstanceOf(SessionRevert.MessageNotFoundError)
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
+    }).pipe(
+      Effect.provideService(Location.Service, Location.Service.of({ directory, project: { id: Project.ID.global, directory: AbsolutePath.make("/project") } })),
+      Effect.provide(Layer.mock(Snapshot.Service, {
+        capture: () => Effect.succeed(Snapshot.ID.make("tree_current")),
+        restore: ({ files }) => Effect.sync(() => { restores.push([...files]) }),
+        // 替身只记录生产传入路径，实际筛选和持久化均由真实owner完成，不复制归属算法。
+        diff: ({ paths }) => Effect.succeed((paths ?? []).map(path => ({ path, status: "modified" as const, patch: "-new\n+old\n", additions: 1, deletions: 1 }))),
+      })),
+    )
+  })
 
   it.effect("projects staged, cleared, and committed reverts", () =>
     Effect.gen(function* () {

@@ -10,6 +10,7 @@ import { Todo } from "../../src/session/todo"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 // Covers the session-domain Effect Schema migration. For each migrated
 // schema we assert:
@@ -72,9 +73,12 @@ describe("Session.Info", () => {
         partID,
         snapshot: "snap-1",
         diff: "diff-1",
+        revertedPaths: ["/tmp/proj/a.ts"],
       },
     }
     expect(decode(input)).toEqual(input)
+    // Session.Info与session.updated的canonical V1契约都必须保留恢复范围。
+    expect(Schema.decodeUnknownSync(SessionV1.SessionInfo)(input)).toEqual(input)
   })
 
   test("accepts migrated summary diffs without file details", () => {

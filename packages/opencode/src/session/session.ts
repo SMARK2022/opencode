@@ -91,6 +91,7 @@ export function toRow(info: Info) {
           partID: info.revert.partID,
           snapshot: info.revert.snapshot,
           diff: info.revert.diff,
+          revertedPaths: info.revert.revertedPaths,
         }
       : null,
     permission: info.permission,
@@ -155,6 +156,9 @@ const Revert = Schema.Struct({
   partID: optional(PartID),
   snapshot: optional(Schema.String),
   diff: optional(Schema.String),
+  // 被 revert 的工具触碰文件列表（绝对路径），供 restore 精确恢复；
+  // 与 schema 包 Revert.State.revertedPaths 对应，旧数据缺省时整目录恢复。
+  revertedPaths: optional(Schema.Array(Schema.String)),
 })
 
 const Model = Schema.Struct({

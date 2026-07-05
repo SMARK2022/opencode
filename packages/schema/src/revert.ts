@@ -20,5 +20,9 @@ export const State = Schema.Struct({
   snapshot: Schema.String.pipe(optional),
   diff: Schema.String.pipe(optional),
   files: Schema.Array(FileDiff).pipe(optional),
+  // V1 revert 的精确恢复路径列表（绝对路径，opencode 侧 session revert 使用）；
+  // 与 files（V2 FileDiff 语义）分键存储避免同键不同义。旧数据无此字段时
+  // restore 退回 -- . 恢复整个目录。
+  revertedPaths: Schema.Array(Schema.String).pipe(optional),
 }).annotate({ identifier: "Revert.State" })
 export interface State extends Schema.Schema.Type<typeof State> {}

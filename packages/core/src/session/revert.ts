@@ -4,12 +4,14 @@ import { and, asc, eq, gt } from "drizzle-orm"
 import { DateTime, Effect, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
+import { Location } from "../location"
 import { RelativePath } from "../schema"
 import { Snapshot } from "../snapshot"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { SessionMessageTable } from "./sql"
+import { ToolDiffs } from "./tool-diffs"
 
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "Session.MessageNotFoundError",
@@ -48,13 +50,20 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
     .pipe(Effect.orDie)
   const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
   const files = new Map<RelativePath, Snapshot.ID>()
+  const records: Record<string, unknown>[] = []
   for (const row of rows) {
     const message = yield* decode({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie)
-    if (message.type !== "assistant" || !message.snapshot?.start) continue
+    if (message.type !== "assistant" || Schema.is(SessionMessage.Hidden)(message.metadata?.hidden)) continue
+    records.push(...message.content.flatMap(part => part.type === "tool" && part.state.status === "completed" ? [part.state.structured] : []))
+    if (!message.snapshot?.start) continue
     for (const file of message.snapshot.files ?? [])
       if (!files.has(file)) files.set(file, Snapshot.ID.make(message.snapshot.start))
   }
-  return files
+  const location = yield* Location.Service
+  // Snapshot恢复键相对项目根，工具相对项属于当前Location，必须沿共享聚合器统一基准。
+  const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
+  // 无工具证据的历史/纯Shell保留原快照恢复；有证据时不能撤回同目录其他会话的文件。
+  return touched.size ? new Map([...files].filter(([file]) => touched.has(file))) : files
 })
 
 export const stage = Effect.fn("SessionRevert.stage")(function* (input: {
