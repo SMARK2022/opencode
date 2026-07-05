@@ -1,6 +1,15 @@
 # Triage Labels
 
-The mattpocock skills speak in terms of five canonical triage **lifecycle** roles. This file maps those roles to the actual label strings used in this repo's issue tracker (GitHub, `SMARK2022/opencode`).
+The `triage` skill speaks in terms of **two category roles** and **five state roles** — every triaged issue carries exactly one of each. This file maps those canonical roles to the actual label strings used in this repo's issue tracker (GitHub, `SMARK2022/opencode`).
+
+## Category roles (exactly one per issue)
+
+| Role in mattpocock/skills | Label in our tracker | Meaning                          |
+| ------------------------- | -------------------- | -------------------------------- |
+| `bug`                     | `bug`                | Something is broken              |
+| `enhancement`             | `enhancement`        | New feature or improvement       |
+
+## State roles (exactly one per issue)
 
 | Label in mattpocock/skills | Label in our tracker | Meaning                                  |
 | -------------------------- | -------------------- | ---------------------------------------- |
@@ -10,7 +19,7 @@ The mattpocock skills speak in terms of five canonical triage **lifecycle** role
 | `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
 | `wontfix`                  | `wontfix`            | Will not be actioned                     |
 
-When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table. If these labels do not yet exist on `SMARK2022/opencode`, create them via `gh label create <name> --description "..." --color "..."` before first use.
+When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from these tables. If these labels do not yet exist on `SMARK2022/opencode`, create them via `gh label create <name> --description "..." --color "..."` before first use.
 
 ## Coexistence with the team-assignment triage agent
 
