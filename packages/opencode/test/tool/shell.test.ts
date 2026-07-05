@@ -204,7 +204,10 @@ describe("tool.shell", () => {
       projectRoot,
       Effect.gen(function* () {
         const result = yield* run({
-          command: "echo test",
+          // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态：
+          // detached:true 创建新进程组时，Effect stream consumer 可能尚未订阅 proc.stdout，
+          // echo 已写入并退出，数据丢失。sleep 让 shell 存活足够久让 stream 订阅完成。
+          command: "echo test; sleep 0.01",
           description: "Echo test message",
         })
         expect(result.metadata.exit).toBe(0)
@@ -248,7 +251,8 @@ describe("tool.shell", () => {
 
           const result = yield* bash.execute(
             {
-              command: "echo fallback",
+              // sleep 0.01 防止 macOS CI 上 echo builtin 退出过快导致 stdout 管道竞态
+              command: "echo fallback; sleep 0.01",
               description: "Echo fallback text",
             },
             ctx,
