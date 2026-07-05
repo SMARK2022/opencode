@@ -4,7 +4,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { useSync } from "@tui/context/sync"
 import { useSDK } from "@tui/context/sdk"
 import { useToast } from "@tui/ui/toast"
-import { createMemo } from "solid-js"
+import { createMemo, onMount } from "solid-js"
 import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
 
 // [local-smark] goal 管理 dialog
@@ -109,9 +109,16 @@ export function DialogGoalMenu(props: DialogGoalProps) {
 
   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
 
+  // 使用 large 宽度（88 chars），让 goal objective 描述和选项标题有足够显示空间，
+  // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
+  onMount(() => dialog.setSize("large"))
+
   return (
     <DialogSelect
       title="Manage Goal"
+      // 只有 3-4 个选项，不需要搜索 filter；隐藏 filter 节省 2 行垂直空间，
+      // 让小终端（≤18 行）也能完整显示所有选项无需滚动
+      renderFilter={false}
       options={[
         {
           title: "Edit objective",
