@@ -13,6 +13,7 @@ import { useBindings, useCommandShortcut } from "../../keymap"
 import { PromptVoiceInput } from "../../prompt-voice-input"
 import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
 import { Spinner } from "../../component/spinner"
+import { createRefreshClock } from "../../util/signal"
 
 export function QuestionPrompt(props: { request: QuestionRequest }) {
   const sdk = useSDK()
@@ -44,6 +45,9 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
   const voiceInputBusy = () => voiceInputStatus().type !== "idle"
   const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
   const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
+  // 录音计时器需要每秒刷新 now 信号驱动 footer 的 Recording MM:SS 走数；
+  // 缺少它时 voiceInputStatusText 的 now 参数只在录音开始瞬间求值一次，计时器冻结在 00:00。
+  const now = createRefreshClock(() => voiceInputStatus().type === "recording")
 
   function insertVoiceText(text: string) {
     // stale ref 守卫：退出 editing 后 textarea 已被 <Show> 销毁，
@@ -575,7 +579,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
                 <text fg={theme.error}>●</text>
               </Show>
               <text fg={theme.accent}>
-                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback)}
+                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
               </text>
             </box>
           </Show>

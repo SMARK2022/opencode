@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import path from "path"
+import { createRoot, createSignal } from "solid-js"
 import { tmpdir } from "../../fixture/fixture"
 import {
   createVoiceInputController,
@@ -9,6 +10,7 @@ import {
   type VoiceRecorderHandle,
   type VoiceTranscriber,
 } from "../../../src/cli/cmd/tui/prompt-voice-input"
+import { createRefreshClock } from "../../../src/cli/cmd/tui/util/signal"
 
 const nodeJson = (script: string): VoiceTranscriber => ({
   command: process.execPath,
@@ -85,6 +87,53 @@ describe("prompt voice input", () => {
     )
     expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400)).toBe("Saving voice...")
     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
+  })
+
+  // createRefreshClock 是三处组件（主 Prompt / QuestionPrompt / DialogPrompt）录音计时器走数的
+  // 基础设施：recording 期间每秒刷新 now 信号驱动 voiceInputStatusText 重算，idle 时停止。
+  // 该契约此前零测试覆盖——一旦被破坏，question/dialog 组件的计时器会冻结在 00:00
+  // （voiceInputStatusText 的 now 参数只在录音开始瞬间求值一次，之后无周期信号触发重算）。
+  // 使用 createRoot 隔离响应式作用域，10ms 短间隔加速测试，避免真实 1s 等待。
+  test("createRefreshClock ticks while active, stops when inactive, and cleans up on dispose", async () => {
+    let readNow: () => number = () => 0
+    let setActive: (v: boolean) => void = () => {}
+    const dispose = createRoot((d) => {
+      const [active, setA] = createSignal(false)
+      setActive = setA
+      readNow = createRefreshClock(active, 10)
+      return d
+    })
+    try {
+      // createEffect 延迟到 microtask 执行；先冲刷一次让初始 effect（active=false）跑完，
+      // 确保 idle 基线值取的是 effect 执行后的 now，而非 createSignal 初始值。
+      await new Promise((r) => setTimeout(r, 0))
+      const idle = readNow()
+
+      // active=true → effect 重跑启动 setInterval，now 应随 interval tick 前进
+      setActive(true)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(readNow()).toBeGreaterThan(idle)
+
+      // active=false → onCleanup 清理 interval，now 停止前进
+      setActive(false)
+      await new Promise((r) => setTimeout(r, 50))
+      const stopped = readNow()
+      await new Promise((r) => setTimeout(r, 50))
+      expect(readNow()).toBe(stopped)
+
+      // 再次 active 后立即 dispose，模拟组件在录音中被卸载：
+      // dispose 必须触发 onCleanup 清理正在运行的 interval，否则定时器泄漏
+      setActive(true)
+      await new Promise((r) => setTimeout(r, 30))
+      const beforeDispose = readNow()
+      dispose()
+      await new Promise((r) => setTimeout(r, 50))
+      // dispose 后 now 不再前进，证明 onCleanup 清理了活跃 interval
+      expect(readNow()).toBe(beforeDispose)
+    } catch (e) {
+      dispose()
+      throw e
+    }
   })
 
   // voice 提示是 footer 的引导文案，窄终端会挤占输入区，必须延迟到 prompt 足够宽才显示。
