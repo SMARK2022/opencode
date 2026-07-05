@@ -6,6 +6,7 @@ import { Spinner } from "../component/spinner"
 import { useTuiConfig } from "../config"
 import { useBindings, useCommandShortcut } from "../keymap"
 import { useRenderer } from "@opentui/solid"
+import { createRefreshClock } from "../util/signal"
 import { PromptVoiceInput } from "../prompt-voice-input"
 import { PromptVoiceRecorder } from "../prompt-voice-recorder"
 import { useToast } from "./toast"
@@ -40,6 +41,8 @@ export function DialogPrompt(props: DialogPromptProps) {
   const voiceInputBusy = () => voiceInputStatus().type !== "idle"
   const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
   const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
+  // #384：录音计时器需周期刷新——createRefreshClock 在 recording 状态下每秒触发重渲染
+  const now = createRefreshClock(() => voiceInputStatus().type === "recording")
 
   function insertVoiceText(text: string) {
     // isDestroyed 守卫：转写完成时 textarea 可能已被 busy/ESC 销毁（dialog.replace），
@@ -179,7 +182,7 @@ export function DialogPrompt(props: DialogPromptProps) {
                 <text fg={theme.error}>●</text>
               </Show>
               <text fg={theme.accent}>
-                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback)}
+                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
               </text>
             </box>
           </Show>
