@@ -47,7 +47,7 @@ export interface Interface {
   readonly cleanup: () => Effect.Effect<void>
   readonly track: () => Effect.Effect<string | undefined>
   readonly patch: (hash: string) => Effect.Effect<Patch>
-  readonly restore: (snapshot: string) => Effect.Effect<void>
+  readonly restore: (snapshot: string, files?: string[]) => Effect.Effect<void>
   readonly revert: (patches: Patch[]) => Effect.Effect<void>
   readonly diff: (hash: string) => Effect.Effect<string>
   readonly diffFull: (from: string, to: string) => Effect.Effect<FileDiff[]>
@@ -342,27 +342,25 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             )
           })
 
-          const restore = Effect.fnUntraced(function* (snapshot: string) {
+          const restore = Effect.fnUntraced(function* (snapshot: string, files?: string[]) {
             return yield* locked(
               Effect.gen(function* () {
                 log.info("restore", { commit: snapshot })
-                const result = yield* git([...core, ...args(["read-tree", snapshot])], { cwd: state.worktree })
-                if (result.code === 0) {
-                  const checkout = yield* git([...core, ...args(["checkout-index", "-a", "-f"])], {
-                    cwd: state.worktree,
-                  })
-                  if (checkout.code === 0) return
-                  log.error("failed to restore snapshot", {
-                    snapshot,
-                    exitCode: checkout.code,
-                    stderr: checkout.stderr,
-                  })
-                  return
-                }
+                // 目录限定的 restore：用 git checkout <snapshot> -- <pathspec> 替代
+                // read-tree + checkout-index -a。旧实现的 checkout-index -a 无 pathspec，
+                // 会把共享 snapshot index 中所有文件写入 worktree——包括其他 session
+                // 目录下的文件（共享 gitdir 场景）以及同目录下其他 session 改动的文件。
+                // 当 files 提供时（revert/unrevert 精确恢复），只 checkout 这些文件，
+                // 避免覆盖同目录其他 session 的改动。无 files 时退回 -- . 恢复整个目录。
+                const pathspec = files && files.length > 0 ? files : ["."]
+                const checkout = yield* git([...core, ...args(["checkout", snapshot, "--", ...pathspec])], {
+                  cwd: state.directory,
+                })
+                if (checkout.code === 0) return
                 log.error("failed to restore snapshot", {
                   snapshot,
-                  exitCode: result.code,
-                  stderr: result.stderr,
+                  exitCode: checkout.code,
+                  stderr: checkout.stderr,
                 })
               }),
             )
@@ -487,8 +485,12 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
             return yield* locked(
               Effect.gen(function* () {
                 yield* add()
+                // cwd 必须为 state.directory 而非 state.worktree，使 -- "." 限定到
+                // 当前 session 目录。旧实现用 cwd: state.worktree 导致 pathspec "."
+                // 匹配整个 worktree，diff 文本会包含其他目录（其他 session）的改动。
+                // 与 patch() 和 diffFull() 的目录限定保持一致。
                 const result = yield* git([...quote, ...args(["diff", "--cached", "--no-ext-diff", hash, "--", "."])], {
-                  cwd: state.worktree,
+                  cwd: state.directory,
                 })
                 if (result.code !== 0) {
                   log.warn("failed to get diff", {
@@ -751,8 +753,8 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
         patch: Effect.fn("Snapshot.patch")(function* (hash: string) {
           return yield* InstanceState.useEffect(state, (s) => s.patch(hash))
         }),
-        restore: Effect.fn("Snapshot.restore")(function* (snapshot: string) {
-          return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot))
+        restore: Effect.fn("Snapshot.restore")(function* (snapshot: string, files?: string[]) {
+          return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot, files))
         }),
         revert: Effect.fn("Snapshot.revert")(function* (patches: Patch[]) {
           return yield* InstanceState.useEffect(state, (s) => s.revert(patches))

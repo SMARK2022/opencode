@@ -1112,3 +1112,111 @@ it.instance(
   }),
   { git: true },
 )
+
+// [local-smark] 跨目录隔离测试：同一 git worktree 下两个子目录各自的 session
+// 共享同一个 snapshot gitdir 和 git index。restore 必须只影响当前 session 目录下的文件，
+// 不能覆盖其他目录（其他 session）的改动。
+//
+// 污染路径：Session B 先 track() 把 dirB 文件 stage 进共享 index；Session A 再 track()
+// 时 write-tree 捕获的 tree 同时包含 dirA + dirB 文件。旧实现 restore 用
+// read-tree + checkout-index -a（无 pathspec），会把 tree 中所有文件写入 worktree，
+// 包括 dirB 的文件——覆盖掉 Session B 的后续改动。
+it.live(
+  "restore scoped to directory does not affect files outside directory",
+  Effect.gen(function* () {
+    const repo = yield* scopedGitTmpdir()
+    const dirA = path.join(repo, "packages", "a")
+    const dirB = path.join(repo, "packages", "b")
+    yield* mkdirp(dirA)
+    yield* mkdirp(dirB)
+    yield* write(path.join(dirA, "a.txt"), "a0")
+    yield* write(path.join(dirB, "b.txt"), "b0")
+    yield* exec(repo, ["git", "add", "."])
+    yield* exec(repo, ["git", "commit", "-m", "init"])
+
+    // Session B 先 track()，把 dirB 文件 stage 进共享 snapshot index
+    yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      const h = yield* snapshot.track()
+      expect(h).toBeTruthy()
+    }).pipe(provideInstance(dirB))
+
+    // Session A track()：write-tree 捕获的 tree 此时包含 dirA + dirB 文件
+    const beforeA = yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      const h = yield* snapshot.track()
+      expect(h).toBeTruthy()
+      return h!
+    }).pipe(provideInstance(dirA))
+
+    // 两个 session 各自修改自己的文件
+    yield* write(path.join(dirA, "a.txt"), "a1")
+    yield* write(path.join(dirB, "b.txt"), "b1")
+
+    // Session A restore 到自己的快照
+    yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      yield* snapshot.restore(beforeA)
+    }).pipe(provideInstance(dirA))
+
+    // Session A 的文件应被恢复
+    expect(yield* readText(path.join(dirA, "a.txt"))).toBe("a0")
+    // Session B 的文件不应被 Session A 的 restore 影响
+    expect(yield* readText(path.join(dirB, "b.txt"))).toBe("b1")
+  }),
+)
+
+// [local-smark] snap.diff 的 cwd 应为 state.directory 而非 state.worktree，
+// 使其与 patch() 和 diffFull() 的目录限定一致。
+//
+// 污染路径：Session B 先 track() 把 dirB 文件 stage 进共享 index；Session A track()
+// 的 tree 不含 dirB 文件（此时 dirB 还没 stage）。之后 Session B track() 把 dirB 文件
+// stage 进共享 index。Session A 调 diff(beforeA) 时，add() 只 stage dirA 文件，
+// 但共享 index 中已有 dirB 文件。旧实现 diff 用 cwd: state.worktree + -- "."，
+// 匹配整个 worktree，dirB 文件在 index 中但不在 beforeA tree 中 → 显示为新增 → 污染。
+it.live(
+  "diff scoped to directory excludes changes outside directory",
+  Effect.gen(function* () {
+    const repo = yield* scopedGitTmpdir()
+    const dirA = path.join(repo, "packages", "a")
+    const dirB = path.join(repo, "packages", "b")
+    yield* mkdirp(dirA)
+    yield* mkdirp(dirB)
+    yield* write(path.join(dirA, "a.txt"), "a0")
+    yield* write(path.join(dirB, "b.txt"), "b0")
+    yield* exec(repo, ["git", "add", "."])
+    yield* exec(repo, ["git", "commit", "-m", "init"])
+
+    // Session A 先 track()：tree 此时只有 dirA 文件
+    const beforeA = yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      const h = yield* snapshot.track()
+      expect(h).toBeTruthy()
+      return h!
+    }).pipe(provideInstance(dirA))
+
+    // Session B track()：把 dirB 文件 stage 进共享 index
+    yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      const h = yield* snapshot.track()
+      expect(h).toBeTruthy()
+    }).pipe(provideInstance(dirB))
+
+    // Session A 修改自己的文件
+    yield* write(path.join(dirA, "a.txt"), "a1")
+
+    // Session A 的 diff 应只包含 dirA 的改动
+    const diff = yield* Effect.gen(function* () {
+      const snapshot = yield* Snapshot.Service
+      return yield* snapshot.diff(beforeA)
+    }).pipe(provideInstance(dirA))
+
+    // 不应包含其他目录的文件改动（dirB 文件在共享 index 中但不在 beforeA tree 中）。
+    // 旧实现用 cwd: state.worktree，-- "." 匹配整个 worktree，dirB 文件会显示为新增。
+    // 注意：a.txt 可能不出现在 diff 中——这是 add()/stage() 在子目录场景下的既有
+    // pathspec 解析限制（diff-files 输出相对于 worktree root 的路径，stage() 按 cwd 解析），
+    // 与本次 cwd 修复无关。本次修复只保证不泄漏其他目录的文件。
+    expect(diff).not.toContain("b.txt")
+    expect(diff).not.toContain("packages/b")
+  }),
+)

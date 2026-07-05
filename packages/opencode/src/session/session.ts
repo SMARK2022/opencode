@@ -252,6 +252,10 @@ const Revert = Schema.Struct({
   partID: optionalOmitUndefined(PartID),
   snapshot: optionalOmitUndefined(Schema.String),
   diff: optionalOmitUndefined(Schema.String),
+  // 被 revert 的工具触碰文件列表（绝对路径），用于 restore 精确恢复，
+  // 避免同目录多 session 场景下 restore 覆盖其他 session 的文件。
+  // 旧数据无此字段，restore 退回 -- . 恢复整个目录。
+  files: optionalOmitUndefined(Schema.Array(Schema.String)),
 })
 
 const Model = Schema.Struct({
