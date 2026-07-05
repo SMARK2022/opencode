@@ -13,8 +13,9 @@ const root = path.resolve(import.meta.dir, "..")
 const skip = new Set([".git", ".opencode", ".turbo", "dist", "node_modules"])
 const keys = ["@opentui/core", "@opentui/keymap", "@opentui/solid"] as const
 
+// Windows 上 Bun.Glob 返回的路径可能使用 \ 分隔符，必须同时处理 / 和 \
 const files = (await Array.fromAsync(new Bun.Glob("**/package.json").scan({ cwd: root }))).filter(
-  (file) => !file.split("/").some((part) => skip.has(part)),
+  (file) => !file.split(/[\\/]/).some((part) => skip.has(part)),
 )
 
 const setVersion = (cur: string) => {
