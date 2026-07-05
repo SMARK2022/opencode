@@ -147,11 +147,10 @@ export function DialogPrompt(props: DialogPromptProps) {
       <box gap={1}>
         {props.description?.()}
         <textarea
-          // minHeight=3 保证空态有足够视觉空间；maxHeight=9 让长文本（如 6400 字符的 goal objective）
-          // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
-          // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
+          // 空态保留3行，长objective最多显示15行；只扩展可见窗口，不限制或截断6400字符正文。
+          // medium宽60时内容宽56；24行终端中标题、15行正文和footer仍有布局余量。
           minHeight={3}
-          maxHeight={9}
+          maxHeight={15}
           ref={(val: TextareaRenderable) => {
             textarea = val
             setTextareaTarget(val)

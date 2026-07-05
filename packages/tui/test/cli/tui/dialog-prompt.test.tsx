@@ -113,7 +113,7 @@ test("dialog prompt submit wins when return is also input newline", async () => 
     expect(textarea.height).toBe(3)
     textarea.setText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"))
     await prompt.app.renderOnce()
-    expect(textarea.height).toBe(9)
+    expect(textarea.height).toBe(15)
     textarea.setText("draft")
     await prompt.app.renderOnce()
     expect(textarea.height).toBe(3)
