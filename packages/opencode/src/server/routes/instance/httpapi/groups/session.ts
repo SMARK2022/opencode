@@ -600,7 +600,10 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: GoalSetPayload,
           success: described(GoalResponse, "Updated session goal"),
-          error: [HttpApiError.BadRequest, GoalApiError, ApiNotFoundError],
+          // 只声明 GoalApiError(400) + ApiNotFoundError(404)，不重复声明 HttpApiError.BadRequest(400)。
+          // 两个 400 会导致 OpenAPI 生成重复响应码，SDK build 的 tsc 阶段失败。
+          // GoalApiError 携带 data.message，严格优于空的 BadRequest。
+          error: [GoalApiError, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.goal.set",
