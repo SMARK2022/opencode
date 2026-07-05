@@ -597,7 +597,6 @@ const layer = Layer.effect(
             const summary = yield* ToolDiffs.summarize(db, {
               sessionID: session.id, assistantMessageID: yield* publisher.startAssistant(finalizer),
               directory: location.directory, worktree: location.project.directory,
-              snapshot: endSnapshot, diff: snapshots.diff,
             })
             yield* withPublication(
               events.publish(SessionEvent.Step.Ended, {
