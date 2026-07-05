@@ -234,13 +234,14 @@ it.live("tool execution produces non-empty session diff (snapshot race)", () =>
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
 
-      // Use bash tool (always registered) to create a file
-      const command = `echo 'snapshot race test content' > ${path.join(dir, "race-test.txt")}`
-      yield* llm.toolMatch((hit) => JSON.stringify(hit.body).includes("create the file"), "bash", {
-        command,
-        description: "create test file",
+      // [local-smark] 使用 write 工具（而非 bash）创建文件：computeDiff 移除了
+      // git 兜底后，bash 不携带工具 metadata，其文件改动不会出现在 diff 中。
+      // write 工具对新文件也生成 diff metadata（write.ts 修复），能被工具流追踪。
+      yield* llm.toolMatch((hit) => JSON.stringify(hit.body).includes("create the file"), "write", {
+        filePath: path.join(dir, "race-test.txt"),
+        content: "snapshot race test content",
       })
-      yield* llm.textMatch((hit) => JSON.stringify(hit.body).includes("bash"), "done")
+      yield* llm.textMatch((hit) => JSON.stringify(hit.body).includes("write"), "done")
 
       // Seed user message
       yield* prompt.prompt({
@@ -268,7 +269,7 @@ it.live("tool execution produces non-empty session diff (snapshot race)", () =>
       const allMsgs = yield* MessageV2.filterCompactedEffect(session.id)
       const tool = allMsgs
         .flatMap((m) => m.parts)
-        .find((p): p is MessageV2.ToolPart => p.type === "tool" && p.tool === "bash")
+        .find((p): p is MessageV2.ToolPart => p.type === "tool" && p.tool === "write")
       expect(tool?.state.status).toBe("completed")
 
       // Poll for diff — summarize() is fire-and-forget

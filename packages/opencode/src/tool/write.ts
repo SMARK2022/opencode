@@ -95,11 +95,26 @@ export const WriteTool = Tool.define(
                   normalizeLineEndings(finalSource.text),
                 ),
               )
+            } else {
+              // 新文件被 formatter 改变内容：diff 基于格式化后的最终落盘内容，
+              // 使 computeDiff 的工具流能按工具归因追踪新文件改动
+              metadataDiff = trimDiff(
+                createTwoFilesPatch(
+                  filepath,
+                  filepath,
+                  "",
+                  normalizeLineEndings(finalSource.text),
+                ),
+              )
             }
             // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
               formattedContent = finalSource.text
             }
+          } else if (!exists) {
+            // 新文件且未格式化：用写入前已计算的 diff（空内容 → contentNew），
+            // 确保新文件写入也出现在工具流 diff 中，而非仅依赖 git 兜底
+            metadataDiff = diff
           }
           yield* bus.publish(File.Event.Edited, { file: filepath })
           yield* bus.publish(FileWatcher.Event.Updated, {
