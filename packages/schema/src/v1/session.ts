@@ -579,6 +579,8 @@ const SessionRevert = Schema.Struct({
   partID: optional(PartID),
   snapshot: optional(Schema.String),
   diff: optional(Schema.String),
+  // V1事件解码也需保留精确恢复路径，不能在共享mapper之后再丢失该字段。
+  revertedPaths: optional(Schema.Array(Schema.String)),
 })
 
 const SessionModel = Schema.Struct({

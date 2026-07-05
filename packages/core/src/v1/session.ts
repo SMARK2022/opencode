@@ -71,6 +71,8 @@ export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Sess
         partID: row.revert.partID ? PartID.make(row.revert.partID) : undefined,
         snapshot: row.revert.snapshot,
         diff: row.revert.diff,
+        // HTTP与事件共用此映射；复制路径数组保留精确恢复范围，且不暴露存储引用。
+        revertedPaths: row.revert.revertedPaths ? [...row.revert.revertedPaths] : undefined,
       }
     : undefined
   return {

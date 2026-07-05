@@ -18300,6 +18300,12 @@
               },
               "diff": {
                 "type": "string"
+              },
+              "revertedPaths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": ["messageID"],
@@ -25955,6 +25961,12 @@
               },
               "diff": {
                 "type": "string"
+              },
+              "revertedPaths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": ["messageID"],
@@ -29104,6 +29116,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/FileDiff"
+            }
+          },
+          "revertedPaths": {
+            "type": "array",
+            "items": {
+              "type": "string"
             }
           }
         },

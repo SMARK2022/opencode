@@ -230,6 +230,7 @@ export type Session = {
     partID?: string
     snapshot?: string
     diff?: string
+    revertedPaths?: Array<string>
   }
 }
 
@@ -2592,6 +2593,7 @@ export type GlobalSession = {
     partID?: string
     snapshot?: string
     diff?: string
+    revertedPaths?: Array<string>
   }
   project: ProjectSummary | null
 }
@@ -3583,6 +3585,7 @@ export type RevertState = {
   snapshot?: string
   diff?: string
   files?: Array<FileDiff>
+  revertedPaths?: Array<string>
 }
 
 export type PermissionV2Source = {

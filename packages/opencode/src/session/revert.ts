@@ -1,5 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Context, Schema, Option } from "effect"
+import path from "path"
+import { InstanceState } from "@/effect/instance-state"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Snapshot } from "../snapshot"
@@ -82,18 +84,38 @@ const layer = Layer.effect(
 
       if (!rev) return session
 
+      // 按工具触碰文件过滤 patch：同目录多 session 共享 snapshot gitdir 时 patch.files
+      // 含其他 session 的改动。computeDiff（0477 后纯工具流）提取本 session 工具实际
+      // 触碰的文件，过滤 patch.files 避免 revert 覆盖其他 session 的文件。
+      // 安全网：无工具 metadata（纯 bash turn 或旧数据）时 toolFiles 为空，不过滤，
+      // 保持原始全量 revert 行为——不误丢非工具 session 的回滚能力。
+      const toolIndex = all.findIndex((msg) => msg.info.id === rev.messageID)
+      const toolRange = toolIndex < 0 ? [] : all.slice(toolIndex)
+      const toolDiffs = yield* summary.computeDiff({ messages: toolRange })
+      const ictx = yield* InstanceState.context
+      const toolFiles = new Set(
+        toolDiffs
+          .map((d) => d.file)
+          .filter((f): f is string => Boolean(f))
+          .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
+      )
+      const filteredPatches = toolFiles.size > 0
+        ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
+        : patches
+      // 记录被 revert 的文件列表（revertedPaths），供 unrevert/二次 revert 精确恢复
+      const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
+
       rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* snap.revert(patches)
+      // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
+      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.revertedPaths)
+      yield* snap.revert(filteredPatches)
       if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
-      const index = all.findIndex((msg) => msg.info.id === rev.messageID)
-      const range = index < 0 ? [] : all.slice(index)
-      const diffs = yield* summary.computeDiff({ messages: range })
+      const diffs = toolDiffs
       yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
       yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
       yield* sessions.setRevert({
         sessionID: input.sessionID,
-        revert: rev,
+        revert: { ...rev, revertedPaths: revertedFiles.length > 0 ? revertedFiles : undefined },
         summary: {
           additions: diffs.reduce((sum, x) => sum + x.additions, 0),
           deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
@@ -118,7 +140,7 @@ const layer = Layer.effect(
             const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
             if (!session.revert) return session
             // 恢复撤回前快照，标志仍与正常revert共用同一释放边界。
-            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
+            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.revertedPaths)
             yield* sessions.clearRevert(input.sessionID)
             return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
           }),

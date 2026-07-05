@@ -38,7 +38,7 @@ export interface Interface {
   readonly cleanup: () => Effect.Effect<void>
   readonly track: () => Effect.Effect<string | undefined>
   readonly patch: (hash: string) => Effect.Effect<Patch>
-  readonly restore: (snapshot: string) => Effect.Effect<void>
+  readonly restore: (snapshot: string, files?: string[]) => Effect.Effect<void>
   readonly revert: (patches: Patch[]) => Effect.Effect<void>
   readonly diff: (hash: string) => Effect.Effect<string>
   readonly diffFull: (from: string, to: string) => Effect.Effect<FileDiff[]>
@@ -391,27 +391,24 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
           )
         })
 
-        const restore = Effect.fnUntraced(function* (snapshot: string) {
+        const restore = Effect.fnUntraced(function* (snapshot: string, files?: string[]) {
           return yield* locked(
             Effect.gen(function* () {
               yield* Effect.logInfo("restore", { commit: snapshot })
-              const result = yield* git([...core, ...args(["read-tree", snapshot])], { cwd: state.worktree })
-              if (result.code === 0) {
-                const checkout = yield* git([...core, ...args(["checkout-index", "-a", "-f"])], {
-                  cwd: state.worktree,
-                })
-                if (checkout.code === 0) return
-                yield* Effect.logError("failed to restore snapshot", {
-                  snapshot,
-                  exitCode: checkout.code,
-                  stderr: checkout.stderr,
-                })
-                return
-              }
+              // 目录限定的 restore：git checkout <snapshot> -- <pathspec> 替代
+              // read-tree + checkout-index -a。旧实现无 pathspec 会把共享 index 中
+              // 所有文件写入 worktree（含其他 session 目录/其他 session 改动）。
+              // files 提供时（revert/unrevert 精确恢复）只 checkout 这些文件；
+              // 无 files 时退回 -- . 恢复整个目录（当前 session 的目录限定）。
+              const pathspec = files && files.length > 0 ? files : ["."]
+              const checkout = yield* git([...core, ...args(["checkout", snapshot, "--", ...pathspec])], {
+                cwd: state.directory,
+              })
+              if (checkout.code === 0) return
               yield* Effect.logError("failed to restore snapshot", {
                 snapshot,
-                exitCode: result.code,
-                stderr: result.stderr,
+                exitCode: checkout.code,
+                stderr: checkout.stderr,
               })
             }),
           )
@@ -551,8 +548,12 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
           return yield* locked(
             Effect.gen(function* () {
               yield* add()
+              // cwd 必须为 state.directory 而非 state.worktree，使 -- "." 限定到
+              // 当前 session 目录；旧实现整 worktree 匹配会把共享 index 中其他
+              // 目录（其他 session）的改动泄入 diff 文本。与 patch()/diffFull()
+              // 的目录限定保持一致。
               const result = yield* git([...quote, ...args(["diff", "--cached", "--no-ext-diff", hash, "--", "."])], {
-                cwd: state.worktree,
+                cwd: state.directory,
               })
               if (result.code !== 0) {
                 yield* Effect.logWarning("failed to get diff", {
@@ -811,8 +812,8 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
       patch: Effect.fn("Snapshot.patch")(function* (hash: string) {
         return yield* InstanceState.useEffect(state, (s) => s.patch(hash))
       }),
-      restore: Effect.fn("Snapshot.restore")(function* (snapshot: string) {
-        return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot))
+      restore: Effect.fn("Snapshot.restore")(function* (snapshot: string, files?: string[]) {
+        return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot, files))
       }),
       revert: Effect.fn("Snapshot.revert")(function* (patches: Patch[]) {
         return yield* InstanceState.useEffect(state, (s) => s.revert(patches))
