@@ -80,6 +80,8 @@ const appProcess = Layer.succeed(
     run: (command: ChildProcess.Command, options?: AppProcess.RunOptions) =>
       Effect.suspend(() => {
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
+        // 非Windows独立进程组是取消/超时隔离契约，不能为规避stdout竞态改成仅Linux。
+        expect(command.options.detached).toBe(process.platform !== "win32")
         // 仅在测试观察边界解码传输包装；完整argv仍保留，真实编码由另一个实进程用例验证。
         const argument = command.args.at(-1)
         // 只观察外层脚本块中的原始命令；偏好行数和末尾流重定向不属于用户输入。
