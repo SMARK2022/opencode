@@ -5,7 +5,6 @@ import { and, asc, eq } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { FileDiff } from "@opencode-ai/schema/file-diff"
 import { Database } from "../database/database"
-import { Snapshot } from "../snapshot"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { SessionMessageTable } from "./sql"
@@ -74,8 +73,6 @@ export const summarize = Effect.fn("ToolDiffs.summarize")(function* (db: Databas
   assistantMessageID: SessionMessage.ID
   directory: string
   worktree: string
-  snapshot?: Snapshot.ID
-  diff: Snapshot.Interface["diff"]
 }) {
   const owner = yield* db.select({ requestID: RequestUsageAssistantTable.request_id }).from(RequestUsageAssistantTable).where(and(
     eq(RequestUsageAssistantTable.session_id, input.sessionID), eq(RequestUsageAssistantTable.assistant_message_id, MessageID.make(input.assistantMessageID)),
@@ -95,15 +92,9 @@ export const summarize = Effect.fn("ToolDiffs.summarize")(function* (db: Databas
     .orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
   const messages = rows.map(row => decode({ ...row.data, id: row.id, type: row.type }))
     .filter((message): message is SessionMessage.Assistant => message.type === "assistant" && !hidden(message.metadata?.hidden))
+  // Native与V1同样只消费当前请求的完成工具；整树快照既不参与归因，也不再吞错补成功。
   const byTool = collect(messages.flatMap(message => message.content.flatMap(part =>
     part.type === "tool" && part.state.status === "completed" ? [part.state.structured] : [],
   )), input.worktree, input.directory)
-  const from = messages.find(message => message.snapshot?.start)?.snapshot?.start
-  // 只补工具未覆盖文件，保留纯shell/MCP的快照收益；快照关闭时仍能使用已完成的工具证据。
-  const gitDiffs = from && input.snapshot ? yield* input.diff({ from: Snapshot.ID.make(from), to: input.snapshot })
-    .pipe(Effect.catch(() => Effect.succeed([]))) : []
-  const covered = new Set(byTool.map(item => item.file))
-  return { messageID, diffs: [...byTool, ...gitDiffs.filter(item => !covered.has(item.path)).map(item => ({
-    file: item.path, patch: item.patch, additions: item.additions, deletions: item.deletions, status: item.status,
-  }))] }
+  return { messageID, diffs: byTool }
 })

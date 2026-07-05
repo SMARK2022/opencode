@@ -165,16 +165,15 @@ describe("SessionProjector", () => {
       yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: other, timestamp: created, agent: "build", model })
       yield* complete(other, "other", "edit", { files: [{ file: "other.ts", patch: "+other\n", additions: 1, deletions: 0 }] })
       const input = { sessionID, assistantMessageID, directory: "/project/app", worktree: "/project" }
-      const withoutSnapshots = yield* ToolDiffs.summarize(db, { ...input, diff: () => Effect.die("must not read snapshots") })
+      const withoutSnapshots = yield* ToolDiffs.summarize(db, input)
       expect(withoutSnapshots?.messageID).toBe(first.id)
       expect(withoutSnapshots?.diffs.map(item => item.file)).toEqual(["app/a.ts", "app/gone.ts", "app/new.ts"])
-      const summary = yield* ToolDiffs.summarize(db, { ...input, snapshot: Snapshot.ID.make("tree_after"), diff: () => Effect.succeed([
-        { path: RelativePath.make("app/a.ts"), status: "modified", patch: "+wrong\n", additions: 99, deletions: 0 },
-        { path: RelativePath.make("shell.ts"), status: "added", patch: "+shell\n", additions: 1, deletions: 0 },
-      ]) })
-      // 快照只能补未覆盖文件，同文件必须保留当前请求工具的真实patch和计数。
-      expect(summary?.diffs.slice(0, 3)).toEqual(withoutSnapshots?.diffs)
-      expect(summary?.diffs[3]).toMatchObject({ file: "shell.ts", patch: "+shell\n" })
+      const withSnapshots = { ...input, snapshot: Snapshot.ID.make("tree_after"),
+        diff: () => Effect.die("tool-only summary must not read whole-tree snapshots") }
+      const summary = yield* ToolDiffs.summarize(db, withSnapshots)
+      // 即使消息及旧调用载荷仍有快照，也只保留工具文件；shell等外部变更不再偷偷补入。
+      expect(summary?.diffs).toEqual(withoutSnapshots?.diffs)
+      expect(summary?.diffs[3]).toBeUndefined()
       expect(summary?.diffs[0]).toMatchObject({ file: "app/a.ts", patch: "+edit\n+patch\n", additions: 2, deletions: 0, status: "modified" })
       expect(summary?.diffs[1]?.status).toBe("deleted")
       expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n+formatted\n" })

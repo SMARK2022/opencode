@@ -98,11 +98,19 @@ export const WriteTool = Tool.define(
                 normalizeLineEndings(finalSource.text),
               ),
             )
+            } else {
+              // 格式化新文件的diff必须取最终落盘文本，不能漏记或回用格式化前内容。
+              metadataDiff = trimDiff(
+                createTwoFilesPatch(filepath, filepath, "", normalizeLineEndings(finalSource.text)),
+              )
             }
             // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
               formattedContent = finalSource.text
             }
+          } else if (!exists) {
+            // 未格式化的新文件复用写前diff；该分支属于外层最终内容判断。
+            metadataDiff = diff
           }
           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
           yield* events.publish(Watcher.Event.Updated, {
