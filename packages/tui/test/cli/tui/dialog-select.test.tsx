@@ -211,3 +211,20 @@ test("dialog select keeps current fallback for unkeyed object values", async () 
     app.cleanup()
   }
 })
+
+test("goal menu mounts large without a search filter", async () => {
+  const source = await Bun.file(new URL("../../../src/component/dialog-goal.tsx", import.meta.url)).text()
+  const menu = source.match(/export function DialogGoalMenu\([\s\S]*?\n\}/)?.[0]
+  const mount = menu?.match(/onMount\(\(\) => dialog\.setSize\("large"\)\)/)?.[0]
+  expect(mount).toBeDefined()
+  const sizes: string[] = []
+  // 执行真实挂载语句，不在测试中重写 setSize 决策，也不导入 App/SDK 初始化链。
+  new Function(
+    "onMount",
+    "dialog",
+    mount!,
+  )((run: () => void) => run(), { setSize: (size: string) => sizes.push(size) })
+  expect(sizes).toEqual(["large"])
+  // 菜单自身关闭 filter 才能省行，其他 DialogSelect 用例继续验证真实列表布局。
+  expect(menu).toMatch(/<DialogSelect\s[\s\S]*?renderFilter=\{false\}/)
+})
