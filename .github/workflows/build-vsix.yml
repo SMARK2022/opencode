@@ -116,10 +116,15 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" sdks/vscode/dist/*.vsix --clobber --repo "$GITHUB_REPOSITORY"
           else
+            # --prerelease 防止 VSIX release 抢占 GitHub "latest" release 位置。
+            # install 脚本用 releases/latest/download/install 下载安装脚本，
+            # 若 VSIX release 成为 latest，install 资产不存在 → 404，
+            # 且 tag_name 的版本号会被误解析为 VSCode 扩展版本而非 CLI 版本。
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "VSCode Extension $VERSION" \
               --generate-notes \
+              --prerelease \
               sdks/vscode/dist/*.vsix
           fi
