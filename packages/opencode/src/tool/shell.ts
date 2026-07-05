@@ -451,13 +451,15 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
   // Bun macOS 上 shell 选项 + detached 组合存在 stdout 管道未建立的 bug，
   // 导致 echo test 退出码 0 但输出为空。显式 -c 在所有平台行为等价且避免该 bug。
   // cmd.exe 需保留 /d（禁用 AutoRun 注册表命令）和 /s（规范引号剥离）标志。
+  // macOS CI 上 detached:true 仍可能导致 stdout 管道竞态（调度抖动使管道未及时建立），
+  // 仅 Linux 保留 detached:true（Linux 调度更稳定且需要进程组隔离）。
   const n = Shell.name(shell)
   const shellArgs = n === "cmd" ? ["/d", "/s", "/c", command] : ["-c", command]
   return ChildProcess.make(shell, shellArgs, {
     cwd,
     env,
     stdin: "ignore",
-    detached: process.platform !== "win32",
+    detached: process.platform === "linux",
   })
 }
 
