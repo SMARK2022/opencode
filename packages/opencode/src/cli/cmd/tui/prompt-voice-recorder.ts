@@ -44,10 +44,11 @@ const VOICE_RECORDER_DEVICE_INDEX = -1
 // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
 const VOICE_RECORDER_BUFFERED_FRAMES = 250
 // queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
-// macOS CI 调度抖动可使 4ms busyWait 的 wall-clock 测量值膨胀至 24ms 以上，
-// 导致 drainBufferedFrames 误判缓冲耗尽而提前终止（丢失尾部 queued 帧）。
-// 0.9 系数给出 28ms 阈值：queued read（~5ms）留 23ms 余量，live read（~32ms 帧周期）仍可正确区分。
-// 28ms 距 32ms 仅 4ms，但调度抖动只会膨胀测量值、不会缩短，因此 4ms 间隙不可被抖动闭合。
+// 生产环境中 queued read 是亚毫秒级 memcpy，live read 阻塞约一个帧周期（32ms）。
+// 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
+// 调度抖动只会膨胀 wall-clock 测量值、不会缩短，因此 live read 不会被误判为 queued。
+// drainBufferedFrames 对首次慢读做二次确认（再读一帧），防止单次抢占膨胀的 queued read
+// 被误判为 live 而丢失全部尾部帧；只有连续两帧都慢才认定缓冲耗尽。
 const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
 // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
 const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
@@ -376,9 +377,20 @@ function drainBufferedFrames(PvRecorder: PvRecorderConstructor, recorder: PvReco
   for (let index = 0; index < VOICE_RECORDER_BUFFERED_FRAMES; index++) {
     const startedAt = performance.now()
     const frame = readFrame(PvRecorder, recorder)
-    // 同步 native read 不能被 JS timeout 中断；耗时达到 live 帧级别时丢弃该帧并停止，只保留 stop 前已缓冲音频。
-    if (performance.now() - startedAt >= VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) return
+    // 快返回的 read 是 queued backlog，直接保留。
+    if (performance.now() - startedAt < VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) {
+      frames.push(frame)
+      continue
+    }
+    // 单次慢读可能是缓冲耗尽进入 live read，也可能是 OS 调度抢占导致的 wall-clock 膨胀。
+    // 再读一帧确认：连续两帧都慢才认定为 live read，避免单次抢占导致尾部 queued 帧全部丢失。
+    // 确认帧会额外消耗一个 native 帧周期（~32ms），但仅在首次遇到慢读时触发一次，对 stop 延迟可忽略。
+    const confirmStartedAt = performance.now()
+    const confirmFrame = readFrame(PvRecorder, recorder)
+    if (performance.now() - confirmStartedAt >= VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) return
+    // 确认帧快返回：前一帧是抢占膨胀的 queued 帧，两帧都是有效 backlog 数据，一并保留。
     frames.push(frame)
+    frames.push(confirmFrame)
   }
 }
 

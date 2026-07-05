@@ -14,6 +14,9 @@ class FakePvRecorder {
   static queuedReadDelayMs = 0
   static liveReadDelayMs = 0
   static liveFrameValue = 321
+  // 指定 readCount 的 read 强制走 live 延迟，模拟 OS 调度抢占导致的单次慢读。
+  // 用于确定性地测试 drainBufferedFrames 的两阶段确认机制，不依赖 wall-clock 时序。
+  static slowOnReadCount: number | undefined
   static _pvRecorder = {
     read: (_handle: bigint, pcm: Int16Array) => {
       FakePvRecorder.readCount++
@@ -21,9 +24,15 @@ class FakePvRecorder {
       if (FakePvRecorder.readStatus !== 0) return FakePvRecorder.readStatus
       // queuedFrameValues 模拟 native circular buffer 中已经录好的历史帧，应该被 stop drain 快速读走。
       const queued = FakePvRecorder.queuedFrameValues.shift()
-      if (queued !== undefined && FakePvRecorder.queuedReadDelayMs > 0) busyWait(FakePvRecorder.queuedReadDelayMs)
-      // 队列耗尽后的 live read 会阻塞一个帧周期；测试用它证明实现不会继续录入 stop 之后的声音。
-      if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) busyWait(FakePvRecorder.liveReadDelayMs)
+      // slowOnReadCount 模拟 OS 调度抢占：指定 readCount 的 read 强制走 live 延迟，
+      // 不论该帧来自 queued backlog 还是 live capture，用于确定性地测试两阶段确认机制。
+      if (FakePvRecorder.slowOnReadCount === FakePvRecorder.readCount) {
+        busyWait(FakePvRecorder.liveReadDelayMs)
+      } else if (queued !== undefined && FakePvRecorder.queuedReadDelayMs > 0) {
+        busyWait(FakePvRecorder.queuedReadDelayMs)
+      } else if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) {
+        busyWait(FakePvRecorder.liveReadDelayMs)
+      }
       pcm.fill(queued ?? FakePvRecorder.liveFrameValue)
       return 0
     },
@@ -74,6 +83,7 @@ describe("prompt voice recorder", () => {
     FakePvRecorder.queuedReadDelayMs = 0
     FakePvRecorder.liveReadDelayMs = 40
     FakePvRecorder.liveFrameValue = 321
+    FakePvRecorder.slowOnReadCount = undefined
     delete (globalThis as { OPENCODE_COMPILED?: boolean }).OPENCODE_COMPILED
   })
 
@@ -172,10 +182,10 @@ describe("prompt voice recorder", () => {
   // stop 写 WAV 前必须把这些已经存在的 queued 帧读出来，否则最终文件会比用户实际录音短。
   // fake recorder 用 bufferedFramesCount 限制可保留帧数，测试通过行为验证 buffer 预算，而不是读取源码常量。
   // 断言帧数来自 WAV data chunk，确保最终落盘内容完整，而不只是 readCount 变大。
-  // 当前旧实现只写首帧；完整修复应写首帧加阻塞期间保留下来的 120 帧。
-  // macOS CI 注意：busyWait(4) 的测量值可能因调度抖动膨胀至 24ms 以上，
-  // 导致 drainBufferedFrames 误判缓冲耗尽而提前终止。
-  // 生产代码的 DRAIN_BLOCKED_READ_MS 阈值需留出足够余量（28ms = 0.9×32ms）。
+  // queued read 不引入 busyWait：真实 PvRecorder queued read 是亚毫秒级 memcpy，
+  // 人为 busyWait 会把 wall-clock 测量推近 drain 阈值（28ms），CI 调度抖动下触发
+  // drainBufferedFrames 误判缓冲耗尽而提前终止，丢失尾部 queued 帧。
+  // live read 用 40ms busyWait 模拟帧周期，远超 28ms 阈值，确保被 drain 正确丢弃。
   test("writes audio buffered during a stalled TUI tick before stopping", async () => {
     const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
 
@@ -183,7 +193,35 @@ describe("prompt voice recorder", () => {
     try {
       await waitForFakeRead()
       FakePvRecorder.queueNativeFrames(120)
-      FakePvRecorder.queuedReadDelayMs = 4
+      // queuedReadDelayMs 保持 beforeEach 的 0：不为人造延迟引入 wall-clock 敏感性。
+      FakePvRecorder.liveReadDelayMs = 40
+      FakePvRecorder.liveFrameValue = 9_999
+      await recorder.stop()
+
+      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
+
+      expect(wavFrameCount(wav)).toBe(121)
+      expect(wavSamples(wav)).not.toContain(9_999)
+    } finally {
+      await recorder.abort()
+    }
+  })
+
+  // 两阶段确认机制：drain 遇到单次慢读时不应直接终止而丢失剩余 queued 帧。
+  // slowOnReadCount 确定性地让第 50 次 read（drain 的第 49 个 queued 帧）走 live 延迟，
+  // 模拟 OS 调度抢占。其余 queued read 保持亚毫秒。确认机制应读到第 51 帧（快），
+  // 判定第 50 帧为抢占而非缓冲耗尽，两帧都保留，继续 drain 直到真正的 live read。
+  // 最终 WAV 帧数仍为 121（1 bg + 120 drain），live 帧（9999）被两阶段确认正确丢弃。
+  test("recovers queued frames after a single slow read via drain confirmation", async () => {
+    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
+
+    const recorder = await startPromptVoiceRecorder()
+    try {
+      await waitForFakeRead()
+      // bg 循环已读取 1 帧（readCount=1）；drain 从 readCount=2 开始。
+      // slowOnReadCount=50 让 drain 的第 49 个 queued 帧模拟单次抢占慢读。
+      FakePvRecorder.queueNativeFrames(120)
+      FakePvRecorder.slowOnReadCount = 50
       FakePvRecorder.liveReadDelayMs = 40
       FakePvRecorder.liveFrameValue = 9_999
       await recorder.stop()

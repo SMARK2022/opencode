@@ -1,8 +1,10 @@
 import { Effect, Layer, Context, Schema, Option } from "effect"
+import path from "path"
 import { Bus } from "../bus"
 import { Snapshot } from "../snapshot"
 import { Storage } from "@/storage/storage"
 import { SyncEvent } from "../sync"
+import { InstanceState } from "@/effect/instance-state"
 import * as Log from "@opencode-ai/core/util/log"
 import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
@@ -71,17 +73,37 @@ export const layer = Layer.effect(
 
       if (!rev) return session
 
-      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* snap.revert(patches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+      // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
+      // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
+      // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
+      // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
+      // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
       const range = all.filter((msg) => msg.info.id >= rev.messageID)
-      const diffs = yield* summary.computeDiff({ messages: range })
+      const toolDiffs = yield* summary.computeDiff({ messages: range })
+      const ictx = yield* InstanceState.context
+      const toolFiles = new Set(
+        toolDiffs
+          .map((d) => d.file)
+          .filter((f): f is string => Boolean(f))
+          .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
+      )
+      const filteredPatches = toolFiles.size > 0
+        ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
+        : patches
+      // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
+      const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
+
+      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
+      // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
+      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
+      yield* snap.revert(filteredPatches)
+      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+      const diffs = toolDiffs
       yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
       yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
       yield* sessions.setRevert({
         sessionID: input.sessionID,
-        revert: rev,
+        revert: { ...rev, files: revertedFiles.length > 0 ? revertedFiles : undefined },
         summary: {
           additions: diffs.reduce((sum, x) => sum + x.additions, 0),
           deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
@@ -96,7 +118,8 @@ export const layer = Layer.effect(
       yield* state.assertNotBusy(input.sessionID)
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       if (!session.revert) return session
-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
+      // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
+      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
       yield* sessions.clearRevert(input.sessionID)
       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
     })

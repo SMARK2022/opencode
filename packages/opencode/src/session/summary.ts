@@ -76,53 +76,19 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sessions = yield* Session.Service
-    const snapshot = yield* Snapshot.Service
     const storage = yield* Storage.Service
     const bus = yield* Bus.Service
 
     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: MessageV2.WithParts[] }) {
-      // 修改文件追踪以「工具调用流」为主源：edit/write/apply_patch 各自携带落盘前后的
-      // 文件改动证据（part.state.metadata），按文件聚合后能区分不同工具/并行 subagent
-      // 的改动归属，避免 git 整树快照把并发改动并集成 A∪B。
-      // worktree 与 snapshot.diffFull 同款依赖（后者内部已用 InstanceState），故此处取用不引入新运行时依赖。
+      // 修改文件追踪以「工具调用流」为唯一来源：edit/write/apply_patch 各自携带
+      // 落盘前后的文件改动证据（part.state.metadata），按文件聚合后能区分不同工具/
+      // 并行 subagent 的改动归属。不使用 git 整树快照 diff（diffFull）兜底——后者在
+      // 同目录多 session 场景下会把其他 session 的改动并入（A∪B 问题），也无法区分
+      // 工具改动与外部改动。工具未覆盖的文件（bash/MCP/手动编辑）不出现在 diff 中，
+      // 这是有意为之的取舍：宁可遗漏非工具改动，也不混入其他 session 的改动。
       const ctx = yield* InstanceState.context
-      // worktree 是 git 项目的根（与 git numstat、apply_patch 的相对基一致）；
-      // 非 git 项目 worktree="/"（见 project.fromDirectory），此时退回 directory 作为相对基。
       const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
-      const byTool = collectToolDiffs(input.messages, base)
-
-      // git 兜底：未被任何工具记录的文件改动（write 新文件、MCP、bash、手动编辑）
-      // 仍由整树快照 diff 补齐，保证「无工具的纯 shell turn」行为不回归。
-      let from: string | undefined
-      let to: string | undefined
-      for (const item of input.messages) {
-        if (!from) {
-          for (const part of item.parts) {
-            if (part.type === "step-start" && part.snapshot) {
-              from = part.snapshot
-              break
-            }
-          }
-        }
-        for (const part of item.parts) {
-          if (part.type === "step-finish" && part.snapshot) to = part.snapshot
-        }
-      }
-      const gitDiffs = from && to ? yield* snapshot.diffFull(from, to) : []
-
-      // 合并：工具覆盖的文件优先按工具归属（Copilot working-set 语义，单条工具 diff
-      // 即终态，不与 git hunk 拼接）；仅补齐工具未触及的文件。git 历史条目 file 可选，
-      // 缺省视为未被工具覆盖以免误丢弃。
-      // 注意 git numstat 路径相对 directory（snapshot/index.ts 中 git 以 state.directory 为
-      // cwd），而工具条目相对 worktree；当 directory 是 worktree 的子目录（monorepo/
-      // submodule）时两者不同基，需把 git 路径统一到 worktree 再去重，否则同一文件会重复。
-      const covered = new Set(byTool.map((item) => item.file))
-      const gitMerged = gitDiffs.map((item) => {
-        if (item.file === undefined) return item
-        const rel = toWorktreeRel(base, unquoteGitPath(item.file), ctx.directory)
-        return rel === item.file ? item : { ...item, file: rel }
-      })
-      return [...byTool, ...gitMerged.filter((item) => item.file === undefined || !covered.has(item.file))]
+      return collectToolDiffs(input.messages, base)
     })
 
     const summarize = Effect.fn("SessionSummary.summarize")(function* (input: {
@@ -176,16 +142,14 @@ export const layer = Layer.effect(
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     Layer.provide(Session.defaultLayer),
-    Layer.provide(Snapshot.defaultLayer),
     Layer.provide(Storage.defaultLayer),
     Layer.provide(Bus.layer),
   ),
 )
 
-// 将路径统一为相对 base 的正斜杠路径，与 git numstat 输出格式对齐，
-// 保证工具来源与 git 兜底来源能在合并去重时按同一 key 匹配。
-// 相对路径按 fromBase（默认 base 本身）解析为绝对再求相对：git 路径来自 directory，
-// 工具的 apply_patch relativePath 来自 worktree，两者需各自正确的解析基。
+// 将路径统一为相对 base 的正斜杠路径，使不同工具来源（edit 的绝对路径、
+// apply_patch 的 worktree 相对路径）能按同一 key 聚合去重。
+// 相对路径按 fromBase（默认 base 本身）解析为绝对再求相对。
 function toWorktreeRel(base: string, target: string, fromBase: string = base) {
   const abs = path.isAbsolute(target) ? target : path.resolve(fromBase, target)
   return path.relative(base, abs).replaceAll("\\", "/")
@@ -265,7 +229,7 @@ function collectToolDiffs(messages: MessageV2.WithParts[], worktree: string): Sn
 
       const diff = stringValue(meta.diff)
       const fp = stringValue(meta.filepath)
-      // write：filepath+diff（仅 exists=true 时 diff 存在；新文件写由 git 兜底补齐）
+      // write：filepath+diff（exists=true 时 diff 为旧→新内容；exists=false 时 diff 为空→新内容）
       if (diff && fp) {
         const { additions, deletions } = countPatchStats(diff)
         merge(fp, diff, additions, deletions)

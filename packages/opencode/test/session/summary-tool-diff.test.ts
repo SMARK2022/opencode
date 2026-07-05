@@ -1,5 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
+import fs from "fs/promises"
+import path from "path"
 import { Session } from "@/session/session"
 import { SessionSummary } from "@/session/summary"
 import { Snapshot } from "@/snapshot"
@@ -184,6 +186,78 @@ describe("computeDiff tool-flow aggregation", () => {
         const diffs = yield* summary.computeDiff({ messages: [msg] })
         expect(diffs.map((d) => d.file)).toEqual(["keep.ts"])
       }),
+    ),
+  )
+
+  // [local-smark] 同目录 session 隔离：两个 session 在同一目录工作，A 改 .md、B 改 .ts。
+  // B 的 computeDiff 应只显示 .ts，不应包含 A 的 .md。
+  // 旧实现 computeDiff 会合并 git diffFull（整树快照），把同目录下所有文件改动并入，
+  // 包括其他 session 的改动。移除 git 兜底后，只有工具流（collectToolDiffs）的文件出现。
+  it.live(
+    "excludes same-directory changes from other sessions (tool-flow only)",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const summary = yield* SessionSummary.Service
+          const session = yield* Session.Service
+          const snapshot = yield* Snapshot.Service
+          const info = yield* session.create({})
+
+          // 初始文件，建立 git 基线
+          yield* Effect.promise(() => fs.writeFile(path.join(dir, "base.txt"), "base"))
+
+          // 取 before 快照（模拟 step-start 的 snapshot）
+          const before = yield* snapshot.track()
+          expect(before).toBeTruthy()
+
+          // 另一个 session 的改动：外部修改 md 文件（不经过本 session 的工具）
+          yield* Effect.promise(() => fs.writeFile(path.join(dir, "readme.md"), "from session A"))
+
+          // 本 session 的工具改动：edit ts 文件
+          const absTs = path.join(dir, "code.ts")
+          yield* Effect.promise(() => fs.writeFile(absTs, "original"))
+          // edit 工具的 metadata 携带 ts 文件的 diff 证据
+          const toolPartEdit = toolPart("edit", editMeta(absTs, "--- code.ts\n+++ code.ts\n@@ -1 +1 @@\n-original\n+modified\n", 1, 1))
+
+          // 取 after 快照（模拟 step-finish 的 snapshot）
+          const after = yield* snapshot.track()
+          expect(after).toBeTruthy()
+
+          // 构造带 step-start/tool/step-finish 的消息，使 git 兜底路径激活
+          const msg = assistantWithTools(info.id, dir, [
+            {
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID: MessageID.ascending(),
+              type: "step-start" as const,
+              snapshot: before,
+              inputChars: undefined,
+              inputTokens: 0,
+              inputBreakdown: undefined,
+            },
+            toolPartEdit,
+            {
+              id: PartID.ascending(),
+              sessionID: info.id,
+              messageID: MessageID.ascending(),
+              type: "step-finish" as const,
+              snapshot: after,
+              reason: "stop" as const,
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              inputChars: undefined,
+              inputBreakdown: undefined,
+            },
+          ])
+
+          const diffs = yield* summary.computeDiff({ messages: [msg] })
+
+          // 只应包含工具修改的 ts 文件，不应包含其他 session 改的 md 文件
+          const files = diffs.map((d) => d.file).sort()
+          expect(files).toContain("code.ts")
+          expect(files).not.toContain("readme.md")
+        }),
+      { git: true },
     ),
   )
 })

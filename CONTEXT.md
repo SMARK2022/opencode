@@ -126,7 +126,7 @@ _Avoid_: proxy-config, http-proxy
 
 ## Module map
 
-A descriptive index of current structure and each area's responsibility — **not** a design spec and **not** a statement of future direction. It indexes what exists now so skills (e.g. `zoom-out`) can navigate; the glossary above is the canonical vocabulary.
+A descriptive index of current structure and each area's responsibility — **not** a design spec and **not** a statement of future direction. It indexes what exists now so skills (e.g. `improve-codebase-architecture`, `diagnosing-bugs`) can navigate; the glossary above is the canonical vocabulary.
 
 ### `packages/opencode/src/`
 

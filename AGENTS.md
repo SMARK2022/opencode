@@ -12,7 +12,7 @@ Issues for the SMARK fork live on GitHub at `SMARK2022/opencode` (the `origin` r
 
 ### Triage labels
 
-The 5 canonical lifecycle labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) coexist with the team-assignment triage agent in `.opencode/agent/triage.md`. See `docs/agents/triage-labels.md`.
+The canonical triage roles — 2 category (`bug`, `enhancement`) + 5 state (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) — coexist with the team-assignment triage agent in `.opencode/agent/triage.md`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 

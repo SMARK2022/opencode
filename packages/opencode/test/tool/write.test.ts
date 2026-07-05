@@ -389,4 +389,57 @@ describe("tool.write", () => {
       }),
     )
   })
+
+  // [local-smark] 新文件写入必须携带 diff metadata，使 computeDiff 的工具流
+  // 能按工具归因追踪新文件改动，而非依赖 git 兜底（后者在多 session 共享
+  // worktree 时可能混入其他 session 的改动）。
+  describe("new file diff metadata", () => {
+    // 新文件（exists=false）无格式化：metadata.diff 应为空内容 → 写入内容的 patch
+    it.instance("sets diff metadata for new file without formatting", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "new-diff.txt")
+        const result = yield* run({ filePath: filepath, content: "line1\nline2\n" })
+
+        // exists=false 确认是新文件
+        expect(result.metadata.exists).toBe(false)
+        // 新文件必须有 diff metadata，供 collectToolDiffs 按工具归因
+        expect(result.metadata.diff).toBeDefined()
+        // diff 文本应包含新增的行（+ 前缀）
+        expect(result.metadata.diff).toContain("+line1")
+        expect(result.metadata.diff).toContain("+line2")
+      }),
+    )
+
+    // 新文件（exists=false）被 formatter 改变内容：metadata.diff 应基于格式化后的最终内容
+    itFormatted.instance("sets diff metadata for new file with formatting", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "new-fmt-diff.ts")
+        // 写入不含末尾换行的内容；mock formatter 会追加换行
+        const result = yield* run({ filePath: filepath, content: "const x=1" })
+
+        expect(result.metadata.exists).toBe(false)
+        expect(result.metadata.diff).toBeDefined()
+        // diff 应反映格式化后的最终内容（含追加的换行）
+        expect(result.metadata.diff).toContain("+const x=1")
+      }),
+    )
+
+    // 已有文件覆写：metadata.diff 应为旧内容 → 新内容的 patch（保持既有行为）
+    it.instance("sets diff metadata for existing file overwrite", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "overwrite-diff.txt")
+        yield* Effect.promise(() => fs.writeFile(filepath, "old content", "utf-8"))
+
+        const result = yield* run({ filePath: filepath, content: "new content" })
+
+        expect(result.metadata.exists).toBe(true)
+        expect(result.metadata.diff).toBeDefined()
+        expect(result.metadata.diff).toContain("-old content")
+        expect(result.metadata.diff).toContain("+new content")
+      }),
+    )
+  })
 })
