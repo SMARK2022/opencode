@@ -31,7 +31,10 @@ import * as DateTime from "effect/DateTime"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
 const DOOM_LOOP_THRESHOLD = 3
-const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
+// bounded kill（shell.ts 的 timeoutOrElse 500ms）后，tool 最多 500ms kill + ~500ms
+// output drain = 1s。2s 给 ~100% 安全边际。settle 是 per-tool 并行（concurrency:
+// "unbounded"），不串行累加。
+const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 export const TOOL_ABORTED_ERROR = "Tool execution aborted"
 const log = Log.create({ service: "session.processor" })
 

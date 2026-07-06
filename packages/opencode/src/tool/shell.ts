@@ -990,11 +990,31 @@ export const ShellTool = Tool.define(
 
           if (exit.kind === "abort") {
             aborted = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
+            // Effect ChildProcess.kill 的 forceKillAfter 只限制信号发送（Unix 同步
+            // 即完成），不限制 Deferred.await(exitSignal) 的进程退出等待（无上限）。
+            // 用 timeoutOrElse 包裹整个 kill，实现 SIGTERM→500ms→SIGKILL 序列，
+            // 复用代码库 shell/shell.ts:killTree 的 SIGKILL_TIMEOUT_MS=200 同款语义。
+            // orElse 加 Effect.ignore：进程可能在 SIGTERM 后恰好退出，SIGKILL 时
+            // 抛 ESRCH，与 killTree 的 exited() 检查同理。
+            yield* handle.kill().pipe(
+              Effect.timeoutOrElse({
+                duration: "500 millis",
+                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
+              }),
+              Effect.orDie,
+            )
           }
           if (exit.kind === "timeout") {
             expired = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+            // timeout 路径同样使用 bounded kill
+            yield* handle.kill().pipe(
+              Effect.timeoutOrElse({
+                duration: "500 millis",
+                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
+              }),
+              Effect.orDie,
+            )
           }
 
           // 子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完

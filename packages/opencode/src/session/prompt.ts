@@ -418,19 +418,30 @@ export const layer = Layer.effect(
       yield* cancelLock(sessionID).withPermits(1)(
         Effect.gen(function* () {
           yield* elog.info("cancel", { sessionID })
+          // 在中断 runner 前快照待终态化的 assistant 消息 ID，
+          // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀。
+          // MessageV2.stream 是同步生成器（无 yield*），快照对 Effect 调度器原子。
+          const pendingIds = new Set(
+            Array.from(MessageV2.stream(sessionID))
+              .filter((m) => m.info.role === "assistant" && !m.info.time.completed)
+              .map((m) => m.info.id),
+          )
           yield* state.cancel(sessionID)
-          yield* abortPendingAssistants(sessionID)
+          yield* abortPendingAssistants(sessionID, pendingIds)
         }),
       )
     })
 
-    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
+    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<string>) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<string>) {
       const pending = [] as (MessageV2.WithParts & { info: MessageV2.Assistant })[]
       for (const msg of MessageV2.stream(sessionID)) {
         if (msg.info.role !== "assistant") continue
         if (msg.info.time.completed) continue
+        // 只终态化 cancel 开始前已存在的消息，不触碰 cancel 后新建的消息
+        if (pendingIds && !pendingIds.has(msg.info.id)) continue
         pending.push(msg as MessageV2.WithParts & { info: MessageV2.Assistant })
       }
+      // 子会话递归时不传 pendingIds——子会话无用户输入竞态
       const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
         discard: true,
       })

@@ -108,14 +108,22 @@ export const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      yield* cancelBackgroundJobs(background, sessionID)
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
       if (!existing || !existing.busy) {
-        yield* status.set(sessionID, { type: "idle" })
+        // 无 runner 时仍需取消可能残留的 background jobs
+        yield* Effect.all([cancelBackgroundJobs(background, sessionID), status.set(sessionID, { type: "idle" })], {
+          concurrency: "unbounded",
+          discard: true,
+        })
         return
       }
-      yield* existing.cancel
+      // 并行取消 background jobs 和 runner fiber，避免串行等待。
+      // 两者操作独立的 resource（BackgroundJob 服务 vs runner fiber），都幂等。
+      yield* Effect.all([cancelBackgroundJobs(background, sessionID), existing.cancel], {
+        concurrency: "unbounded",
+        discard: true,
+      })
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
