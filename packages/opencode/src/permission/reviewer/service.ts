@@ -92,6 +92,8 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
 // consumers from confusing protocol retry cleanup with undo or session repair.
 const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
 // #227：协议失败重试的隐藏原因——首次尝试的畸形输出在重试前隐藏，避免用户把 JSON/散文答案误读为已批准
+// reviewer 总尝试次数：1 初始 + 2 重试。协议错误与超时共用该预算。
+const MAX_REVIEWER_ATTEMPTS = 3
 const PROTOCOL_RETRY_USER_ITEM = {
 // #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
   type: "text" as const,
@@ -205,20 +207,27 @@ export const layer = Layer.effect(
               )
             }) as Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error, never>
           }
-          const assessment = yield* runReviewerAttempt(messages, true).pipe(
-            Effect.catchIf(isReviewerDecisionProtocolError, () =>
-// #227：仅协议格式错误触发重试，其他错误直接走超时/mapError 路径
-              // Keep the evidence and requested action unchanged; only append a
-              // protocol nudge so the second attempt repairs submission format
-              // instead of broadening the authorization or policy context.
-              runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
-            ),
-            // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
-            Effect.timeoutOrElse({
-// #227：超时是重试之外的第二道保险——provider 挂起不阻塞 auto 权限评估
-              duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
-              orElse: () => Effect.fail(new ReviewerTimedOut()),
-            }),
+          // timeout_ms是每次执行预算，共三次尝试；清理开销不构成严格的总墙钟上限。
+          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
+          // 显式返回注解：递归函数的返回类型无法推断（TS7023/7024）
+          const reviewerRetry = (attemptNum: number, currentMessages: readonly ModelMessage[], hideProtocolFailure: boolean): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
+            runReviewerAttempt(currentMessages, hideProtocolFailure).pipe(
+              Effect.timeoutOrElse({
+                duration: `${perAttemptTimeout} millis`,
+                orElse: () => Effect.fail(new ReviewerTimedOut()),
+              }),
+              // catchIf 在 timeoutOrElse 外层：能捕获 ReviewerTimedOut 进行重试。
+              // 旧代码顺序相反，超时绕过了重试。
+              Effect.catchIf(isReviewerRetryable, (error) => {
+                if (attemptNum >= MAX_REVIEWER_ATTEMPTS - 1) return Effect.fail(error)
+                // 协议错误：附加 protocol nudge 修复提交格式；超时：保持原 prompt
+                const nextMessages = isReviewerDecisionProtocolError(error)
+                  ? buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] })
+                  : currentMessages
+                return reviewerRetry(attemptNum + 1, nextMessages, false)
+              }),
+            )
+          const assessment = yield* reviewerRetry(0, messages, true).pipe(
             // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
             Effect.mapError((error) =>
 // #227：非 reviewer 错误统一包装为 RunError——fail-closed 信号可被上层捕获
@@ -266,6 +275,15 @@ export const layer = Layer.effect(
               // #264：非 ReviewerError 的未知错误包成 ReviewerRunError——类型化错误契约不因 fallback 改造而破裂
               return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
             }),
+          ),
+          // 外部取消（session cancel/compaction）不触发 handleReviewerFailure（中断
+          // 不是 failure）；onInterrupt 作为 processor.interruptedToolMetadata 的补充，
+          // 覆盖 processor 清理未触达的边界（stuck reviewing 案例）。
+          Effect.onInterrupt(() =>
+            markToolReviewFailed(input, "aborted", "reviewer interrupted").pipe(
+              Effect.catch(() => Effect.void),
+              Effect.catchDefect(() => Effect.void),
+            ),
           ),
         )
       })
@@ -438,6 +456,20 @@ export const layer = Layer.effect(
               message.time.completed = Date.now()
               yield* session.updateMessage(message)
             }),
+          ),
+          // 超时中断不会触发 tapError（中断不是 failure）；onInterrupt 确保子会话
+          // assistant 消息始终写入终态，避免 repair-empty-dangling-assistant 延迟修复。
+          // 复用 prompt.ts finalizeInterruptedAssistant 的相同模式。
+          Effect.onInterrupt(() =>
+            Effect.gen(function* () {
+              if (message.time.completed) return
+              message.error ??= MessageV2.fromError(
+                new DOMException("Aborted", "AbortError"),
+                { providerID: input.model.providerID, aborted: true },
+              )
+              message.time.completed = Date.now()
+              yield* session.updateMessage(message)
+            }).pipe(Effect.catch(() => Effect.void), Effect.catchDefect(() => Effect.void)),
           ),
         )
         // #209：流结束后补全 finish 与 completed——tool-calls 标记决策工具已被调用
@@ -872,7 +904,7 @@ export const layer = Layer.effect(
     // #209：标记工具审查失败——timed_out/failed/fallback_user 状态和错误原因
     function markToolReviewFailed(
       input: PermissionAuto.ReviewInput,
-      status: "timed_out" | "failed" | "fallback_user",
+      status: "timed_out" | "failed" | "fallback_user" | "aborted",
       reason: string,
     ) {
       return updateToolAutoReview(input, { status, error: reason })
@@ -882,7 +914,7 @@ export const layer = Layer.effect(
     function updateToolAutoReview(
       input: PermissionAuto.ReviewInput,
       patch: {
-        status: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
+        status: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user" | "aborted"
         sessionID?: SessionID
         error?: string
         result?: {
@@ -911,6 +943,9 @@ export const layer = Layer.effect(
           metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
             ? metadata.autoReview
             : {}
+        // onInterrupt 可能在 handleReviewerFailure 写入终态后延迟触发；
+        // "aborted" 不应覆盖更具体的终态（timed_out/failed/fallback_user/allowed/denied）。
+        if (patch.status === "aborted" && current.status && current.status !== "reviewing") return
         yield* session.updatePart({
           ...part,
           state: {
@@ -975,6 +1010,11 @@ function isReviewerDecisionProtocolError(error: unknown) {
   // retrying those would blur operational failures with model formatting repair.
   return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
 }
+// 协议错误（reviewer 完成但未调用决策工具）和超时都触发重试。
+// provider 级 429/503 由 SessionRetry.retry 在每次尝试内处理，不经过此层。
+function isReviewerRetryable(error: unknown): boolean {
+  return isReviewerDecisionProtocolError(error) || error instanceof ReviewerTimedOut
+}
 
 // #203：reviewer 启用判定——显式 user 配置优先保留人工审批
 // #280：reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
@@ -986,9 +1026,28 @@ function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, _metad
 
 // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
 function errorMessage(error: unknown) {
-  if (error instanceof Error) return error.message
+  if (error instanceof Error) {
+    // AI SDK APICallError 携带 responseBody/statusCode，但 message 不包含它们。
+    // 提取这些字段使 reviewer 失败可诊断。responseBody 是 provider 的错误响应
+    //（非请求体），截断 300 字符，不含用户凭据。
+    const withResponse = error as Error & { responseBody?: string; statusCode?: number }
+    if (withResponse.responseBody) {
+      return `${error.message}${withResponse.statusCode ? ` (${withResponse.statusCode})` : ""}: ${withResponse.responseBody.slice(0, 300)}`
+    }
+    return error.message
+  }
   if (error && typeof error === "object" && "message" in error && typeof error.message === "string")
     return error.message
+  // 非 Error 对象（如 provider 结构化错误）可能无 message 字符串；
+  // JSON.stringify 比 String(error)（"[object Object]"）提供更多诊断信息。
+  // ?? 兜底 JSON.stringify(undefined) 返回 undefined 的情况；try-catch 防循环引用。
+  if (error && typeof error === "object") {
+    try {
+      return JSON.stringify(error) ?? String(error)
+    } catch {
+      return String(error)
+    }
+  }
   return String(error)
 }
 
@@ -1030,14 +1089,46 @@ export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Lay
 function assessmentFromJsonText(text: string) {
   const trimmed = text.trim()
   if (!trimmed) return
+  // 先尝试整体解析（覆盖模型直接输出纯 JSON 的正常路径）
+  const direct = parseAssessmentJson(trimmed)
+  if (direct) return direct
+  // 模型可能在 JSON 前后附加 prose 或 markdown fence。reviewer 模型是可信系统组件
+  //（非用户输入），Schema 校验和 invalidReviewContract 仍保证结构与语义安全。
+  // 提取仅扩大解析范围，不削弱 schema 或策略守卫。
+  const extracted = extractFirstJsonObject(trimmed)
+  if (extracted) return parseAssessmentJson(extracted)
+}
+
+function parseAssessmentJson(text: string) {
   try {
-    // Deliberately parse only the whole final text. Extracting JSON from prose,
-    // markdown fences, or mixed reasoning would let untrusted explanation text
-    // influence the permission boundary and belongs in the protocol retry path.
-    return Schema.decodeUnknownSync(Assessment)(JSON.parse(trimmed))
+    return Schema.decodeUnknownSync(Assessment)(JSON.parse(text))
   } catch {
     return
   }
+}
+
+// 用括号深度扫描提取第一个完整 JSON 对象，避免正则对嵌套结构的误匹配。
+// 处理字符串内的花括号和转义引号，防止误截断。
+function extractFirstJsonObject(text: string): string | undefined {
+  const start = text.indexOf("{")
+  if (start < 0) return
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === '"') inString = false
+    } else if (ch === '"') inString = true
+    else if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) return text.slice(start, i + 1)
+    }
+  }
+  return
 }
 
 function assessmentFromUnknown(input: unknown) {

@@ -19,7 +19,8 @@ export const AutoReview = Schema.Struct({
   // #196：但这些字段本身不是 rules，Permission.fromConfig 会跳过它们。
   // #196：model 指定 reviewer 使用的模型；timeout_ms 默认 90 秒。
   model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
-  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer timeout in milliseconds. Defaults to 90000." }),
+  // timeout_ms限制单次执行，共1次初始加2次重试，不把清理开销计成执行总界。
+  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Defaults to 90000." }),
   // #196：policy_path 和 policy 追加到默认 tenant policy 之后。
   policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
   policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
