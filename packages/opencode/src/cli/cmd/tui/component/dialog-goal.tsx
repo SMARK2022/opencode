@@ -4,8 +4,10 @@ import { useDialog } from "@tui/ui/dialog"
 import { useSync } from "@tui/context/sync"
 import { useSDK } from "@tui/context/sdk"
 import { useToast } from "@tui/ui/toast"
+import { useTheme } from "@tui/context/theme"
 import { createMemo, onMount } from "solid-js"
 import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
+import { Locale } from "@/util/locale"
 
 // [local-smark] goal 管理 dialog
 // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
@@ -105,6 +107,7 @@ export function DialogGoal(props: DialogGoalProps) {
 export function DialogGoalMenu(props: DialogGoalProps) {
   const dialog = useDialog()
   const sync = useSync()
+  const { theme } = useTheme()
   const { setGoal, clearGoal } = useGoalApi(props.sessionID)
 
   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
@@ -113,16 +116,36 @@ export function DialogGoalMenu(props: DialogGoalProps) {
   // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
   onMount(() => dialog.setSize("large"))
 
+  // header 显示 goal 摘要：每行用 wrapMode=none + overflow=hidden + Locale.truncate
+  // 保证可预测的行数，不依赖渲染器自动撑开容器
+  const goalHeader = createMemo(() => {
+    const g = goal()
+    if (!g) return undefined
+    return (
+      <box flexDirection="column" gap={0}>
+        {/* objective 截断到 68 chars（88 宽度 - 8 padding - 12 "Objective: " 前缀） */}
+        <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
+          {"Objective: " + (g.objective ? Locale.truncate(g.objective, 68) : "—")}
+        </text>
+        <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
+          {"Status: " + g.status + "  ·  Tokens: " + g.tokensUsed}
+        </text>
+      </box>
+    )
+  })
+
   return (
     <DialogSelect
       title="Manage Goal"
       // 只有 3-4 个选项，不需要搜索 filter；隐藏 filter 节省 2 行垂直空间，
       // 让小终端（≤18 行）也能完整显示所有选项无需滚动
       renderFilter={false}
+      header={goalHeader()}
       options={[
         {
           title: "Edit objective",
-          description: goal()?.objective,
+          // 截断 description 避免 4000 字符 objective 在选项行中换行导致 rows() 计算不准
+          description: goal()?.objective ? Locale.truncate(goal()!.objective, 60) : undefined,
           value: "edit",
           onSelect: () => {
             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)

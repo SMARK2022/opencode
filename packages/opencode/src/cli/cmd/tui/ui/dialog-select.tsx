@@ -46,6 +46,8 @@ export interface DialogSelectProps<T> {
   bindings?: readonly Binding<Renderable, KeyEvent>[]
   current?: T
   currentKey?: string
+  // 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度
+  header?: JSX.Element
 }
 
 export interface DialogSelectOption<T = any> {
@@ -443,6 +445,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           </box>
         </Show>
       </box>
+      {/* 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度 */}
+      <Show when={props.header}>
+        <box paddingLeft={4} paddingRight={4} paddingBottom={1}>
+          {props.header}
+        </box>
+      </Show>
       <Show
         when={grouped().length > 0}
         fallback={

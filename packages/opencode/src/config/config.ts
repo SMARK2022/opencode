@@ -286,9 +286,9 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
-  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10
+  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 32
   goal_max_turns: Schema.optional(NonNegativeInt).annotate({
-    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
+    description: "Maximum auto-continue turns per goal (default: 32, 0 to disable)",
   }),
   experimental: Schema.optional(
     Schema.Struct({

@@ -425,8 +425,8 @@ it.instance(
     Effect.gen(function* () {
       const config = yield* Config.Service
       const cfg = yield* config.get()
-      // goal_max_turns 在顶层可读，默认 10
-      expect((cfg as any).goal_max_turns ?? 10).toBe(10)
+      // goal_max_turns 在顶层可读，默认 32（0 = 禁用续跑）
+      expect((cfg as any).goal_max_turns ?? 32).toBe(32)
       // experimental.goals 不再存在，goal 功能始终可用
       expect((cfg as any).experimental?.goals).toBeUndefined()
     }),

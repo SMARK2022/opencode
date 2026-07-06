@@ -2138,7 +2138,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // 仅对主 session（无 parentID）和非 decide agent 生效。
             const cfg = yield* config.get()
             // [local-smark] goal 续跑不再需要 experimental 开关，始终可用
-            const maxGoalTurns = cfg.goal_max_turns ?? 10
+            const maxGoalTurns = cfg.goal_max_turns ?? 32
             if (
               maxGoalTurns > 0 &&
               !session.parentID &&
@@ -2182,6 +2182,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   yield* slog.info("goal continuation", { goalTurns, step })
                   continue
                 }
+              }
+            }
+            // max_turns 到达时将 active goal 暂停，避免 UI 误导用户以为 goal 仍在运行。
+            // maxGoalTurns=0 表示禁用续跑，不 pause；complete/blocked goal 不 pause。
+            // Resume 后 goal 回到 active，用户发送新消息时新 loop 以 goalTurns=0 开始。
+            if (maxGoalTurns > 0 && !session.parentID && goalTurns >= maxGoalTurns) {
+              const goalOpt = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              if (goalOpt._tag === "Some" && goalOpt.value.status === "active") {
+                yield* goalSvc.set(sessionID, { status: "paused" }).pipe(Effect.orDie)
               }
             }
             yield* slog.info("exiting loop")
