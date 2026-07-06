@@ -1554,7 +1554,10 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
     retryCode !== undefined ||
     message === "fetch failed" ||
     message === "failed to fetch" ||
-    message.startsWith("Cannot connect to API:")
+    message.startsWith("Cannot connect to API:") ||
+    // 仅在无 code 时兜底匹配 socket close message；有 code 的 ECONNRESET 等
+    // 由 fromError switch(true) 中的专用 case 处理，保持 "Connection reset by server" 消息
+    !code && message.includes("socket connection was closed")
 
   if (retryable) {
     return {

@@ -1013,7 +1013,7 @@ it.instance(
 )
 
 it.instance(
-  "auto permission reviewer fails closed after one malformed protocol retry",
+  "auto permission reviewer fails closed after two malformed protocol retries",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => ({
@@ -1024,9 +1024,11 @@ it.instance(
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
       const command = String.raw`rm "/tmp/file with spaces.txt"`
+      // reviewer 最多 3 次尝试（1 初始 + 2 重试），每次都输出 prose 而非 tool call
       yield* llm.push(
         reply().text("first malformed reviewer response").stop().item(),
         reply().text("second malformed reviewer response").stop().item(),
+        reply().text("third malformed reviewer response").stop().item(),
       )
 
       const exit = yield* permissions
@@ -1043,12 +1045,14 @@ it.instance(
       expect(Exit.isFailure(exit)).toBe(true)
       if (!Exit.isFailure(exit)) return
       expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.AutoDeniedError)
-      expect(yield* llm.calls).toBe(2)
+      // 3 次尝试全部协议错误后 fail closed
+      expect(yield* llm.calls).toBe(3)
       const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
       expect(reviewer).toBeDefined()
       if (!reviewer) return
 
       const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
+      // 第一次尝试被隐藏（hideProtocolFailure=true），后续可见
       expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed")))).toBe(false)
       expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed")))).toBe(true)
     }),
@@ -1157,6 +1161,109 @@ it.instance(
     }),
   { git: true },
   10_000,
+)
+
+it.instance(
+  "auto permission reviewer retries on timeout before falling back to user",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        // 极短超时使 hang 快速触发，验证超时后重试而非直接 unavailable
+        permission: { auto_review: { timeout_ms: 500 } },
+      }))
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer timeout retry" })
+      const command = String.raw`rm "/tmp/file with spaces.txt"`
+      // 第一次 hang → 超时中断 → 重试；第二次正常返回 tool call
+      yield* llm.hang
+      yield* llm.push(
+        reply()
+          .tool("permission_review_decision", {
+            outcome: "allow",
+            risk_level: "high",
+            user_authorization: "high",
+            rationale: "retry after timeout succeeded",
+          })
+          .item(),
+      )
+
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+
+      // 超时后重试成功：共 2 次 provider 调用
+      expect(yield* llm.calls).toBe(2)
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+      // 被超时中断的 assistant 消息应有终态（error + completed），不悬挂
+      const msgs = yield* MessageV2.page({ sessionID: reviewer.id, limit: 20, includeHidden: true })
+      const assistants = msgs.items.filter((m) => m.info.role === "assistant")
+      expect(assistants.length).toBeGreaterThanOrEqual(2)
+      // page 返回联合类型，需要断言为 Assistant 才能访问 time.completed / error
+      const interrupted = assistants[0].info as MessageV2.Assistant
+      expect(interrupted.time.completed).toBeDefined()
+      expect(interrupted.error).toBeDefined()
+    }),
+  { git: true },
+  30_000,
+)
+
+it.instance(
+  "auto permission reviewer extracts JSON from prose-prefixed text",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const permissions = yield* Permission.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reviewer JSON extraction" })
+      const command = String.raw`rsync -av "/Volumes/My Passport/Calibration/" Sensetimex4:~/project/Calibration/`
+      // 模型在 JSON 前附加 prose，旧实现只接受纯 JSON 会失败；修复后应提取第一个 {...} 块
+      yield* llm.push(
+        reply()
+          .text(
+            `Based on my analysis:\n${JSON.stringify({
+              outcome: "allow",
+              risk_level: "high",
+              user_authorization: "high",
+              rationale: "user explicitly authorized the bounded remote transfer",
+            })}`,
+          )
+          .stop()
+          .item(),
+      )
+      yield* permissions.ask({
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, agent: "auto" },
+        always: ["*"],
+        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+      })
+      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
+      expect(reviewer).toBeDefined()
+      if (!reviewer) return
+      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
+      // prose 前缀的 JSON 被提取并接受为 json_fallback 决策
+      expect(
+        reviewerParts.some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "permission_review_decision" &&
+            part.state.status === "completed" &&
+            part.state.metadata?.source === "json_fallback" &&
+            part.state.metadata?.rationale === "user explicitly authorized the bounded remote transfer",
+        ),
+      ).toBe(true)
+    }),
+  { git: true },
 )
 
 it.instance(
