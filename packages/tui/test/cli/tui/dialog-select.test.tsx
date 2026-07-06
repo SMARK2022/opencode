@@ -32,6 +32,7 @@ async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, text: s
 function DialogSelectHarness(props: {
   root: string
   state: string
+  header?: string
   options: DialogSelectOption<unknown>[]
   current?: unknown
   currentKey?: string
@@ -60,6 +61,7 @@ function DialogSelectHarness(props: {
                 <DialogProvider>
                   <DialogSelect
                     title="Models"
+                    header={props.header ? <text>{props.header}</text> : undefined}
                     options={props.options}
                     current={props.current}
                     currentKey={props.currentKey}
@@ -78,6 +80,7 @@ function DialogSelectHarness(props: {
 
 async function mountHarness(input: {
   root: string
+  header?: string
   options: DialogSelectOption<unknown>[]
   current?: unknown
   currentKey?: string
@@ -99,6 +102,7 @@ async function mountHarness(input: {
     return (
       <DialogSelectHarness
         root={input.root}
+        header={input.header}
         state={state}
         options={options()}
         current={input.current}
@@ -117,6 +121,7 @@ test("dialog select can mark the current object by stable key", async () => {
   await using tmp = await tmpdir()
   const app = await mountHarness({
     root: tmp.path,
+    header: "Goal summary",
     current: { providerID: "test", modelID: "two" },
     currentKey: "test/two",
     options: [
@@ -137,6 +142,9 @@ test("dialog select can mark the current object by stable key", async () => {
     const frame = (await waitForFrame(app.app, "Model Two")).split("\n")
     const current = frame.find((line) => line.includes("Model Two")) ?? ""
     const other = frame.find((line) => line.includes("Model One")) ?? ""
+    // header位于标题和选项之间，不能吞掉原有identity高亮或进入业务选项集合。
+    expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeGreaterThanOrEqual(0)
+    expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeLessThan(frame.findIndex((line) => line.includes("Model One")))
 
     // value 多出的 metadata 使对象不相等，高亮必须来自稳定 key。
     expect(current).toContain("●")

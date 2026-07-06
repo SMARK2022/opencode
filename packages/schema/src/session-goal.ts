@@ -8,7 +8,7 @@ import { SessionID } from "./session-id"
 export const MAX_OBJECTIVE_CHARS = 4000
 
 // [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
-// 由 tool 或用户显式切换——loop 不自动迁移状态，避免与用户意图冲突。
+// 用户和工具显式切换状态；runner只在正常续跑额度耗尽时自动暂停。
 export const Status = Schema.Literals(["active", "paused", "complete", "blocked"] as const)
 export type Status = Schema.Schema.Type<typeof Status>
 
