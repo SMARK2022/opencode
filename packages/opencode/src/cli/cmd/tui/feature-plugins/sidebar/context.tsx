@@ -7,6 +7,7 @@ import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
 import { activeTurnPair } from "../../util/session-pending"
 import { tokenAccounting } from "@/token/accounting"
+import { Locale } from "@/util/locale"
 import { useLocal } from "@tui/context/local"
 import { useSDK } from "@tui/context/sdk"
 
@@ -171,8 +172,10 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <b>Context</b>
       </text>
       <text fg={theme().textMuted}>
-        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) ·{" "}
-        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})
+        {/* 上下载当前值与累积量改用 K/M 缩略(Locale.number)，与 prompt footer 流量格式对齐；
+            总量行(下方)保留 toLocaleString 全精度，作为上下文占用的权威读数 */}
+        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {Locale.number(state().input)}({Locale.number(state().totalInput)}) ·{" "}
+        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {Locale.number(state().output)}({Locale.number(state().totalOutput)})
       </text>
       <text fg={theme().textMuted}>
         {state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens

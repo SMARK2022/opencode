@@ -245,10 +245,12 @@ describe("Prompt component integration points", () => {
   })
 
   describe("token usage display", () => {
-    test("shows cumulative input/output with arrows", () => {
+    // 宽屏 footer 改为分拆 ↑/↓ 流量(移除累积括号)，断言锁定 Locale.number 分拆渲染与流量脉冲接线，
+    // 替代旧版对 totalInput/totalOutput 渲染的断言——累积量改由 sidebar 承载，prompt 不再展示。
+    test("shows split input/output flow with arrows", () => {
       expect(promptSource).toContain("usageFlow")
-      expect(promptSource).toContain("totalInput")
-      expect(promptSource).toContain("totalOutput")
+      expect(promptSource).toContain("Locale.number(item().input)")
+      expect(promptSource).toContain("Locale.number(item().output)")
     })
 
     test("imports tokenAccounting", () => {

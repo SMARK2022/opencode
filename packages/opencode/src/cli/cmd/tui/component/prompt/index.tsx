@@ -177,7 +177,10 @@ export function Prompt(props: PromptProps) {
   // Measure the prompt root after flex layout has run and compact only when the
   // actual prompt allocation is narrow, instead of keying off terminal columns.
   const [promptWidth, setPromptWidth] = createSignal(dimensions().width)
-  const showCumulative = createMemo(() => promptWidth() > 100)
+  // 宽窄屏分界：promptWidth>90 显示分拆 ↑/↓ 流量，否则合并 ↑↓ 只露总量。
+  // 阈值由 100 下调至 90，让中小终端也能看到上下行分拆；voice 提示阈值(>120)仍晚于此，保持露出梯度。
+  // 旧名 showCumulative 已 rename 为 showSplitFlow：累积括号移除后，该开关改为控制是否分拆上下行流量。
+  const showSplitFlow = createMemo(() => promptWidth() > 90)
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -366,11 +369,11 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
+  // footer 用量数据：移除 request 累积(totalInput/totalOutput)——宽屏只显示当前 step 的 ↑/↓ 分拆值，
+  // 累积量改由 sidebar 承载，避免 prompt 与 sidebar 双处冗余。createTokenFlowPulse 仅依赖 input/output。
   type UsageInfo = {
     input: number
     output: number
-    totalInput: number
-    totalOutput: number
     context: string | undefined
     cost: string | undefined
   }
@@ -398,15 +401,15 @@ export function Prompt(props: PromptProps) {
 
     if (stepTotal <= 0 && requestTotal <= 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, totalInput: acc.request.totalInput, totalOutput: acc.request.totalOutput, context: undefined, cost: undefined }
+      // running 但尚无确认 token：保留 input/output 占位以维持 footer 流量脉冲，不再携带累积量
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     const pct = acc.contextPercent != null ? `${acc.contextPercent}%` : undefined
     return {
       input: acc.step.input,
       output: acc.step.output,
-      totalInput: acc.request.totalInput,
-      totalOutput: acc.request.totalOutput,
+      // 总量保留 stepTotal(input+output) 与百分比，作为上下文占用读数；累积上传/下载不再在此展示
       context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
       cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
     }
@@ -2039,9 +2042,9 @@ export function Prompt(props: PromptProps) {
                         <Match when={usage()}>
                           {(item) => (
                             <Show
-                              when={showCumulative()}
+                              when={showSplitFlow()}
                               fallback={
-                                // prompt width <= 100: ↑↓ combined arrow, context + cost only
+                                // prompt width <= 90：↑↓ 合并箭头，仅总量与费用，窄终端省空间
                                 <text fg={theme.textMuted} wrapMode="none">
                                   <span style={{ fg: usageFlow().input || usageFlow().output ? theme.text : theme.textMuted }}>↑↓</span>
                                   {item().context ? ` ${item().context}` : ""}
@@ -2049,9 +2052,10 @@ export function Prompt(props: PromptProps) {
                                 </text>
                               }
                             >
+                              {/* prompt width > 90：分拆 ↑/↓ 流量(当前 step)，空格内聚为流动组，与总量/费用以 · 分隔；
+                                  相比旧版逐段 · 更紧凑，借鉴窄屏分组思想：流动组 | 占用组 | 费用 */}
                               <text fg={theme.textMuted} wrapMode="none">
-                                <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
-                                <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                                <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                                 {item().context ? ` · ${item().context}` : ""}
                                 {item().cost ? ` · ${item().cost}` : ""}
                               </text>
@@ -2067,7 +2071,7 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
-                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示(比 usage 的 >100 更晚)，窄终端把 chrome 让给更高频信息；
+                  {/* 仅显示判定：promptWidth>120 才露出 voice 提示(比 usage 的 >90 更晚)，窄终端把 chrome 让给更高频信息；
                       不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
                   <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
                     <text fg={theme.text}>

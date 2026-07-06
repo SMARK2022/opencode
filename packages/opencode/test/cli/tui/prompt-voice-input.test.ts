@@ -137,15 +137,18 @@ describe("prompt voice input", () => {
   })
 
   // voice 提示是 footer 的引导文案，窄终端会挤占输入区，必须延迟到 prompt 足够宽才显示。
-  // 阈值为开区间 ">140"：140 本身仍隐藏，与 usage 显示的 ">100" 同语义，避免边界行为漂移。
+  // 阈值为开区间 ">120"：120 本身仍隐藏，与 usage 显示的 ">90" 同语义，避免边界行为漂移。
   // 未配置转写器时无论多宽都不显示，避免引导用户使用未启用的能力。
   // 该判定只管显示文案，不影响 Alt+V 绑定——窄终端仍可转录，测试只断言显示决策本身。
   test("shows the voice hint only when a transcriber is configured and the prompt is wide enough", () => {
     const transcriber: VoiceTranscriber = { command: "transcriber", args: ["{file}"] }
     expect(voiceHintVisible(undefined, 999)).toBe(false)
+    // 100 低于 voice 阈值 120，仍隐藏(虽已过 usage 阈值 90，但 voice 需更晚露出)
     expect(voiceHintVisible(transcriber, 100)).toBe(false)
-    expect(voiceHintVisible(transcriber, 140)).toBe(false)
-    expect(voiceHintVisible(transcriber, 141)).toBe(true)
+    // 120 为开区间边界，本身不显示
+    expect(voiceHintVisible(transcriber, 120)).toBe(false)
+    // 121 刚过阈值，开始显示
+    expect(voiceHintVisible(transcriber, 121)).toBe(true)
     expect(voiceHintVisible(transcriber, 200)).toBe(true)
   })
 
