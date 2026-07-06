@@ -1779,7 +1779,10 @@ const layer = Layer.effect(
                 0,
                 Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
               )
-              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
+              // 计费DB缺陷保留诊断但不截断provider轮次；ignore不能捕获defect。
+              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(
+                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
+              )
             }
             if (result === "compact") {
               nearOverflowNotified = false

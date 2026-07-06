@@ -709,9 +709,15 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.accountUsage(sessionID, 500, 10)
     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
     expect(yield* goals.set(sessionID, { status: "paused" }).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
-    for (const invalid of [{ objective: "   " }, { objective: "a".repeat(4001) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
+    for (const invalid of [{ objective: "   " }, { objective: "a".repeat(6401) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
       expect(yield* goals.set(sessionID, invalid).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
     }
+    // 真实共享存储接受6400、拒绝6401并保持原值；清除边界fixture后继续原CRUD场景。
+    const boundary = yield* goals.set(sessionID, { objective: "a".repeat(6400) })
+    expect(boundary.objective).toHaveLength(6400)
+    expect((yield* goals.set(sessionID, { objective: "a".repeat(6401) }).pipe(Effect.flip)).message).toBe("goal objective must be at most 6400 characters")
+    expect(Option.getOrThrow(yield* goals.get(sessionID))).toEqual(boundary)
+    yield* goals.clear(sessionID)
     const original = yield* goals.set(sessionID, { objective: "  original  ", tokenBudget: 50000 })
     expect(original).toMatchObject({ status: "active", objective: "original", tokensUsed: 0, timeUsedSeconds: 0 })
     expect(original.id).toBeTruthy()
@@ -760,6 +766,28 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     const paused = yield* goals.get(sessionID)
     expect(Option.getOrThrow(paused).status).toBe("paused")
     expect(Option.getOrThrow(paused).tokensUsed).toBe(12)
+
+    const registry = yield* ToolRegistry.Service
+    const materialized = yield* registry.materialize()
+    const read = yield* materialized.settle({
+      sessionID,
+      agent: AgentV2.ID.make("build"),
+      assistantMessageID: SessionMessage.ID.make("msg_goal_read"),
+      call: LLMEvent.toolCall({ id: "goal-read", name: "goal", input: {} }),
+    })
+    // 读取走真实注册/解码/模型输出链，不能把暂停目标激活或清空用量。
+    expect(read.output?.structured).toEqual(Option.getOrThrow(paused))
+    expect(read.output?.content).toEqual([{
+      type: "text",
+      text: JSON.stringify({
+        goal: { objective: "Finish the native task", status: "paused" },
+        tokensUsed: 12,
+        tokenBudget: 1,
+        remainingTokens: 0,
+        timeUsedSeconds: Option.getOrThrow(paused).timeUsedSeconds,
+      }, null, 2),
+    }])
+    expect(yield* goals.get(sessionID)).toEqual(paused)
 
     yield* goals.set(sessionID, { status: "active" })
     responses = [[

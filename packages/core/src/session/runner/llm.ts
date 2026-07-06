@@ -609,7 +609,10 @@ const layer = Layer.effect(
             // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
             const tokens = stepSettlement.tokens
             const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
-            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(Effect.ignore)
+            // 与V1相同：记录计费defect，不能静默丢失或让诊断变成第二个结算路径。
+            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(
+              Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
+            )
           }
           if (publisher.hasActiveAssistant() && !stepSettlement) {
             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。

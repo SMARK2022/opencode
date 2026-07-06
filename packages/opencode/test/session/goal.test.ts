@@ -112,17 +112,19 @@ it.instance(
   { git: true },
 )
 
-// #364：超过 4000 字符的 objective 必须被拒绝
+// 新上限必须真正接受，而不只是让拒绝用例换一个更大的数。
 it.instance(
-  "set with objective over 4000 chars is rejected",
+  "set with objective over 6400 chars is rejected",
   () =>
     Effect.gen(function* () {
       const goalSvc = yield* SessionGoal.Service
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({})
 
-      // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒绝
-      const longObjective = "a".repeat(4001)
+      // 超过 MAX_OBJECTIVE_CHARS(6400) 的 objective 必须被拒绝
+      const accepted = yield* goalSvc.set(session.id, { objective: "a".repeat(6400) })
+      expect(accepted.objective).toHaveLength(6400)
+      const longObjective = "a".repeat(6401)
       const result = yield* goalSvc.set(session.id, { objective: longObjective }).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
     }),
