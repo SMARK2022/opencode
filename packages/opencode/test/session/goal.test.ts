@@ -102,15 +102,15 @@ it.instance(
 )
 
 it.instance(
-  "set with objective over 4000 chars is rejected",
+  "set with objective over 6400 chars is rejected",
   () =>
     Effect.gen(function* () {
       const goalSvc = yield* SessionGoal.Service
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({})
 
-      // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒绝
-      const longObjective = "a".repeat(4001)
+      // 超过 MAX_OBJECTIVE_CHARS(6400) 的 objective 必须被拒绝
+      const longObjective = "a".repeat(6401)
       const result = yield* goalSvc.set(session.id, { objective: longObjective }).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
     }),

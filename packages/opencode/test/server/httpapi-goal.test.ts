@@ -49,14 +49,14 @@ describe("session goal HttpApi", () => {
         const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
           method: "POST",
           headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
-          // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒
-          body: JSON.stringify({ objective: "a".repeat(4001) }),
+          // 超过 MAX_OBJECTIVE_CHARS(6400) 的 objective 必须被拒
+          body: JSON.stringify({ objective: "a".repeat(6401) }),
         })
         expect(res.status).toBe(400)
         const parsed = yield* responseJson(res)
         expect(parsed).toEqual({
           name: "GoalError",
-          data: { message: "goal objective must be at most 4000 characters" },
+          data: { message: "goal objective must be at most 6400 characters" },
         })
       }),
     { git: true, config: { formatter: false, lsp: false } },

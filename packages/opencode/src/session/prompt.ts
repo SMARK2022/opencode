@@ -2524,7 +2524,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 0,
                 Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
               )
-              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
+              // catchDefect 而非 ignore：accountUsage 返回 Effect<void>（error=never），
+              // 但 DB 操作会抛 defect（运行时错误）。记录日志而非静默吞掉，便于诊断 token 计费丢失
+              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(
+                Effect.catchDefect((defect: unknown) =>
+                  slog.error("goal accountUsage defect", { defect: String(defect) }),
+                ),
+              )
             }
             if (result === "compact") {
               // Provider overflow happens after a real assistant attempt, so run

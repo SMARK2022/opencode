@@ -144,7 +144,7 @@ export function DialogGoalMenu(props: DialogGoalProps) {
       options={[
         {
           title: "Edit objective",
-          // 截断 description 避免 4000 字符 objective 在选项行中换行导致 rows() 计算不准
+          // 截断 description 避免 6400 字符 objective 在选项行中换行导致 rows() 计算不准
           description: goal()?.objective ? Locale.truncate(goal()!.objective, 60) : undefined,
           value: "edit",
           onSelect: () => {
