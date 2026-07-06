@@ -74,7 +74,7 @@ export function toolUsageSection(registeredTools: string[]) {
   }
 
   items.push(
-    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
+    ` - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to dedicated tools (read, grep, glob) for all subsequent file operations — do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.`,
     ``,
     `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
     `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
