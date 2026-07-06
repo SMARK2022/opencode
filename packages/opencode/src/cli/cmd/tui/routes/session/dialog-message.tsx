@@ -3,7 +3,6 @@ import { useSync } from "@tui/context/sync"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
-import { usePromptRef } from "@tui/context/prompt"
 import * as Clipboard from "@tui/util/clipboard"
 import type { PromptInfo } from "@tui/component/prompt/history"
 import { strip } from "@tui/component/prompt/part"
@@ -12,12 +11,14 @@ export function DialogMessage(props: {
   messageID: string
   sessionID: string
   setPrompt?: (prompt: PromptInfo) => void
+  // submit 回调由调用方传入——dialog.replace 渲染上下文脱离 PromptRefProvider，
+  // 不能在此组件内直接 usePromptRef，必须通过 prop 传递。
+  submit?: () => void
 }) {
   const sync = useSync()
   const sdk = useSDK()
   const message = createMemo(() => sync.data.message[props.sessionID]?.find((x) => x.id === props.messageID))
   const route = useRoute()
-  const promptRef = usePromptRef()
 
   // 从消息 parts 提取 PromptInfo（text 拼接 + file parts），供 Revert/Retry 复用
   function extractPromptInfo(messageID: string): PromptInfo {
@@ -87,7 +88,7 @@ export function DialogMessage(props: {
             // revert 成功：填回 prompt 并自动提交。
             // set 同步更新 store（prompt/index.tsx），submit 读取 store——时序安全
             props.setPrompt?.(promptInfo)
-            promptRef.current?.submit()
+            props.submit?.()
           },
         },
         {

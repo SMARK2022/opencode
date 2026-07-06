@@ -11,6 +11,9 @@ export function DialogTimeline(props: {
   sessionID: string
   onMove: (messageID: string) => void
   setPrompt?: (prompt: PromptInfo) => void
+  // 透传给 DialogMessage——dialog.replace 渲染上下文脱离 PromptRefProvider，
+  // submit 回调必须由上层（PromptRefProvider 内）传入
+  submit?: () => void
 }) {
   const sync = useSync()
   const dialog = useDialog()
@@ -34,7 +37,7 @@ export function DialogTimeline(props: {
         footer: Locale.time(message.time.created),
         onSelect: (dialog) => {
           dialog.replace(() => (
-            <DialogMessage messageID={message.id} sessionID={props.sessionID} setPrompt={props.setPrompt} />
+            <DialogMessage messageID={message.id} sessionID={props.sessionID} setPrompt={props.setPrompt} submit={props.submit} />
           ))
         },
       })

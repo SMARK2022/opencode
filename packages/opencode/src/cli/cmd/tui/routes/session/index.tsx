@@ -646,6 +646,7 @@ export function Session() {
             }}
             sessionID={route.sessionID}
             setPrompt={(promptInfo) => prompt?.set(promptInfo)}
+            submit={() => promptRef.current?.submit()}
           />
         ))
       },
@@ -1359,6 +1360,7 @@ export function Session() {
                                 messageID={message.id}
                                 sessionID={route.sessionID}
                                 setPrompt={(promptInfo) => prompt?.set(promptInfo)}
+                                submit={() => promptRef.current?.submit()}
                               />
                             ))
                           }}
