@@ -6,8 +6,8 @@ export const VOICE_FILE_PLACEHOLDER = "{file}"
 // 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
 export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
 // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
-// 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
-export const VOICE_HINT_MIN_PROMPT_WIDTH = 140
+// 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
+export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
 
 export type VoiceTranscriber = {
   command: string

@@ -181,8 +181,8 @@ export function Prompt(props: PromptProps) {
   // #109：窄终端隐藏累计 token 括号
   // #189：改按 prompt 实际分配宽度，侧栏挤压时即使终端很宽也要紧凑
   const [promptWidth, setPromptWidth] = createSignal(dimensions().width)
-  // #189：阈值 100 列（相对终端 120 更贴近 prompt 槽）
-  const showCumulative = createMemo(() => promptWidth() > 100)
+  // 实际prompt槽超过90列才分拆流量，voice超过120列才显示，保持信息露出梯度。
+  const showSplitFlow = createMemo(() => promptWidth() > 90)
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -1897,7 +1897,7 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <Show
-                          when={showCumulative()}
+                          when={showSplitFlow()}
                           fallback={
                             // #125：窄屏合并 ↑↓，只保留 context/cost
                             <text fg={theme.textMuted} wrapMode="none">
@@ -1908,9 +1908,8 @@ export function Prompt(props: PromptProps) {
                           }
                         >
                           <text fg={theme.textMuted} wrapMode="none">
-                            {/* 宽屏：分向箭头 + 可选累计括号 */}
-                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
-                            <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
+                            {/* 只移除重复累计括号，step/request的原始数值与增长脉冲继续由完整投影提供。 */}
+                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                             {item().context ? ` · ${item().context}` : ""}
                             {item().cost ? ` · ${item().cost}` : ""}
                           </text>
@@ -1926,7 +1925,7 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
-                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示（比 usage 的 >100 更晚），窄终端把 chrome 让给更高频信息；
+                  {/* 仅显示判定：promptWidth>120 才露出 voice 提示（比 usage 的 >90 更晚），窄终端把 chrome 让给更高频信息；
                       不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
                   <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
                     <text fg={theme.text}>
