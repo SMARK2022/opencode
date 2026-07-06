@@ -47,7 +47,8 @@ export const toolUsage = (ids: readonly string[]) => {
     ...(ids.includes("todowrite") ? ["# Task Management", "Use the todowrite tool for non-trivial multi-step work, explicit progress tracking, multiple requirements, and changed plans. Skip trivial or informational tasks. Keep items concrete and verifiable. Include required verification. Keep only one item in_progress; move it to in_progress before working, do not jump from pending to completed. Mark completed as soon as work and required verification finish; do not batch updates. Cancel irrelevant items and update the list when understanding changes before continuing implementation."] : []),
     // 通用 Windows 文件操作约束不猜测 shell，也不点名未广告的工具。
     ...(process.platform === "win32" && ids.includes("bash") ? [" - On Windows, prefer available dedicated tools for file operations; use shell-native commands only when terminal execution is truly required."] : []),
-    " - Reserve bash for system commands and terminal operations requiring shell execution",
+    // 终端操作结束后回到当前可用的专用工具，不因示例虚构被权限过滤的能力。
+    " - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to available dedicated tools for all subsequent file operations; do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.",
     // 分段分隔是格式契约，避免指引紧贴前面的能力列表。
     "",
     "PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.",

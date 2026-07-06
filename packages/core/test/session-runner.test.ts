@@ -147,7 +147,7 @@ const recoveryModel = Model.make({
 const expectedToolGuidance = `# Using your tools
 Do NOT use the bash tool when a dedicated tool is available.
 Using dedicated tools lets the user review and track your work:
- - Reserve bash for system commands and terminal operations requiring shell execution
+ - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to available dedicated tools for all subsequent file operations; do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.
 
 PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.
 THINK FIRST before using tools. Decide the FULL first batch of independent reads, searches, directory listings, and status checks you already know you need.

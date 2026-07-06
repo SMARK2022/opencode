@@ -318,6 +318,9 @@ test("uses actual tool names and preserves parallel write boundaries", () => {
   expect(SystemContextBuiltIns.toolUsage([])).toContain("NO tools are currently available")
   expect(SystemContextBuiltIns.toolUsage([])).not.toContain("# Using your tools")
   const guidance = SystemContextBuiltIns.toolUsage(["read", "apply_patch", "todowrite"])
+  // 只有read的请求不能被切回指引凭空广告grep/glob，原有能力过滤断言仍保留。
+  expect(guidance).toContain("After a bash operation (e.g. git, build), switch back to available dedicated tools")
+  expect(guidance).toContain("do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation")
   // patch-only 模式应广告 patch，而不是隐式补回已过滤的 edit/write。
   expect(guidance).toContain("use the apply_patch tool")
   expect(guidance).not.toContain("use the edit tool")
