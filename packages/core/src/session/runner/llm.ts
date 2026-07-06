@@ -125,7 +125,8 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const permission = yield* PermissionV2.Service
     // 同工具成功才重置错误；不同Session和不同工具互不冲掉计数。
-    const errors = new Map<SessionSchema.ID, Map<string, number>>()
+    // 同一助手的并行失败共享一次机会，模型看过结果后的新消息才继续累加。
+    const errors = new Map<SessionSchema.ID, Map<string, { count: number; lastMessageID: string }>>()
     const nearOverflowNotified = new Set<SessionSchema.ID>()
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
@@ -399,17 +400,23 @@ const layer = Layer.effect(
           // publisher只为已接受的终态返回凭证，重复/忽略事件不能虚增错误。
           const settled = yield* publisher.publish(event, outputPaths)
           if (!settled) return
-          const counts = errors.get(session.id) ?? new Map<string, number>()
+          const counts = errors.get(session.id) ?? new Map<string, { count: number; lastMessageID: string }>()
           errors.set(session.id, counts)
           if (!settled.failed) { counts.delete(settled.name); return }
-          const count = (counts.get(settled.name) ?? 0) + 1
-          counts.set(settled.name, count)
-          if (count < 3) return
+          // 消息身份取已确认的终态凭证，不把各自callID当作模型已看到结果。
+          const entry = counts.get(settled.name) ?? { count: 0, lastMessageID: "" }
+          if (entry.lastMessageID !== settled.assistantMessageID) {
+            entry.count++
+            entry.lastMessageID = settled.assistantMessageID
+          }
+          counts.set(settled.name, entry)
+          if (entry.count < 3) return
           yield* permission.assert({ action: "doom_loop", resources: [settled.name], save: [settled.name], sessionID: session.id, agent: agent.id,
-            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: count },
+            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: entry.count },
             source: { type: "tool", messageID: settled.assistantMessageID, callID: settled.callID },
           }).pipe(Effect.orDie)
-          counts.delete(settled.name)
+          // 保留消息身份，阈值后的同批剩余失败不能再次消费下一轮计数。
+          entry.count = 0
         }))
       let overflowFailure: ProviderErrorEvent | undefined
       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
