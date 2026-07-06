@@ -7,12 +7,7 @@ import { Snapshot } from "@/snapshot"
 import { SyncEvent } from "../sync"
 import { Database } from "@/storage/db"
 import { NotFoundError } from "@/storage/storage"
-import { and } from "drizzle-orm"
-import { desc } from "drizzle-orm"
-import { eq } from "drizzle-orm"
-import { inArray } from "drizzle-orm"
-import { lt } from "drizzle-orm"
-import { or } from "drizzle-orm"
+import { and, desc, eq, gte, inArray, lt, or } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import * as ProviderError from "@/provider/error"
 import { iife } from "@/util/iife"
@@ -1103,11 +1098,16 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   limit: number
   before?: string
   includeHidden?: boolean
+  fromMessageID?: MessageID
 }) {
   const before = input.before ? cursor.decode(input.before) : undefined
-  const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+  // fromMessageID 裁剪：MessageID 单调递增（见 message-v2.ts ascending），
+  // gte(id, fromMessageID) 等价于"该消息及之后的所有消息"，与 revert.ts 中
+  // `msg.info.id >= rev.messageID` 的字符串比较语义一致。
+  const base = input.fromMessageID
+    ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
     : eq(MessageTable.session_id, input.sessionID)
+  const where = before ? and(base, older(before)) : base
   const rows = Database.use((db) =>
     db
       .select()

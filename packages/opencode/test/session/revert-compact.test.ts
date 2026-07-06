@@ -1,10 +1,11 @@
 import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Layer } from "effect"
+import { Effect, Exit, Layer } from "effect"
 import { Session } from "@/session/session"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { SessionRevert } from "../../src/session/revert"
+import { SessionRunState } from "../../src/session/run-state"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionRequestUsage } from "../../src/session/request-usage"
 import { Snapshot } from "../../src/snapshot"
@@ -22,6 +23,7 @@ const env = Layer.mergeAll(
   SessionRequestUsage.defaultLayer,
   Snapshot.defaultLayer,
   CrossSpawnSpawner.defaultLayer,
+  SessionRunState.defaultLayer,
 )
 
 const it = testEffect(env)
@@ -723,6 +725,233 @@ describe("revert + compact workflow", () => {
           const u1raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
           expect(u1raw.info.id).toBe(u1.id)
           expect(u1raw.info.hidden?.reason).toBe("undo")
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
+
+  // ── B1: revert 状态守卫 ──────────────────────────────────────
+  // 验证 revert 进行中时，第二次 revert 被阻止（返回 BusyError），
+  // 以及 revert 失败后 reverting 标志被清除（后续操作不受阻）。
+
+  it.live(
+    "concurrent revert is rejected with BusyError",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const snapshot = yield* Snapshot.Service
+
+          // 准备：两个 turn，各有 patch（同文件不同 hash）
+          yield* write(path.join(dir, "a.txt"), "a0")
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const turn = Effect.fn("test.concurrentTurn")(function* (next: string) {
+            const u = yield* user(sid)
+            yield* text(sid, u.id, `a.txt:${next}`)
+            const a = yield* assistant(sid, u.id, dir)
+            const before = yield* snapshot.track()
+            if (!before) throw new Error("expected snapshot")
+            yield* write(path.join(dir, "a.txt"), next)
+            const after = yield* snapshot.track()
+            if (!after) throw new Error("expected snapshot")
+            const patch = yield* snapshot.patch(before)
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: a.id,
+              sessionID: sid,
+              type: "step-start",
+              snapshot: before,
+            })
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: a.id,
+              sessionID: sid,
+              type: "step-finish",
+              reason: "stop",
+              snapshot: after,
+              cost: 0,
+              tokens,
+            })
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: a.id,
+              sessionID: sid,
+              type: "patch",
+              hash: patch.hash,
+              files: patch.files,
+            })
+            return u.id
+          })
+
+          yield* turn("a1")
+          yield* turn("a2")
+
+          // 获取两个 user messageID 作为 revert 目标
+          const msgs = yield* session.messages({ sessionID: sid })
+          const userMsgs = msgs.filter((m) => m.info.role === "user")
+          const first = userMsgs[0]!.info.id
+          const second = userMsgs[1]!.info.id
+
+          // 真正并发：两个 revert 同时执行，beginRevert 原子 check-and-set
+          // 保证只有一个成功，另一个得 BusyError
+          const [exit1, exit2] = yield* Effect.all(
+            [
+              Effect.exit(revert.revert({ sessionID: sid, messageID: first })),
+              Effect.exit(revert.revert({ sessionID: sid, messageID: second })),
+            ],
+            { concurrency: 2 },
+          )
+
+          // 一个成功一个失败（BusyError）——顺序不确定，但恰好一个 success
+          const successCount = [exit1, exit2].filter((e) => Exit.isSuccess(e)).length
+          expect(successCount).toBe(1)
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
+
+  it.live(
+    "revert clears reverting flag on failure allowing subsequent operations",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const state = yield* SessionRunState.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "hello")
+
+          // revert 一个不存在的 messageID——revert 内部遍历找不到 rev，
+          // 提前返回（不触发 git），但 beginRevert/endRevert 仍应正确配对
+          const fakeID = MessageID.ascending()
+          const exit = yield* Effect.exit(revert.revert({ sessionID: sid, messageID: fakeID }))
+
+          // revert 对不存在的 messageID 返回 session（不报错），reverting 已清除
+          expect(Exit.isSuccess(exit)).toBe(true)
+
+          // assertNotReverting 应该通过——reverting 已被 endRevert 清除
+          yield* state.assertNotReverting(sid)
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
+
+  // ── A1: 合并 git checkout ────────────────────────────────────
+  // 验证同一 hash 的多文件批量 revert 能正确恢复全部文件。
+  // 当前测试中每个 turn 只改一个文件且 hash 不同，走 single() 路径。
+  // 此测试构造同 hash 多文件场景，触发 A1 快速 checkout 路径。
+
+  it.live(
+    "revert restores multiple files with same snapshot hash in one batch",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const snapshot = yield* Snapshot.Service
+
+          // 初始：两个文件
+          yield* write(path.join(dir, "x.txt"), "x0")
+          yield* write(path.join(dir, "y.txt"), "y0")
+
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const u = yield* user(sid)
+          yield* text(sid, u.id, "change both files")
+          const a = yield* assistant(sid, u.id, dir)
+
+          // 一次 track（before），然后同时修改两个文件，再一次 track（after）
+          // 这样两个文件的 patch 共享同一个 before hash → A1 批量路径
+          const before = yield* snapshot.track()
+          if (!before) throw new Error("expected before snapshot")
+          yield* write(path.join(dir, "x.txt"), "x1")
+          yield* write(path.join(dir, "y.txt"), "y1")
+          const after = yield* snapshot.track()
+          if (!after) throw new Error("expected after snapshot")
+          const patch = yield* snapshot.patch(before)
+
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-start",
+            snapshot: before,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-finish",
+            reason: "stop",
+            snapshot: after,
+            cost: 0,
+            tokens,
+          })
+          // 两个 patch part 共享同一 hash——A1 会将它们合并为一次 checkout
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "patch",
+            hash: patch.hash,
+            files: patch.files,
+          })
+
+          // revert 后两个文件都应恢复到初始内容
+          yield* revert.revert({ sessionID: sid, messageID: u.id })
+          expect(yield* read(path.join(dir, "x.txt"))).toBe("x0")
+          expect(yield* read(path.join(dir, "y.txt"))).toBe("y0")
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
+
+  // ── A2: messages 范围裁剪 ────────────────────────────────────
+  // 验证 messages(fromMessageID) 只返回该 ID 及之后的消息。
+
+  it.live(
+    "messages with fromMessageID returns only tail messages",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "first")
+          const u2 = yield* user(sid)
+          yield* text(sid, u2.id, "second")
+          const u3 = yield* user(sid)
+          yield* text(sid, u3.id, "third")
+
+          // 全量加载应返回 3 条
+          const all = yield* session.messages({ sessionID: sid })
+          expect(all.length).toBe(3)
+
+          // 从 u2 开始裁剪——只返回 u2 和 u3
+          const tail = yield* session.messages({ sessionID: sid, fromMessageID: u2.id })
+          expect(tail.length).toBe(2)
+          const tailIds = tail.map((m) => m.info.id)
+          expect(tailIds).toContain(u2.id)
+          expect(tailIds).toContain(u3.id)
+          expect(tailIds).not.toContain(u1.id)
 
           yield* session.remove(sid)
         }),

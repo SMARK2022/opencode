@@ -421,6 +421,18 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
                     continue
                   }
 
+                  // 优化：先尝试单次 checkout 全部文件。成功时跳过 ls-tree 预验证（省一次 git spawn）。
+                  // git checkout 返回 0 当且仅当所有 pathspec 在 tree 中匹配到文件——此时无需删除。
+                  // 失败（部分文件不存在或其他 git 错误）时回退到下方 ls-tree + 逐文件逻辑，行为不变。
+                  const fastCheckout = yield* git(
+                    [...core, ...args(["checkout", first.hash, "--", ...run.map((item) => item.file)])],
+                    { cwd: state.worktree },
+                  )
+                  if (fastCheckout.code === 0) {
+                    i = j
+                    continue
+                  }
+
                   const tree = yield* git(
                     [...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])],
                     {

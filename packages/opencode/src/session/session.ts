@@ -533,7 +533,7 @@ export interface Interface {
   readonly clearRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly setSummary: (input: { sessionID: SessionID; summary: Info["summary"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
-  readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<MessageV2.WithParts[], NotFound>
+  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<MessageV2.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
@@ -825,14 +825,14 @@ export const layer: Layer.Layer<
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
       if (input.limit) {
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit })).items
+        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID })).items
       }
 
       const size = 50
       const result = [] as MessageV2.WithParts[]
       let before: string | undefined
       while (true) {
-        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before })
+        const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before, fromMessageID: input.fromMessageID })
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
           const item = page.items[i]

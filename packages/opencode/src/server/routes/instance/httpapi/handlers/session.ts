@@ -298,6 +298,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      // revert 进行中时阻止 prompt——避免 cleanup 与 in-progress revert 的消息/文件竞争
+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
       const message = yield* promptSvc
         .prompt({
           ...ctx.payload,
@@ -314,6 +316,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      // revert 进行中时同步返回错误，不 fork——TUI 收到 BadRequest 保留草稿
+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
       yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -336,6 +340,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof CommandPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      // command 内部调用 prompt()（含 cleanup），同样需要 revert 守卫
+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
       return yield* promptSvc
         .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
         .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
@@ -346,6 +352,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof ShellPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
+      // shell 内部调用 shellImpl（含 cleanup），同样需要 revert 守卫
+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
       return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
     })
 

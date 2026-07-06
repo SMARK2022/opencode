@@ -43,85 +43,113 @@ export const layer = Layer.effect(
 
     const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
       yield* state.assertNotBusy(input.sessionID)
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      let lastUser: MessageV2.User | undefined
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      // acquireUseRelease：beginRevert 成功后 endRevert 立即注册为 finalizer，
+      // 消除 beginRevert 与 Effect.ensuring 之间的理论中断窗口。
+      // beginRevert 失败（已 reverting）时 endRevert 不执行——不会误清除其他 revert 的标志。
+      return yield* Effect.acquireUseRelease(
+        state.beginRevert(input.sessionID),
+        () =>
+          Effect.gen(function* () {
+            // 只加载 input.messageID 及之后的尾部消息，避免大 session 全量分页加载。
+            // partID 场景（部分撤回）需要 lastUser（input.messageID 之前的最近 user 消息），
+            // 仍加载全部作为安全回退。
+            // narrowing：非 partID + assistant messageID（仅 API 直传可达，TUI 不可达）时，
+            // lastUser 为 undefined → rev.messageID = assistant 自身（旧行为是之前的 user）。
+            // 此差异可接受——保留 user 提问不造成数据损坏。
+            const all = yield* sessions.messages(
+              input.partID
+                ? { sessionID: input.sessionID }
+                : { sessionID: input.sessionID, fromMessageID: input.messageID },
+            ).pipe(Effect.orDie)
+            let lastUser: MessageV2.User | undefined
+            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
-      let rev: Session.Info["revert"]
-      const patches: Snapshot.Patch[] = []
-      for (const msg of all) {
-        if (msg.info.role === "user") lastUser = msg.info
-        const remaining = []
-        for (const part of msg.parts) {
-          if (rev) {
-            if (part.type === "patch") patches.push(part)
-            continue
-          }
+            let rev: Session.Info["revert"]
+            const patches: Snapshot.Patch[] = []
+            for (const msg of all) {
+              if (msg.info.role === "user") lastUser = msg.info
+              const remaining = []
+              for (const part of msg.parts) {
+                if (rev) {
+                  if (part.type === "patch") patches.push(part)
+                  continue
+                }
 
-          if (!rev) {
-            if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
-              const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
-              rev = {
-                messageID: !partID && lastUser ? lastUser.id : msg.info.id,
-                partID,
+                if (!rev) {
+                  if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
+                    const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
+                    rev = {
+                      messageID: !partID && lastUser ? lastUser.id : msg.info.id,
+                      partID,
+                    }
+                  }
+                  remaining.push(part)
+                }
               }
             }
-            remaining.push(part)
-          }
-        }
-      }
 
-      if (!rev) return session
+            if (!rev) return session
 
-      // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
-      // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
-      // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
-      // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
-      // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
-      const range = all.filter((msg) => msg.info.id >= rev.messageID)
-      const toolDiffs = yield* summary.computeDiff({ messages: range })
-      const ictx = yield* InstanceState.context
-      const toolFiles = new Set(
-        toolDiffs
-          .map((d) => d.file)
-          .filter((f): f is string => Boolean(f))
-          .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
+            // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
+            // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
+            // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
+            // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
+            // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
+            const range = all.filter((msg) => msg.info.id >= rev.messageID)
+            const toolDiffs = yield* summary.computeDiff({ messages: range })
+            const ictx = yield* InstanceState.context
+            const toolFiles = new Set(
+              toolDiffs
+                .map((d) => d.file)
+                .filter((f): f is string => Boolean(f))
+                .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
+            )
+            const filteredPatches = toolFiles.size > 0
+              ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
+              : patches
+            // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
+            const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
+
+            rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
+            // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
+            if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
+            yield* snap.revert(filteredPatches)
+            if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+            const diffs = toolDiffs
+            yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
+            yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
+            yield* sessions.setRevert({
+              sessionID: input.sessionID,
+              revert: { ...rev, files: revertedFiles.length > 0 ? revertedFiles : undefined },
+              summary: {
+                additions: diffs.reduce((sum, x) => sum + x.additions, 0),
+                deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
+                files: diffs.length,
+              },
+            })
+            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+          }),
+        () => state.endRevert(input.sessionID),
       )
-      const filteredPatches = toolFiles.size > 0
-        ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
-        : patches
-      // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
-      const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
-
-      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
-      yield* snap.revert(filteredPatches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
-      const diffs = toolDiffs
-      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-      yield* bus.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
-      yield* sessions.setRevert({
-        sessionID: input.sessionID,
-        revert: { ...rev, files: revertedFiles.length > 0 ? revertedFiles : undefined },
-        summary: {
-          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-          files: diffs.length,
-        },
-      })
-      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
     })
 
     const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
       log.info("unreverting", input)
       yield* state.assertNotBusy(input.sessionID)
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      if (!session.revert) return session
-      // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
-      yield* sessions.clearRevert(input.sessionID)
-      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      // unrevert 也修改文件（snap.restore），同样需要 reverting 守卫防止与 prompt 竞争
+      return yield* Effect.acquireUseRelease(
+        state.beginRevert(input.sessionID),
+        () =>
+          Effect.gen(function* () {
+            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+            if (!session.revert) return session
+            // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
+            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.files)
+            yield* sessions.clearRevert(input.sessionID)
+            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+          }),
+        () => state.endRevert(input.sessionID),
+      )
     })
 
     const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {

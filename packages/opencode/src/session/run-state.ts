@@ -10,6 +10,13 @@ import { SessionActivity } from "./activity"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
+  // 只检查 revert 进行中，不检查 runner.busy——用于 prompt/shell handler 层守卫，
+  // 避免阻止 prompt 执行中发新消息的排队语义（ensureRunning join 行为）。
+  readonly assertNotReverting: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
+  // 原子 check-and-set：标记 revert 进行中。失败（已 reverting）返回 BusyError。
+  // 必须与 endRevert 配对使用（通过 Effect.acquireUseRelease 保证）。
+  readonly beginRevert: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
+  readonly endRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly ensureRunning: (
     sessionID: SessionID,
@@ -33,9 +40,12 @@ export const layer = Layer.effect(
     const status = yield* SessionStatus.Service
 
     const state = yield* InstanceState.make(
-      Effect.fn("SessionRunState.state")(function* () {
+      Effect.fn("SessionRunState.state")(function* (ctx) {
         const scope = yield* Scope.Scope
         const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
+        // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
+        // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
+        const reverting = new Set<SessionID>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
             yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
@@ -43,9 +53,10 @@ export const layer = Layer.effect(
               discard: true,
             })
             runners.clear()
+            reverting.clear()
           }),
         )
-        return { runners, scope }
+        return { runners, scope, reverting }
       }),
     )
 
@@ -72,6 +83,28 @@ export const layer = Layer.effect(
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
       if (existing?.busy) yield* busyError(sessionID)
+      // revert 进行中也视为 busy——阻止 compact/deleteMessage 等操作与 revert 并发
+      if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+    })
+
+    // 只检查 revert 进行中，不检查 runner.busy——保留 prompt 执行中发新消息的排队语义
+    const assertNotReverting = Effect.fn("SessionRunState.assertNotReverting")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+    })
+
+    // 原子 check-and-set：yield* InstanceState.get 后，has 和 add 之间无 yield*，
+    // Effect 协作式调度不会在同步代码块中切让 fiber，保证只一个 revert 能进入。
+    const beginRevert = Effect.fn("SessionRunState.beginRevert")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+      data.reverting.add(sessionID)
+    })
+
+    // endRevert 幂等——即使 reverting 未被设置（理论上不会发生），delete 也不会报错
+    const endRevert = Effect.fn("SessionRunState.endRevert")(function* (sessionID: SessionID) {
+      const data = yield* InstanceState.get(state)
+      data.reverting.delete(sessionID)
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
@@ -115,7 +148,7 @@ export const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
+    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startShell })
   }),
 )
 
