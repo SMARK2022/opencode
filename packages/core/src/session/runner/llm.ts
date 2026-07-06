@@ -714,7 +714,7 @@ const layer = Layer.effect(
           promotion = "steer"
           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
           if (!needsContinuation && result.canContinueGoal && !(yield* SessionInput.hasPending(db, input.sessionID, "queue"))) {
-            const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 10
+            const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 32
             const session = yield* getSession(input.sessionID)
             const agent = yield* agents.select(session.agent)
             if (continuation.turns < maxGoalTurns &&
@@ -726,6 +726,11 @@ const layer = Layer.effect(
                 // 下个安全边界也检查 queue，避免候选 Goal 抢占刚到达的用户输入。
                 promotion = "queue"
               }
+            }
+            // 只在正常Goal边界耗尽正额度时暂停，0与异常退出不触发状态迁移。
+            if (maxGoalTurns > 0 && !session.parentID && continuation.turns >= maxGoalTurns) {
+              const goal = yield* goals.get(input.sessionID)
+              if (Option.isSome(goal) && goal.value.status === "active") yield* goals.set(input.sessionID, { status: "paused" }).pipe(Effect.orDie)
             }
           }
         }

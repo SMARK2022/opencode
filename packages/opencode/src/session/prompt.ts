@@ -1497,7 +1497,8 @@ const layer = Layer.effect(
             const cfg = yield* config.get()
             // [local-smark] goal 续跑不再需要 experimental 开关，始终可用；
             // goal_max_turns 已提升为顶层 config 字段（0367）
-            const maxGoalTurns = cfg.goal_max_turns ?? 10
+            const maxGoalTurns = cfg.goal_max_turns ?? 32
+            // [0386] 默认 32 轮：与 config schema description 同源；源提交本即 32
             if (
               maxGoalTurns > 0 &&
               !session.parentID &&
@@ -1536,6 +1537,15 @@ const layer = Layer.effect(
                   yield* Effect.logInfo("goal continuation", { goalTurns, step })
                   continue
                 }
+              }
+            }
+            // max_turns 到达时将 active goal 暂停，避免 UI 误导用户以为 goal 仍在运行。
+            // maxGoalTurns=0 表示禁用续跑，不 pause；complete/blocked goal 不 pause。
+            // Resume 后 goal 回到 active，用户发送新消息时新 loop 以 goalTurns=0 开始。
+            if (maxGoalTurns > 0 && !session.parentID && goalTurns >= maxGoalTurns) {
+              const goalOpt = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              if (goalOpt._tag === "Some" && goalOpt.value.status === "active") {
+                yield* goalSvc.set(sessionID, { status: "paused" }).pipe(Effect.orDie)
               }
             }
             yield* Effect.logInfo("exiting loop", { "session.id": sessionID })

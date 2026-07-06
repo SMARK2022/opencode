@@ -4,7 +4,9 @@ import { useDialog } from "../ui/dialog"
 import { useSync } from "../context/sync"
 import { useSDK } from "../context/sdk"
 import { useToast } from "../ui/toast"
-import { createMemo } from "solid-js"
+import { createMemo, onMount } from "solid-js"
+import { useTheme } from "../context/theme"
+import { Locale } from "../util/locale"
 import { MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
 
 // [local-smark] goal 管理 dialog
@@ -108,17 +110,41 @@ export function DialogGoal(props: DialogGoalProps) {
 export function DialogGoalMenu(props: DialogGoalProps) {
   const dialog = useDialog()
   const sync = useSync()
+  const { theme } = useTheme()
   const { setGoal, clearGoal } = useGoalApi(props.sessionID)
 
   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
 
+  // 摘要使用large宽度；header只提供内容槽位，不能替代对话框尺寸。
+  onMount(() => dialog.setSize("large"))
+  // header 显示 goal 摘要：wrapMode=none + overflow=hidden + Locale.truncate
+  // 保证可预测的行数，不依赖渲染器自动撑开容器
+  const goalHeader = createMemo(() => {
+    const g = goal()
+    if (!g) return undefined
+    return (
+      <box flexDirection="column" gap={0}>
+        {/* objective 截断到 68 chars（88 宽度 - 8 padding - 12 "Objective: " 前缀） */}
+        <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
+          {"Objective: " + (g.objective ? Locale.truncate(g.objective, 68) : "—")}
+        </text>
+        <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
+          {"Status: " + g.status + "  ·  Tokens: " + g.tokensUsed}
+        </text>
+      </box>
+    )
+  })
+
   return (
     <DialogSelect
       title="Manage Goal"
+      header={goalHeader()}
+      renderFilter={false}
       options={[
         {
           title: "Edit objective",
-          description: goal()?.objective,
+          // 截断 description 避免 4000 字符 objective 在选项行中换行导致 rows() 计算不准
+          description: goal()?.objective ? Locale.truncate(goal()!.objective, 60) : undefined,
           value: "edit",
           onSelect: () => {
             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)

@@ -112,7 +112,7 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   // 上限跨两代配置保持同义；0禁用续跑而不隐藏Goal工具。
   goal_max_turns: NonNegativeInt.pipe(Schema.optional).annotate({
-    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
+    description: "Maximum auto-continue turns per goal (default: 32, 0 to disable)",
   }),
   experimental: ConfigExperimental.Experimental.pipe(Schema.optional),
   providers: Schema.Record(Schema.String, ConfigProvider.Info).pipe(Schema.optional),

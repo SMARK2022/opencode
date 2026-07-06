@@ -17,7 +17,7 @@ import { testEffect } from "../lib/effect"
 // #364：测试 layer 组装：SessionGoal 依赖 EventV2Bridge + Database，
 // Session 依赖 InstanceStore 等，使用与 session.test.ts 相同的模式。
 // [local-smark] Config 层供 goal_max_turns 顶层读取测试；TestConfig 提供
-// 空配置桩（get 返回 {}），goal_max_turns 缺省回退到 10 的断言因此成立。
+// 空配置桩（get 返回 {}），goal_max_turns 缺省回退到 32 的断言因此成立。
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
@@ -412,8 +412,8 @@ it.instance(
     Effect.gen(function* () {
       const config = yield* Config.Service
       const cfg = yield* config.get()
-      // goal_max_turns 在顶层可读，默认 10（TestConfig 空桩下回退到默认值）
-      expect((cfg as any).goal_max_turns ?? 10).toBe(10)
+      // goal_max_turns 在顶层可读，默认 32（prompt.ts 续跑门同源，0 = 禁用续跑）
+      expect((cfg as any).goal_max_turns ?? 32).toBe(32)
       // experimental.goals 不再存在，goal 功能始终可用
       expect((cfg as any).experimental?.goals).toBeUndefined()
     }),

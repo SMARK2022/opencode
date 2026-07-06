@@ -178,9 +178,9 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
-  // Goal正式启用：顶层上限默认10；0只禁用自动续跑，不隐藏工具。
+  // Goal正式启用：顶层上限默认32；0只禁用自动续跑，不隐藏工具。
   goal_max_turns: Schema.optional(NonNegativeInt).annotate({
-    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
+    description: "Maximum auto-continue turns per goal (default: 32, 0 to disable)",
   }),
   experimental: Schema.optional(
     Schema.Struct({

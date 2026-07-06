@@ -757,10 +757,11 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description).toBe(GOAL_DESCRIPTION.trimEnd())
-    const active = yield* goals.get(sessionID)
-    expect(Option.getOrThrow(active).status).toBe("active")
-    expect(Option.getOrThrow(active).tokensUsed).toBe(12)
+    const paused = yield* goals.get(sessionID)
+    expect(Option.getOrThrow(paused).status).toBe("paused")
+    expect(Option.getOrThrow(paused).tokensUsed).toBe(12)
 
+    yield* goals.set(sessionID, { status: "active" })
     responses = [[
       LLMEvent.stepStart({ index: 0 }),
       LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { status: "complete" } }),
@@ -795,6 +796,35 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
     const database = yield* Database.Service
     expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)).toBeUndefined()
+  }),
+)
+
+it.effect("defaults native goal continuation to 32 and resets the allowance on a new drain", () =>
+  Effect.gen(function* () {
+    yield* setup
+    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
+    const session = yield* SessionV2.Service
+    const goals = yield* SessionGoal.Service
+    yield* goals.set(sessionID, { objective: "Complete the default goal" })
+    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Begin" }), resume: false })
+    const normal = [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { inputTokens: 1, nonCachedInputTokens: 1, outputTokens: 0 } }),
+      LLMEvent.finish({ reason: "stop" }),
+    ]
+    responses = Array.from({ length: 33 }, () => normal)
+    requests.length = 0
+    yield* session.resume(sessionID)
+    // 首轮加32次续跑，到限暂停；恢复后由新用户输入开启下一轮额度。
+    expect(requests).toHaveLength(33)
+    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
+    yield* goals.set(sessionID, { status: "active" })
+    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue the goal" }), resume: false })
+    responses = Array.from({ length: 33 }, () => normal)
+    requests.length = 0
+    yield* session.resume(sessionID)
+    expect(requests).toHaveLength(33)
+    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
   }),
 )
 

@@ -54,6 +54,8 @@ export interface DialogSelectProps<T> {
   current?: T
   // #279：与 option.key 同形的稳定业务 identity；提供后 current 高亮不再依赖深比较
   currentKey?: string
+  // 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度
+  header?: JSX.Element
 }
 
 export interface DialogSelectOption<T = any> {
@@ -678,6 +680,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           </box>
         </Show>
       </box>
+      {/* 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度 */}
+      <Show when={props.header}>
+        <box paddingLeft={4} paddingRight={4} paddingBottom={1}>
+          {props.header}
+        </box>
+      </Show>
       <box flexGrow={1} flexShrink={1}>
         <Show
           when={grouped().length > 0}
