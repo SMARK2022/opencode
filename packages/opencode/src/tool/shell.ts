@@ -645,11 +645,12 @@ export const ShellTool = Tool.define(
 
           if (exit.kind === "abort") {
             aborted = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+            // 底层已把退出等待纳入forceKillAfter，复用它而不叠加第二套超时与吞错。
+            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
           }
           if (exit.kind === "timeout") {
             expired = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
           }
 
           // #291：子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完

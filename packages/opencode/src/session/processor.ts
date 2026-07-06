@@ -33,7 +33,8 @@ import { Usage, type LLMEvent } from "@opencode-ai/llm"
 import { Token } from "@opencode-ai/core/util/token"
 
 // #149：取消时给 bash 等工具完成截断/complete 的宽限
-const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
+// 500ms升级窗口后给并行工具2秒结算宽限；输出消费及finalizer仍由原owner收尾。
+const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 
 const DOOM_LOOP_THRESHOLD = 3
 // #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径

@@ -4207,6 +4207,59 @@ it.instance(
   { git: true },
   15_000,
 )
+it.instance(
+  "cancel does not abort assistant messages from a subsequently submitted prompt",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Cancel race" })
+      yield* seed(chat.id)
+
+      // 第一轮：hang 住 LLM，让 agent loop 卡住
+      yield* llm.hang
+      yield* user(chat.id, "first")
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      // 取消当前 agent loop（fork 让 cancel 在后台执行）
+      const cancelling = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+      const status = yield* SessionStatus.Service
+      // 等旧runner释放后才能创建新轮，不能把ensureRunning的join误当新模型执行。
+      yield* pollWithTimeout(status.get(chat.id).pipe(Effect.map((value) => value.type === "idle" ? true : undefined)), "Old runner did not release")
+
+      // 立即提交新命令——在 cancel 的 abortPendingAssistants 执行前
+      yield* llm.push(reply().text("second response").stop().item())
+      yield* user(chat.id, "second")
+      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+
+      // 等待第二个 loop 完成
+      const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("10 seconds"))
+      expect(Exit.isSuccess(exit2)).toBe(true)
+
+      // 验证第二个 assistant 消息没有被 abort
+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+      const assistants = messages.filter((m) => m.info.role === "assistant")
+      // 至少有两个 assistant：第一个被 cancel 终态化，第二个正常完成
+      const lastAssistant = assistants.at(-1)
+      expect(lastAssistant?.info.role).toBe("assistant")
+      if (lastAssistant?.info.role === "assistant") {
+        // 关键断言：新命令的 assistant 不应有 AbortedError
+        expect(lastAssistant.info.error?.name).not.toBe("MessageAbortedError")
+      }
+      expect(lastAssistant?.parts.some((part) => part.type === "text" && part.text === "second response")).toBe(true)
+      expect(yield* llm.calls).toBe(2)
+      yield* Fiber.join(cancelling)
+
+      // 清理第一个 fiber
+      yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore)
+    }),
+  { git: true },
+  30_000,
+)
+
+
 
 noLLMServer.instance(
   "unknown agent error includes available agent names",

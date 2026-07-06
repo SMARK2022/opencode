@@ -798,7 +798,8 @@ const layer = Layer.effect(
                 extendEnv: true,
                 env: { ...shellEnv.env, TERM: "dumb" },
                 stdin: "ignore",
-                forceKillAfter: "3 seconds",
+                // 手工shell与工具取消共用底层升级机制，仍等待退出和输出收尾。
+                forceKillAfter: "500 millis",
               })
               const handle = yield* spawner.spawn(cmd)
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
