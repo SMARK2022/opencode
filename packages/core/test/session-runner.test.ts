@@ -4136,6 +4136,43 @@ describe("SessionRunnerLLM", () => {
       responses = [failedTurn("error-two", 2), failedTurn("error-three", 3), fragmentFixture("text", "error-recovered", ["Recovered again"]).completeEvents]
       yield* session.resume(sessionID)
       expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
+      // 六个不同输入排除独立的同输入doom-loop，只核对同一助手的失败边界。
+      const failedBatch = (prefix: string) => [
+        LLMEvent.stepStart({ index: 0 }),
+        ...Array.from({ length: 6 }, (_, index) => LLMEvent.toolCall({ id: `${prefix}-${index}`, name: "missing", input: { prefix, index } })),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      ]
+      doomAssertions.length = 0
+      responses = [failedBatch("parallel-errors"), fragmentFixture("text", "parallel-recovered", ["Changed paths"]).completeEvents]
+      yield* session.resume(sessionID)
+      expect(doomAssertions).toEqual([])
+      const parallelErrors = (yield* session.context(sessionID)).flatMap(message =>
+        message.type === "assistant" ? message.content.filter(part => part.type === "tool" && part.id.startsWith("parallel-errors-")) : [],
+      )
+      expect(parallelErrors).toHaveLength(6)
+      expect(parallelErrors.every(part => part.type === "tool" && part.state.status === "error")).toBe(true)
+      // 新消息才递增；第三次触发后仍保留其身份，后面五个失败不能重复审批。
+      responses = [failedTurn("parallel-next", 4), failedBatch("threshold-errors"), fragmentFixture("text", "threshold-recovered", ["Changed strategy"]).completeEvents]
+      yield* session.resume(sessionID)
+      // 实际六个终态都已发布，断言一次审批也覆盖触发后同批剩余结算。
+      expect(doomAssertions).toHaveLength(1)
+      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
+      doomAssertions.length = 0
+      responses = [
+        ...[1, 2].map(attempt => [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: `echo-invalid-${attempt}`, name: "echo", input: { attempt } }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ]),
+        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-reset", name: "echo", input: { text: "reset" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
+        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-after-reset", name: "echo", input: { attempt: 3 } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
+        fragmentFixture("text", "reset-recovered", ["Recovered after reset"]).completeEvents,
+      ]
+      yield* session.resume(sessionID)
+      // 通过真实echo成功结算打断失败链，不靠改计数器fixture得到空审批。
+      expect(doomAssertions).toEqual([])
       doomAssertions.length = 0
       responses = [
         [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "loop-one", name: "echo", input: { text: "same" } }), LLMEvent.toolCall({ id: "loop-two", name: "echo", input: { text: "same" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
