@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Cause, DateTime, Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
+import { TestClock } from "effect/testing"
 import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { Database } from "@opencode-ai/core/database/database"
@@ -766,13 +767,15 @@ describe("PermissionV2", () => {
     reviewGate = yield* Deferred.make<void>()
     reviewStarted = yield* Deferred.make<void>()
     yield* publisher.publish(LLMEvent.toolCall({ id: "parent-cancel", name: "bash", input: { command: "git commit -m test" } }))
+    const beforeCancel = reviewRequests.length
     const cancel = yield* service.assert({ ...request, id: PermissionV2.ID.create(), resources: ["git commit -m test"], metadata: { command: "git commit -m test" }, source: { type: "tool", messageID: assistantMessageID, callID: "parent-cancel" } }).pipe(Effect.forkScoped)
     yield* Deferred.await(reviewStarted)
     yield* Fiber.interrupt(cancel)
+    expect(reviewRequests).toHaveLength(beforeCancel + 1)
     expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "failed", sessionID: child.id } } } }] })
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "aborted", sessionID: child.id } } } }] })
     yield* publisher.failUnsettledTools("Tool execution interrupted", false, true)
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "error", structured: { autoReview: { status: "failed" } } } }] })
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "error", structured: { autoReview: { status: "aborted" } } } }] })
     // 两个请求先写入，再同时交付解释，固定复现共享child下的交错。
     reviewRequests.length = 0
     reviewBeforeStream = yield* Deferred.make<void>()
@@ -841,7 +844,7 @@ describe("PermissionV2", () => {
     reviewSettings = new Config.Info({})
   }))
 
-  it.effect("repairs native reviewer protocol once while preserving hidden audit and usage", () => Effect.gen(function* () {
+  it.effect("repairs native reviewer protocol up to three attempts while preserving hidden audit and usage", () => Effect.gen(function* () {
     yield* setup([{ action: "*", resource: "*", effect: "auto" }])
     // 本例锁定协议重试及终局失败，默认人工回退已由上一真实权限用例覆盖。
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
@@ -913,14 +916,31 @@ describe("PermissionV2", () => {
       LLMEvent.toolError({ id: "broken", name: "permission_review_decision", message: "malformed input" }),
     ), tool(accepted)])).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(2)
-    // Markdown中的合法对象仍不是整段JSON；第二次畸形保持可见且不发起第三次。
+    // Markdown和prose只扩大原文本解码范围，仍须真实落盘json_fallback。
+    expect(yield* run([text("```json\n" + JSON.stringify(accepted) + "\n```")])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(1)
+    const prose = { ...accepted, rationale: 'bounded } transfer with "quoted" evidence' }
+    expect(yield* run([text("Based on my analysis:\n" + JSON.stringify(prose))])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(1)
+    expect((yield* sessions.context(childID)).flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool").at(-1)).toMatchObject({ state: { structured: { ...prose, source: "json_fallback" } } })
+    // 语义守卫继续拒绝critical，首对象不符契约时也不能搜索后面的allow。
+    expect(yield* run([text("Decision:\n" + JSON.stringify({ ...accepted, risk_level: "critical" }))])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(1)
+    expect(yield* run(Array.from({ length: 3 }, () => text('Preface {"unrelated":true}\n' + JSON.stringify(accepted))))).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(3)
+    // 畸形显式参数先触发同一协议错误，不能从同轮附带文本挑一个允许结果。
+    const malformedWithText = tool({ outcome: "allow" }).pipe(Stream.concat(text(JSON.stringify(accepted))))
+    expect(yield* run([malformedWithText, malformedWithText, malformedWithText])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(3)
+    // 三次总预算耗尽：只隐藏初次失败，第二和第三次真实输出保持可见。
     const hiddenBeforeFailure = hiddenIDs.length
-    expect(yield* run([text(`\`\`\`json\n${JSON.stringify(accepted)}\n\`\`\``), text("second malformed reply")])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(2)
+    expect(yield* run([text("first malformed reply"), text("second malformed reply"), text("third malformed reply")])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(3)
     expect(hiddenIDs).toHaveLength(hiddenBeforeFailure + 2)
     const visible = JSON.stringify(yield* sessions.context(childID))
-    expect(visible).not.toContain("```json")
+    expect(visible).not.toContain("first malformed reply")
     expect(visible).toContain("second malformed reply")
+    expect(visible).toContain("third malformed reply")
     const hiddenBeforeProviderFailure = hiddenIDs.length
     expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable" }))])).toMatchObject({ effect: "deny" })
     expect(reviewRequests).toHaveLength(1)
@@ -933,6 +953,77 @@ describe("PermissionV2", () => {
     expect((yield* sessions.context(childID)).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
     expect(reviewRequests).toHaveLength(2)
     expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
+    expect(yield* service.list()).toEqual([])
+  }))
+
+  it.effect("retries native reviewer timeouts and protocol errors and decodes prose without relaxing policy", () => Effect.gen(function* () {
+    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", timeout_ms: 1000 }) })
+    reviewRequests.length = 0
+    reviewGate = undefined
+    reviewStarted = undefined
+    let interrupted = 0
+    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewScript = undefined; reviewSettings = new Config.Info({}); reviewStarted = undefined; reviewGate = undefined }))
+    const service = yield* PermissionV2.Service
+    const sessions = yield* SessionStore.Service
+    const database = yield* Database.Service
+    const decision = { outcome: "allow", rationale: "retry after timeout succeeded", risk_level: "low", user_authorization: "high" }
+    const request = (diff: string) => assertion({ action: "edit", resources: ["src/retry.ts"], metadata: { filepath: "/project/src/retry.ts", diff } })
+    // 就绪信号在真实reasoning写入后发布，TestClock只推进已有单次期限。
+    const hang = (ready: Deferred.Deferred<void>) => Stream.make(
+      LLMEvent.reasoningStart({ id: "retry" }),
+      LLMEvent.reasoningDelta({ id: "retry", text: "partial review before deadline" }),
+    ).pipe(
+      // 清理归整个假运输流所有，避免ready发布后尚未进入never时遗漏中断计数。
+      Stream.concat(Stream.fromEffect(
+        Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)),
+      )),
+      Stream.ensuring(Effect.sync(() => { interrupted++ })),
+    )
+    const success = Stream.make(
+      LLMEvent.toolCall({ id: "retry-success", name: "permission_review_decision", input: decision }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    )
+    const started = yield* Deferred.make<void>()
+    reviewScript = [hang(started), success]
+    const fiber = yield* service.ask(request("timeout-success")).pipe(Effect.forkScoped)
+    yield* Deferred.await(started)
+    yield* TestClock.adjust("1 second")
+    expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
+    expect(interrupted).toBe(1)
+    expect(reviewRequests).toHaveLength(2)
+    expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
+    const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
+    expect(child).toBeDefined()
+    if (!child) return yield* Effect.die("Expected reviewer child")
+    const childID = SessionV2.ID.make(child.id)
+    const traces = yield* sessions.context(childID)
+    expect(traces.find(message => message.type === "assistant" && message.finish === "error")).toMatchObject({ time: { completed: DateTime.makeUnsafe(1000) } })
+    expect(JSON.stringify(traces)).toContain("partial review before deadline")
+    // 每次各自耗尽1000ms后再启动下一次，三次都必须先中断和关闭原流。
+    const starts = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>())
+    reviewRequests.length = 0
+    interrupted = 0
+    reviewScript = starts.map(hang)
+    const exhausted = yield* service.ask(request("timeout-exhausted")).pipe(Effect.forkScoped)
+    yield* Effect.forEach(starts, ready => Deferred.await(ready).pipe(Effect.andThen(TestClock.adjust("1 second"))))
+    expect(yield* Fiber.join(exhausted)).toMatchObject({ effect: "deny" })
+    expect(interrupted).toBe(3)
+    expect(reviewRequests).toHaveLength(3)
+    expect((yield* sessions.context(childID)).filter(message => message.type === "assistant").every(message => message.time.completed !== undefined)).toBe(true)
+    // 外部取消不是单次超时，不能消费补试次数或留下人工pending。
+    const cancelStarted = yield* Deferred.make<void>()
+    reviewRequests.length = 0
+    interrupted = 0
+    reviewScript = [hang(cancelStarted)]
+    const cancelled = yield* service.ask(request("external-cancel")).pipe(Effect.forkScoped)
+    yield* Deferred.await(cancelStarted)
+    // 等计时竞争的fiber进入等待后再取消；零推进不消耗任何单次预算。
+    yield* TestClock.adjust("0 millis")
+    yield* Fiber.interrupt(cancelled)
+    expect(interrupted).toBe(1)
+    expect(reviewRequests).toHaveLength(1)
     expect(yield* service.list()).toEqual([])
   }))
 })

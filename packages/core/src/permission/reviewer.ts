@@ -2,7 +2,7 @@ export * as PermissionReviewer from "./reviewer"
 
 import path from "path"
 import { LLM, LLMClient, LLMEvent, Tool } from "@opencode-ai/llm"
-import { Cause, Clock, Context, DateTime, Effect, FileSystem, Layer, Option, Schema, Semaphore, Stream } from "effect"
+import { Cause, Context, DateTime, Effect, FileSystem, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import { and, eq } from "drizzle-orm"
 import { Config } from "../config"
 import { ConfigAutoReview } from "../config/auto-review"
@@ -99,9 +99,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       const reviewerSession = yield* getReviewerSession(session, model)
       yield* updateToolAutoReview(input, { status: "reviewing", sessionID: reviewerSession })
       const protocolError = new Failed({ reason: "reviewer did not call permission_review_decision" })
-      const deadline = (yield* Clock.currentTimeMillis) + (options.timeout_ms ?? 90_000)
       const decodeAssessment = Schema.decodeUnknownOption(PermissionReviewerSchema.Assessment)
-      const decodeJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
       const runReviewerAttempt = (attemptPrompt: string, hideProtocolFailure: boolean) => Effect.gen(function* () {
         const reviewerRequestID = SessionMessage.ID.create()
         // 每次尝试保留真实请求；相同reviewID不代替请求/助手的独立身份。
@@ -121,7 +119,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         let textOutput = ""
         return yield* client.stream(LLM.request({
           model: selected.model, prompt: attemptPrompt,
-          // 两次尝试移动同一可信原话；证据与协议修复提示始终留在user通道。
+          // 逐次移动同一可信原话；证据与协议修复提示始终留在user通道。
           ...(selected.openaiOAuth ? { providerOptions: { openai: { instructions: system } } } : { system }),
           tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
             description: "Submit the structured allow/deny decision for this permission review.",
@@ -142,7 +140,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
             if (event.type === "text-delta") textOutput += event.text
             if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
             assessment = Option.getOrUndefined(decodeAssessment(event.input))
-            if (!assessment) return
+            if (!assessment) return yield* protocolError
             yield* publisher.publish(LLMEvent.toolResult({
               id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
               output: { structured: { ...assessment, reviewID: input.reviewID, source: "tool_call" }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
@@ -150,8 +148,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           })),
           Effect.flatMap(() => Effect.gen(function* () {
             if (assessment) return assessment
-            // 仅接受整段Schema合法JSON，不从解释或Markdown中抽取片段。
-            const fallback = Option.getOrUndefined(Option.flatMap(decodeJson(textOutput.trim()), decodeAssessment))
+            // 文本兼容只在原裁决边界提取首个对象，继续经过同一Schema及策略校验。
+            const fallback = Option.getOrUndefined(assessmentFromText(textOutput))
             if (!fallback) return yield* protocolError
             const callID = `json_fallback_${input.reviewID}`
             yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "permission_review_decision", input: fallback }))
@@ -161,8 +159,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
             }))
             return fallback
           })),
-          // 两次尝试共享原有总期限；收尾在超时竞争之外，取消返回前必须完成投影。
-          Effect.timeoutOrElse({ duration: Math.max(0, deadline - (yield* Clock.currentTimeMillis)), orElse: () => Effect.fail(timedOut) }),
+          // 每次拥有完整执行期限；仍先完成原onExit收尾，再向外层交付超时供补试。
+          Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
           Effect.onExit((exit) => Effect.gen(function* () {
             const finalizer = exit._tag === "Failure"
             yield* publisher.flush(finalizer)
@@ -196,9 +194,16 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           }),
         )
       })
-      const result = yield* runReviewerAttempt(prompt, true).pipe(
-        Effect.catchIf((error) => error === protocolError, () => runReviewerAttempt(`${prompt}\n\n${PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT}`, false)),
-      )
+      // 三次预算只覆盖本请求的超时/协议错误，provider失败和取消不补试。
+      const attempt = (index: number, currentPrompt = prompt): Effect.Effect<PermissionReviewerSchema.Assessment, Effect.Error<ReturnType<typeof runReviewerAttempt>>> =>
+        runReviewerAttempt(currentPrompt, index === 0).pipe(
+          Effect.catchIf((error) => error === protocolError || error === timedOut, (error) => {
+            if (index >= 2) return Effect.fail(error)
+            // 协议仅追加同一条原话；超时保留当前提示，必须等上次收尾后才重试。
+            return attempt(index + 1, error === protocolError ? `${prompt}\n\n${PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT}` : currentPrompt)
+          }),
+        )
+      const result = yield* attempt(0)
       yield* updateToolAutoReview(input, { status: result.outcome === "allow" ? "allowed" : "denied", result })
       return {
         action: result.outcome, reason: result.rationale, reviewID: input.reviewID,
@@ -212,7 +217,7 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         const error = Cause.squash(exit.cause)
         // 期限身份来自本次timeout错误对象；取消不靠英文文案猜测，也不变成用户批准。
         return updateToolAutoReview(input, {
-          status: options.fallback === "user" && !Cause.hasInterrupts(exit.cause) ? "fallback_user" : error === timedOut ? "timed_out" : "failed",
+          status: Cause.hasInterrupts(exit.cause) ? "aborted" : options.fallback === "user" ? "fallback_user" : error === timedOut ? "timed_out" : "failed",
           error: error instanceof Error ? error.message : "Review cancelled",
         }, true)
       }),
@@ -253,6 +258,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
       if (!part || part.type !== "tool" || part.state.status !== "running") return
       // 已结算或过期引用不重启工具；仅在现有running投影记录关联，不泄漏审查正文。
       const current = part.state.structured.autoReview
+      // 迟到取消只补reviewing，不能把已有裁决或失败终态覆写为aborted。
+      if (patch.status === "aborted" && typeof current === "object" && current !== null && "status" in current && current.status && current.status !== "reviewing") return
       yield* events.publish(SessionEvent.Tool.Progress, {
         sessionID: recorded.sessionID, assistantMessageID: recorded.message.id, callID: binding.callID, timestamp: yield* DateTime.now,
         structured: { ...part.state.structured, autoReview: {
@@ -268,6 +275,32 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
     )
   }
 }))
+
+function assessmentFromText(text: string) {
+  const json = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
+  const decode = Schema.decodeUnknownOption(PermissionReviewerSchema.Assessment)
+  const direct = Option.flatMap(json(text.trim()), decode)
+  if (Option.isSome(direct)) return direct
+  const start = text.indexOf("{")
+  if (start < 0) return Option.none()
+  // 仅提取第一个完整对象；字符串内括号和转义不参与深度，禁止搜索后续候选。
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = start; index < text.length; index++) {
+    const character = text[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (character === "\\") escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') quoted = true
+    else if (character === "{") depth++
+    else if (character === "}" && --depth === 0) return Option.flatMap(json(text.slice(start, index + 1)), decode)
+  }
+  return Option.none()
+}
 
 function render(message: SessionMessage.Message) {
   if (message.type === "synthetic" || message.type === "system") return ""
