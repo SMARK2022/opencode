@@ -130,6 +130,13 @@ const cmdShell = shells.find((item) => item.label === "cmd")
 const sh = () => Shell.name(Shell.acceptable())
 const evalarg = (text: string) => (sh() === "cmd" ? quote(text) : squote(text))
 
+// Windows 上默认 shell 是 pwsh（PowerShell 7），其 .NET 运行时冷启动 +
+// 首条 echo 输出在 CI 上可达 600ms+。500ms timeout 会在 echo 输出到达管道前
+// 触发，导致 result.output 不含 "started" 而间歇性失败。
+// Windows 放宽到 3000ms 保证 echo 先输出再 timeout；其他平台保持 500ms
+// 以维持快速反馈。此常量仅用于 timeout + 预期有输出的测试场景。
+const timeoutMs = process.platform === "win32" ? 3000 : 500
+
 const fill = (mode: "lines" | "bytes", n: number) => {
   const code =
     mode === "lines"
@@ -1815,14 +1822,16 @@ describe("tool.shell abort", () => {
       runIn(
         projectRoot,
         Effect.gen(function* () {
+          // timeoutMs 在 Windows 上为 3000ms，给 pwsh 冷启动足够时间先输出 "started"；
+          // 在 Linux/macOS 上为 500ms，保持快速反馈。timeout_ms 断言须与平台值一致。
           const result = yield* run({
             command: `echo started && sleep 60`,
             description: "Timeout test",
-            timeout: 500,
+            timeout: timeoutMs,
           })
           expect(result.output).toContain("started")
           expect(result.output).toContain(
-            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
+            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}" />`,
           )
           expect(result.output).not.toContain('reason="exit"')
         }),
@@ -1841,9 +1850,11 @@ describe("tool.shell abort", () => {
             description: "Default timeout test",
           })
           expect(result.output).toContain("started")
-          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
+          // bashDefaultTimeoutMs 与 timeoutMs 保持同值，确保 notice 中 timeout_ms
+          // 在所有平台都与实际使用的默认超时一致
+          expect(result.output).toContain(`reason="timeout" timeout_ms="${timeoutMs}"`)
         }),
-      ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
+      ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: timeoutMs }))),
     15_000,
   )
 
@@ -2216,10 +2227,12 @@ describe("tool.shell truncation", () => {
           Effect.gen(function* () {
             // [local-smark] echo 先输出再 sleep，timeout 时已有 output → emptyOutput=false
             // 验证有输出时不触发 block-buffering 诊断（仅 timeout+空输出触发）
+            // timeoutMs 在 Windows 上放宽到 3000ms，确保 pwsh 冷启动后
+            // "started" 先到达管道再触发 timeout，否则 emptyOutput=true 会误触诊断
             const result = yield* run({
               command: `echo started && sleep 60`,
               description: "Timeout with output test",
-              timeout: 500,
+              timeout: timeoutMs,
             })
 
             expect(result.output).toContain("started")
