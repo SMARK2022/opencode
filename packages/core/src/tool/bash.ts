@@ -332,7 +332,8 @@ const layer = Layer.effectDiscard(
                 env: Shell.utf8Environment(),
                 stdin: "ignore",
                 detached: process.platform !== "win32",
-                forceKillAfter: Duration.seconds(3),
+                // 原生Bash scope退出同样按500ms升级，清理仍归现有AppProcess/spawner。
+                forceKillAfter: Duration.millis(500),
               })
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
               let ended = false

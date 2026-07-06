@@ -109,14 +109,22 @@ const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      yield* cancelBackgroundJobs(background, sessionID)
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
+      const jobs = yield* background.list()
       if (!existing) {
-        yield* status.set(sessionID, { type: "idle" })
+        // 无 runner 时仍需取消可能残留的 background jobs
+        yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), status.set(sessionID, { type: "idle" })], {
+          concurrency: "unbounded",
+          discard: true,
+        })
         return
       }
-      yield* existing.cancel
+      // 先固定本次jobs再并行取消，不能在runner发布idle后扫描新命令的作业。
+      yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), existing.cancel], {
+        concurrency: "unbounded",
+        discard: true,
+      })
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
@@ -150,8 +158,8 @@ const layer = Layer.effect(
 const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (
   background: BackgroundJob.Interface,
   sessionID: SessionID,
+  jobs: ReadonlyArray<BackgroundJob.Info>,
 ) {
-  const jobs = yield* background.list()
   const pending = new Set<string>([sessionID])
   const cancelled = new Set<string>()
   const matches = (job: BackgroundJob.Info) => {
