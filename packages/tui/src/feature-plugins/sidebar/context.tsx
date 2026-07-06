@@ -7,6 +7,7 @@ import { useSDK } from "../../context/sdk"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { getContextLimit } from "../../util/token-estimate"
 import { tokenAccounting } from "../../util/token-accounting"
+import { Locale } from "../../util/locale"
 // #122：侧栏 context 与 prompt 共用 accounting
 
 const id = "internal:sidebar-context"
@@ -174,7 +175,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <b>Context</b>
       </text>
       {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
-      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})</text>
+      {/* 上下载当前值与累积量改用 K/M 缩略(Locale.number)，与 prompt footer 流量格式对齐 */}
+      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {Locale.number(state().input)}({Locale.number(state().totalInput)}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {Locale.number(state().output)}({Locale.number(state().totalOutput)})</text>
       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens{state().percent != null ? ` · ${state().percent}%` : ""}</text>
       {/* 未解析到 origin 时隐藏探测，避免冷启动一直显示没有目标的等待状态。 */}
       <text fg={theme().textMuted}>
