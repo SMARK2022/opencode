@@ -159,6 +159,11 @@ const cmdShell = shells.find((item) => item.label === "cmd")
 
 const sh = () => Shell.name(Shell.acceptable())
 const evalarg = (text: string) => (sh() === "cmd" ? quote(text) : squote(text))
+// Windows 上默认 shell 是 pwsh（PowerShell 7），其 .NET 运行时冷启动 +
+// 首条 echo 输出在 CI 上可达 600ms+。500ms timeout 会在输出到达管道前触发，
+// 导致 timeout 相关断言间歇性失败。Windows 放宽到 3000ms；其他平台保持
+// 500ms 快速反馈。仅用于 timeout + 预期有输出的测试场景。
+const timeoutMs = process.platform === "win32" ? 3000 : 500
 
 const fill = (mode: "lines" | "bytes", n: number) => {
   const code =
@@ -1710,10 +1715,10 @@ describe("tool.shell abort", () => {
         Effect.gen(function* () {
           const result = yield* run({
             command: `sleep 60`,
-            timeout: 500,
+            timeout: timeoutMs,
           })
           expect(result.output).toContain(
-            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
+            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}" />`,
           )
           expect(result.output).not.toContain('reason="exit"')
           // #289：abort/timeout notice 不带 exit reason——中止不是进程自身退出，防止状态混淆
@@ -1729,16 +1734,19 @@ describe("tool.shell abort", () => {
         projectRoot,
         Effect.gen(function* () {
           const tool = yield* initShell()
-          expect(tool.description).toContain("commands will time out after 500ms")
+          // description 断言须与 RuntimeFlags 注入值一致，避免改超时值时断言漂移
+          expect(tool.description).toContain(`commands will time out after ${timeoutMs}ms`)
           const result = yield* tool.execute(
             {
               command: `sleep 60`,
             },
             ctx,
           )
-          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
+          // bashDefaultTimeoutMs 与 timeoutMs 保持同值，notice 的 timeout_ms
+          // 在所有平台都与实际默认超时一致
+          expect(result.output).toContain(`reason="timeout" timeout_ms="${timeoutMs}"`)
         }),
-      ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
+      ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: timeoutMs }))),
     15_000,
   )
 
@@ -2325,9 +2333,11 @@ describe("tool.shell windows PS stderr and progress", () => {
           Effect.gen(function* () {
             // [local-smark] echo 先输出再 sleep，timeout 时已有 output → emptyOutput=false
             // 验证有输出时不触发 block-buffering 诊断（仅 timeout+空输出触发）
+            // timeout 用平台感知 timeoutMs：pwsh 冷启动 600ms+ 时 500ms 会在输出到达前触发，
+            // emptyOutput=true 反而误追加 block-buffering 诊断，双断言皆败
             const result = yield* run({
               command: `echo started && sleep 60`,
-              timeout: 500,
+              timeout: timeoutMs,
             })
 
             expect(result.output).toContain("started")
