@@ -23,13 +23,7 @@ import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessag
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { NotFoundError } from "@/storage/storage"
-import { and } from "drizzle-orm"
-import { desc } from "drizzle-orm"
-import { eq } from "drizzle-orm"
-import { inArray } from "drizzle-orm"
-import { lt } from "drizzle-orm"
-import { or } from "drizzle-orm"
-import { sql } from "drizzle-orm"
+import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
@@ -489,12 +483,22 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
   // 显式审计读取保留隐藏内容，普通分页在 LIMIT 前筛选可见消息。
   includeHidden?: boolean
+  fromMessageID?: MessageID
 }) {
   const { db } = yield* Database.Service
   const before = input.before ? cursor.decode(input.before) : undefined
-  const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-    : eq(MessageTable.session_id, input.sessionID)
+  const anchor = input.fromMessageID
+    ? yield* db.select({ id: MessageTable.id, time: MessageTable.time_created })
+        .from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.fromMessageID)))
+        .get().pipe(Effect.orDie)
+    : undefined
+  // 导入及回绕ID不保证时间单调，范围必须与现有(time_created,id)分页顺序一致。
+  const lower = input.fromMessageID
+    ? anchor
+      ? or(gt(MessageTable.time_created, anchor.time), and(eq(MessageTable.time_created, anchor.time), gte(MessageTable.id, anchor.id)))
+      : sql`0`
+    : undefined
+  const where = and(eq(MessageTable.session_id, input.sessionID), lower, before ? older(before) : undefined)
   // #98：隐藏消息在 LIMIT 前过滤，保留可见页容量和游标。
   const rows = yield* db
     .select()
@@ -536,14 +540,14 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 })
 
 // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
-export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
+export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
   // includeHidden 默认 false：正常流不返回被撤销隐藏的消息和 part
   const size = 50
   return Effect.gen(function* () {
     const result = [] as WithParts[]
     let before: string | undefined
     while (true) {
-      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden }).pipe(
+      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden, fromMessageID: opts?.fromMessageID }).pipe(
         Effect.catchIf(NotFoundError.isInstance, () =>
           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
         ),

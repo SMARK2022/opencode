@@ -346,12 +346,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       // #153：流式返回的 message 必须来自 session 所属实例，防止跨目录读写
       const message = yield* inSessionDirectory(
         ctx.params.sessionID,
-        promptSvc
-          .prompt({
+        Effect.gen(function* () {
+          // 守卫必须与执行同属持久会话目录，否则会读到另一份InstanceState。
+          yield* runState.assertNotReverting(ctx.params.sessionID)
+          return yield* promptSvc.prompt({
             ...ctx.payload,
             sessionID: ctx.params.sessionID,
           })
-          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+        }).pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
       )
       return HttpServerResponse.stream(Stream.make(JSON.stringify(message)).pipe(Stream.encodeText), {
         contentType: "application/json",
@@ -366,7 +368,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       // #153：后台 fork 的 Error 事件必须发布到 session 所属实例，订阅方才能收到
       yield* inSessionDirectory(
         ctx.params.sessionID,
-        promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+        Effect.gen(function* () {
+          // 同步拒绝发生在fork之前，不能把revert冲突藏进后台Error事件。
+          yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
+            Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
+          )
+          yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
           // catchCause 后统一转 Error 事件，单次失败不影响请求作用域内其他 fiber
           Effect.catchCause((cause) =>
             Effect.gen(function* () {
@@ -377,8 +384,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
               })
             }),
           ),
-        ),
-      ).pipe(Effect.forkIn(scope, { startImmediately: true }))
+          ).pipe(Effect.forkIn(scope, { startImmediately: true }))
+        }),
+      )
       return HttpApiSchema.NoContent.make()
     })
 
@@ -390,9 +398,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       // #153：命令消息持久化与 agent 解析依赖 session 目录上下文
       return yield* inSessionDirectory(
         ctx.params.sessionID,
-        promptSvc
-          .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
-          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+        Effect.gen(function* () {
+          yield* runState.assertNotReverting(ctx.params.sessionID)
+          return yield* promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID })
+        }).pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
       )
     })
 
@@ -404,7 +413,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       // #153：shell 的输出落盘与快照写入 session 所在存储根，跨目录会写到错误位置
       return yield* inSessionDirectory(
         ctx.params.sessionID,
-        SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })),
+        SessionError.mapBusy(
+          runState.assertNotReverting(ctx.params.sessionID).pipe(Effect.andThen(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))),
+        ),
       )
     })
 
@@ -413,12 +424,19 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof RevertPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload }))
+      // revert与四个提交入口必须读写同一目录作用域的reverting集合。
+      return yield* inSessionDirectory(
+        ctx.params.sessionID,
+        SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload })),
+      )
     })
 
     const unrevert = Effect.fn("SessionHttpApi.unrevert")(function* (ctx: { params: { sessionID: SessionID } }) {
       yield* requireSession(ctx.params.sessionID)
-      return yield* SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
+      return yield* inSessionDirectory(
+        ctx.params.sessionID,
+        SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID })),
+      )
     })
 
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
@@ -443,8 +461,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-      yield* session.removeMessage(ctx.params)
+      yield* inSessionDirectory(ctx.params.sessionID, Effect.gen(function* () {
+        // assertNotBusy新增reverting语义后，删除检查也要消费同一目录状态。
+        yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
+        yield* session.removeMessage(ctx.params)
+      }))
       return true
     })
 

@@ -101,6 +101,10 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Ses
   sessionID: SessionSchema.ID,
 }) {}
 
+export class BusyError extends Schema.TaggedErrorClass<BusyError>()("Session.BusyError", {
+  sessionID: SessionSchema.ID,
+}) {}
+
 export class OperationUnavailableError extends Schema.TaggedErrorClass<OperationUnavailableError>()(
   "Session.OperationUnavailableError",
   {
@@ -117,7 +121,7 @@ export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictE
 export const MessageNotFoundError = SessionRevert.MessageNotFoundError
 export type MessageNotFoundError = SessionRevert.MessageNotFoundError
 
-export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError
+export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError | BusyError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
@@ -160,7 +164,7 @@ export interface Interface {
     prompt: PromptInput.Prompt
     delivery?: SessionInput.Delivery
     resume?: boolean
-  }) => Effect.Effect<SessionInput.Admitted, NotFoundError | PromptConflictError>
+  }) => Effect.Effect<SessionInput.Admitted, NotFoundError | PromptConflictError | BusyError>
   readonly shell: (input: {
     id?: EventV2.ID
     sessionID: SessionSchema.ID
@@ -173,19 +177,19 @@ export interface Interface {
     skill: string
     resume?: boolean
   }) => Effect.Effect<void, OperationUnavailableError>
-  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
+  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
-  readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
+  readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
   readonly interrupt: (sessionID: SessionSchema.ID) => Effect.Effect<void>
   readonly revert: {
     readonly stage: (input: {
       sessionID: SessionSchema.ID
       messageID: SessionMessage.ID
       files?: boolean
-    }) => Effect.Effect<Revert.State, NotFoundError | MessageNotFoundError | Snapshot.Error>
-    readonly clear: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | Snapshot.Error>
-    readonly commit: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
+    }) => Effect.Effect<Revert.State, NotFoundError | MessageNotFoundError | Snapshot.Error | BusyError>
+    readonly clear: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | Snapshot.Error | BusyError>
+    readonly commit: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | BusyError>
   }
 }
 
@@ -212,6 +216,23 @@ const layer = Layer.effect(
               messageID: SessionMessage.ID.make(row.id),
             }),
         ),
+      )
+
+    // 占用与Session服务同为进程级；普通运行中的steer/queue仍可入箱。
+    const reverting = new Set<SessionSchema.ID>()
+    const assertNotReverting = (sessionID: SessionSchema.ID) => Effect.suspend(() =>
+      reverting.has(sessionID) ? new BusyError({ sessionID }) : Effect.void,
+    )
+    // 获取失败不释放别人的占用，文件恢复、失败和取消共用同一释放边界。
+    const withRevert = <A, E, R>(sessionID: SessionSchema.ID, use: Effect.Effect<A, E, R>) =>
+      Effect.acquireUseRelease(
+        Effect.gen(function* () {
+          const active = yield* execution.active
+          if (active.has(sessionID) || reverting.has(sessionID)) return yield* new BusyError({ sessionID })
+          reverting.add(sessionID)
+        }),
+        () => use,
+        () => Effect.sync(() => { reverting.delete(sessionID) }),
       )
 
     const result = Service.of({
@@ -405,6 +426,8 @@ const layer = Layer.effect(
         Effect.uninterruptible(
           Effect.gen(function* () {
             yield* result.get(input.sessionID)
+            // 必须在durable admission之前拒绝撤回冲突，不能先写入再假称失败。
+            yield* assertNotReverting(input.sessionID)
             const prompt = resolvePrompt(input.prompt)
             const messageID = input.id ?? SessionMessage.ID.create()
             const delivery = input.delivery ?? "steer"
@@ -460,6 +483,7 @@ const layer = Layer.effect(
       }),
       compact: Effect.fn("V2Session.compact")(function* (input) {
         yield* result.get(input.sessionID)
+        yield* assertNotReverting(input.sessionID)
         // 维护意图经过同一进程级所有权和 Location 路由，不能直接启动第二个 runner。
         yield* execution.resume(input.sessionID, "compact")
       }),
@@ -470,31 +494,38 @@ const layer = Layer.effect(
       active: execution.active,
       resume: Effect.fn("V2Session.resume")(function* (sessionID) {
         yield* result.get(sessionID)
+        yield* assertNotReverting(sessionID)
         yield* execution.resume(sessionID)
       }),
       interrupt: Effect.fn("V2Session.interrupt")((sessionID) =>
         Effect.uninterruptible(execution.interrupt(sessionID)),
       ),
       revert: {
-        stage: Effect.fn("V2Session.revert.stage")(function* (input) {
-          const session = yield* result.get(input.sessionID)
-          return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
-            Effect.provideService(Database.Service, database),
-            Effect.provideService(EventV2.Service, events),
-            Effect.provide(locations.get(session.location)),
-          )
-        }),
-        clear: Effect.fn("V2Session.revert.clear")(function* (sessionID) {
-          const session = yield* result.get(sessionID)
-          yield* SessionRevert.clear(session).pipe(
-            Effect.provideService(EventV2.Service, events),
-            Effect.provide(locations.get(session.location)),
-          )
-        }),
-        commit: Effect.fn("V2Session.revert.commit")(function* (sessionID) {
-          const session = yield* result.get(sessionID)
-          yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
-        }),
+        stage: Effect.fn("V2Session.revert.stage")((input) =>
+          withRevert(input.sessionID, Effect.gen(function* () {
+            const session = yield* result.get(input.sessionID)
+            return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
+              Effect.provideService(Database.Service, database),
+              Effect.provideService(EventV2.Service, events),
+              Effect.provide(locations.get(session.location)),
+            )
+          })),
+        ),
+        clear: Effect.fn("V2Session.revert.clear")((sessionID) =>
+          withRevert(sessionID, Effect.gen(function* () {
+            const session = yield* result.get(sessionID)
+            yield* SessionRevert.clear(session).pipe(
+              Effect.provideService(EventV2.Service, events),
+              Effect.provide(locations.get(session.location)),
+            )
+          })),
+        ),
+        commit: Effect.fn("V2Session.revert.commit")((sessionID) =>
+          withRevert(sessionID, Effect.gen(function* () {
+            const session = yield* result.get(sessionID)
+            yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
+          })),
+        ),
       },
     })
 
