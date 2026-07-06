@@ -119,7 +119,10 @@ export const layer = Layer.effect(
     // [local-smark] consecutive-error breaker 的跨 step 计数器。
     // ProcessorContext 每步重建，无法跨 step 累加；此处 Map 在 layer 闭包中持久化，
     // 按 sessionID 隔离，跨 create()/process() 调用存活。
-    const consecutiveErrorMap = new Map<SessionID, Record<string, number>>()
+    // value 为 { count, lastMessageID }：同一 assistant message 内的并行 error
+    // 只计 1 次失败事件（lastMessageID 相同不递增），跨 turn 才递增 count。
+    // 防止模型一次并行调用多个同工具（如 3 个 read 不同路径）全部失败时误触发。
+    const consecutiveErrorMap = new Map<SessionID, Record<string, { count: number; lastMessageID: string }>>()
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
 
@@ -573,7 +576,9 @@ export const layer = Layer.effect(
               })
             }
             yield* completeToolCall(value.toolCallId, output)
-            // [local-smark] 工具成功时重置 consecutive-error 计数器
+            // [local-smark] 工具成功时重置 consecutive-error 计数器。
+            // delete 整个 entry：下次 error 会创建新 entry { count: 1, lastMessageID: currentMsgID }，
+            // 正确表示"成功打断连续失败，重新开始计数"。
             const successToolName = toolCall?.part.tool
             if (successToolName) {
               const errMap = consecutiveErrorMap.get(ctx.sessionID)
@@ -603,25 +608,35 @@ export const layer = Layer.effect(
               })
             }
             yield* failToolCall(value.toolCallId, value.error)
-            // [local-smark] consecutive-error breaker：同一工具连续 3 次 error 后
+            // [local-smark] consecutive-error breaker：同一工具跨 turn 连续 error 后
             // 注入 doom_loop permission ask，让模型意识到需要改变策略。
+            // 消息边界感知：同一 assistant message 内的并行 error 只计 1 次——
+            // 模型尚未看到错误结果，无法"改变策略"，此时触发是误报。
             // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
             const toolName = toolCall?.part.tool ?? "unknown"
             const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
-            errMap[toolName] = (errMap[toolName] ?? 0) + 1
+            const entry = errMap[toolName] ?? { count: 0, lastMessageID: "" }
+            // lastMessageID 不同 = 跨 turn 的新的失败 → 递增计数
+            // lastMessageID 相同 = 同一 assistant message 的并行 error → 不递增
+            if (entry.lastMessageID !== ctx.assistantMessage.id) {
+              entry.count += 1
+              entry.lastMessageID = ctx.assistantMessage.id
+            }
+            errMap[toolName] = entry
             consecutiveErrorMap.set(ctx.sessionID, errMap)
-            if (errMap[toolName] >= 3) {
+            if (entry.count >= 3) {
               const agent = yield* agents.get(ctx.assistantMessage.agent)
               yield* permission.ask({
                 permission: "doom_loop",
                 patterns: [toolName],
                 sessionID: ctx.assistantMessage.sessionID,
-                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: errMap[toolName] },
+                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: entry.count },
                 always: [toolName],
                 ruleset: agent.permission,
               })
-              // 重置计数器，避免每次 error 都触发
-              errMap[toolName] = 0
+              // 重置计数，避免同 message 后续 error 重复触发；
+              // lastMessageID 保留：同批次后续 error 不递增，下一 turn 才从 1 开始
+              entry.count = 0
               consecutiveErrorMap.set(ctx.sessionID, errMap)
             }
             return
