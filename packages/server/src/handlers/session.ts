@@ -197,6 +197,9 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                     }),
                   ),
                 ),
+                // 撤回冲突与已有durable ID冲突共用公开409合同，不变成隐藏成功。
+                Effect.catchTag("Session.BusyError", (error) =>
+                  new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
               ),
           }
         }),
@@ -207,7 +210,9 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           yield* session.compact({ sessionID: ctx.params.sessionID }).pipe(
             // 已接通的维护失败返回真实诊断，不能仍报告“尚未实现”。
             Effect.catch((error) => Effect.fail(
-              error instanceof SessionV2.NotFoundError
+              error instanceof SessionV2.BusyError
+                ? new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })
+                : error instanceof SessionV2.NotFoundError
                 ? new SessionNotFoundError({ sessionID: error.sessionID, message: `Session not found: ${error.sessionID}` })
                 : new ServiceUnavailableError({ message: error.message, service: "session.compact" }),
             )),
@@ -244,6 +249,8 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         Effect.fn(function* (ctx) {
           return {
             data: yield* session.revert.stage({ ...ctx.params, ...ctx.payload }).pipe(
+              Effect.catchTag(
+                "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
               Effect.catchTag(
                 "Session.NotFoundError",
                 (error) =>
@@ -283,6 +290,8 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         Effect.fn(function* (ctx) {
           yield* session.revert.clear(ctx.params.sessionID).pipe(
             Effect.catchTag(
+              "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
+            Effect.catchTag(
               "Session.NotFoundError",
               (error) =>
                 new SessionNotFoundError({
@@ -311,6 +320,8 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.revert.commit",
         Effect.fn(function* (ctx) {
           yield* session.revert.commit(ctx.params.sessionID).pipe(
+            Effect.catchTag(
+              "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
             Effect.catchTag(
               "Session.NotFoundError",
               (error) =>

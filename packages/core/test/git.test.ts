@@ -121,6 +121,7 @@ describe("Git trees", () => {
         await initRepo(root.path)
         await fs.mkdir(path.join(root.path, "scope"))
         await fs.writeFile(path.join(root.path, "scope", "tracked.txt"), "one\n")
+        await fs.writeFile(path.join(root.path, "scope", "second.txt"), "second one\n")
         await fs.writeFile(path.join(root.path, "outside.txt"), "outside\n")
         await $`git add .`.cwd(root.path).quiet()
         await $`git commit -m initial`.cwd(root.path).quiet()
@@ -135,6 +136,7 @@ describe("Git trees", () => {
 
       yield* Effect.promise(async () => {
         await fs.writeFile(path.join(root.path, "scope", "tracked.txt"), "two\n")
+        await fs.writeFile(path.join(root.path, "scope", "second.txt"), "second two\n")
         await fs.writeFile(path.join(root.path, "scope", "added.txt"), "added\n")
         await fs.writeFile(path.join(root.path, "outside.txt"), "changed outside\n")
       })
@@ -143,22 +145,29 @@ describe("Git trees", () => {
 
       expect(yield* git.tree.files({ repository, from: before, to: after })).toEqual([
         RelativePath.make("scope/added.txt"),
+        RelativePath.make("scope/second.txt"),
         RelativePath.make("scope/tracked.txt"),
       ])
       const diffs = yield* git.tree.diff({ repository, from: before, to: after, context: 1 })
       expect(diffs.map((item) => [item.path, item.status])).toEqual([
         [RelativePath.make("scope/added.txt"), "added"],
+        [RelativePath.make("scope/second.txt"), "modified"],
         [RelativePath.make("scope/tracked.txt"), "modified"],
       ])
 
-      const files = new Map([[RelativePath.make("scope/tracked.txt"), before]])
+      // 同树两个已存在文件使用批量恢复，范围外文件和新增文件仍保持当前值。
+      const files = new Map([[RelativePath.make("scope/tracked.txt"), before], [RelativePath.make("scope/second.txt"), before]])
       const preview = yield* git.tree.preview({ repository, current: after, files, context: 1 })
-      expect(preview).toHaveLength(1)
-      expect(preview[0]?.path).toBe(RelativePath.make("scope/tracked.txt"))
+      expect(preview).toHaveLength(2)
+      expect(preview.map(file => file.path)).toEqual([RelativePath.make("scope/second.txt"), RelativePath.make("scope/tracked.txt")])
       yield* git.tree.restore({ repository, files })
       expect(yield* read(path.join(root.path, "scope", "tracked.txt"))).toBe("one\n")
+      expect(yield* read(path.join(root.path, "scope", "second.txt"))).toBe("second one\n")
       expect(yield* read(path.join(root.path, "scope", "added.txt"))).toBe("added\n")
       expect(yield* read(path.join(root.path, "outside.txt"))).toBe("changed outside\n")
+      // 缺失路径使快径失败后继续原逐文件路径，只删除snapshot中不存在的文件。
+      yield* git.tree.restore({ repository, files: new Map([[RelativePath.make("scope/second.txt"), before], [RelativePath.make("scope/added.txt"), before]]) })
+      expect(yield* Effect.promise(() => Bun.file(path.join(root.path, "scope", "added.txt")).exists())).toBe(false)
     }),
   )
 })

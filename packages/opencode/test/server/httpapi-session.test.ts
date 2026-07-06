@@ -281,6 +281,21 @@ describe("session HttpApi", () => {
         yield* Context.get(first, Project.Service).fromDirectory(instance.directory)
         const session = yield* createSession().pipe(Effect.provide(first))
         const message = yield* createTextMessage(session.id, "shared run").pipe(Effect.provide(first))
+        const other = yield* tmpdirScoped({ git: true }).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)))
+        yield* Effect.acquireUseRelease(
+          firstRunState.beginRevert(session.id).pipe(Effect.provide(first)),
+          () => Effect.gen(function* () {
+            // 请求目录不同仍同步拒绝；若守卫放在fork内则会错误返回204。
+            const response = yield* Effect.promise(() => handlers[0]!.web.handler(new Request(
+              `http://localhost${pathFor(SessionPaths.promptAsync, { sessionID: session.id })}?directory=${encodeURIComponent(other)}`,
+              { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ noReply: true, parts: [{ type: "text", text: "must not be admitted" }] }) },
+            ), HttpApiApp.context))
+            expect(response.status).toBe(400)
+            expect(yield* Context.get(first, Session.Service).messages({ sessionID: session.id }).pipe(Effect.provide(first))).toHaveLength(1)
+          }),
+          () => firstRunState.endRevert(session.id).pipe(Effect.provide(first)),
+        )
+
         const interrupted = { info: message.info, parts: [message.part] }
         const ready = yield* Deferred.make<void>()
         const fiber = yield* firstRunState

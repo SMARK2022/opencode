@@ -691,28 +691,47 @@ const layer = Layer.effect(
       (input: { repository: Repository; files: ReadonlyMap<RelativePath, TreeID> }) =>
         locked(
           input.repository,
-          Effect.forEach(
-            input.files,
-            ([file, tree]) =>
-              Effect.gen(function* () {
-                if (yield* entry(input.repository, tree, file)) {
-                  yield* repositoryOperation("restore", input.repository, ["checkout", tree, "--", file])
-                  return
-                }
-                yield* fs.remove(path.join(input.repository.worktree, file), { recursive: true, force: true }).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new OperationError({
-                        operation: "restore",
-                        directory: input.repository.worktree,
-                        message: `Failed to remove ${file}`,
-                        cause,
-                      }),
-                  ),
+          Effect.gen(function* () {
+            // 只合并相邻同树且不互相包含的路径，保留文件/目录互换顺序和100项上限。
+            const batches: [readonly [RelativePath, TreeID], ...Array<readonly [RelativePath, TreeID]>][] = []
+            for (const next of input.files) {
+              const previous = batches.at(-1)
+              if (previous && previous.length < 100 && previous.every(([file, tree]) => tree === next[1] && !file.startsWith(`${next[0]}/`) && !next[0].startsWith(`${file}/`))) {
+                previous.push(next)
+                continue
+              }
+              batches.push([next])
+            }
+            yield* Effect.forEach(
+              batches,
+              (batch) => Effect.gen(function* () {
+                // 复用原Git owner及repository参数；成功时省去逐文件ls-tree。
+                if (batch.length > 1 && (yield* repositoryOperation("restore", input.repository, ["checkout", batch[0][1], "--", ...batch.map(([file]) => file)]).pipe(Effect.match({ onFailure: () => false, onSuccess: () => true })))) return
+                // 缺失路径或checkout失败仍沿原存在性检查、恢复与删除语义，不掩盖最终错误。
+                yield* Effect.forEach(
+                  batch,
+                  ([file, tree]) => Effect.gen(function* () {
+                    if (yield* entry(input.repository, tree, file)) {
+                      yield* repositoryOperation("restore", input.repository, ["checkout", tree, "--", file])
+                      return
+                    }
+                    yield* fs.remove(path.join(input.repository.worktree, file), { recursive: true, force: true }).pipe(
+                      Effect.mapError(
+                        (cause) => new OperationError({
+                          operation: "restore",
+                          directory: input.repository.worktree,
+                          message: `Failed to remove ${file}`,
+                          cause,
+                        }),
+                      ),
+                    )
+                  }),
+                  { discard: true },
                 )
               }),
-            { discard: true },
-          ),
+              { discard: true },
+            )
+          }),
         ),
     )
 

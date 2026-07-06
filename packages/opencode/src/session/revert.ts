@@ -37,9 +37,23 @@ const layer = Layer.effect(
     const state = yield* SessionRunState.Service
 
     const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
+      // acquireUseRelease：beginRevert 成功后 endRevert 立即注册为 finalizer，
+      // 消除 beginRevert 与 Effect.ensuring 之间的理论中断窗口。
+      // beginRevert 失败（已 reverting）时 endRevert 不执行——不会误清除其他 revert 的标志。
+      // #393：busy runner 期间同样拒绝——snap.restore/revert 与运行中工具的文件写入在服务层拦截
       yield* state.assertNotBusy(input.sessionID)
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      let lastUser: SessionV1.User | undefined
+      return yield* Effect.acquireUseRelease(
+        state.beginRevert(input.sessionID),
+        () =>
+          Effect.gen(function* () {
+            // 只加载 input.messageID 及之后的尾部消息，避免大 session 全量分页加载。
+            // partID 场景（部分撤回）需要 lastUser，仍加载全部作为安全回退。
+            const all = yield* sessions.messages(
+              input.partID
+                ? { sessionID: input.sessionID }
+                : { sessionID: input.sessionID, fromMessageID: input.messageID },
+            ).pipe(Effect.orDie)
+            let lastUser: SessionV1.User | undefined
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
       let rev: Session.Info["revert"]
@@ -87,16 +101,29 @@ const layer = Layer.effect(
         },
       })
       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+          }),
+        () => state.endRevert(input.sessionID),
+      )
     })
 
     const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
       yield* Effect.logInfo("unreverting", { sessionID: input.sessionID })
+      // unrevert 也修改文件（snap.restore），同样需要 reverting 守卫防止与 prompt 竞争
+      // #393：busy runner 期间 unrevert 同样拒绝，保持 revert 路径的双层守卫对称
       yield* state.assertNotBusy(input.sessionID)
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      if (!session.revert) return session
-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
-      yield* sessions.clearRevert(input.sessionID)
-      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      return yield* Effect.acquireUseRelease(
+        state.beginRevert(input.sessionID),
+        () =>
+          Effect.gen(function* () {
+            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+            if (!session.revert) return session
+            // 恢复撤回前快照，标志仍与正常revert共用同一释放边界。
+            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
+            yield* sessions.clearRevert(input.sessionID)
+            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+          }),
+        () => state.endRevert(input.sessionID),
+      )
     })
 
     const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {

@@ -391,7 +391,8 @@ export interface Interface {
   readonly setShare: (input: { sessionID: SessionID; share: Info["share"] }) => Effect.Effect<void>
   readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
-  readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
+  // fromMessageID：尾部裁剪读取（0393 revert messages 裁剪优化）
+  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
@@ -783,14 +784,15 @@ const layer: Layer.Layer<
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
       if (input.limit) {
         // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
+        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID }).pipe(
           Effect.provideService(Database.Service, database),
         )).items
       }
 
       // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
       yield* get(input.sessionID)
-      const newestFirst = yield* MessageV2.stream(input.sessionID).pipe(
+      // 把边界交给既有分页查询，不能全量hydrate后再作内存过滤。
+      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID: input.fromMessageID }).pipe(
         Effect.provideService(Database.Service, database),
       )
       // stream 为 newest-first；Session.messages 契约为 chronological oldest-first
