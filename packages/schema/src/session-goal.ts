@@ -5,7 +5,8 @@ import { optional } from "./schema"
 import { SessionID } from "./session-id"
 
 // 客户端预检与服务端校验共用静态上限，不能从界面导入持久化服务层。
-export const MAX_OBJECTIVE_CHARS = 4000
+// 允许更完整的复杂目标摘要；共享常量让两代服务与TUI同时接受新上限。
+export const MAX_OBJECTIVE_CHARS = 6400
 
 // [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
 // 用户和工具显式切换状态；runner只在正常续跑额度耗尽时自动暂停。
