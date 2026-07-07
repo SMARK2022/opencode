@@ -49,5 +49,7 @@ export const VscodeNotebookDescriptions = {
     "  configure — select a kernel and verify readiness. Returns a status: configured (active kernel found), selected (accepted, kernel starts on first run — proceed directly to run), needs-selection (user cancelled picker), selection-requested (no explicit result), or failed (error). Use before the first run; no need to call info after selected.",
     "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward. Only restart when strictly necessary (e.g. stuck kernel, corrupted state); prefer re-running cells over restarting when possible.",
     "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
+    "  stop      — interrupt the currently executing cell without restarting the kernel. Variables and imports are preserved. Use after a run timeout or when a cell is stuck, instead of the heavier restart.",
+    "  create    — create a new empty .ipynb file at the given filePath and open it. Use this instead of writing raw JSON with the write tool. After create, use vscode_notebook_edit with editType=insert to add cells, or operation=configure to select a kernel.",
   ].join("\n"),
 }

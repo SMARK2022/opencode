@@ -16,7 +16,18 @@ export async function resolveNotebook(filePath: string) {
   )
   if (existing) return existing
 
-  return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
+  // 文件不存在时 openNotebookDocument 会失败。补充 create 引导，
+  // 让 agent 知道可以用 env create 创建新 notebook 而非用 write 写入原始 JSON。
+  // 此错误被所有工具共用，消息不能只提某个工具的操作。
+  try {
+    return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
+  } catch {
+    throw new Error(
+      `Notebook not found: ${filePath}. ` +
+      `If this is a new notebook, use vscode_notebook_env with operation=create to create it. ` +
+      `Otherwise, check the exact path from vscode_notebook_summary.`
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------

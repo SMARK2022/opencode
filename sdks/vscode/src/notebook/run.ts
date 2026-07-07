@@ -47,7 +47,55 @@ export async function runNotebook(input: Record<string, unknown>) {
   const notebook = await resolveNotebook(filePath)
   const commands = await vscode.commands.getCommands(true)
   if (!commands.includes("notebook.cell.execute")) {
-    throw new Error("VS Code command notebook.cell.execute is not available")
+    // 引导 agent 安装 Jupyter 扩展并配置 kernel，而非返回不可操作的原始错误
+    throw new Error(
+      "VS Code command notebook.cell.execute is not available. " +
+      "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
+      "then call vscode_notebook_env with operation=configure to select a kernel."
+    )
+  }
+
+  // 执行前检查 kernel 是否可用。configure 的 "selected" 状态下 getKernel 返回 undefined
+  // 是正常的（kernel 已选定但未启动），此时 kernelspec metadata 存在，预检应放行。
+  // 只在"既无活跃 kernel 又无 kernelspec metadata"时才阻断，引导 agent 先 configure。
+  const jupyterExt = vscode.extensions.getExtension("ms-toolsai.jupyter")
+  if (jupyterExt) {
+    if (!jupyterExt.isActive) await jupyterExt.activate()
+    const jupApi = jupyterExt.exports as { kernels?: { getKernel?(uri: vscode.Uri): Promise<unknown> } } | undefined
+    const kernel = await jupApi?.kernels?.getKernel?.(notebook.uri)
+    if (!kernel) {
+      // getKernel 返回 undefined 可能是"已选定但未启动"（正常）或"完全未选定"。
+      // 检查 metadata 是否有 kernelspec：有则允许继续（kernel 会在执行时启动）
+      const meta = notebook.metadata as Record<string, unknown>
+      const hasKernelspec = meta && typeof meta === "object" &&
+        (meta.kernelspec !== undefined || meta.language_info !== undefined)
+      if (!hasKernelspec) {
+        return {
+          ran: false,
+          summary: [
+            ...notebookHeader(notebook, "Run", [
+              `target=${quoteForSummary(describeRunTarget(resolveRunTarget(notebook, cellId, endCellId)))}`,
+              `status="no-active-kernel"`,
+              `dirty=${notebook.isDirty}`,
+              `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
+            ]),
+            "",
+            "No active kernel and no kernelspec metadata. " +
+            "Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
+          ].join("\n"),
+          data: {
+            path: notebook.uri.fsPath || notebook.uri.toString(),
+            dirty: notebook.isDirty,
+            runtime: runtimeLabel(notebook),
+            completed: false,
+            stoppedAt: undefined,
+            cells: [],
+            noActiveKernel: true,
+          },
+        }
+      }
+      // kernelspec 存在但 kernel 未启动：继续执行，notebook.cell.execute 会启动 kernel
+    }
   }
 
   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
@@ -98,7 +146,9 @@ export async function runNotebook(input: Record<string, unknown>) {
     }
 
     const result = await compactRunCell(notebook, notebook.cellAt(cell.index))
-    if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
+    // 超时后引导 agent 调用 env stop 中断（手动），或 env info 检查 kernel 状态。
+    // 不自动 interrupt——用户明确不想要自动中断机制。
+    if (!executionSummary) result.exec = "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
     results.push(result)
   }
 

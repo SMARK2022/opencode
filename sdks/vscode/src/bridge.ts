@@ -38,6 +38,11 @@ let registry: RegistryHandle | undefined
 /** Per-filePath mutex: serializes notebook requests that target the same document. */
 const fileLocks = new Map<string, Promise<void>>()
 
+// 只读路由跳过 withFileLock：summary/source/output 只读取 VS Code 文档状态，
+// 不修改 notebook/kernel，与并发 run/edit 不冲突。
+// cell-output 是 output 的路由别名（routeRequest 中 case fallthrough）。
+const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
+
 function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = fileLocks.get(key) ?? Promise.resolve()
   let release!: () => void
@@ -99,7 +104,14 @@ export async function startBridge(output: { appendLine(value: string): void }): 
         const body = await readJson(request)
         if (!body || !isRecord(body)) throw new Error("Expected JSON object body")
         const filePath = stringProp(body, "filePath") ?? url.pathname
-        const result = await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
+        // 只读路由（summary/source/output）不需要 withFileLock：
+        // 它们只读取 VS Code 文档状态，不修改 notebook/kernel，
+        // 50 分钟 run 期间 agent 仍可检查 notebook 状态。
+        // cell-output 是 output 的别名（routeRequest 中 case fallthrough）。
+        const handler = () => routeRequest(url.pathname, body, output)
+        const result = READONLY_ROUTES.has(url.pathname)
+          ? await handler()
+          : await withFileLock(filePath, handler)
         if (result !== undefined) return writeJson(response, 200, result)
       }
 
@@ -217,7 +229,13 @@ function readJson(request: http.IncomingMessage) {
       try {
         resolve(body ? JSON.parse(body) : {})
       } catch (error) {
-        reject(error)
+        // 友好错误消息：包含 body 长度和连接中断提示，
+        // 帮助 agent 诊断是请求被截断还是格式错误
+        reject(new Error(
+          `Failed to parse ${body.length} byte request body as JSON. ` +
+          `The connection may have been interrupted. ` +
+          `Original error: ${error instanceof Error ? error.message : String(error)}`
+        ))
       }
     })
     request.on("error", reject)

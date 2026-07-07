@@ -74,9 +74,19 @@ mock.module("vscode", () => ({
       createDirectory: async () => undefined,
       writeFile: async () => undefined,
       readFile: async () => new Uint8Array(),
+      // stat 对不存在的文件抛错（模拟 ENOENT），对已打开的 notebook 路径也抛错
+      // 因为 mock 的 fs 不跟踪实际磁盘文件
+      stat: async (uri: UriLike) => { throw new Error(`ENOENT: ${uri.fsPath}`) },
     },
     getWorkspaceFolder: () => ({ uri: createUri("/tmp") }),
-    openNotebookDocument: async () => activeNotebook,
+    openNotebookDocument: async (uri: UriLike) => {
+      // 对不存在的文件路径抛错，模拟 VS Code openNotebookDocument 的真实行为
+      const path = uri.fsPath || uri.toString()
+      if (path !== notebookPath && !path.includes("test_create_new")) {
+        throw new Error(`Unable to open notebook: ${path}`)
+      }
+      return activeNotebook
+    },
     applyEdit: async (edit: { entries: Array<Record<string, unknown>> }) => applyEdit(edit.entries),
     onDidChangeNotebookDocument: (listener: (event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void) => {
       notebookListeners.add(listener)
@@ -128,6 +138,8 @@ const vscodeModule = "vscode"
 const vscodeMock = (await import(vscodeModule)) as {
   workspace: { notebookDocuments: Array<typeof activeNotebook> }
   window: { activeNotebookEditor?: NotebookEditor; visibleNotebookEditors: NotebookEditor[] }
+  // commands 可在测试中临时覆盖 executeCommand 来模拟超时等场景
+  commands: { executeCommand: (command: string, ...args: unknown[]) => Promise<unknown> }
 }
 const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as { notebookSummary: (filePath: string) => Promise<ToolResult> }
 const { notebookSource } = (await import(sdkNotebookUrl("source"))) as { notebookSource: (input: Record<string, unknown>) => Promise<ToolResult> }
@@ -436,6 +448,193 @@ test("configure returns configured when selectKernel immediately accepts and ker
   const result = await notebookEnv({ filePath: notebookPath, operation: "configure" })
   const data = result.data as Record<string, unknown>
   expect(data.status).toBe("configured")
+})
+
+// ---------------------------------------------------------------------------
+// env stop：中断正在执行的 cell，不重启整个 kernel（保持变量/导入状态）。
+// agent 在 run 超时后可调用 stop 而非更重的 restart。
+// ---------------------------------------------------------------------------
+
+test("env stop calls jupyter.interruptkernel command", async () => {
+  // interrupt 命令与 restart 一样由 Jupyter 扩展贡献，可能隐藏在公共列表之外
+  commandLists = {
+    public: ["notebook.cell.execute", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "notebook.selectKernel", "jupyter.interruptkernel"],
+  }
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: {},
+    async activate() { this.isActive = true; return this.exports },
+  })
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "stop", reason: "中断超时 cell" })
+  const data = result.data as Record<string, unknown>
+
+  expect(data.requested).toBe(true)
+  expect(executedCommands).toContain("jupyter.interruptkernel")
+  expect(result.summary).toContain("stop")
+})
+
+test("env stop returns failed when interrupt command is not registered", async () => {
+  // Jupyter 扩展已安装但未贡献 interrupt 命令（版本过旧或损坏）
+  // 显式不包含 jupyter.interruptkernel
+  commandLists = {
+    public: ["notebook.cell.execute", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "notebook.selectKernel"],
+  }
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: {},
+    async activate() { this.isActive = true; return this.exports },
+  })
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "stop" })
+  const data = result.data as Record<string, unknown>
+
+  expect(data.requested).toBe(false)
+  expect(result.summary).toContain("failed")
+})
+
+// ---------------------------------------------------------------------------
+// env create：创建空白 .ipynb 文件，避免 agent 用 write 写入原始 JSON。
+// ---------------------------------------------------------------------------
+
+test("env create creates a new notebook file and opens it", async () => {
+  // 使用独立路径避免与默认 notebook fixture 冲突
+  const newPath = "/tmp/test_create_new.ipynb"
+  const result = await notebookEnv({ filePath: newPath, operation: "create", reason: "创建新 notebook" })
+  const data = result.data as Record<string, unknown>
+
+  expect(data.created).toBe(true)
+  expect(data.cellCount).toBe(0)
+  expect(result.summary).toContain("created")
+})
+
+test("env create returns already-exists when notebook is already open", async () => {
+  // 默认 notebook fixture 已在 notebookDocuments 中，create 应返回 already-exists
+  const result = await notebookEnv({ filePath: notebookPath, operation: "create" })
+  const data = result.data as Record<string, unknown>
+
+  expect(data.created).toBe(false)
+  expect(data.alreadyExists).toBe(true)
+  expect(result.summary).toContain("already exists")
+})
+
+// ---------------------------------------------------------------------------
+// run kernel 预检：无 kernel 且无 kernelspec metadata 时引导 configure，
+// 而非让 notebook.cell.execute 静默失败或弹 picker。
+// 注意：configure 的 "selected" 状态下 getKernel 返回 undefined 是正常的，
+// 此时 kernelspec metadata 存在，预检应放行。
+// ---------------------------------------------------------------------------
+
+test("run returns no-active-kernel when no kernel and no kernelspec metadata", async () => {
+  // 移除 kernelspec metadata，模拟完全未配置的 notebook
+  ;(activeNotebook as { metadata: Record<string, unknown> }).metadata = {}
+  // 安装 Jupyter 扩展但 getKernel 返回 undefined（无活跃 kernel）
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: { kernels: { getKernel: async () => undefined } },
+    async activate() { this.isActive = true; return this.exports },
+  })
+
+  const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
+  const data = result.data as Record<string, unknown>
+
+  expect(data.noActiveKernel).toBe(true)
+  expect(result.summary).toContain("configure")
+})
+
+test("run proceeds when kernel not started but kernelspec metadata exists", async () => {
+  // kernelspec 存在但 getKernel 返回 undefined（configure 后 "selected" 状态）
+  // 预检应放行，让 notebook.cell.execute 启动 kernel
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: { kernels: { getKernel: async () => undefined } },
+    async activate() { this.isActive = true; return this.exports },
+  })
+
+  const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
+  const data = result.data as Record<string, unknown>
+
+  // 不应被预检阻断
+  expect(data.noActiveKernel).toBeUndefined()
+})
+
+// ---------------------------------------------------------------------------
+// run 超时消息：超时后引导 agent 调用 env stop 中断或 env info 检查状态。
+// ---------------------------------------------------------------------------
+
+test("run timeout message guides agent to env stop and env info", async () => {
+  // 设置极短超时，模拟 cell 执行不完成
+  // 默认 mock 的 executeSelectedCell 会立即触发 listener 完成执行，
+  // 所以需要覆盖为不触发的版本
+  const originalExecute = vscodeMock.commands.executeCommand
+  vscodeMock.commands.executeCommand = async (command: string) => {
+    executedCommands.push(command)
+    // notebook.cell.execute 不触发 listener，模拟执行不完成
+    return undefined
+  }
+
+  const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 50 })
+  vscodeMock.commands.executeCommand = originalExecute
+
+  expect(result.summary).toContain("timed out")
+  expect(result.summary).toContain("stop")
+  expect(result.summary).toContain("info")
+})
+
+// ---------------------------------------------------------------------------
+// run execute-command-unavailable 错误：引导 agent 安装 Jupyter 扩展并 configure。
+// ---------------------------------------------------------------------------
+
+test("run execute-command-unavailable error includes configure guidance", async () => {
+  // notebook.cell.execute 不在命令列表中
+  commandLists = {
+    public: ["notebook.selectKernel"],
+    all: ["notebook.selectKernel"],
+  }
+
+  await expect(
+    runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 }),
+  ).rejects.toThrow("configure")
+})
+
+// ---------------------------------------------------------------------------
+// restart 验证：restart 后轻量级检查 kernel 可访问性。
+// ---------------------------------------------------------------------------
+
+test("restart verifies kernel accessibility after restart", async () => {
+  commandLists = {
+    public: ["notebook.cell.execute", "notebook.selectKernel"],
+    all: ["notebook.cell.execute", "notebook.selectKernel", "jupyter.restartkernel"],
+  }
+  extensionLookup.set("ms-toolsai.jupyter", {
+    isActive: true,
+    packageJSON: { version: "test" },
+    exports: { kernels: { getKernel: async () => undefined } },
+    async activate() { this.isActive = true; return this.exports },
+  })
+
+  const result = await notebookEnv({ filePath: notebookPath, operation: "restart" })
+  const data = result.data as Record<string, unknown>
+
+  expect(data.requested).toBe(true)
+  // isKernelAccessible 返回 false（getKernel 返回 undefined），验证字段存在
+  expect(data.verified).toBe(false)
+})
+
+// ---------------------------------------------------------------------------
+// resolveNotebook 错误：文件未找到时引导 agent 使用 env create 创建。
+// ---------------------------------------------------------------------------
+
+test("resolveNotebook error guides to env create for missing file", async () => {
+  await expect(
+    notebookSummary("/tmp/nonexistent_notebook_file.ipynb"),
+  ).rejects.toThrow("create")
 })
 
 async function expectHeader(result: { summary: string }, label: string) {

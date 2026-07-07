@@ -112,7 +112,7 @@ const editArgs = {
 const envArgs = {
   ...requiredFilePath,
   operation: z
-    .enum(["info", "configure", "restart", "save"])
+    .enum(["info", "configure", "restart", "save", "stop", "create"])
     .describe("Which notebook environment operation to perform."),
   reason: z
     .string()
@@ -429,7 +429,8 @@ export const VscodeBridgePlugin = async () => ({
         // save 是 env 工具中的持久化分支，会把 notebook 文档写回磁盘。
         // 因此它必须继续服从通用 edit 门禁；否则用户只禁止 edit 时，仍可
         // 通过 vscode_notebook_env.save 绕过普通文件写入边界。
-        if (args.operation === "save") await ask(context, "edit", args)
+        // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
+        if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
       },
     }),
