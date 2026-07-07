@@ -122,26 +122,26 @@ describe("vscode bridge plugin", () => {
     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
   })
 
-  test("keeps notebook save covered by the generic edit permission gate", async () => {
+  test.each(["save", "create"] as const)("keeps notebook %s covered by the generic edit permission gate", async (operation) => {
     // #252：save 是 env 的持久化分支——必须被通用 edit 门禁覆盖，防止绕过文件写入边界
     // Use shell-looking characters as literal path data. Permission matching must
     // receive the exact notebook path string and must not normalize, split, or
     // interpret quotes, environment-variable text, pipes, redirection, or
     // subcommand-looking fragments before the approval/deny boundary runs.
     const filePath = String.raw`F:\project with spaces\$(noop) '$HOME' | redirect > demo.ipynb`
-    const stop = "generic edit denied for notebook save"
+    const stop = `generic edit denied for notebook ${operation}`
     const calls: string[] = []
     const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
       ran: true,
       summary: "save should not be reached when generic edit is denied",
-      data: { path: filePath, operation: "save", saved: true },
+      data: { path: filePath, operation, saved: true },
     })
 
     await expect(
       plugin.tool!.vscode_notebook_env.execute(
         {
           filePath,
-          operation: "save",
+          operation,
           reason: "permission boundary regression test",
         },
         {
@@ -156,7 +156,7 @@ describe("vscode bridge plugin", () => {
             calls.push(input.permission)
             expect(input.patterns).toEqual([filePath])
             expect(input.always).toEqual([filePath])
-            expect(input.metadata.args).toMatchObject({ filePath, operation: "save" })
+            expect(input.metadata.args).toMatchObject({ filePath, operation })
             if (input.permission === "edit") throw new Error(stop)
           },
         },

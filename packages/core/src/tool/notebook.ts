@@ -47,10 +47,10 @@ export const EditInput = Schema.Struct({
   newCode: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({ description: "New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content." }).pipe(Schema.optional),
   language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode." }).pipe(Schema.optional),
 })
-// 四操作与原生唯一env入口一致，不能在CLI缺省成info而丢弃模型的操作意图。
+// 六操作共用原生env入口，不能在CLI丢弃显式中断或创建意图。
 export const EnvInput = Schema.Struct({
   filePath,
-  operation: Schema.Literals(["info", "configure", "restart", "save"]).annotate({ description: "Which notebook environment operation to perform." }),
+  operation: Schema.Literals(["info", "configure", "restart", "save", "stop", "create"]).annotate({ description: "Which notebook environment operation to perform." }),
   reason: Schema.String.annotate({ description: "Brief description of why this operation is being performed, shown to the user." }).pipe(Schema.optional),
 })
 
@@ -108,8 +108,8 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
     vscode_notebook_env: Tool.make({ ...common("/notebook/env"), description: VscodeNotebookDescriptions.env, input: EnvInput,
       // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
       execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(
-        // save写回磁盘，专属审批通过后仍须服从通用edit，拒绝时不发现或调用桥。
-        Effect.andThen(args.operation === "save" ? ask("edit", args, context) : Effect.void),
+        // 创建和保存都写磁盘；通用edit拒绝时仍不进入发现或RPC。
+        Effect.andThen(args.operation === "save" || args.operation === "create" ? ask("edit", args, context) : Effect.void),
         Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
   }).pipe(Effect.orDie)
 }))

@@ -144,6 +144,11 @@ function notebookEnvView(path: string | undefined, data: Record<string, unknown>
     operation,
     status,
     guidance,
+    // 保留新增操作的紧凑观察字段；requested与可访问性都不等同于执行成功。
+    requested: booleanValue(data.requested),
+    created: booleanValue(data.created),
+    alreadyExists: booleanValue(data.alreadyExists),
+    verified: booleanValue(data.verified),
     runtime: recordValue(data.runtime),
     saved: booleanValue(data.saved),
     beforeDirty: booleanValue(data.beforeDirty),

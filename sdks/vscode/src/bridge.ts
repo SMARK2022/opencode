@@ -44,6 +44,9 @@ let closing = true
 
 // 在既有 filePath 必填检查后加锁，同文档处理串行，失败也必须释放后继请求。
 const fileLocks = new Map<string, Promise<void>>()
+// 只读操作沿同一路由owner旁路，不占用长run持有的文档锁。
+const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
+
 
 function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = fileLocks.get(key) ?? Promise.resolve()
@@ -221,7 +224,7 @@ async function routeRequest(
   // 已鉴权路由共享必填路径检查，不能用类型断言把缺失路径送入新的严格接口。
   if (!filePath) throw new Error("filePath is required")
 
-  return await withFileLock(filePath, async () => {
+  const handler = async () => {
     switch (pathname) {
       case "/notebook/env":
         return await notebookEnv(body)
@@ -250,7 +253,9 @@ async function routeRequest(
     }
 
     return undefined
-  })
+  }
+  // 只旁路source列出的四类读取；其余变更继续复用原文档锁。
+  return await (READONLY_ROUTES.has(pathname) ? handler() : withFileLock(filePath, handler))
 }
 
 function authorized(request: http.IncomingMessage, url: URL, token: string) {
@@ -280,7 +285,12 @@ function readJson(request: http.IncomingMessage) {
       try {
         resolve(body ? JSON.parse(body) : {})
       } catch (error) {
-        reject(error)
+        // 0399：截断/畸形请求体给出长度与连接中断提示，保留原始错误便于诊断
+        reject(
+          new Error(
+            `Failed to parse ${Buffer.byteLength(body, "utf8")} byte request body as JSON. The connection may have been interrupted. Original error: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        )
       }
     })
     request.on("error", reject)

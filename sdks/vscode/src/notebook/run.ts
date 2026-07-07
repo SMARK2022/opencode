@@ -47,8 +47,33 @@ export async function runNotebook(input: Record<string, unknown>) {
   const commands = await vscode.commands.getCommands(true)
   if (!commands.includes("notebook.cell.execute")) {
     // 原生执行入口只有 notebook.cell.execute，能力检测失败就直接报错。
-    throw new Error("VS Code command notebook.cell.execute is not available")
+    // 引导 agent 安装 Jupyter 扩展并配置 kernel
+    throw new Error(
+      "VS Code command notebook.cell.execute is not available. " +
+      "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
+      "then call vscode_notebook_env with operation=configure to select a kernel."
+    )
   }
+  // 预检不执行探针；等待后仍由下方既有身份校验检查已保留的目标格。
+  const jupyterExt = vscode.extensions.getExtension("ms-toolsai.jupyter")
+  if (jupyterExt && cells.some((cell) => cell.kind === vscode.NotebookCellKind.Code)) {
+    if (!jupyterExt.isActive) await jupyterExt.activate()
+    const jupApi = jupyterExt.exports as { kernels?: { getKernel?(uri: vscode.Uri): Promise<unknown> } } | undefined
+    const kernel = await jupApi?.kernels?.getKernel?.(notebook.uri)
+    const meta = notebook.metadata as Record<string, unknown>
+    const hasKernelspec = meta && typeof meta === "object" && (meta.kernelspec !== undefined || meta.language_info !== undefined)
+    if (!kernel && !hasKernelspec) {
+      // 复用现有Run格式，未执行必须保留completed=false及空cells，不能显示为完成。
+      const result = await compactRunResult(notebook, describeRunTarget(cells), false, cells, [])
+      return {
+        ...result,
+        ran: false,
+        summary: result.summary + "\nNo active kernel and no kernelspec metadata. Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
+        data: { ...result.data, noActiveKernel: true },
+      }
+    }
+  }
+
   // 所有界面与能力查询结束后再校验目标，结构漂移时不调用命令或更新旧选区。
   if (notebook.isClosed || cells.some((cell, index) => notebook.getCells()[positions[index]] !== cell)) {
     // 按原范围核对对象，目标移位、删除或替换仍拒绝；不要求整份文档版本保持不变。
@@ -104,7 +129,9 @@ export async function runNotebook(input: Record<string, unknown>) {
     // 每次执行结算后先同步捕获字节与状态，文件 I/O 不能把第二次输出贴到这一格的结果上。
     const result = await compactRunCell(notebook, cell, captureNotebookCellOutput(notebook, cell))
     // 超时文案只改展示字段，原生执行状态及已捕获输出不能补成成功或取消。
-    if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
+    // 只给恢复指引，不自动中断；原生状态与捕获输出仍由既有owner负责。
+    // 超时不证明取消，用户可显式stop或info检查内核。
+    if (!executionSummary) result.exec = "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
     results.push(result)
   }
 
