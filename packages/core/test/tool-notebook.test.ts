@@ -10,6 +10,7 @@ import { PermissionV2 } from "@opencode-ai/core/permission"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { NotebookTools } from "@opencode-ai/core/tool/notebook"
+import { NotebookView } from "@opencode-ai/core/tool/notebook-view"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { tmpdir } from "./fixture/tmpdir"
@@ -271,6 +272,42 @@ it.live("registers Notebook tools through the real bridge and preserves native r
   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
     [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
     [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(
+      Effect.andThen(input.action === deniedAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void),
+    ) })],
+    [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+  ])))
+}))
+
+it.effect("keeps Notebook lifecycle schema, permissions, and observations aligned", () => Effect.gen(function* () {
+  const filePath = path.resolve("notebook-lifecycle.ipynb")
+  const permissions: PermissionV2.AssertInput[] = []
+  let deniedAction = "vscode_notebook_env"
+  yield* Effect.gen(function* () {
+    const registry = yield* ToolRegistry.Service
+    // 检查真实广告与解码路径，不在测试中复制六操作schema。
+    const definitions = yield* toolDefinitions(registry)
+    expect(definitions.find(item => item.name === "vscode_notebook_env")?.description).toContain("stop      — interrupt")
+    expect(definitions.find(item => item.name === "vscode_notebook_env")?.description).toContain("create    — create")
+    for (const operation of ["stop", "create"] as const) {
+      deniedAction = operation === "create" ? "edit" : "vscode_notebook_env"
+      const before = permissions.length
+      const result = yield* settleTool(registry, {
+        sessionID: SessionV2.ID.make("ses_notebook_lifecycle"), ...toolIdentity,
+        call: { type: "tool-call", id: `lifecycle-${operation}`, name: "vscode_notebook_env", input: { filePath, operation } },
+      })
+      expect(result.result.type).toBe("error")
+      expect(permissions.slice(before).map(item => item.action)).toEqual(operation === "create" ? ["vscode_notebook_env", "edit"] : ["vscode_notebook_env"])
+      expect(permissions.slice(before).every(item => item.resources[0] === filePath)).toBe(true)
+    }
+    // 显式false必须与true同样保留，观察字段不能被当作成功状态补写。
+    for (const observed of [false, true]) {
+      const data = { operation: "stop", requested: observed, created: observed, alreadyExists: observed, verified: observed }
+      expect(NotebookView.build("/notebook/env", { filePath }, { data })).toMatchObject({ view: "env", path: filePath, ...data })
+    }
+  }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
+    [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(path.dirname(filePath)) })))],
+    // 拒绝仍由实际执行叶子处理；两次调用均在发现桥之前结束，不创建监听或IDE宿主。
+    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input) }).pipe(
       Effect.andThen(input.action === deniedAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void),
     ) })],
     [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],

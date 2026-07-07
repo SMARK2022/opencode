@@ -11,7 +11,7 @@
  */
 import vscode from "vscode"
 import { TextDecoder } from "node:util"
-import { extensionState, extensionInfo, stringProp, quoteForSummary } from "../util"
+import { extensionState, extensionInfo, stringProp, quoteForSummary, uriFromInput } from "../util"
 import { resolveNotebook } from "./resolve"
 import { notebookHeader } from "./format"
 
@@ -67,6 +67,9 @@ const PROBE_TIMEOUT_MS = 30_000
 const SELECT_KERNEL_TIMEOUT_MS = 15_000
 const decoder = new TextDecoder("utf-8")
 const RESTART_CMD = "jupyter.restartkernel"
+// 中断只停止当前格，保留内核变量；可访问性检查同样使用该扩展的公开API。
+const INTERRUPT_CMD = "jupyter.interruptkernel"
+const JUPYTER_ID = "ms-toolsai.jupyter"
 const CONFIG_SECTION = "jupyter"
 const CONFIG_KEY = "askForKernelRestart"
 const SELECT_KERNEL_CMD = "notebook.selectKernel"
@@ -75,8 +78,10 @@ export async function notebookEnv(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
   if (!filePath) throw new Error("filePath is required")
   const operation = stringProp(input, "operation") ?? "info"
-  if (!["info", "configure", "restart", "save"].includes(operation)) throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save.`)
+  if (!["info", "configure", "restart", "save", "stop", "create"].includes(operation)) throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save, stop, create.`)
   const reason = stringProp(input, "reason")
+  // 创建不存在的文档必须先分流，不能走现有文档解析器。
+  if (operation === "create") return await createNotebook(filePath, reason)
   const notebook = await resolveNotebook(filePath)
   // 路径无法打开时直接拒绝，不能把解析失败包装成 no-active-kernel 快照。
   switch (operation) {
@@ -88,11 +93,13 @@ export async function notebookEnv(input: Record<string, unknown>) {
       return await restartNotebookKernel(notebook, reason)
     case "save":
       return await saveNotebook(notebook, reason)
+    case "stop":
+      return await stopNotebookKernel(notebook, reason)
   }
 }
 
 // 未探测运行时的操作只标unknown，文档元数据不替代活动内核证据。
-function envSummaryHeader(notebook: vscode.NotebookDocument, operation: "info" | "configure" | "restart" | "save", status?: string, dirty = String(notebook.isDirty), runtime = "unknown") {
+function envSummaryHeader(notebook: vscode.NotebookDocument, operation: "info" | "configure" | "restart" | "save" | "stop" | "create", status?: string, dirty = String(notebook.isDirty), runtime = "unknown") {
   return notebookHeader(notebook, "Env", [
     `operation=${operation}`,
     "target=notebook",
@@ -342,7 +349,13 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     return {
       ran: true,
       summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
-      data: { path: primaryPath, operation: "restart", reason, requested: true, askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore, durationMs: Date.now() - startedAt },
+      data: {
+        path: primaryPath, operation: "restart", reason, requested: true,
+        askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore,
+        // 只观察公开内核可访问性，不执行探针，也不把它升级为重启成功证据。
+        verified: await isKernelAccessible(notebook.uri),
+        durationMs: Date.now() - startedAt,
+      },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -351,6 +364,180 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     if (needsRestore) await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
   }
 }
+
+// ===========================================================================
+// stop — interrupt kernel, halt the currently executing cell
+// ===========================================================================
+
+// 轻量级 kernel 可访问性检查：只调 getKernel 不调 executeCode。
+// 用于 restart 验证等不需要 Python 运行时详情的场景，
+// 避免 probePythonRuntime 在重启过渡期执行代码导致的 30s 延迟和假阳性。
+async function isKernelAccessible(uri: vscode.Uri): Promise<boolean> {
+  try {
+    const ext = vscode.extensions.getExtension(JUPYTER_ID)
+    if (!ext) return false
+    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
+    const kernel = await api?.kernels?.getKernel?.(uri)
+    return kernel !== undefined
+  } catch {
+    return false
+  }
+}
+
+async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+  const startedAt = Date.now()
+
+  // interrupt 命令与 restart 一样由 Jupyter 扩展贡献，可能隐藏在公共列表之外
+  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
+  if (!jupyter) {
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "stop", "failed"),
+        "Jupyter extension is not installed. Install ms-toolsai.jupyter first.",
+      ].join("\n"),
+      data: { path: primaryPath, operation: "stop", reason, jupyterFound: false, durationMs: Date.now() - startedAt },
+    }
+  }
+  if (!jupyter.isActive) await jupyter.activate()
+
+  const allCommands = await vscode.commands.getCommands(false)
+  if (!allCommands.includes(INTERRUPT_CMD)) {
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "stop", "failed"),
+        `${INTERRUPT_CMD} command is not registered. Check that the Jupyter extension is correctly installed.`,
+      ].join("\n"),
+      data: {
+        path: primaryPath, operation: "stop", reason,
+        jupyterFound: true, jupyterActive: jupyter.isActive,
+        interruptCommandFound: false,
+        requested: false,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  }
+
+  // interrupt 不需要抑制确认弹窗（与 restart 不同，restart 需要抑制 askForKernelRestart）
+  try {
+    await vscode.commands.executeCommand(INTERRUPT_CMD, {
+      notebookEditor: { notebookUri: notebook.uri },
+    })
+
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "stop", "requested"),
+        "Kernel interrupt requested. The currently executing cell should stop.",
+        // 无 kernel 运行时 interrupt 无害，但仍返回 requested 让 agent 知道操作已执行
+        "If no cell was running, this operation is harmless.",
+        "Use vscode_notebook_env operation=info to verify kernel status.",
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: {
+        path: primaryPath, operation: "stop", reason,
+        requested: true,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "stop", "failed"),
+        `Kernel interrupt failed: ${message}.`,
+      ].join("\n"),
+      data: { path: primaryPath, operation: "stop", reason, error: message, durationMs: Date.now() - startedAt },
+    }
+  }
+}
+
+// ===========================================================================
+// create — create a new empty notebook file on disk
+// ===========================================================================
+
+async function createNotebook(filePath: string, reason?: string) {
+  const uri = uriFromInput(filePath)
+  const startedAt = Date.now()
+
+  // 先检查 VS Code 是否已打开此 notebook（包括未保存的 untitled notebook）
+  const existing = vscode.workspace.notebookDocuments.find(
+    (nb) => nb.uri.fsPath === filePath || nb.uri.toString() === filePath,
+  )
+  if (existing) {
+    return {
+      ran: true,
+      summary: [
+        ...notebookHeader(existing, "Env", [`operation=create`, `status=already-exists`, `cells=${existing.cellCount}`]),
+        `Notebook already exists and is open in VS Code. Use vscode_notebook_summary to inspect it.`,
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: { path: filePath, operation: "create", created: false, alreadyExists: true, cellCount: existing.cellCount, durationMs: Date.now() - startedAt },
+    }
+  }
+
+  // 再检查磁盘是否已存在（包括未在 VS Code 中打开的文件），防止静默覆盖用户数据
+  try {
+    await vscode.workspace.fs.stat(uri)
+    return {
+      ran: true,
+      summary: [
+        `Notebook: ${filePath}`,
+        `Env: operation=create status=already-exists`,
+        `Notebook file already exists on disk. Use vscode_notebook_summary to inspect it.`,
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: { path: filePath, operation: "create", created: false, alreadyExists: true, durationMs: Date.now() - startedAt },
+    }
+  } catch {
+    // stat 抛 ENOENT 是预期行为——文件不存在，继续创建
+  }
+
+  // 创建最小 .ipynb JSON（nbformat 4.5 标准）
+  const minimalNotebook = JSON.stringify({
+    cells: [],
+    metadata: {},
+    nbformat: 4,
+    nbformat_minor: 5,
+  }, null, 2)
+
+  try {
+    await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(minimalNotebook))
+    const notebook = await vscode.workspace.openNotebookDocument(uri)
+    return {
+      ran: true,
+      summary: [
+        ...notebookHeader(notebook, "Env", [`operation=create`, `status=created`, `cells=0`]),
+        `Notebook created successfully with empty cell list.`,
+        `Use vscode_notebook_edit with editType=insert to add cells, or vscode_notebook_env with operation=configure to select a kernel.`,
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: {
+        path: filePath, operation: "create", reason,
+        created: true, cellCount: 0,
+        durationMs: Date.now() - startedAt,
+      },
+    }
+  } catch (error) {
+    // writeFile/openNotebookDocument 失败（目录不存在、权限不足等）返回结构化错误
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      ran: true,
+      summary: [
+        `Notebook: ${filePath}`,
+        `Env: operation=create status=failed`,
+        `Notebook creation failed: ${message}.`,
+        `Check that the parent directory exists and is writable.`,
+        reason ? `Reason: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      data: { path: filePath, operation: "create", reason, created: false, error: message, durationMs: Date.now() - startedAt },
+    }
+  }
+}
+
 
 async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) {
   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()

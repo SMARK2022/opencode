@@ -16,7 +16,17 @@ export async function resolveNotebook(filePath: string) {
 
   // 打开前由 uriFromInput 区分 Windows 盘符与 URI scheme，避免盘符被误当协议。
   // 显式路径打开失败沿 await 传播，不能转而执行另一份活动文档。
-  return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
+  // 补恢复指引但保留原始原因；权限、格式及provider故障不能都伪装为不存在。
+  try {
+    return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
+  } catch (error) {
+    throw new Error(
+      `Unable to open notebook: ${filePath}. ${error instanceof Error ? error.message : String(error)}. ` +
+      `If this is a new notebook, use vscode_notebook_env with operation=create to create it. ` +
+      `Otherwise, check the exact path from vscode_notebook_summary.`,
+      { cause: error },
+    )
+  }
 }
 
 // resolve 接口在调用方给定的文档内匹配 canonical ID，不能跨文档借用全局选区。

@@ -188,14 +188,15 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
       description: VscodeNotebookDescriptions.env,
       args: {
         ...requiredFilePath,
-        operation: z.enum(["info", "configure", "restart", "save"]).describe("Which notebook environment operation to perform."),
+        // 操作仍为显式枚举，新增中断与创建不改变其它环境操作的权限入口。
+        operation: z.enum(["info", "configure", "restart", "save", "stop", "create"]).describe("Which notebook environment operation to perform."),
         reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
       },
       execute: async (args, context) => {
         // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
         await ask(context, "vscode_notebook_env", args)
-        // save 写回磁盘，专属工具许可之后仍须通过通用 edit 门禁。
-        if (args.operation === "save") await ask(context, "edit", args)
+        // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
+        if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
       },
     }),
