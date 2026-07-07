@@ -1,6 +1,6 @@
 # opencode (SMARK fork)
 
-The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.9-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
+The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.10-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
 
 ## Language
 
