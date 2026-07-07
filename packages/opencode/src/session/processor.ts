@@ -97,6 +97,14 @@ interface ProcessorContext extends Input {
   reasoningMap: Record<string, MessageV2.ReasoningPart>
   inputChars: number | undefined
   inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
+  // [local-smark] 追踪当前 step 是否产生了语义输出（text/reasoning/tool）。
+  // 在 finish-step 时用于检测 provider 空完成：
+  // finishReason="other"（AI SDK 对 network_error 等未知值的归一化）+ 三个标志全 false
+  // = provider 返回了空终止流，必须抛出 retryable APIError 而非静默写成 completed。
+  // 每个 process() 调用开头重置，retry 时也重置（与 currentText/reasoningMap 同处）。
+  hasText: boolean
+  hasReasoning: boolean
+  hasToolCall: boolean
 }
 
 type StreamEvent = Event
@@ -148,6 +156,9 @@ export const layer = Layer.effect(
         reasoningMap: {},
         inputChars: undefined,
         inputBreakdown: undefined,
+        hasText: false,
+        hasReasoning: false,
+        hasToolCall: false,
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -318,6 +329,8 @@ export const layer = Layer.effect(
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
             }
+            // [local-smark] 标记本轮已产生 reasoning 输出，用于 finish-step 空完成检测
+            ctx.hasReasoning = true
             ctx.reasoningMap[value.id] = {
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -377,6 +390,8 @@ export const layer = Layer.effect(
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
             }
+            // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
+            ctx.hasToolCall = true
             const part = yield* session.updatePart({
               id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -701,6 +716,25 @@ export const layer = Layer.effect(
                 })
               }
             }
+            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
+            // 任何 text/reasoning/tool 输出，且 finishReason="other"（AI SDK 对
+            // network_error 等未知 finish_reason 的归一化值）。这通常表示服务端
+            // 推理阶段异常终止（如 GLM-5.2 大上下文下的 network_error）。
+            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
+            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
+            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
+            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
+            if (
+              value.finishReason === "other" &&
+              !ctx.hasText &&
+              !ctx.hasReasoning &&
+              !ctx.hasToolCall
+            ) {
+              throw new MessageV2.APIError({
+                message: `Provider returned empty completion (finish_reason: ${value.finishReason}), no content/reasoning/tool produced`,
+                isRetryable: true,
+              })
+            }
             ctx.assistantMessage.finish = value.finishReason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
@@ -763,6 +797,8 @@ export const layer = Layer.effect(
                 })
               }
             }
+            // [local-smark] 标记本轮已产生 text 输出，用于 finish-step 空完成检测
+            ctx.hasText = true
             ctx.currentText = {
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -960,6 +996,11 @@ export const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志
+            // 必须清零，否则空完成检测会因残留标志而跳过。
+            ctx.hasText = false
+            ctx.hasReasoning = false
+            ctx.hasToolCall = false
             const stream = llm.stream(streamInput)
 
             yield* stream.pipe(

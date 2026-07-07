@@ -2136,6 +2136,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (
             lastAssistant?.finish &&
+            // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
+            // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
+            // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
+            !lastAssistant.error &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
             lastUser.id < lastAssistant.id

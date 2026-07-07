@@ -2162,3 +2162,36 @@ describe("session.message-v2.filterCompacted", () => {
     ).toStrictEqual(expected)
   })
 })
+
+// [local-smark] fromError 透传测试：已分类的 APIError 实例不应被降级为 UnknownError。
+// 触发场景：processor.ts finish-step 检测到 provider 空完成时直接抛出 APIError，
+// fromError 必须保持其分类（name=APIError, isRetryable=true），否则 retry 机制无法识别。
+describe("session.message-v2.fromError APIError passthrough", () => {
+  test("passes through already-classified APIError without degrading to Unknown", () => {
+    const apiError = new MessageV2.APIError({
+      message: "Provider returned empty completion",
+      isRetryable: true,
+    })
+    const result = MessageV2.fromError(apiError, { providerID })
+
+    // 必须保持 APIError 分类，不能被降级为 UnknownError
+    expect(result.name).toBe("APIError")
+    // isRetryable 必须保留，否则 retry 机制不会重试
+    expect((result.data as { isRetryable: boolean }).isRetryable).toBe(true)
+  })
+
+  test("passes through APIError with metadata intact", () => {
+    const apiError = new MessageV2.APIError({
+      message: "Provider returned empty completion (finish_reason: other)",
+      isRetryable: true,
+      metadata: { finishReason: "other" },
+    })
+    const result = MessageV2.fromError(apiError, { providerID })
+
+    expect(result.name).toBe("APIError")
+    expect((result.data as { message: string }).message).toBe(
+      "Provider returned empty completion (finish_reason: other)",
+    )
+    expect((result.data as { metadata: Record<string, string> }).metadata.finishReason).toBe("other")
+  })
+})

@@ -1026,3 +1026,189 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
     { git: true, config: (url) => denyDoomLoopConfig(url) },
   ),
 )
+
+// ---------------------------------------------------------------------------
+// [local-smark] provider 空完成检测测试
+// ---------------------------------------------------------------------------
+// GLM-5.2 等 provider 在大上下文 + thinking + tool_stream 组合下可能返回
+// HTTP 200 + SSE 正常关闭，但 finish_reason="network_error"（AI SDK 映射为 "other"），
+// 无 content/reasoning/tool delta，无 usage。processor 必须检测这种空完成并抛出
+// retryable APIError，而不是静默写成 completed 后被 goal continuation 无限循环。
+
+// 空完成 SSE：只有 role chunk + finish_reason="network_error"（→ AI SDK "other"），无内容 delta
+function emptyCompletionSse() {
+  return raw({
+    head: [
+      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+    ],
+    tail: [
+      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "network_error" }] },
+    ],
+  })
+}
+
+it.live("session.processor empty completion with finish_reason=other throws retryable error then recovers", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // 第一次请求：空完成（finish_reason=network_error → AI SDK "other"），应抛 retryable APIError
+        // 第二次请求：正常文本响应，retry 后应成功
+        yield* llm.push(emptyCompletionSse(), reply().text("recovered").stop())
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "empty then recover")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "empty then recover" }],
+          tools: {},
+        })
+
+        const parts = MessageV2.parts(msg.id)
+
+        // retry 成功后 process 返回 "continue"
+        expect(value).toBe("continue")
+        // 第一次空完成触发 retry，第二次正常响应 → 2 次 HTTP 调用
+        expect(yield* llm.calls).toBe(2)
+        // retry 成功后 error 被清除
+        expect(handle.message.error).toBeUndefined()
+        // 正常文本被持久化
+        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor partial output with finish_reason=other does not throw", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // 有 text delta 但 finish_reason=network_error（→ "other"）
+        // hasText=true → 不应触发空完成检测
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { content: "partial" } }] },
+            ],
+            tail: [
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "network_error" }] },
+            ],
+          }),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "partial output")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "partial output" }],
+          tools: {},
+        })
+
+        const parts = MessageV2.parts(msg.id)
+
+        // 有输出（hasText=true），不触发空完成检测 → 正常完成
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(1)
+        expect(handle.message.error).toBeUndefined()
+        expect(parts.some((part) => part.type === "text" && part.text === "partial")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor empty stop (no content, finish=stop) does not throw", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // finish_reason=stop 但无 content delta
+        // finishReason !== "other" → 不触发空完成检测
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+            ],
+            tail: [
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "stop" }] },
+            ],
+          }),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "empty stop")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "empty stop" }],
+          tools: {},
+        })
+
+        // finish_reason=stop 不触发空完成检测 → 正常完成（即使无内容）
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(1)
+        expect(handle.message.error).toBeUndefined()
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)

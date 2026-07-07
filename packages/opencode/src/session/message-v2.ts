@@ -1449,6 +1449,11 @@ export function fromError(
         },
         { cause: e },
       ).toObject()
+    case APIError.isInstance(e):
+      // [local-smark] 已分类的 APIError 直接透传，避免被降级为 UnknownError。
+      // 触发场景：processor.ts finish-step 检测到 provider 空完成时抛出 APIError，
+      // fromError 必须保持其 isRetryable 分类，否则 SessionRetry 不会重试。
+      return e.toObject()
     case e instanceof Error:
       return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
     default:
