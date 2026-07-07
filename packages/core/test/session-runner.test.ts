@@ -853,6 +853,17 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a
     yield* session.resume(sessionID)
     expect(requests).toHaveLength(33)
     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
+    // 活跃Goal也不能把未知/错误的空结算当正常完成，避免不断注入续跑。
+    for (const reason of ["unknown", "error"] as const) {
+      yield* goals.set(sessionID, { status: "active" })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: `Handle empty ${reason}` }), resume: false })
+      responses = [[LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason }), LLMEvent.finish({ reason })]]
+      requests.length = 0
+      yield* session.resume(sessionID)
+      // 异常停止不是正常额度耗尽，不应把仍活跃的目标误改成paused。
+      expect(requests).toHaveLength(1)
+      expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
+    }
   }),
 )
 

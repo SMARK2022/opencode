@@ -138,6 +138,11 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  // 仅记录本次provider尝试的语义输出；重试不能借用上一轮的标志。
+  // 空start/end不算正文，真实tool-call则必须防止重复副作用。
+  hasText: boolean
+  hasReasoning: boolean
+  hasToolCall: boolean
 }
 
 type StreamEvent = LLMEvent
@@ -186,6 +191,9 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        hasText: false,
+        hasReasoning: false,
+        hasToolCall: false,
       }
       let aborted = false
 
@@ -424,6 +432,8 @@ const layer = Layer.effect(
           case "reasoning-delta":
             // Match dev: silently drop orphan deltas (no preceding reasoning-start).
             if (!(value.id in ctx.reasoningMap)) return
+            // 只有接纳的非空delta才证明provider实际输出了推理。
+            if (value.text.length > 0) ctx.hasReasoning = true
             ctx.reasoningMap[value.id].text += value.text
             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
             yield* logFirstDelta("reasoning", ctx.reasoningMap[value.id].id, "text", value.text.length)
@@ -484,6 +494,8 @@ const layer = Layer.effect(
           }
 
           case "tool-call": {
+            // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
+            ctx.hasToolCall = true
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
@@ -715,6 +727,13 @@ const layer = Layer.effect(
               usage: value.usage ?? new Usage({}),
               metadata: value.providerMetadata,
             })
+            // 未知完成且无输出才重试；正常空stop和有工具调用的回合保持原语义。
+            if (value.reason === "unknown" && !ctx.hasText && !ctx.hasReasoning && !ctx.hasToolCall) {
+              yield* Effect.fail(new SessionV1.APIError({
+                message: `Provider returned empty completion (finish_reason: ${value.reason}), no content/reasoning/tool produced`,
+                isRetryable: true,
+              }))
+            }
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
@@ -784,6 +803,8 @@ const layer = Layer.effect(
 
           case "text-delta":
             if (!ctx.currentText) return
+            // 只建立文本块而没有正文，不应绕过空完成检测。
+            if (value.text.length > 0) ctx.hasText = true
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
@@ -954,6 +975,10 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            // 每次重试都重新判断本轮输出，不能被旧标志误放行。
+            ctx.hasText = false
+            ctx.hasReasoning = false
+            ctx.hasToolCall = false
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
               const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
