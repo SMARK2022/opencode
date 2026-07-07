@@ -47,6 +47,22 @@ runs:
       shell: bash
 
     - name: Install dependencies
+      env:
+        # CI 无需 electron/playwright/puppeteer/cypress 的预构建二进制：
+        # opencode/core/http-recorder 单测不依赖它们；upstream-e2e 的 playwright
+        # 浏览器由 test.yml 的独立步骤安装（PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD 仅抑制
+        # bun install 的 postinstall 自动下载，不影响后续 `playwright install` CLI）。
+        # 与 build-opencode.yml 的 Windows install 步骤保持一致。
+        # 注意：electron 的 install.js 实际检查 ELECTRON_SKIP_BINARY_DOWNLOAD（另一个
+        # ELECTRON_SKIP_DOWNLOAD 供 electron-builder 等工具识别，两者都设以对齐先例）。
+        ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        ELECTRON_SKIP_DOWNLOAD: "1"
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        PUPPETEER_SKIP_DOWNLOAD: "1"
+        CYPRESS_INSTALL_BINARY: "0"
+        # CI 不提交代码，无需 husky 安装 git hook；HUSKY=0 让 husky 9 直接 return（exit 0）。
+        # 测试中的 git commit 均在 os.tmpdir() 的独立 repo 中执行，不读取根 .husky/，互不影响。
+        HUSKY: "0"
       run: |
         # Workaround for patched peer variants
         # e.g. ./patches/ for standard-openapi
