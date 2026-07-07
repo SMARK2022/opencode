@@ -1477,6 +1477,8 @@ const layer = Layer.effect(
             !hasToolCalls &&
             lastAssistant.parentID === lastUser.id
           ) {
+            // 错误助手仍走退出分支，不能因跳过整个if而重新进入模型或Goal续跑。
+            if (lastAssistant.error) break
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
             )
