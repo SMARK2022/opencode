@@ -28,13 +28,20 @@ runs:
         bun-version-file: ${{ !steps.bun-url.outputs.url && 'package.json' || '' }}
         bun-download-url: ${{ steps.bun-url.outputs.url }}
 
+    # Windows 跳过 bun pm 缓存的恢复/保存：actions/cache 的 tar+zstd 在 NTFS 上解压
+    # 634MB 实测 ~209s，比 bun 原生 extract-to-cache(~168s)更慢，且 save 竞争失败再浪费
+    # ~43s（bun.lock 每次提交都变 → exact key 永不命中 → 5 个 Windows job 全部竞争 save）。
+    # 冷安装(~224s, build-opencode Windows 实测) < 有缓存(304s)。与 build-opencode.yml
+    # Windows job 跳过 composite 缓存的先例一致。macOS/Linux restore 仅 16-67s，保留缓存。
     - name: Get cache directory
       id: cache
+      if: runner.os != 'Windows'
       shell: bash
       run: echo "dir=$(bun pm cache)" >> "$GITHUB_OUTPUT"
 
     - name: Restore Bun dependencies
       id: bun-cache
+      if: runner.os != 'Windows'
       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ steps.cache.outputs.dir }}
@@ -71,7 +78,9 @@ runs:
       shell: bash
 
     - name: Save Bun dependencies
-      if: steps.bun-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      # runner.os != 'Windows' 必须在最前短路：Windows 跳过了 restore(id=bun-cache)，
+      # cache-hit 输出不存在；若不短路会以空 path 触发 cache/save。
+      if: runner.os != 'Windows' && steps.bun-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
       uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ steps.cache.outputs.dir }}
