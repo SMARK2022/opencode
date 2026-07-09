@@ -64,7 +64,8 @@ export type BridgeEntry = {
 }
 
 // 桥接引用：精简的桥接信息，用于匹配和调用
-export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token"> & {
+// 能力元数据沿共享客户端保留，不据此重新启用已停用的LSP后端。
+export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token" | "capabilities"> & {
   host: string
   score?: number
   source: "env" | "registry"
@@ -222,6 +223,8 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
     host: best.entry.host ?? "127.0.0.1",
     port: best.entry.port,
     token: best.entry.token,
+    // 保留扩展原始能力声明，实际执行入口仍由产品注册表决定。
+    capabilities: best.entry.capabilities,
     score: best.score,
     source: "registry",
   } satisfies BridgeRef

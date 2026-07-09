@@ -269,6 +269,7 @@ export const ReadTool = Tool.define<
     })
 
     const warm = Effect.fn("ReadTool.warm")(function* (filepath: string) {
+      // [local-smark] 回移 PR #30226：用 ignoreCause 隔离后台 LSP warmup defect，
       // LSP warm-up is optional; do not let a background defect fail an otherwise successful read.
       yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
     })

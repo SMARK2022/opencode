@@ -146,22 +146,39 @@ function getDiagnostics(
   return diagnostics.filter((d) => d.severity === 1).slice(0, 3)
 }
 
-function DiagnosticsDisplay(props: { diagnostics: Diagnostic[] }): JSX.Element {
+// [local-smark] 增强诊断显示：有新错误时显示详情，无新错误但有已存在错误时显示紧凑摘要
+function DiagnosticsDisplay(props: {
+  diagnostics: Diagnostic[]
+  summary?: { newCount: number; existingCount: number }
+}): JSX.Element {
   const i18n = useI18n()
+  const hasNew = () => props.diagnostics.length > 0
+  // [local-smark] 无新错误但有已存在错误时显示紧凑摘要（✓ 0 new · N existing）
+  const hasExistingOnly = () => !hasNew() && props.summary && props.summary.existingCount > 0
   return (
-    <Show when={props.diagnostics.length > 0}>
+    <Show when={hasNew() || hasExistingOnly()}>
       <div data-component="diagnostics">
-        <For each={props.diagnostics}>
-          {(diagnostic) => (
-            <div data-slot="diagnostic">
-              <span data-slot="diagnostic-label">{i18n.t("ui.messagePart.diagnostic.error")}</span>
-              <span data-slot="diagnostic-location">
-                [{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}]
-              </span>
-              <span data-slot="diagnostic-message">{diagnostic.message}</span>
-            </div>
-          )}
-        </For>
+        <Show when={hasNew()}>
+          <For each={props.diagnostics}>
+            {(diagnostic) => (
+              <div data-slot="diagnostic">
+                <span data-slot="diagnostic-label">{i18n.t("ui.messagePart.diagnostic.error")}</span>
+                <span data-slot="diagnostic-location">
+                  [{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}]
+                </span>
+                <span data-slot="diagnostic-message">{diagnostic.message}</span>
+              </div>
+            )}
+          </For>
+        </Show>
+        <Show when={hasExistingOnly()}>
+          <div data-slot="diagnostic-summary">
+            <span data-slot="diagnostic-summary-clean">✓</span>
+            <span data-slot="diagnostic-summary-text">
+              {" "}{i18n.t("ui.messagePart.diagnostic.summary", { count: props.summary!.existingCount })}
+            </span>
+          </div>
+        </Show>
       </div>
     </Show>
   )
@@ -2221,6 +2238,8 @@ ToolRegistry.register({
     const i18n = useI18n()
     const fileComponent = useFileComponent()
     const diagnostics = createMemo(() => getDiagnostics(props.metadata.diagnostics, props.input.filePath))
+    // [local-smark] 诊断摘要供 TUI 渲染紧凑状态行
+    const diagnosticSummary = createMemo(() => props.metadata.diagnosticSummary)
     const path = createMemo(() => props.metadata?.filediff?.file || props.input.filePath || "")
     const filename = () => getFilename(props.input.filePath ?? "")
     const pending = () => props.status === "pending" || props.status === "running"
@@ -2314,7 +2333,7 @@ ToolRegistry.register({
               </div>
             </ToolFileAccordion>
           </Show>
-          <DiagnosticsDisplay diagnostics={diagnostics()} />
+          <DiagnosticsDisplay diagnostics={diagnostics()} summary={diagnosticSummary()} />
         </BasicTool>
       </div>
     )
@@ -2327,6 +2346,8 @@ ToolRegistry.register({
     const i18n = useI18n()
     const fileComponent = useFileComponent()
     const diagnostics = createMemo(() => getDiagnostics(props.metadata.diagnostics, props.input.filePath))
+    // [local-smark] 诊断摘要供 TUI 渲染紧凑状态行
+    const diagnosticSummary = createMemo(() => props.metadata.diagnosticSummary)
     const path = createMemo(() => props.input.filePath || "")
     const filename = () => getFilename(props.input.filePath ?? "")
     const pending = () => props.status === "pending" || props.status === "running"
@@ -2374,7 +2395,7 @@ ToolRegistry.register({
               </div>
             </ToolFileAccordion>
           </Show>
-          <DiagnosticsDisplay diagnostics={diagnostics()} />
+          <DiagnosticsDisplay diagnostics={diagnostics()} summary={diagnosticSummary()} />
         </BasicTool>
       </div>
     )
@@ -2387,6 +2408,19 @@ ToolRegistry.register({
     const i18n = useI18n()
     const fileComponent = useFileComponent()
     const files = createMemo(() => patchFiles(props.metadata.files))
+    // [local-smark] 聚合所有修改文件的新错误供 TUI DiagnosticsDisplay 渲染
+    const diagnostics = createMemo(() => {
+      const diags: Diagnostic[] = []
+      if (props.metadata.diagnostics) {
+        for (const fileDiags of Object.values(props.metadata.diagnostics) as Diagnostic[][]) {
+          for (const d of fileDiags) {
+            if (d.severity === 1 && diags.length < 3) diags.push(d)
+          }
+        }
+      }
+      return diags
+    })
+    const diagnosticSummary = createMemo(() => props.metadata.diagnosticSummary)
     const pending = createMemo(() => props.status === "pending" || props.status === "running")
     const single = createMemo(() => {
       const list = files()
@@ -2511,6 +2545,8 @@ ToolRegistry.register({
                   </For>
                 </Accordion>
               </Show>
+              {/* [local-smark] apply_patch 添加诊断渲染（当前缺失） */}
+              <DiagnosticsDisplay diagnostics={diagnostics()} summary={diagnosticSummary()} />
             </BasicTool>
           </div>
         }
@@ -2580,6 +2616,8 @@ ToolRegistry.register({
                 />
               </div>
             </ToolFileAccordion>
+            {/* [local-smark] apply_patch 单文件路径也添加诊断渲染 */}
+            <DiagnosticsDisplay diagnostics={diagnostics()} summary={diagnosticSummary()} />
           </BasicTool>
         </div>
       </Show>

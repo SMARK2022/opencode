@@ -50,24 +50,52 @@ describe("lsp.spawn", () => {
     { config: { lsp: true } },
   )
 
-  it.instance("does not spawn builtin LSP for files inside instance when LSP is unset", () =>
-    LSP.Service.use((lsp) =>
-      Effect.gen(function* () {
-        const dir = (yield* TestInstance).directory
-        const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+  it.instance(
+    "does not spawn builtin LSP for files inside instance when LSP is false",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const dir = (yield* TestInstance).directory
+          const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
 
-        try {
-          yield* lsp.hover({
-            file: path.join(dir, "src", "inside.ts"),
-            line: 0,
-            character: 0,
-          })
-          expect(spy).toHaveBeenCalledTimes(0)
-        } finally {
-          spy.mockRestore()
-        }
-      }),
-    ),
+          try {
+            yield* lsp.hover({
+              file: path.join(dir, "src", "inside.ts"),
+              line: 0,
+              character: 0,
+            })
+            // [local-smark] LSP 显式设为 false 时不 spawn
+            expect(spy).toHaveBeenCalledTimes(0)
+          } finally {
+            spy.mockRestore()
+          }
+        }),
+      ),
+    // 产品固定停用；显式false与默认配置都必须零spawn。
+    { config: { lsp: false } },
+  )
+
+  it.instance(
+    "does not spawn builtin LSP for files inside instance when LSP is unset (product disabled)",
+    () =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const dir = (yield* TestInstance).directory
+          const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+
+          try {
+            yield* lsp.hover({
+              file: path.join(dir, "src", "inside.ts"),
+              line: 0,
+              character: 0,
+            })
+            // 默认值也不能恢复LSP，与既有true/custom配置防复活测试一致。
+            expect(spy).toHaveBeenCalledTimes(0)
+          } finally {
+            spy.mockRestore()
+          }
+        }),
+      ),
   )
 
   it.instance(

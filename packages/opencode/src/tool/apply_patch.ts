@@ -10,6 +10,8 @@ import { createTwoFilesPatch, diffLines } from "diff"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { trimDiff } from "./edit"
 import { LSP } from "@/lsp/lsp"
+// [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
+import { LSPClient } from "@/lsp/client"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import DESCRIPTION from "./apply_patch.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
@@ -315,13 +317,24 @@ export const ApplyPatchTool = Tool.define(
         yield* events.publish(Watcher.Event.Updated, update)
       }
 
-      // Notify LSP of file changes and collect diagnostics
+      // [local-smark] 增量诊断：patch 应用前一次性捕获所有目标文件的 baseline，
+      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta
+      const beforeAll = yield* lsp.diagnostics()
+      const baselines = new Map<string, LSPClient.Diagnostic[]>()
+      for (const change of fileChanges) {
+        if (change.type === "delete") continue
+        const target = change.movePath ?? change.filePath
+        const normalized = FSUtil.normalizePath(target)
+        baselines.set(normalized, beforeAll[normalized] ?? [])
+      }
+
+      // Notify LSP of file changes
       for (const change of fileChanges) {
         if (change.type === "delete") continue
         const target = change.movePath ?? change.filePath
         yield* lsp.touchFile(target, "document")
       }
-      const diagnostics = yield* lsp.diagnostics()
+      const afterAll = yield* lsp.diagnostics()
 
       // Generate output summary
       const summaryLines = fileChanges.map((change) => {
@@ -340,22 +353,33 @@ export const ApplyPatchTool = Tool.define(
         output += `\n\nFailed to update ${hunkErrors.length} file(s):\n${hunkErrors.join("\n")}`
       }
 
-      let lspFoundErrors = false
+      let lspFoundNewErrors = false
+      let totalNew = 0
+      let totalExisting = 0
+      const diagMetadata: Record<string, LSPClient.Diagnostic[]> = {}
 
+      // [local-smark] 逐文件计算增量诊断，只显示本次 patch 新引入的错误
       for (const change of fileChanges) {
         if (change.type === "delete") continue
         const target = change.movePath ?? change.filePath
-        const block = LSP.Diagnostic.report(target, diagnostics[FSUtil.normalizePath(target)] ?? [])
+        const normalized = FSUtil.normalizePath(target)
+        const currentIssues = afterAll[normalized] ?? []
+        const fileBaseline = baselines.get(normalized) ?? []
+        const fileNewErrors = LSP.Diagnostic.newErrors(currentIssues, fileBaseline)
+        const fileDelta = LSP.Diagnostic.deltaSummary(currentIssues, fileBaseline)
+        totalNew += fileDelta.newCount
+        totalExisting += fileDelta.existingCount
+        diagMetadata[normalized] = fileNewErrors
+        const block = LSP.Diagnostic.reportDelta(target, currentIssues, fileBaseline)
         if (!block) continue
-        lspFoundErrors = true
+        lspFoundNewErrors = true
         const rel = path.relative(instance.worktree, target).replaceAll("\\", "/")
-        output += `\n\nLSP errors detected in ${rel}, please fix:\n${block}`
+        output += `\n\nNew LSP errors introduced in ${rel}:\n${block}`
       }
-      // [local-smark] 当 LSP diagnostics 无结果且无已连接 client 时，
-      // 追加不可用提示，避免模型误认为修改的文件无类型错误。
-      // 用 status() 而非 hasClients()：后者检查 server 配置存在性，
-      // 不代表 client 已完成 fire-and-forget 启动。
-      if (!lspFoundErrors) {
+      if (lspFoundNewErrors) {
+        output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
+      } else {
+        // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时所有 delta 都为空
         const clients = yield* lsp.status()
         if (clients.length === 0) {
           output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
@@ -367,7 +391,9 @@ export const ApplyPatchTool = Tool.define(
         metadata: {
           diff: totalDiff,
           files,
-          diagnostics,
+          // 未连接不能报告clean；保留差分数据供历史显示，不将空结果当验证成功。
+          diagnostics: diagMetadata,
+          diagnosticSummary: (yield* lsp.status()).length ? { newCount: totalNew, existingCount: totalExisting } : undefined,
         },
         output,
       }
