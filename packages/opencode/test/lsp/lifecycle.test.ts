@@ -4,6 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect } from "effect"
 import { LSP } from "@/lsp/lsp"
 import * as LSPServer from "@/lsp/server"
+import { VscodeBridge } from "@/ide/vscode-bridge"
 import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
@@ -25,9 +26,15 @@ describe("LSP service lifecycle", () => {
   it.instance("status() returns empty array initially", () =>
     LSP.Service.use((lsp) =>
       Effect.gen(function* () {
-        const result = yield* lsp.status()
-        expect(Array.isArray(result)).toBe(true)
-        expect(result.length).toBe(0)
+        // [local-smark] 测试环境可能有 bridge registry 残留，mock 掉避免干扰
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
+        try {
+          const result = yield* lsp.status()
+          expect(Array.isArray(result)).toBe(true)
+          expect(result.length).toBe(0)
+        } finally {
+          resolve.mockRestore()
+        }
       }),
     ),
   )
@@ -35,9 +42,14 @@ describe("LSP service lifecycle", () => {
   it.instance("diagnostics() returns empty object initially", () =>
     LSP.Service.use((lsp) =>
       Effect.gen(function* () {
-        const result = yield* lsp.diagnostics()
-        expect(typeof result).toBe("object")
-        expect(Object.keys(result).length).toBe(0)
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
+        try {
+          const result = yield* lsp.diagnostics()
+          expect(typeof result).toBe("object")
+          expect(Object.keys(result).length).toBe(0)
+        } finally {
+          resolve.mockRestore()
+        }
       }),
     ),
   )
@@ -106,9 +118,15 @@ describe("LSP service lifecycle", () => {
   it.instance("workspaceSymbol() returns empty array with no clients", () =>
     LSP.Service.use((lsp) =>
       Effect.gen(function* () {
-        const result = yield* lsp.workspaceSymbol("test")
-        expect(Array.isArray(result)).toBe(true)
-        expect(result.length).toBe(0)
+        // [local-smark] 测试环境可能有 bridge registry 残留，mock 掉避免干扰
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("no bridge"))
+        try {
+          const result = yield* lsp.workspaceSymbol("test")
+          expect(Array.isArray(result)).toBe(true)
+          expect(result.length).toBe(0)
+        } finally {
+          resolve.mockRestore()
+        }
       }),
     ),
   )
@@ -263,6 +281,23 @@ describe("LSP.Diagnostic", () => {
     const result = LSP.Diagnostic.deltaSummary(current, [])
     expect(result.newCount).toBe(2)
     expect(result.existingCount).toBe(0)
+  })
+
+  test("checkedMessage confirms clean LSP results for a single file", () => {
+    const result = LSP.Diagnostic.checkedMessage({ newCount: 0, existingCount: 0 }, "file")
+    // clean 确认必须只在 LSP 已经返回 summary 后使用，避免模型误以为 LSP 没工作。
+    expect(result).toBe("LSP checked: no errors in this file.")
+  })
+
+  test("checkedMessage keeps existing errors as a count-only summary", () => {
+    const result = LSP.Diagnostic.checkedMessage({ newCount: 0, existingCount: 4 }, "file")
+    // 既有错误只给数量，不给详情，避免模型把历史问题误判成当前编辑失败。
+    expect(result).toBe("LSP checked: no new errors introduced; 4 existing errors remain.")
+  })
+
+  test("checkedMessage uses changed-files copy for patch clean results", () => {
+    const result = LSP.Diagnostic.checkedMessage({ newCount: 0, existingCount: 0 }, "changed-files")
+    expect(result).toBe("LSP checked: no errors in changed files.")
   })
 
   // [local-smark] newErrors 返回新错误数组，供 metadata 存储给 TUI 渲染

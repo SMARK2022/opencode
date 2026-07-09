@@ -317,8 +317,7 @@ export const ApplyPatchTool = Tool.define(
         yield* events.publish(Watcher.Event.Updated, update)
       }
 
-      // [local-smark] 增量诊断：patch 应用前一次性捕获所有目标文件的 baseline，
-      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta
+      // [local-smark] baseline 在 patch 落盘后、touch 前采集：LSP 此时还不知道新内容。
       const beforeAll = yield* lsp.diagnostics()
       const baselines = new Map<string, LSPClient.Diagnostic[]>()
       for (const change of fileChanges) {
@@ -376,13 +375,22 @@ export const ApplyPatchTool = Tool.define(
         const rel = path.relative(instance.worktree, target).replaceAll("\\", "/")
         output += `\n\nNew LSP errors introduced in ${rel}:\n${block}`
       }
+      // [local-smark] summary 只在 LSP 可靠可用时传给 TUI；unavailable 时缺失字段
+      let diagnosticSummary: { newCount: number; existingCount: number } | undefined = {
+        newCount: totalNew,
+        existingCount: totalExisting,
+      }
       if (lspFoundNewErrors) {
         output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
       } else {
         // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时所有 delta 都为空
         const clients = yield* lsp.status()
         if (clients.length === 0) {
+          diagnosticSummary = undefined
           output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+        } else {
+          // [local-smark] apply_patch 可能覆盖多文件，clean 文案必须指向 changed files
+          output += `\n\n${LSP.Diagnostic.checkedMessage({ newCount: totalNew, existingCount: totalExisting }, "changed-files")}`
         }
       }
 
@@ -393,7 +401,8 @@ export const ApplyPatchTool = Tool.define(
           files,
           // 未连接不能报告clean；保留差分数据供历史显示，不将空结果当验证成功。
           diagnostics: diagMetadata,
-          diagnosticSummary: (yield* lsp.status()).length ? { newCount: totalNew, existingCount: totalExisting } : undefined,
+          // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突
+          ...(diagnosticSummary ? { diagnosticSummary } : {}),
         },
         output,
       }

@@ -2912,7 +2912,7 @@ function Write(props: ToolProps) {
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
           {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
         </BlockTool>
       </Match>
       <Match when={props.metadata.diagnostics !== undefined || props.metadata.operation === "write"}>
@@ -2935,7 +2935,7 @@ function Write(props: ToolProps) {
           <Show when={writeCanCollapse()}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -3302,7 +3302,7 @@ function Edit(props: ToolProps) {
           <Show when={overflow()}>
             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
           </Show>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -3415,7 +3415,7 @@ function ApplyPatch(props: ToolProps) {
                   <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
                 </Show>
               </Show>
-              <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+              <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
             </BlockTool>
             )
           }}
@@ -3495,7 +3495,14 @@ function Skill(props: ToolProps) {
   )
 }
 
-function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
+// [local-smark] TUI 诊断渲染三态：新错误（header+最多 3 条单行明细）/
+// 既有错误（数量摘要）/完全无错误（绿色确认）。summary 缺失时不推导 clean，
+// 避免在 LSP 未运行时给出虚假"类型安全"信号
+function Diagnostics(props: {
+  diagnostics: unknown
+  filePath: string
+  summary?: { newCount?: number; existingCount?: number }
+}) {
   const { theme } = useTheme()
   const terminalEnvironment = useTuiTerminalEnvironment()
   const errors = createMemo(() => {
@@ -3505,19 +3512,53 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
     )
     return parseDiagnostics(props.diagnostics, normalized)
   })
-
+  // [local-smark] summary 字段不完整时视为缺失，TUI 不显示 clean/existing
+  const summary = createMemo(() => {
+    const s = props.summary
+    if (!s || typeof s.newCount !== "number" || typeof s.existingCount !== "number") return undefined
+    return s as { newCount: number; existingCount: number }
+  })
+  // [local-smark] 多行 LSP message 压成单行，避免撑高 TUI 工具块
+  const normalizeMsg = (msg: string) => msg.trim().replace(/\s+/g, " ")
+  // [local-smark] 截断过长 message，保持 TUI 行宽稳定
+  const truncateMsg = (msg: string, limit = 120) => (msg.length <= limit ? msg : msg.slice(0, limit - 3) + "...")
+  const more = createMemo(() => {
+    const s = summary()
+    if (!s || s.newCount <= errors().length) return 0
+    return s.newCount - errors().length
+  })
+  const newCount = createMemo(() => summary()?.newCount ?? errors().length)
   return (
-    <Show when={errors().length}>
-      <box>
-        <For each={errors()}>
-          {(diagnostic) => (
-            <text fg={theme.error}>
-              Error [{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {diagnostic.message}
-            </text>
-          )}
-        </For>
-      </box>
-    </Show>
+    <Switch>
+      {/* [local-smark] 新错误：header + 最多 3 条单行明细 */}
+      <Match when={errors().length > 0}>
+        <box gap={0}>
+          <text fg={theme.error}>
+            LSP · {newCount()} new error{newCount() === 1 ? "" : "s"}
+            {more() > 0 ? ` · +${more()} more` : ""}
+          </text>
+          <For each={errors()}>
+            {(diagnostic) => (
+              <text fg={theme.error}>
+                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {truncateMsg(normalizeMsg(diagnostic.message))}
+              </text>
+            )}
+          </For>
+        </box>
+      </Match>
+      {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
+      <Match when={summary() && summary()!.existingCount > 0}>
+        <text fg={theme.textMuted}>
+          LSP checked · 0 new · {summary()!.existingCount} existing
+        </text>
+      </Match>
+      {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
+      <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
+        <text fg={theme.success ?? theme.textMuted}>
+          ✓ LSP checked · no errors in this file
+        </text>
+      </Match>
+    </Switch>
   )
 }
 
