@@ -58,9 +58,15 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
 
 // #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
 // 递归保护根判定仅依赖递归标志：-f（force）只压制提示符不增加破坏性，
-// rm -r / 与 rm -rf / 破坏力等价，不应把 -f 作为 dangerous 门槛
-const POSIX_ROOT_ALTERNATION = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users`
-const RE_D_RM_RF_ROOT = /\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/(?:etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users)(?:\/|(?=[\s)'"\x60]|$)))/
+// rm -r / 与 rm -rf / 破坏力等价，不应把 -f 作为 dangerous 门槛。
+// 系统根（/etc、/usr 等）保护所有子目录；用户数据根（/home、/Users）仅保护
+// 根本身和一级子目录（用户家目录），深层子目录是正常用户操作不视为保护根；
+// /root 仅保护根本身，子目录不保护
+const POSIX_SYSTEM_ROOTS = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|Library|Applications|System`
+const POSIX_USER_DATA_ROOTS = String.raw`home|Users`
+const RE_D_RM_RF_ROOT = new RegExp(
+  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$))|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s)'"` + "`" + String.raw`|;]+\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS})\/\.\.(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
+)
 const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i
 const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
 const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
@@ -612,6 +618,10 @@ function unwrap(tokens: string[]): UnwrapResult {
   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
   // #197：提权 wrapper 放大命令影响范围——sudo/doas/su/pkexec 后的命令以更高权限执行
   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
+    // 特权包装器：提取内层命令递归评估，而非短路为 ask。
+    // sudo rm file 应至少 cautious，sudo rm -rf / 应 dangerous
+    if (tokens.length > 1)
+      return { action: "script", script: joinShellTokens(tokens.slice(1)), reason: "privilege wrapper requires explicit approval" }
     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
   }
   // #197：非 wrapper 分支返回 none——none 不等于 allow，调用方继续 token 级判定，避免此处单点放行
@@ -744,7 +754,14 @@ function normalizeForRawScan(command: string): string {
 
 function dangerousRaw(command: string): string | undefined {
   const normalized = normalizeForRawScan(command)
-  if (RE_D_RM_RF_ROOT.test(normalized)) return "critical recursive delete"
+  // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式。
+  // 折叠多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc），
+  // 归一化后才能正确匹配保护根路径
+  let rawNormalized = normalized.replace(/(?!^)\/{2,}/g, "/")
+  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
+    rawNormalized = rawNormalized.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
+  }
+  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
   if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
     return "remote download piped to interpreter; review the script locally before running safe commands"
   if (RE_D_PS_DOWNLOAD_EXEC.test(normalized))
@@ -1141,7 +1158,11 @@ function hasRecursiveDeleteFlags(tokens: string[]) {
 
 // #220：protectedDeleteTarget——保护根目录覆盖 POSIX 根、家目录、Windows 盘符、系统目录和 macOS 特有目录
 function protectedDeleteTarget(input: string) {
-  const normalized = input.replaceAll("\\", "/").replace(/\/+$/, "")
+  // 折叠多斜杠并解析 .. 穿越，保证 /home//user、/home/../etc 等形式正确判定
+  let normalized = input.replaceAll("\\", "/").replace(/\/+$/, "").replace(/\/{2,}/g, "/")
+  while (/\/[^/]+\/\.\.(?=\/|$)/.test(normalized)) {
+    normalized = normalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
+  }
   if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
   if (normalized === "~" || normalized === "$HOME") return true
   // #220: Windows 环境变量家目录
@@ -1154,7 +1175,14 @@ function protectedDeleteTarget(input: string) {
     "/Library", "/Applications", "/System", "/Users",
   ])
   if (posixRoots.has(normalized)) return true
-  // #220: 检查以系统根目录开头的路径（如 /etc/passwd）
+  // 用户数据根（/home、/Users）仅保护一级子目录（用户家目录），
+  // 深层子目录（/home/<user>/Download/...）是正常用户操作不视为保护根
+  if (normalized.startsWith("/home/") || normalized.startsWith("/Users/")) {
+    return !normalized.replace(/^\/(?:home|Users)\//, "").includes("/")
+  }
+  // /root 仅保护根本身（已由 posixRoots.has 覆盖），子目录不保护
+  if (normalized.startsWith("/root/")) return false
+  // 其他系统根目录：保护根及所有子目录（如 /etc/passwd、/usr/local/bin）
   for (const root of posixRoots) {
     if (normalized.startsWith(root + "/")) return true
   }
