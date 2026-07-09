@@ -15,6 +15,9 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceRef } from "@/effect/instance-ref"
 import { makeRuntime } from "@/effect/run-service"
+// [local-smark] VSCode Bridge LSP backend：优先通过 bridge 获取 VSCode 的 LSP 能力
+import * as VscodeBridge from "@/ide/vscode-bridge"
+import { AppFileSystem } from "@opencode-ai/core/filesystem"
 
 const log = Log.create({ service: "lsp" })
 const busRuntime = makeRuntime(Bus.Service, Bus.layer)
@@ -154,7 +157,10 @@ export const layer = Layer.effect(
 
         const servers: Record<string, LSPServer.Info> = {}
 
-        if (!cfg.lsp) {
+        // [local-smark] 默认启用 LSP：未配置时视为 true，仅 false 显式禁用。
+        // 官方 PR #23416 因"LSP 有意默认禁用"被关闭，但作为 fork 我们选择默认启用
+        // 以降低使用门槛。LSP 按需启动（touchFile 时 spawn），不影响启动性能。
+        if (cfg.lsp === false) {
           log.info("all LSPs are disabled")
         } else {
           for (const server of Object.values(LSPServer)) {
@@ -163,7 +169,9 @@ export const layer = Layer.effect(
 
           filterExperimentalServers(servers, flags)
 
-          if (cfg.lsp !== true) {
+          // [local-smark] cfg.lsp 为 undefined（默认启用）时跳过自定义配置遍历，
+          // 防止 Object.entries(undefined) 报错。仅对象类型才进入自定义配置。
+          if (cfg.lsp && cfg.lsp !== true) {
             for (const [name, item] of Object.entries(cfg.lsp)) {
               const existing = servers[name]
               if (item.disabled) {
@@ -313,11 +321,82 @@ export const layer = Layer.effect(
       return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x))))
     })
 
+    // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存。
+    // 失败返回 undefined，调用方回退到内置 LSP。
+    const resolveLspBridge = Effect.fnUntraced(function* (filePath?: string) {
+      const ctx = yield* InstanceState.context
+      return yield* Effect.promise(async () => {
+        try {
+          const bridge = await VscodeBridge.resolveBridge({ cwd: ctx.directory, filePath })
+          if (!bridge.capabilities?.lsp) return undefined
+          return bridge
+        } catch {
+          return undefined
+        }
+      })
+    })
+
+    // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined（触发回退）。
+    const callLspBridge = Effect.fnUntraced(function* (
+      endpoint: string,
+      body: Record<string, unknown>,
+      filePath?: string,
+    ) {
+      const ctx = yield* InstanceState.context
+      return yield* Effect.promise(async () => {
+        try {
+          return await VscodeBridge.callBridge({ cwd: ctx.directory, path: endpoint, body, filePath })
+        } catch {
+          return undefined
+        }
+      })
+    })
+
+    // [local-smark] 将 bridge 诊断格式转换为内置 LSP 的 Record<string, Diagnostic[]> 格式。
+    // 对 key 做 normalizePath，与 write/edit/apply_patch 的查找 key 对齐。
+    function bridgeDiagnosticsToMap(result: unknown): Record<string, LSPClient.Diagnostic[]> | undefined {
+      if (!result || typeof result !== "object") return undefined
+      const diags = (result as { diagnostics?: unknown[] }).diagnostics
+      if (!Array.isArray(diags)) return undefined
+      const severityMap: Record<string, number> = { Error: 1, Warning: 2, Information: 3, Hint: 4 }
+      const results: Record<string, LSPClient.Diagnostic[]> = {}
+      for (const d of diags) {
+        if (!d || typeof d !== "object") continue
+        const item = d as { file?: string; line?: number; column?: number; severity?: string; message?: string; source?: string }
+        if (!item.file || typeof item.line !== "number" || typeof item.column !== "number") continue
+        const diagnostic: LSPClient.Diagnostic = {
+          range: {
+            start: { line: item.line - 1, character: item.column - 1 },
+            end: { line: item.line - 1, character: item.column },
+          },
+          message: item.message ?? "",
+          severity: (severityMap[item.severity ?? "Error"] ?? 1) as LSPClient.Diagnostic["severity"],
+          ...(item.source ? { source: item.source } : {}),
+        }
+        // [local-smark] 对 key 做 normalizePath，与 write/edit/apply_patch 的查找 key 对齐
+        const normalizedFile = AppFileSystem.normalizePath(item.file)
+        const arr = results[normalizedFile] ?? []
+        arr.push(diagnostic)
+        results[normalizedFile] = arr
+      }
+      return results
+    }
+
     const init = Effect.fn("LSP.init")(function* () {
       yield* InstanceState.get(state)
     })
 
     const status = Effect.fn("LSP.status")(function* () {
+      // [local-smark] 有 bridge 时返回 VSCode 连接状态
+      const bridge = yield* resolveLspBridge()
+      if (bridge) {
+        return [{
+          id: "vscode",
+          name: "VSCode",
+          root: ".",
+          status: "connected" as const,
+        }]
+      }
       const ctx = yield* InstanceState.context
       const s = yield* InstanceState.get(state)
       const result: Status[] = []
@@ -333,6 +412,9 @@ export const layer = Layer.effect(
     })
 
     const hasClients = Effect.fn("LSP.hasClients")(function* (file: string) {
+      // [local-smark] 有 bridge 时直接返回 true（VSCode 已有 LSP 扩展）
+      const bridge = yield* resolveLspBridge(file)
+      if (bridge) return true
       const ctx = yield* InstanceState.context
       const s = yield* InstanceState.get(state)
       return yield* Effect.promise(async () => {
@@ -349,6 +431,12 @@ export const layer = Layer.effect(
     })
 
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
+      // [local-smark] 有 bridge 时走 bridge /lsp/touch（ensureOpen + awaitDiagnosticsRefresh）
+      const bridge = yield* resolveLspBridge(input)
+      if (bridge) {
+        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
+        if (touched) return
+      }
       log.info("touching file", { file: input })
       const clients = yield* getClients(input)
       yield* Effect.promise(() =>
@@ -371,6 +459,13 @@ export const layer = Layer.effect(
     })
 
     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
+      // [local-smark] 优先 bridge，回退内置
+      const bridge = yield* resolveLspBridge()
+      if (bridge) {
+        const result = yield* callLspBridge("/lsp/diagnostics", {})
+        const mapped = bridgeDiagnosticsToMap(result)
+        if (mapped) return mapped
+      }
       const results: Record<string, LSPClient.Diagnostic[]> = {}
       const all = yield* runAll(async (client) => client.diagnostics)
       for (const result of all) {
@@ -384,6 +479,14 @@ export const layer = Layer.effect(
     })
 
     const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
+      // [local-smark] 优先 bridge，提取 bare array 与 tool 层对齐
+      const bridge = yield* resolveLspBridge(input.file)
+      if (bridge) {
+        const result = yield* callLspBridge("/lsp/hover", {
+          filePath: input.file, line: input.line, character: input.character,
+        }, input.file)
+        if (result) return (result as { hovers?: unknown[] }).hovers ?? []
+      }
       return yield* run(input.file, (client) =>
         client.connection
           .sendRequest("textDocument/hover", {
@@ -395,6 +498,14 @@ export const layer = Layer.effect(
     })
 
     const definition = Effect.fn("LSP.definition")(function* (input: LocInput) {
+      // [local-smark] 优先 bridge，提取 .definitions
+      const bridge = yield* resolveLspBridge(input.file)
+      if (bridge) {
+        const result = yield* callLspBridge("/lsp/definition", {
+          filePath: input.file, line: input.line, character: input.character,
+        }, input.file)
+        if (result) return (result as { definitions?: unknown[] }).definitions ?? []
+      }
       const results = yield* run(input.file, (client) =>
         client.connection
           .sendRequest("textDocument/definition", {
@@ -407,6 +518,14 @@ export const layer = Layer.effect(
     })
 
     const references = Effect.fn("LSP.references")(function* (input: LocInput) {
+      // [local-smark] 优先 bridge，提取 .references
+      const bridge = yield* resolveLspBridge(input.file)
+      if (bridge) {
+        const result = yield* callLspBridge("/lsp/references", {
+          filePath: input.file, line: input.line, character: input.character,
+        }, input.file)
+        if (result) return (result as { references?: unknown[] }).references ?? []
+      }
       const results = yield* run(input.file, (client) =>
         client.connection
           .sendRequest("textDocument/references", {
@@ -433,6 +552,12 @@ export const layer = Layer.effect(
 
     const documentSymbol = Effect.fn("LSP.documentSymbol")(function* (uri: string) {
       const file = fileURLToPath(uri)
+      // [local-smark] 优先 bridge，提取 .symbols
+      const bridge = yield* resolveLspBridge(file)
+      if (bridge) {
+        const result = yield* callLspBridge("/lsp/document-symbol", { filePath: file }, file)
+        if (result) return ((result as { symbols?: unknown[] }).symbols ?? []) as (DocumentSymbol | Symbol)[]
+      }
       const results = yield* run(file, (client) =>
         client.connection.sendRequest("textDocument/documentSymbol", { textDocument: { uri } }).catch(() => []),
       )
@@ -440,6 +565,13 @@ export const layer = Layer.effect(
     })
 
     const workspaceSymbol = Effect.fn("LSP.workspaceSymbol")(function* (query: string) {
+      // [local-smark] 优先 bridge，提取 .symbols
+      const bridge = yield* resolveLspBridge()
+      if (bridge) {
+        const result = yield* callLspBridge("/lsp/workspace-symbol", { query })
+        // [local-smark] workspaceSymbol bridge 返回需要类型断言
+        if (result) return ((result as { symbols?: unknown[] }).symbols ?? []) as Symbol[]
+      }
       const results = yield* runAll((client) =>
         client.connection
           .sendRequest<Symbol[]>("workspace/symbol", { query })

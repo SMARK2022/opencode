@@ -226,18 +226,23 @@ export const EditTool = Tool.define(
           })
 
           let output = "Edit applied successfully."
-          yield* lsp.touchFile(filePath, "document")
-          const diagnostics = yield* lsp.diagnostics()
           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
-          const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
+          // [local-smark] 增量诊断：编辑前获取 baseline，touchFile 后获取 current，
+          // 只报告新引入的错误。baseline 在 touchFile 之前获取（LSP 缓存的旧诊断）。
+          const beforeDiagnostics = yield* lsp.diagnostics()
+          const beforeIssues = beforeDiagnostics[normalizedFilePath] ?? []
+          yield* lsp.touchFile(filePath, "document")
+          const afterDiagnostics = yield* lsp.diagnostics()
+          const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
+          const block = LSP.Diagnostic.reportDelta(filePath, currentIssues, beforeIssues)
+          // [local-smark] 计算新错误数组和摘要供 TUI 渲染
+          const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
+          const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
           if (block) {
-            output += `\n\nLSP errors detected in this file, please fix:\n${block}`
+            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
+            output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
           } else {
-            // [local-smark] 当 diagnostics 为空时，用 status() 区分 "无错误" 和 "LSP 未运行"。
-            // status() 返回已连接的 client 列表：空列表 = 无 LSP server 在运行，
-            // 此时 "无 diagnostics" 不代表 "无类型错误"，需提示模型自行验证。
-            // 不使用 hasClients()：它检查 server 配置是否存在，但 server 可能已配置
-            // 却未完成 fire-and-forget 启动，会误判为"有 LSP"而省略提示。
+            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空
             const clients = yield* lsp.status()
             if (clients.length === 0) {
               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
@@ -246,7 +251,9 @@ export const EditTool = Tool.define(
 
           return {
             metadata: {
-              diagnostics,
+              // [local-smark] metadata.diagnostics 存储新错误数组（delta）+ diagnosticSummary 供 TUI
+              diagnostics: { [normalizedFilePath]: newErrorsArr },
+              diagnosticSummary: delta,
               diff,
               filediff,
             },

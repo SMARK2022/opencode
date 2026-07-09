@@ -25,6 +25,8 @@ import { runNotebook } from "./notebook/run"
 import { editNotebook } from "./notebook/edit"
 import { readNotebookCellOutput } from "./notebook/output"
 import { notebookEnv } from "./notebook/env"
+// [local-smark] LSP bridge 端点：通过 VSCode API 获取诊断/hover/定义等 LSP 能力
+import { lspTouch, lspDiagnostics, lspHover, lspDefinition, lspReferences, lspDocumentSymbol, lspWorkspaceSymbol } from "./lsp"
 import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
 
 const BRIDGE_HOST = "127.0.0.1"
@@ -41,7 +43,12 @@ const fileLocks = new Map<string, Promise<void>>()
 // 只读路由跳过 withFileLock：summary/source/output 只读取 VS Code 文档状态，
 // 不修改 notebook/kernel，与并发 run/edit 不冲突。
 // cell-output 是 output 的路由别名（routeRequest 中 case fallthrough）。
-const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
+// [local-smark] LSP 路由是只读的（不修改 notebook/kernel），加入 READONLY_ROUTES 避免不必要串行化
+const READONLY_ROUTES = new Set([
+  "/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output",
+  "/lsp/touch", "/lsp/diagnostics", "/lsp/hover", "/lsp/definition",
+  "/lsp/references", "/lsp/document-symbol", "/lsp/workspace-symbol",
+])
 
 function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = fileLocks.get(key) ?? Promise.resolve()
@@ -187,6 +194,22 @@ async function routeRequest(
 
     case "/notebook/env":
       return await notebookEnv(body)
+
+    // [local-smark] LSP bridge 端点路由
+    case "/lsp/touch":
+      return await lspTouch(body as { filePath: string })
+    case "/lsp/diagnostics":
+      return await lspDiagnostics(body as { filePath?: string })
+    case "/lsp/hover":
+      return await lspHover(body as { filePath: string; line: number; character: number })
+    case "/lsp/definition":
+      return await lspDefinition(body as { filePath: string; line: number; character: number })
+    case "/lsp/references":
+      return await lspReferences(body as { filePath: string; line: number; character: number })
+    case "/lsp/document-symbol":
+      return await lspDocumentSymbol(body as { filePath: string })
+    case "/lsp/workspace-symbol":
+      return await lspWorkspaceSymbol(body as { query: string })
   }
 
   return undefined

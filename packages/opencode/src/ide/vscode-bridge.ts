@@ -49,7 +49,8 @@ export type BridgeEntry = {
   capabilities?: Record<string, boolean>
 }
 
-export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token"> & {
+// [local-smark] BridgeRef 添加 capabilities 字段，让调用方能检查 bridge.capabilities?.lsp
+export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token" | "capabilities"> & {
   host: string
   score?: number
   source: "env" | "registry"
@@ -167,6 +168,8 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
     host: best.entry.host ?? "127.0.0.1",
     port: best.entry.port,
     token: best.entry.token,
+    // [local-smark] 传递 capabilities 让调用方检查 lsp 支持标记
+    capabilities: best.entry.capabilities,
     score: best.score,
     source: "registry",
   } satisfies BridgeRef

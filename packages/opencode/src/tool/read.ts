@@ -444,7 +444,9 @@ export const ReadTool = Tool.define(
     })
 
     const warm = Effect.fn("ReadTool.warm")(function* (filepath: string) {
-      yield* lsp.touchFile(filepath).pipe(Effect.ignore, Effect.forkIn(scope))
+      // [local-smark] 回移 PR #30226：用 ignoreCause 隔离后台 LSP warmup defect，
+      // 避免 read 成功后异步预热中的 Die 逸出到 scope。
+      yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
     })
 
     const readSample = Effect.fn("ReadTool.readSample")(function* (

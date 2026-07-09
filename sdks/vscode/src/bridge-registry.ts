@@ -75,6 +75,8 @@ export function manifest(input: RegistryInput) {
       notebookOutputArtifacts: true,
       notebookSource: true,
       lmToolsProxy: false,
+      // [local-smark] 声明 LSP bridge 能力：opencode 端通过此标记决定是否走 bridge 获取 LSP
+      lsp: true,
     },
   }
 }

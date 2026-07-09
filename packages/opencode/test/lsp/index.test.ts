@@ -50,7 +50,32 @@ describe("lsp.spawn", () => {
     ),
   )
 
-  it.live("does not spawn builtin LSP for files inside instance when LSP is unset", () =>
+  it.live("does not spawn builtin LSP for files inside instance when LSP is false", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        LSP.Service.use((lsp) =>
+          Effect.gen(function* () {
+            const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+
+            try {
+              yield* lsp.hover({
+                file: path.join(dir, "src", "inside.ts"),
+                line: 0,
+                character: 0,
+              })
+              // [local-smark] LSP 显式设为 false 时不 spawn
+              expect(spy).toHaveBeenCalledTimes(0)
+            } finally {
+              spy.mockRestore()
+            }
+          }),
+        ),
+      // [local-smark] 默认启用 LSP：未配置时视为 true，仅 false 显式禁用
+      { config: { lsp: false } },
+    ),
+  )
+
+  it.live("spawns builtin LSP for files inside instance when LSP is unset (default enabled)", () =>
     provideTmpdirInstance((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
@@ -62,7 +87,8 @@ describe("lsp.spawn", () => {
               line: 0,
               character: 0,
             })
-            expect(spy).toHaveBeenCalledTimes(0)
+            // [local-smark] 未配置 lsp 时默认启用，会尝试 spawn
+            expect(spy).toHaveBeenCalledTimes(1)
           } finally {
             spy.mockRestore()
           }

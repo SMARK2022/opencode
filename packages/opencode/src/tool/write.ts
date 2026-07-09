@@ -16,8 +16,6 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
 
-const MAX_PROJECT_DIAGNOSTICS_FILES = 5
-
 export const Parameters = Schema.Struct({
   content: Schema.String.annotate({ description: "The content to write to the file" }),
   filePath: Schema.String.annotate({
@@ -123,26 +121,25 @@ export const WriteTool = Tool.define(
           })
 
           let output = "Wrote file successfully."
-          yield* lsp.touchFile(filepath, "document")
-          const diagnostics = yield* lsp.diagnostics()
           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
-          let projectDiagnosticsCount = 0
-          for (const [file, issues] of Object.entries(diagnostics)) {
-            const current = file === normalizedFilepath
-            if (!current && projectDiagnosticsCount >= MAX_PROJECT_DIAGNOSTICS_FILES) continue
-            const block = LSP.Diagnostic.report(current ? filepath : file, issues)
-            if (!block) continue
-            if (current) {
-              output += `\n\nLSP errors detected in this file, please fix:\n${block}`
-              continue
-            }
-            projectDiagnosticsCount++
-            output += `\n\nLSP errors detected in other files:\n${block}`
-          }
-          // [local-smark] diagnostics 为空时不区分"无错误"和"LSP 未运行"，
-          // 模型会误认为写入的文件无类型错误。用 status() 检查是否有已连接的
-          // LSP client：空列表表示无 server 运行，追加不可用提示。
-          if (Object.keys(diagnostics).length === 0) {
+          // [local-smark] 增量诊断：编辑前获取 baseline（LSP 缓存的旧诊断），
+          // touchFile 后获取 current，只报告新引入的错误。
+          // baseline 在 touchFile 之前获取：LSP 此时还不知道新内容，诊断反映旧状态。
+          const beforeDiagnostics = yield* lsp.diagnostics()
+          const beforeIssues = beforeDiagnostics[normalizedFilepath] ?? []
+          yield* lsp.touchFile(filepath, "document")
+          const afterDiagnostics = yield* lsp.diagnostics()
+          const currentIssues = afterDiagnostics[normalizedFilepath] ?? []
+          const block = LSP.Diagnostic.reportDelta(filepath, currentIssues, beforeIssues)
+          // [local-smark] 计算新错误数组和摘要供 TUI 渲染
+          const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
+          const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+          if (block) {
+            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
+            output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
+          } else {
+            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空，
+            // delta 必然为空。须用 status() 确认 LSP 确实在运行，否则模型获得虚假"类型安全"信号。
             const clients = yield* lsp.status()
             if (clients.length === 0) {
               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
@@ -152,7 +149,11 @@ export const WriteTool = Tool.define(
           return {
             title: path.relative(instance.worktree, filepath),
             metadata: {
-              diagnostics,
+              // [local-smark] metadata.diagnostics 存储新错误数组（delta），不是全部当前错误。
+              // TUI getDiagnostics() 从此字段读取，只显示新引入的错误。
+              // diagnosticSummary 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）。
+              diagnostics: { [normalizedFilepath]: newErrorsArr },
+              diagnosticSummary: delta,
               filepath,
               exists,
               ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
