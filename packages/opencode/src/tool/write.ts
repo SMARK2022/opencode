@@ -112,11 +112,8 @@ export const WriteTool = Tool.define(
 
           let output = "Wrote file successfully."
           const normalizedFilepath = FSUtil.normalizePath(filepath)
-          // [local-smark] 增量诊断：编辑前取 baseline（LSP 缓存的旧诊断），
-          // touchFile 后取 current，只报告新引入的错误。
-          // baseline 必须在 touchFile 之前获取：LSP 此时还不知道新内容
-          const beforeDiagnostics = yield* lsp.diagnostics()
-          const beforeIssues = beforeDiagnostics[normalizedFilepath] ?? []
+          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
+          const beforeIssues = (yield* lsp.diagnostics())[normalizedFilepath] ?? []
           yield* lsp.touchFile(filepath, "document")
           const afterDiagnostics = yield* lsp.diagnostics()
           const currentIssues = afterDiagnostics[normalizedFilepath] ?? []
@@ -124,6 +121,8 @@ export const WriteTool = Tool.define(
           // [local-smark] 新错误数组和摘要供 TUI 渲染
           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+          // summary 只有在 LSP 可靠可用时才传给 TUI
+          let diagnosticSummary: typeof delta | undefined = delta
           if (block) {
             output += `\n\nNew LSP errors introduced by this edit:\n${block}`
             output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
@@ -132,7 +131,11 @@ export const WriteTool = Tool.define(
             // baseline 和 current 都为空，delta 必然为空
             const clients = yield* lsp.status()
             if (clients.length === 0) {
+              diagnosticSummary = undefined
               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+            } else {
+              // [local-smark] LSP 已运行且 delta 为空时给短确认，避免模型误判 LSP 未工作
+              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
             }
           }
 
@@ -142,7 +145,8 @@ export const WriteTool = Tool.define(
               // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary
               // 无活动client的空差分不证明检查成功，不能发出clean摘要。
               diagnostics: { [normalizedFilepath]: newErrorsArr },
-              diagnosticSummary: (yield* lsp.status()).length ? delta : undefined,
+              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
+              ...(diagnosticSummary ? { diagnosticSummary } : {}),
               filepath,
               exists,
               // 条件展开：仅在 metadataDiff 存在时展开 diff 字段，避免 undefined 污染 metadata

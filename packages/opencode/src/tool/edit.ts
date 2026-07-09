@@ -234,10 +234,8 @@ export const EditTool = Tool.define(
 
           let output = "Edit applied successfully."
           const normalizedFilePath = FSUtil.normalizePath(filePath)
-          // [local-smark] 增量诊断：编辑前取 baseline，touchFile 后取 current，
-          // 只报告新引入的错误。baseline 在 touchFile 之前获取（LSP 缓存的旧诊断）
-          const beforeDiagnostics = yield* lsp.diagnostics()
-          const beforeIssues = beforeDiagnostics[normalizedFilePath] ?? []
+          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
+          const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
           yield* lsp.touchFile(filePath, "document")
           const afterDiagnostics = yield* lsp.diagnostics()
           const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
@@ -245,6 +243,8 @@ export const EditTool = Tool.define(
           // [local-smark] 新错误数组和摘要供 TUI 渲染
           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+          // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
+          let diagnosticSummary: typeof delta | undefined = delta
           if (block) {
             output += `\n\nNew LSP errors introduced by this edit:\n${block}`
             output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
@@ -253,7 +253,11 @@ export const EditTool = Tool.define(
             // baseline 和 current 都为空，delta 必然为空
             const clients = yield* lsp.status()
             if (clients.length === 0) {
+              diagnosticSummary = undefined
               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+            } else {
+              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持反馈高信噪比
+              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
             }
           }
 
@@ -261,7 +265,8 @@ export const EditTool = Tool.define(
             metadata: {
               // 未连接时不提供clean摘要；差分数据与formatter后的真实diff各自保留。
               diagnostics: { [normalizedFilePath]: newErrorsArr },
-              diagnosticSummary: (yield* lsp.status()).length ? delta : undefined,
+              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
+              ...(diagnosticSummary ? { diagnosticSummary } : {}),
               diff,
               filediff,
             },

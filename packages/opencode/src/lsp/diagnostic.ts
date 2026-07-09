@@ -83,4 +83,17 @@ export function deltaSummary(
   }
 }
 
+// [local-smark] clean/既有错误文案：只在调用方已确认 LSP 可用后使用；
+// summary=0 不能单独证明 LSP 运行过
+export function checkedMessage(summary: { newCount: number; existingCount: number }, scope: "file" | "changed-files") {
+  if (summary.newCount > 0) return ""
+  if (summary.existingCount > 0) {
+    // 只暴露既有错误数量，不暴露详情，避免模型把历史问题误判为本次编辑失败
+    const noun = summary.existingCount === 1 ? "error" : "errors"
+    return `LSP checked: no new errors introduced; ${summary.existingCount} existing ${noun} remain.`
+  }
+  if (scope === "changed-files") return "LSP checked: no errors in changed files."
+  return "LSP checked: no errors in this file."
+}
+
 export * as Diagnostic from "./diagnostic"
