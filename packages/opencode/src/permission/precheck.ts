@@ -130,9 +130,13 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
 // 保护根目录递归删除：/ | /* | /. | ~ | $HOME | /etc 以及扩展的系统根目录。
 // 仅检查递归标志（-r/-R/--recursive），不要求 -f（force）：force 只压制提示符，
 // 不增加破坏性，rm -r / 与 rm -rf / 破坏力等价。
-const POSIX_ROOT_ALTERNATION = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users`
+// 系统根（/etc、/usr 等）保护所有子目录；用户数据根（/home、/Users）仅保护
+// 根本身和一级子目录（用户家目录），深层子目录是正常用户操作不视为保护根；
+// /root 仅保护根本身，子目录不保护。
+const POSIX_SYSTEM_ROOTS = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|Library|Applications|System`
+const POSIX_USER_DATA_ROOTS = String.raw`home|Users`
 const RE_D_RM_RF_ROOT = new RegExp(
-  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_ROOT_ALTERNATION})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
+  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$))|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s)'"` + "`" + String.raw`|;]+\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS})\/\.\.(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
 )
 
 // 远程下载管道到解释器：curl/wget | sh/bash/python/...
@@ -531,8 +535,14 @@ function dangerousRaw(command: string): string | undefined {
   const normalized = normalizeForRawScan(command)
 
   // ---- 保护根目录递归删除 ----
-  // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式
-  if (RE_D_RM_RF_ROOT.test(normalized)) return "critical recursive delete"
+  // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式。
+  // 折叠多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc）
+  // 以正确匹配保护根路径
+  let rawNormalized = normalized.replace(/(?!^)\/{2,}/g, "/")
+  while (/\/[^/]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
+    rawNormalized = rawNormalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
+  }
+  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
 
   // ---- 远程下载管道执行 ----
   if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
@@ -911,6 +921,10 @@ function unwrap(tokens: string[]): UnwrapResult {
   }
   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
+    // 特权包装器：提取内层命令递归评估，而非短路为 general。
+    // sudo rm file 应至少 cautious，sudo rm -rf / 应 dangerous。
+    if (tokens.length > 1)
+      return { action: "script", script: joinShellTokens(tokens.slice(1)), reason: "privilege wrapper requires explicit approval" }
     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
   }
   return { action: "none" }
@@ -1428,7 +1442,12 @@ function protectedDeleteTarget(input: string) {
   // 保护根目录覆盖本地 POSIX 根、常见家目录别名、Windows 驱动器根、
   // 系统目录和 macOS 特有目录。这些是递归删除被视为 dangerous 而非
   // 仅 cautious 的情况。
-  const normalized = input.replaceAll("\\", "/").replace(/\/+$/, "")
+  // 折叠多斜杠并解析 .. 穿越以正确判定保护根（如 /home//user → /home/user，
+  // /home/../etc → /etc）
+  let normalized = input.replaceAll("\\", "/").replace(/\/+$/, "").replace(/\/{2,}/g, "/")
+  while (/\/[^/]+\/\.\.(?=\/|$)/.test(normalized)) {
+    normalized = normalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
+  }
   // POSIX 根和通配符
   if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
   // 家目录别名
@@ -1445,10 +1464,15 @@ function protectedDeleteTarget(input: string) {
     "/Library", "/Applications", "/System", "/Users",
   ])
   if (posixRoots.has(normalized)) return true
-  if (posixRoots.has(normalized.replace(/\/.*/, ""))) {
-    // 也匹配 /etc/... 形式（但 /etc 本身已由上面的集合覆盖）
+  // 用户数据根（/home、/Users）仅保护一级子目录（用户家目录），
+  // 深层子目录（/home/<user>/Download/...）是正常用户操作不视为保护根。
+  if (normalized.startsWith("/home/") || normalized.startsWith("/Users/")) {
+    // /home/sunbenteng → 保护；/home/sunbenteng/Download/... → 不保护
+    return !normalized.replace(/^\/(?:home|Users)\//, "").includes("/")
   }
-  // 检查以系统根目录开头的路径（如 /etc/passwd）
+  // /root 仅保护根本身（已由 posixRoots.has 覆盖），子目录不保护
+  if (normalized.startsWith("/root/")) return false
+  // 其他系统根目录：保护根及所有子目录（如 /etc/passwd、/usr/local/bin）
   for (const root of posixRoots) {
     if (normalized.startsWith(root + "/")) return true
   }
