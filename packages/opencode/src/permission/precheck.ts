@@ -127,10 +127,12 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
 // ============================================================
 // 所有 raw 层正则在模块加载时编译一次，避免热路径重复编译。
 
-// 保护根目录递归删除：/ | /* | /. | ~ | $HOME | /etc 以及扩展的系统根目录
+// 保护根目录递归删除：/ | /* | /. | ~ | $HOME | /etc 以及扩展的系统根目录。
+// 仅检查递归标志（-r/-R/--recursive），不要求 -f（force）：force 只压制提示符，
+// 不增加破坏性，rm -r / 与 rm -rf / 破坏力等价。
 const POSIX_ROOT_ALTERNATION = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users`
 const RE_D_RM_RF_ROOT = new RegExp(
-  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_ROOT_ALTERNATION})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
+  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_ROOT_ALTERNATION})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
 )
 
 // 远程下载管道到解释器：curl/wget | sh/bash/python/...
@@ -166,9 +168,11 @@ const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(
   "i",
 )
 
-// PowerShell 保护根目录递归删除
+// PowerShell 保护根目录递归删除。仅检查 -Recurse，不要求 -Force：
+// 与 token 层（classifyTokens 的 remove-item 分支）对齐，且确保被 sudo 等包装器
+// 短路时 raw 层仍能确定性拦截 Remove-Item -Recurse / （无 -Force）。
 const RE_D_PS_RECURSIVE_DELETE_ROOT = new RegExp(
-  String.raw`\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"` + "`" + String.raw`]|$))`,
+  String.raw`\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"` + "`" + String.raw`]|$))`,
   "i",
 )
 
@@ -1023,11 +1027,11 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   if (readsSensitivePath(tokens)) return { level: "cautious", reason: "sensitive file read requires explicit approval" }
 
   // ---- 文件删除 ----
-  // rm -rf 保护根 → dangerous；rm -rf 普通路径 → cautious；其他删除 → cautious
-  if (cmd === "rm" && hasRecursiveForceDeleteFlags(tokens.slice(1))) {
+  // rm -r 保护根 → dangerous；rm -r 普通路径 → cautious；其他删除 → cautious
+  if (cmd === "rm" && hasRecursiveDeleteFlags(tokens.slice(1))) {
     if (tokens.slice(1).some(protectedDeleteTarget))
       return { level: "dangerous", reason: "critical recursive delete" }
-    return { level: "cautious", reason: "recursive force delete requires explicit approval" }
+    return { level: "cautious", reason: "recursive delete requires explicit approval" }
   }
   if (cmd === "remove-item" && tokens.some((item) => item.toLowerCase() === "-recurse")) {
     if (tokens.slice(1).some(protectedDeleteTarget))
@@ -1413,13 +1417,11 @@ function isSensitiveKeyFile(normalizedPath: string) {
   return /(?:ssl|tls|cert|pki|private|secret|\.ssh|\.gnupg)/i.test(normalizedPath)
 }
 
-function hasRecursiveForceDeleteFlags(tokens: string[]) {
-  // rm 接受递归/强制作为组合短标志（-rf、-fr）、分离短标志（-r -f、-R -f）
-  // 或长标志。将这对标志视为等价，然后再检查保护目标。
-  return (
-    tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) &&
-    tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
-  )
+function hasRecursiveDeleteFlags(tokens: string[]) {
+  // rm 的递归/强制可作组合短标志（-rf、-fr）、分离短标志（-r -f、-R -f）
+  // 或长标志。保护根判定仅依赖递归标志——-f（force）只压制提示符，不增加
+  // 破坏性，因此 rm -r / 与 rm -rf / 同等危险，不应将 -f 作为 dangerous 门槛。
+  return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item))
 }
 
 function protectedDeleteTarget(input: string) {
