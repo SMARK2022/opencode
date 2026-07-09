@@ -233,8 +233,10 @@ describe("tool.shell", () => {
         projectRoot,
         Effect.gen(function* () {
           // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
+          // sleep 0.01 防止 macOS CI 上 echo|tr 管道退出过快导致 stdout 竞态
+          //（detached:true + Bun 调度抖动，与 "basic" 测试同款问题，见 line 217 注释）
           const result = yield* run({
-            command: "echo 'hello world' | tr a-z A-Z",
+            command: "echo 'hello world' | tr a-z A-Z; sleep 0.01",
             description: "Echo with quotes and pipe",
           })
           expect(result.metadata.exit).toBe(0)
@@ -1864,7 +1866,8 @@ describe("tool.shell abort", () => {
         projectRoot,
         Effect.gen(function* () {
           const result = yield* run({
-            command: `echo stdout_msg && echo stderr_msg >&2`,
+            // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
+            command: `echo stdout_msg && echo stderr_msg >&2; sleep 0.01`,
             description: "Stderr test",
           })
           expect(result.output).toContain("stdout_msg")
@@ -2007,7 +2010,8 @@ describe("tool.shell abort", () => {
       projectRoot,
       Effect.gen(function* () {
         const result = yield* run({
-          command: `echo ok`,
+          // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
+          command: `echo ok; sleep 0.01`,
           description: "Non-empty successful command",
         })
 

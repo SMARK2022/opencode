@@ -21,6 +21,11 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # CI 环境禁止 LSP server 自动下载：macOS/Windows runner 预装 .NET SDK，
+  # CSharp/FSharp server 会触发 dotnet tool install 下载 roslyn-language-server，
+  # 耗时 >30s 导致 BOM 测试（.cs 文件触发 CSharp server spawn）超时。
+  # 所有有 auto-download 的 LSP server 均在 spawn 中检查此 flag。
+  OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
 
 jobs:
   core-required:
