@@ -96,6 +96,8 @@ export const dict: Record<string, string> = {
   "ui.sessionTurn.status.consideringNextSteps": "Considering next steps",
 
   "ui.messagePart.diagnostic.error": "Error",
+  // 保留源诊断摘要原话，由共享i18n处理参数而非组件硬编码英文。
+  "ui.messagePart.diagnostic.summary": "0 new · {{count}} existing",
   "ui.messagePart.title.edit": "Edit",
   "ui.messagePart.title.write": "Write",
   "ui.messagePart.option.typeOwnAnswer": "Type your own answer",
