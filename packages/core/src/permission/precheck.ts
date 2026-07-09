@@ -56,9 +56,11 @@ const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
 const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 
-// #220：预编译正则常量——dangerous raw 层，模块加载时编译一次
+// #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
+// 递归保护根判定仅依赖递归标志：-f（force）只压制提示符不增加破坏性，
+// rm -r / 与 rm -rf / 破坏力等价，不应把 -f 作为 dangerous 门槛
 const POSIX_ROOT_ALTERNATION = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users`
-const RE_D_RM_RF_ROOT = /\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/(?:etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users)(?:\/|(?=[\s)'"\x60]|$)))/
+const RE_D_RM_RF_ROOT = /\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/(?:etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users)(?:\/|(?=[\s)'"\x60]|$)))/
 const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i
 const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
 const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
@@ -67,7 +69,7 @@ const RE_D_WINDOWS_PROTECTED_DELETE = /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recu
 const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
 const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
 const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,"i",)
-const RE_D_PS_RECURSIVE_DELETE_ROOT = /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
+const RE_D_PS_RECURSIVE_DELETE_ROOT = /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
 const RE_D_PYTHON_RMTREE = /\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
 const RE_D_PYTHON_REMOVE = /\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
 const RE_D_NODE_REMOVE = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
@@ -884,11 +886,11 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   const cmd = normalizeCommandName(tokens[0])
   // #220: 敏感路径读取——读取 .env/SSH key/云凭据会暴露密钥内容给 shell 输出/模型上下文
   if (readsSensitivePath(tokens)) return { level: "cautious", reason: "sensitive file read requires explicit approval" }
-  // #220: 文件删除——rm -rf 保护根 dangerous，其他 cautious
-  if (cmd === "rm" && hasRecursiveForceDeleteFlags(tokens.slice(1))) {
+  // #220: 文件删除——rm -r 保护根 dangerous（递归即门槛，不要求 -f），其他 cautious
+  if (cmd === "rm" && hasRecursiveDeleteFlags(tokens.slice(1))) {
     if (tokens.slice(1).some(protectedDeleteTarget))
       return { level: "dangerous", reason: "critical recursive delete" }
-    return { level: "cautious", reason: "recursive force delete requires explicit approval" }
+    return { level: "cautious", reason: "recursive delete requires explicit approval" }
   }
   if (cmd === "remove-item" && tokens.some((item) => item.toLowerCase() === "-recurse")) {
     if (tokens.slice(1).some(protectedDeleteTarget))
@@ -1130,9 +1132,11 @@ function decodePowerShell(input: string) {
   }
 }
 
-function hasRecursiveForceDeleteFlags(tokens: string[]) {
-  // #197：rm 接受组合短标志(-rf/-fr)、拆分短标志(-r -f/-R -f)或长标志——视为等价后检查保护目标，防止选项拼写将根删除从 dangerous 降级为 cautious
-  return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) && tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
+function hasRecursiveDeleteFlags(tokens: string[]) {
+  // #197：rm 递归标志可作组合短标志(-rf/-fr)、拆分短标志(-r -f/-R -f)或长标志。
+  // 保护根判定只看递归标志：-f 只压制提示符不增加破坏性，rm -r / 与 rm -rf /
+  // 同等危险，防止把 -f 作为 dangerous 门槛造成 rm -r / 降级 cautious
+  return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item))
 }
 
 // #220：protectedDeleteTarget——保护根目录覆盖 POSIX 根、家目录、Windows 盘符、系统目录和 macOS 特有目录
