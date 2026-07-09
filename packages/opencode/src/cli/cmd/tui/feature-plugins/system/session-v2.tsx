@@ -902,7 +902,7 @@ function Write(props: ToolProps) {
               content={content()}
             />
           </line_number>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} summary={props.metadata.diagnosticSummary} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -945,7 +945,7 @@ function Edit(props: ToolProps) {
                 removedLineNumberBg={theme.diffRemovedLineNumberBg}
               />
             </box>
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} />
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath()} summary={props.metadata.diagnosticSummary} />
           </BlockTool>
         )}
       </Match>
@@ -1106,7 +1106,7 @@ function Task(props: ToolProps) {
   )
 }
 
-function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
+function Diagnostics(props: { diagnostics: unknown; filePath: string; summary?: unknown }) {
   const { theme } = useTheme()
   const errors = createMemo(() => {
     if (!isRecord(props.diagnostics)) return []
@@ -1116,14 +1116,61 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
       .filter((diagnostic) => diagnostic.severity === 1)
       .slice(0, 3)
   })
+  // [local-smark] 从 metadata.diagnosticSummary 读取 { newCount, existingCount }。
+  // summary 只在 LSP 确认可用时由 tool 层传入，缺失时不推导 clean。
+  const summary = createMemo(() => {
+    if (!isRecord(props.summary)) return undefined
+    const newCount = typeof props.summary.newCount === "number" ? props.summary.newCount : undefined
+    const existingCount = typeof props.summary.existingCount === "number" ? props.summary.existingCount : undefined
+    if (newCount === undefined || existingCount === undefined) return undefined
+    return { newCount, existingCount }
+  })
+  // [local-smark] 多行 LSP message 压成单行，避免撑高 TUI 工具块。
+  const normalizeMessage = (msg: string) => msg.trim().replace(/\s+/g, " ")
+  // [local-smark] 截断过长 message，保持 TUI 行宽稳定。
+  const truncateMessage = (msg: string, limit = 120) =>
+    msg.length <= limit ? msg : msg.slice(0, limit - 3) + "..."
+  const more = createMemo(() => {
+    const s = summary()
+    if (!s || s.newCount <= errors().length) return 0
+    return s.newCount - errors().length
+  })
   return (
-    <Show when={errors().length}>
-      <box>
-        <For each={errors()}>
-          {(diagnostic) => <text fg={theme.error}>Error {stringValue(diagnostic.message)}</text>}
-        </For>
-      </box>
-    </Show>
+    <Switch>
+      {/* [local-smark] 新错误：显示 header + 最多 3 条单行明细 */}
+      <Match when={errors().length > 0}>
+        <box gap={0}>
+          <text fg={theme.error}>
+            LSP · {summary()?.newCount ?? errors().length} new error{((summary()?.newCount ?? errors().length)) === 1 ? "" : "s"}
+            {more() > 0 ? ` · +${more()} more` : ""}
+          </text>
+          <For each={errors()}>
+            {(diagnostic) => (
+              <text fg={theme.error}>
+                {"  E "}{(() => {
+                  const r = (diagnostic as Record<string, any>)?.range
+                  const line = r?.start?.line
+                  const col = r?.start?.character
+                  return `[${typeof line === "number" ? line + 1 : "?"}:${typeof col === "number" ? col + 1 : "?"}] `
+                })()}{truncateMessage(normalizeMessage(stringValue(diagnostic.message) ?? ""))}
+              </text>
+            )}
+          </For>
+        </box>
+      </Match>
+      {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
+      <Match when={summary() && summary()!.existingCount > 0}>
+        <text fg={theme.textMuted}>
+          LSP checked · 0 new · {summary()!.existingCount} existing
+        </text>
+      </Match>
+      {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
+      <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
+        <text fg={theme.success ?? theme.textMuted}>
+          ✓ LSP checked · no errors in this file
+        </text>
+      </Match>
+    </Switch>
   )
 }
 

@@ -124,6 +124,8 @@ interface State {
   servers: Record<string, LSPServer.Info>
   broken: Set<string>
   spawning: Map<string, Promise<LSPClient.Info | undefined>>
+  // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报。
+  bridgeDiagnostics?: "ok" | "failed"
 }
 
 export interface Interface {
@@ -207,6 +209,7 @@ export const layer = Layer.effect(
           servers,
           broken: new Set(),
           spawning: new Map(),
+          bridgeDiagnostics: undefined,
         }
 
         yield* Effect.addFinalizer(() =>
@@ -387,9 +390,11 @@ export const layer = Layer.effect(
     })
 
     const status = Effect.fn("LSP.status")(function* () {
-      // [local-smark] 有 bridge 时返回 VSCode 连接状态
+      const ctx = yield* InstanceState.context
+      const s = yield* InstanceState.get(state)
+      // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态。
       const bridge = yield* resolveLspBridge()
-      if (bridge) {
+      if (bridge && s.bridgeDiagnostics !== "failed") {
         return [{
           id: "vscode",
           name: "VSCode",
@@ -397,8 +402,6 @@ export const layer = Layer.effect(
           status: "connected" as const,
         }]
       }
-      const ctx = yield* InstanceState.context
-      const s = yield* InstanceState.get(state)
       const result: Status[] = []
       for (const client of s.clients) {
         result.push({
@@ -431,9 +434,10 @@ export const layer = Layer.effect(
     })
 
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
-      // [local-smark] 有 bridge 时走 bridge /lsp/touch（ensureOpen + awaitDiagnosticsRefresh）
+      // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode。
       const bridge = yield* resolveLspBridge(input)
       if (bridge) {
+        if (!diagnostics) return
         const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
         if (touched) return
       }
@@ -460,14 +464,21 @@ export const layer = Layer.effect(
 
     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
       // [local-smark] 优先 bridge，回退内置
+      const s = yield* InstanceState.get(state)
       const bridge = yield* resolveLspBridge()
       if (bridge) {
+        // 成功解析 `{ diagnostics: [] }` 也算可用；undefined/坏结构才标记失败。
         const result = yield* callLspBridge("/lsp/diagnostics", {})
         const mapped = bridgeDiagnosticsToMap(result)
-        if (mapped) return mapped
+        if (mapped) {
+          s.bridgeDiagnostics = "ok"
+          return mapped
+        }
+        // bridge 可连接不等于 diagnostics 可用；失败后 status 不能再让工具输出 clean 误报。
+        s.bridgeDiagnostics = "failed"
       }
       const results: Record<string, LSPClient.Diagnostic[]> = {}
-      const all = yield* runAll(async (client) => client.diagnostics)
+      const all = yield* Effect.promise(() => Promise.all(s.clients.map((client) => client.diagnostics)))
       for (const result of all) {
         for (const [p, diags] of result.entries()) {
           const arr = results[p] || []

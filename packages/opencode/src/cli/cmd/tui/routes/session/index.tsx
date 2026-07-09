@@ -2711,7 +2711,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
         >
           <box gap={1} flexDirection="column">
             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
           </box>
         </BlockTool>
       </Match>
@@ -2745,12 +2745,12 @@ function Write(props: ToolProps<typeof WriteTool>) {
                 content={code()}
               />
             </line_number>
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
-          </box>
-        </BlockTool>
-      </Match>
-      <Match when={true}>
-        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
+           </box>
+         </BlockTool>
+       </Match>
+       <Match when={true}>
+         <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
           Write {pathFormatter.format(props.input.filePath)}
         </InlineTool>
       </Match>
@@ -2994,7 +2994,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
         >
           <box gap={1} flexDirection="column">
             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
           </box>
         </BlockTool>
       </Match>
@@ -3111,7 +3111,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                   >
                     <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
                   </Show>
-                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary} />
                 </box>
               </BlockTool>
             )}
@@ -3190,26 +3190,66 @@ function Skill(props: ToolProps<typeof SkillTool>) {
   )
 }
 
-function Diagnostics(props: { diagnostics?: Record<string, Record<string, any>[]>; filePath: string }) {
+// [local-smark] TUI 诊断渲染：三态（新错误/既有错误/无错误）+ message 单行归一化 + 截断。
+// summary 只在 LSP 确认可用时由 tool 层传入，缺失时不推导 clean，避免误报。
+function Diagnostics(props: {
+  diagnostics?: Record<string, Record<string, any>[]>
+  filePath: string
+  summary?: { newCount?: number; existingCount?: number }
+}) {
   const { theme } = useTheme()
   const errors = createMemo(() => {
     const normalized = Filesystem.normalizePath(props.filePath)
     const arr = props.diagnostics?.[normalized] ?? []
     return arr.filter((x) => x.severity === 1).slice(0, 3)
   })
-
+  // [local-smark] summary 缺失或字段不完整时为 undefined，TUI 不显示 clean/existing。
+  const summary = createMemo(() => {
+    const s = props.summary
+    if (!s || typeof s.newCount !== "number" || typeof s.existingCount !== "number") return undefined
+    return s as { newCount: number; existingCount: number }
+  })
+  // [local-smark] 多行 Pylance message 压成单行，避免撑高 TUI 工具块。
+  const normalizeMsg = (msg: string) => msg.trim().replace(/\s+/g, " ")
+  // [local-smark] 截断过长 message，保持 TUI 行宽稳定。
+  const truncateMsg = (msg: string, limit = 120) => (msg.length <= limit ? msg : msg.slice(0, limit - 3) + "...")
+  const more = createMemo(() => {
+    const s = summary()
+    if (!s || s.newCount <= errors().length) return 0
+    return s.newCount - errors().length
+  })
+  const newCount = createMemo(() => summary()?.newCount ?? errors().length)
   return (
-    <Show when={errors().length}>
-      <box>
-        <For each={errors()}>
-          {(diagnostic) => (
-            <text fg={theme.error}>
-              Error [{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {diagnostic.message}
-            </text>
-          )}
-        </For>
-      </box>
-    </Show>
+    <Switch>
+      {/* [local-smark] 新错误：header + 最多 3 条单行明细 */}
+      <Match when={errors().length > 0}>
+        <box gap={0}>
+          <text fg={theme.error}>
+            LSP · {newCount()} new error{newCount() === 1 ? "" : "s"}
+            {more() > 0 ? ` · +${more()} more` : ""}
+          </text>
+          <For each={errors()}>
+            {(diagnostic) => (
+              <text fg={theme.error}>
+                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {truncateMsg(normalizeMsg(diagnostic.message))}
+              </text>
+            )}
+          </For>
+        </box>
+      </Match>
+      {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
+      <Match when={summary() && summary()!.existingCount > 0}>
+        <text fg={theme.textMuted}>
+          LSP checked · 0 new · {summary()!.existingCount} existing
+        </text>
+      </Match>
+      {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
+      <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
+        <text fg={theme.success ?? theme.textMuted}>
+          ✓ LSP checked · no errors in this file
+        </text>
+      </Match>
+    </Switch>
   )
 }
 

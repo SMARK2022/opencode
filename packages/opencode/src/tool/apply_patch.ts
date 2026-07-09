@@ -315,8 +315,7 @@ export const ApplyPatchTool = Tool.define(
         yield* bus.publish(FileWatcher.Event.Updated, update)
       }
 
-      // [local-smark] 增量诊断：patch 应用前一次性捕获所有目标文件的 baseline，
-      // patch 应用后 touchFile 全部目标 → 再一次 diagnostics() → 逐文件算 delta。
+      // [local-smark] baseline 在 patch 落盘后、touch 前采集：LSP 此时还不知道新内容。
       const beforeAll = yield* lsp.diagnostics()
       const baselines = new Map<string, LSPClient.Diagnostic[]>()
       for (const change of fileChanges) {
@@ -375,13 +374,21 @@ export const ApplyPatchTool = Tool.define(
         const rel = path.relative(instance.worktree, target).replaceAll("\\", "/")
         output += `\n\nNew LSP errors introduced in ${rel}:\n${block}`
       }
+      let diagnosticSummary: { newCount: number; existingCount: number } | undefined = {
+        newCount: totalNew,
+        existingCount: totalExisting,
+      }
       if (lspFoundNewErrors) {
         output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
       } else {
         // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时所有 delta 都为空
         const clients = yield* lsp.status()
         if (clients.length === 0) {
+          diagnosticSummary = undefined
           output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+        } else {
+          // [local-smark] apply_patch 可能覆盖多文件，clean 文案必须指向 changed files 而非单个 file。
+          output += `\n\n${LSP.Diagnostic.checkedMessage({ newCount: totalNew, existingCount: totalExisting }, "changed-files")}`
         }
       }
 
@@ -392,7 +399,8 @@ export const ApplyPatchTool = Tool.define(
           files,
           // [local-smark] metadata.diagnostics 存储新错误数组 + diagnosticSummary 聚合摘要
           diagnostics: diagMetadata,
-          diagnosticSummary: { newCount: totalNew, existingCount: totalExisting },
+          // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突。
+          ...(diagnosticSummary ? { diagnosticSummary } : {}),
         },
         output,
       }

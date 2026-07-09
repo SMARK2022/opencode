@@ -122,9 +122,7 @@ export const WriteTool = Tool.define(
 
           let output = "Wrote file successfully."
           const normalizedFilepath = AppFileSystem.normalizePath(filepath)
-          // [local-smark] 增量诊断：编辑前获取 baseline（LSP 缓存的旧诊断），
-          // touchFile 后获取 current，只报告新引入的错误。
-          // baseline 在 touchFile 之前获取：LSP 此时还不知道新内容，诊断反映旧状态。
+          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
           const beforeDiagnostics = yield* lsp.diagnostics()
           const beforeIssues = beforeDiagnostics[normalizedFilepath] ?? []
           yield* lsp.touchFile(filepath, "document")
@@ -134,6 +132,7 @@ export const WriteTool = Tool.define(
           // [local-smark] 计算新错误数组和摘要供 TUI 渲染
           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
+          let diagnosticSummary: typeof delta | undefined = delta
           if (block) {
             output += `\n\nNew LSP errors introduced by this edit:\n${block}`
             output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
@@ -142,7 +141,11 @@ export const WriteTool = Tool.define(
             // delta 必然为空。须用 status() 确认 LSP 确实在运行，否则模型获得虚假"类型安全"信号。
             const clients = yield* lsp.status()
             if (clients.length === 0) {
+              diagnosticSummary = undefined
               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+            } else {
+              // [local-smark] LSP 已运行且 delta 为空时给短确认，避免模型误判为 LSP 未工作。
+              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
             }
           }
 
@@ -151,9 +154,9 @@ export const WriteTool = Tool.define(
             metadata: {
               // [local-smark] metadata.diagnostics 存储新错误数组（delta），不是全部当前错误。
               // TUI getDiagnostics() 从此字段读取，只显示新引入的错误。
-              // diagnosticSummary 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）。
               diagnostics: { [normalizedFilepath]: newErrorsArr },
-              diagnosticSummary: delta,
+              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean。
+              ...(diagnosticSummary ? { diagnosticSummary } : {}),
               filepath,
               exists,
               ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),

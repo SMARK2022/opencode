@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, spyOn } from "bun:test"
 import { Effect, Layer } from "effect"
 import path from "path"
 import fs from "fs/promises"
@@ -231,6 +231,29 @@ describe("tool.write", () => {
         expect(diff).not.toContain("+Line 1")
         expect(diff).not.toContain("-Line 2")
         expect(diff).not.toContain("+Line 2")
+      }),
+    )
+  })
+
+  describe("LSP unavailable notice", () => {
+    it.instance("does not send diagnosticSummary metadata when no language server is running", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "plain.txt")
+        // [local-smark] mock LSP status 返回空，模拟无 LSP 可用。
+        // 测试环境可能有 bridge registry 残留导致 status() 非空，需 spy 才能可靠验证。
+        const lsp = yield* LSP.Service
+        const statusSpy = spyOn(lsp, "status").mockReturnValue(Effect.succeed([]))
+
+        try {
+          const result = yield* run({ filePath: filepath, content: "plain text" })
+
+          // 无 LSP server 时只能提示 unavailable，不能给 TUI 绿色 clean 的 summary。
+          expect(result.output).toContain("LSP diagnostics unavailable")
+          expect("diagnosticSummary" in result.metadata).toBe(false)
+        } finally {
+          statusSpy.mockRestore()
+        }
       }),
     )
   })
