@@ -1025,6 +1025,9 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         if (call?.state.status === "error") {
           expect(call.state.error).toBe("Tool execution aborted")
           expect(call.state.metadata?.interrupted).toBe(true)
+          // [local-smark] 新 abort 记录携带 server-owned executionElapsedMs marker
+          expect(call.state.metadata?.executionElapsedMs).toBeDefined()
+          expect(typeof call.state.metadata?.executionElapsedMs).toBe("number")
           // 查询编码后的持久化 error，而非 callback 内存对象；raw 必须跨 schema 边界保留。
           expect(call.state.metadata?.raw).toBe('{"cmd"')
           expect(call.state.time.end).toBeDefined()

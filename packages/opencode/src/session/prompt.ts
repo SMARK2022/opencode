@@ -44,7 +44,7 @@ import { Truncate } from "@/tool/truncate"
 import { Image } from "@/image/image"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types, Semaphore } from "effect"
+import { Cause, Deferred, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
@@ -62,7 +62,7 @@ import { LLMEvent } from "@opencode-ai/llm"
 import { usable } from "./overflow"
 // #194：改用 TokenEstimate 统一上传估算
 import { TokenEstimate } from "@/token/estimate"
-import { formatExecutionNotice } from "@/util/output-notice"
+import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
 
 // #159：decide 最近轮目标占用区间（相对 usable）
 // LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
@@ -274,8 +274,8 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     // #364：goal 服务：用于 break 点检查 active goal 并注入续跑 prompt
     const goalSvc = yield* SessionGoal.Service
-    // #173：同 session 并发 cancel 串行，避免双写终态竞态
-    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
+    // 重叠取消共享同一Exit，不能排队后重新读取replacement runner。
+    const cancelFlights = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
     const database = yield* Database.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
@@ -287,32 +287,39 @@ const layer = Layer.effect(
     })
 
     // #216：复用取消owner递归收尾子会话，保留冻结ID、runner等待与原子结算順序。
-    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      // #173：每 session 一把信号量，合并并发 cancel
-      let lock = cancelLocks.get(sessionID)
-      if (!lock) {
-        // #173：lazy 创建，空闲 session 不占信号量
-        lock = Semaphore.makeUnsafe(1)
-        cancelLocks.set(sessionID, lock)
-      }
-      // #173：排队后续 cancel，不丢弃第二次请求
-      yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          yield* Effect.logInfo("cancel", { "session.id": sessionID })
-          // 冻结 ID 在同会话锁内完成，不能在 idle 发布后重新扫描新运行的消息。
-          // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
-          const children = yield* sessions.children(sessionID)
-          const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
-            .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
-            .map((msg) => msg.info.id)
-          yield* state.cancel(sessionID)
-          yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
-            discard: true,
-          })
-          yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
-        }),
-      )
-    })
+    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")((sessionID: SessionID) =>
+      Effect.uninterruptibleMask((restore) => {
+        const inFlight = cancelFlights.get(sessionID)
+        if (inFlight) return restore(Deferred.await(inFlight).pipe(Effect.flatMap((exit) => exit)))
+        // 同步分配与登记之间不切让；body和join仍可中断，释放由onExit负责。
+        const flight = Deferred.makeUnsafe<Exit.Exit<void>>()
+        cancelFlights.set(sessionID, flight)
+        return restore(
+          Effect.gen(function* () {
+            yield* Effect.logInfo("cancel", { "session.id": sessionID })
+            // 冻结一次旧ID，idle后不能再扫描replacement消息。
+            // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
+            const children = yield* sessions.children(sessionID)
+            const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
+              .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+              .map((msg) => msg.info.id)
+            yield* state.cancel(sessionID)
+            yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+              discard: true,
+            })
+            yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
+          }),
+        ).pipe(
+          Effect.onExit((exit) =>
+            Effect.gen(function* () {
+              // 成功、缺陷或中断都释放flight，并让joiner重放同一结果。
+              cancelFlights.delete(sessionID)
+              yield* Deferred.succeed(flight, exit)
+            }),
+          ),
+        )
+      }),
+    )
 
     const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID, messageID: MessageID) {
       // 仅重读冻结 ID 的最新快照，processor/ownAssistant 的终态不得被取消前的旧对象覆盖。
@@ -338,6 +345,8 @@ const layer = Layer.effect(
         (part) => {
           if (part.type !== "tool") return Effect.void
           if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
+          // 修复只记录本次取消的真实起点，旧记录不追溯伪造耗时。
+          const start = part.state.status === "running" ? part.state.time.start : now
           // 重读 parts 保留运行时已提交的 input 与 metadata，不使用取消前的工具快照。
           // 退出发布沿用同一 durable part 事件，跳过可能阻塞的普通 listener，实时流仍收到终态。
           return events.publish(SessionV1.Event.PartUpdated, {
@@ -350,10 +359,10 @@ const layer = Layer.effect(
                 input: part.state.input,
                 // #216：空闲修复与活动processor共用中止信封，reviewing必须变成aborted。
                 error: SessionProcessor.TOOL_ABORTED_ERROR,
-                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined),
+                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined, now - start),
                 // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
                 time: {
-                  start: part.state.status === "running" ? part.state.time.start : now,
+                  start,
                   end: now,
                 },
               },
@@ -617,6 +626,8 @@ const layer = Layer.effect(
       yield* sessions.updateMessage(assistantMessage)
 
       if (result && part.state.status === "running") {
+        // 独立subtask不经过普通adapter，在最终写入点追加长成功提示。
+        const taskNotice = formatLongExecutionNotice("tool", Date.now() - part.state.time.start)
         yield* sessions.updatePart({
           ...part,
           state: {
@@ -624,7 +635,7 @@ const layer = Layer.effect(
             input: part.state.input,
             title: result.title,
             metadata: result.metadata,
-            output: result.output,
+            output: taskNotice ? result.output + "\n\n" + taskNotice : result.output,
             attachments,
             time: { ...part.state.time, end: Date.now() },
           },
@@ -762,10 +773,18 @@ const layer = Layer.effect(
 
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
+              // [local-smark] direct shell 终态 elapsed；cancel 可能已把 status 改为 error，
+              // 但 time.start 被保留——只要 time 存在就回溯原始开始时间
+              const shellElapsedMs = Date.now() - ("time" in part.state ? part.state.time.start : Date.now())
               if (aborted) {
                 // #282：prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
-                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
+                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
+              } else {
+                // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice，
+                // 与 Bash 工具的 formatShellExecutionNotice 阈值/措辞保持一致
+                const notice = formatLongExecutionNotice("shell", shellElapsedMs)
+                if (notice) output += "\n\n" + notice
               }
               const completed = Date.now()
               if (!msg.time.completed) {

@@ -1,5 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Tool } from "@opencode-ai/core/tool/tool"
+import { ToolOutput } from "@opencode-ai/llm"
+import { adjust } from "effect/testing/TestClock"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -434,6 +436,24 @@ describe("ToolRegistry", () => {
         call: { type: "tool-call", id: "call-context", name: "context", input: {} },
       })
       expect(contexts).toEqual([{ sessionID, ...identity, toolCallID: "call-context" }])
+      // 用现成TestClock验证真实结算临界：纯JSON结果不能被长成功Notice替代。
+      for (const elapsed of [119999, 120000]) {
+        yield* service.register({ structured: Tool.make({
+          description: "Structured", input: Schema.Struct({}), output: Schema.Struct({ ok: Schema.Boolean }),
+          execute: () => adjust(elapsed).pipe(Effect.as({ ok: true })),
+        }) })
+        const settled = yield* settleTool(service, {
+          sessionID, ...identity, call: { type: "tool-call", id: `structured-${elapsed}`, name: "structured", input: {} },
+        })
+        expect(settled.output?.structured).toEqual({ ok: true })
+        if (elapsed < 120000) {
+          expect(settled.result).toEqual({ type: "json", value: { ok: true } })
+          continue
+        }
+        expect(settled.output?.content[0]).toEqual({ type: "text", text: '{"ok":true}' })
+        expect(settled.output?.content[1]).toEqual({ type: "text", text: '<opencode_notice type="execution" source="tool" severity="info" reason="completed" elapsed_ms="120000" />' })
+        expect(settled.result).toEqual(ToolOutput.toResultValue(settled.output!))
+      }
     }),
   )
 

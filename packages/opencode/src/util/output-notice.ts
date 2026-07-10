@@ -1,1 +1,1 @@
-export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, truncateForCompaction } from "@opencode-ai/core/util/output-notice"
+export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, truncateForCompaction, formatLongExecutionNotice, formatShellExecutionNotice, LONG_EXECUTION_NOTICE_MS } from "@opencode-ai/core/util/output-notice"

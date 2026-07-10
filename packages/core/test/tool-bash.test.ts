@@ -499,7 +499,9 @@ describe("BashTool", () => {
               expect(text).not.toContain("\r")
               expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
               expect(text).not.toContain("\uFFFD")
-              expect(actualStatus).toBe(status)
+              // 仍逐字检查原授权警告与退出状态，只允许尾部增加本项耗时。
+              expect(actualStatus.replace(/\n\n<opencode_notice [^\n]*\/>$/, "")).toBe(status)
+              expect(actualStatus).toMatch(/\n\n<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" elapsed_ms="\d+" \/>$/)
               for (const expected of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
                 expect(text).toContain(expected)
               }
@@ -730,6 +732,9 @@ describe("BashTool", () => {
         return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "false" }, "call-overflow"))).pipe(
           Effect.andThen((settled) =>
             Effect.sync(() => {
+              const status = settled.output?.content[1]
+              expect(status?.type === "text" ? status.text : "").toMatch(/reason="exit" exit_code="7" elapsed_ms="\d+"/)
+              expect(JSON.stringify(settled.output?.content).match(/opencode_notice/g)).toHaveLength(1)
               expect(settled.output?.content[1]).toMatchObject({
                 type: "text",
                 text: expect.stringContaining("Command exited with code 7"),
@@ -802,7 +807,7 @@ describe("BashTool", () => {
               expect(text.match(/reason="timeout"/g)).toHaveLength(1)
               expect(settled.output?.content[1]).toMatchObject({
                 type: "text",
-                text: expect.stringContaining('reason="timeout"'),
+                text: expect.stringMatching(/reason="timeout" timeout_ms="10" elapsed_ms="\d+"/),
               })
               expect(settled.output?.structured).toMatchObject({
                 timeout: true,

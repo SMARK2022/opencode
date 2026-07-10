@@ -101,6 +101,8 @@ export const make = <Key, E>(options: {
       Effect.suspend(() => {
         const entry = active.get(key)
         if (entry?.owner === undefined) return Effect.void
+        // 重叠中断只等待同一owner，不能清掉清理期间新登记的wake。
+        if (entry.stopping) return Fiber.interrupt(entry.owner)
         entry.stopping = true
         entry.pendingWake = false
         return Fiber.interrupt(entry.owner)
