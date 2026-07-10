@@ -1,7 +1,7 @@
 export * as ToolRegistry from "./registry"
 
 import { ToolOutput, type ToolCall, type ToolDefinition, type ToolResultValue } from "@opencode-ai/llm"
-import { Cause, Context, Effect, Layer, Scope } from "effect"
+import { Cause, Clock, Context, Effect, Layer, Scope } from "effect"
 import { AgentV2 } from "../agent"
 import { PermissionV2 } from "../permission"
 import { SessionMessage } from "../session/message"
@@ -13,6 +13,7 @@ import { ToolSelection } from "./selection"
 import { definition, permission, settle, validateName, type AnyTool, type RegistrationError } from "./tool"
 import { Tools } from "./tools"
 import { makeLocationNode } from "../effect/app-node"
+import { formatExecutionNotice, formatLongExecutionNotice } from "../util/output-notice"
 
 export type ExecuteInput = {
   readonly sessionID: SessionSchema.ID
@@ -50,7 +51,7 @@ const registryLayer = Layer.effect(
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
 
     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) {
-      const startedAt = Date.now()
+      const startedAt = yield* Clock.currentTimeMillis
       // canonical结算统一计时，叶子仍拥有授权与执行；不记录输入、输出和metadata。
       const timing = { source: "native", tool: input.call.name, sessionID: input.sessionID, messageID: input.assistantMessageID, callID: input.call.id }
       yield* Effect.logInfo("tool timing", { phase: "tool.start", ...timing })
@@ -79,7 +80,15 @@ const registryLayer = Layer.effect(
         ),
       )
       if ("result" in pending) return pending
-      const output = pending.output
+      // 本地/MCP成功在同一限幅前收口；Bash自己装饰，日志计时不能替代模型反馈。
+      const notice = input.call.name === "bash" ? undefined : formatLongExecutionNotice("tool", (yield* Clock.currentTimeMillis) - startedAt)
+      const output = notice
+        ? { ...pending.output, content: [
+            // 空content原本由模型JSON投影承载，追加提示之前保留同一实际结果。
+            ...(pending.output.content.length ? pending.output.content : ToolOutput.fromResultValue({ type: "text", value: pending.output.structured })!.content),
+            { type: "text" as const, text: notice },
+          ] }
+        : pending.output
       const bounded = yield* resources.bound({ sessionID: input.sessionID, toolCallID: input.call.id, output })
       const result = ToolOutput.toResultValue(bounded.output)
       if (result.type === "error")
@@ -92,18 +101,25 @@ const registryLayer = Layer.effect(
           if (exit._tag !== "Failure" || !Cause.hasInterruptsOnly(exit.cause) || !onInterrupted) return
           const identity = { sessionID: input.sessionID, toolCallID: input.call.id }
           const output = yield* resources.interrupted(identity)
-          if (!output) return
+          // 新调用即使没有partial也交付取消耗时；只写Progress，后续仍Failed并传播原Cause。
+          const interrupted = input.call.name === "bash" && output ? output : {
+            ...output,
+            structured: output?.structured,
+            content: [...(output?.content ?? []), { type: "text" as const, text: formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.max(0, Math.floor((yield* Clock.currentTimeMillis) - startedAt)) }) }],
+          }
           // 同一 bound 移交原文所有权后才能通知；存储/持久化失败不能改写成成功。
-          const bounded = yield* resources.bound({ ...identity, output })
+          const bounded = yield* resources.bound({ ...identity, output: interrupted })
           yield* onInterrupted(bounded)
         })),
         Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })),
         // 模型可见的error结果也记失败，真实失败/中断仍原样传播，不做catch-and-success。
-        Effect.onExit((exit) => Effect.logInfo("tool timing", {
+        Effect.onExit((exit) => Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) => Effect.logInfo("tool timing", {
           phase: "tool.end", ...timing,
           status: exit._tag === "Success" && exit.value.result.type !== "error" ? "completed" : "error",
-          durationMs: Date.now() - startedAt,
+          durationMs: now - startedAt,
         })),
+        )),
       )
     })
 

@@ -12,14 +12,23 @@ type OutputTruncatedNotice = {
 }
 
 type ExecutionNotice = {
-  // #289：execution notice 是 shell 输出里给模型看的执行状态，不是完整 metadata 回放。
+  // #289：execution notice 是 shell/tool 输出里给模型看的执行状态，不是完整 metadata 回放。
   // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
+  // source 缺省为 shell，generic tool 传 "tool" 以区分来源
+  source?: "shell" | "tool"
   severity: "info" | "warning" | "error"
-  reason: "timeout" | "user_abort" | "exit"
+  // completed 用于长成功工具的中性耗时提示，不含退出码
+  reason: "timeout" | "user_abort" | "exit" | "completed"
   timeout_ms?: number
   // #289：exit_code 在 reason 为 exit 时必填，携带原始进程退出码供审计
   exit_code?: number
+  // [local-smark] 实际墙钟耗时（毫秒），由 server 在终态时写入；不从旧 state.time 追溯
+  elapsed_ms?: number
 }
+
+// [local-smark] 长成功 Notice 阈值：超过此值的成功执行追加中性 completed Notice。
+// 120 秒是当前产品决定，不新增配置项；异常（abort/timeout/exit）不受此阈值限制
+export const LONG_EXECUTION_NOTICE_MS = 120 * 1000
 
 type Notice = Record<string, string | number | undefined>
 
@@ -52,7 +61,58 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
 
 // #282：timeout_ms 直接内联，模型无需再查 metadata 即可判断是否值得重试
 export function formatExecutionNotice(input: ExecutionNotice) {
-  return formatNotice({ type: "execution", source: "shell", ...input })
+  // source 缺省为 shell，保持所有旧调用点行为不变
+  const { source = "shell", ...rest } = input
+  return formatNotice({ type: "execution", source, ...rest })
+}
+
+// [local-smark] 将 elapsed 规范化为非负有限整数；NaN/Infinity/负值返回 0，
+// 不输出畸形属性
+function normalizeElapsed(ms: number): number {
+  return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0
+}
+
+// [local-smark] 通用长成功 Notice：仅当 elapsed 达到阈值时返回，否则 undefined。
+// 用于 local/MCP/Task/direct shell 的成功路径；Bash 由 formatShellExecutionNotice 统一处理
+export function formatLongExecutionNotice(source: "shell" | "tool", elapsedMs: number): string | undefined {
+  const ms = normalizeElapsed(elapsedMs)
+  // 未达阈值不追加，保持短成功 output 完全不变
+  if (ms < LONG_EXECUTION_NOTICE_MS) return undefined
+  return formatExecutionNotice({ source, severity: "info", reason: "completed", elapsed_ms: ms })
+}
+
+// [local-smark] Bash 终态 outcome policy：固定优先级 timeout > user_abort >
+// exit(non-zero/empty) > long completed > none，保证一个 Bash 结果只出现一种系统 outcome
+export function formatShellExecutionNotice(input: {
+  aborted: boolean
+  expired: boolean
+  exitCode: number | null
+  emptyOutput: boolean
+  timeoutMs: number
+  elapsedMs: number
+}): string | undefined {
+  const elapsed = normalizeElapsed(input.elapsedMs)
+  // timeout 优先：即使后续 exitCode 有值，也是 kill 后的残留，不是真实退出
+  if (input.expired) {
+    return formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeoutMs, elapsed_ms: elapsed })
+  }
+  if (input.aborted) {
+    return formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: elapsed })
+  }
+  if (input.exitCode !== null) {
+    // non-zero exit 始终显示 error exit Notice + elapsed
+    if (input.exitCode !== 0) {
+      return formatExecutionNotice({ severity: "error", reason: "exit", exit_code: input.exitCode, elapsed_ms: elapsed })
+    }
+    // exit 0 + 空输出：保留既有 info exit Notice，不改成 completed
+    if (input.emptyOutput) {
+      return formatExecutionNotice({ severity: "info", reason: "exit", exit_code: 0, elapsed_ms: elapsed })
+    }
+    // exit 0 + 有输出：仅超过阈值时追加 completed Notice
+    return formatLongExecutionNotice("shell", elapsed)
+  }
+  // exitCode === null 且无 abort/timeout：不生成 Notice
+  return undefined
 }
 
 // 退出状态与隐藏诊断互相独立，非零退出始终交付，取消仍不冒充进程退出。

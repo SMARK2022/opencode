@@ -9,6 +9,8 @@ import { Tool } from "@/tool/tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { ToolSelection } from "@/tool/selection"
+import { ShellID } from "@/tool/shell/id"
+import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
 import { Truncate } from "@/tool/truncate"
 
 import { Plugin } from "@/plugin"
@@ -159,6 +161,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const ctx = context(args, options)
+            const adapterStartedAt = Date.now()
             const timing = {
               source: "local" as const,
               tool: item.id,
@@ -185,11 +188,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
               output,
             )
+            // 包含plugin前后hook的实际adapter耗时；Bash自行装饰，不能重复追加。
+            const adapterElapsedMs = Date.now() - adapterStartedAt
             if (options.abortSignal?.aborted) {
+              if (item.id !== ShellID.ToolID) output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: adapterElapsedMs })
               yield* input.processor.completeToolCall(options.toolCallId, output)
+            } else if (item.id !== ShellID.ToolID) {
+              const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
+              if (notice) output.output += "\n\n" + notice
             }
             return output
           }),
+          // Bash自己等待kill/drain并保留partial，不能被runtime抢先中断。
+          item.id !== ShellID.ToolID ? { signal: options.abortSignal } : undefined,
         )
       },
     })
@@ -277,6 +288,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             return output
           }),
+          { signal: opts.abortSignal },
         )
       },
     })
@@ -360,6 +372,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             return output
           }),
+          { signal: opts.abortSignal },
         )
       },
     })
@@ -442,6 +455,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             return output
           }),
+          { signal: opts.abortSignal },
         )
       },
     })
@@ -462,6 +476,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       run.promise(
         Effect.gen(function* () {
           const ctx = context(args, opts)
+          const mcpStartedAt = Date.now()
           const timing = {
             source: "mcp" as const,
             tool: key,
@@ -552,11 +567,18 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             })),
             content: result.content,
           }
+          // 先保留MCP附件和截断结果，再对最终模型文本追加唯一执行提示。
+          const elapsedMs = Date.now() - mcpStartedAt
           if (opts.abortSignal?.aborted) {
+            output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: elapsedMs })
             yield* input.processor.completeToolCall(opts.toolCallId, output)
+          } else {
+            const notice = formatLongExecutionNotice("tool", elapsedMs)
+            if (notice) output.output += "\n\n" + notice
           }
           return output
         }),
+        { signal: opts.abortSignal },
       )
     tools[key] = item
   }

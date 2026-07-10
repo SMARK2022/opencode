@@ -237,7 +237,7 @@ const promptRoot = LayerNode.group([
   RuntimeFlags.node,
 ])
 
-function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service> }) {
+function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service>; runState?: Layer.Layer<SessionRunState.Service> }) {
   const replacements = [
     [SessionSummary.node, summary],
     [LSP.node, lsp],
@@ -245,6 +245,7 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
     [RuntimeFlags.node, runtimeFlags],
     ...(input?.database ? [[Database.node, input.database] as const] : []),
     ...(input?.plugin ? [[Plugin.node, input.plugin] as const] : []),
+    ...(input?.runState ? [[SessionRunState.node, input.runState] as const] : []),
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(promptRoot, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -4408,5 +4409,81 @@ noLLMServer.instance(
         }
       }
     }),
+  30_000,
+)
+
+// 在真实外层cancel与RunState间固定窗口，不依赖task忽略中断或2秒计时巧合。
+noLLMServer.instance(
+  "overlapping cancels share single-flight and do not retarget replacement loop",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* SessionRunState.Service
+      const database = yield* Database.Service
+      yield* Effect.forEach([false, true], (failing) => Effect.gen(function* () {
+        const stopped = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const started = yield* Deferred.make<void>()
+        const nextStarted = yield* Deferred.make<void>()
+        const finish = yield* Deferred.make<void>()
+        const failure = new Error("cancel failure")
+        let cancels = 0
+        let replacementAborted = false
+        const runState = Layer.succeed(SessionRunState.Service, { ...state,
+          cancel: (id) => Effect.gen(function* () {
+            const call = ++cancels
+            yield* state.cancel(id)
+            if (call !== 1) return
+            yield* Deferred.succeed(stopped, undefined)
+            yield* Deferred.await(release)
+            if (failing) return yield* Effect.die(failure)
+          }),
+        })
+        yield* Effect.addFinalizer(() => Effect.all([Deferred.succeed(release, undefined), Deferred.succeed(finish, undefined)], { discard: true }))
+        yield* Effect.gen(function* () {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({ title: "Overlap cancel" })
+          const first = yield* seed(chat.id)
+          const old = yield* MessageV2.get({ sessionID: chat.id, messageID: first.assistant.id })
+          const original = yield* state.ensureRunning(chat.id, Effect.succeed(old), Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))).pipe(Effect.forkChild)
+          yield* Deferred.await(started)
+          const leader = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+          yield* Deferred.await(stopped)
+          // 新运行和消息均在旧取消快照之后创建，重叠join不能重新扫描它们。
+          const replacement = yield* seed(chat.id)
+          const next = yield* MessageV2.get({ sessionID: chat.id, messageID: replacement.assistant.id })
+          const running = yield* state.ensureRunning(chat.id, Effect.succeed(next), Deferred.succeed(nextStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(finish)), Effect.as(next),
+            Effect.onInterrupt(() => Effect.sync(() => { replacementAborted = true })),
+          )).pipe(Effect.forkChild)
+          yield* Deferred.await(nextStarted)
+          const joiner = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+          yield* Effect.yieldNow
+          expect(cancels).toBe(1)
+          yield* Deferred.succeed(release, undefined)
+          const firstExit = yield* Fiber.await(leader)
+          const joinedExit = yield* Fiber.await(joiner)
+          expect(Exit.isFailure(firstExit)).toBe(failing)
+          expect(Exit.isFailure(joinedExit)).toBe(failing)
+          if (Exit.isFailure(firstExit) && Exit.isFailure(joinedExit)) {
+            expect(Cause.squash(firstExit.cause)).toBe(failure)
+            expect(Cause.squash(joinedExit.cause)).toBe(failure)
+          }
+          expect(cancels).toBe(1)
+          expect(replacementAborted).toBe(false)
+          expect(Exit.isFailure(yield* state.assertNotBusy(chat.id).pipe(Effect.exit))).toBe(true)
+          const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: next.info.id })
+          expect(stored.info.role === "assistant" && stored.info.error).toBeUndefined()
+          yield* Deferred.succeed(finish, undefined)
+          expect(Exit.isSuccess(yield* Fiber.await(running))).toBe(true)
+          yield* Fiber.await(original)
+          // 上一flight无论成功或失败都必须释放，后续显式取消仍能独立执行。
+          yield* prompt.cancel(chat.id)
+          expect(cancels).toBe(2)
+        }).pipe(Effect.provide(Layer.fresh(makePrompt({ database: Layer.succeed(Database.Service, database), runState }))))
+      }))
+    }),
+  // 单飞只依赖会话和runner，fixture无需Git初始化或本地配置写入。
+  { git: false },
   30_000,
 )

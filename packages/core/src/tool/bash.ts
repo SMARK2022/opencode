@@ -22,7 +22,7 @@ import { ShellRemote } from "../shell-remote"
 import { ToolOutputStore } from "../tool-output-store"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
 import { createAutoTextDecoder } from "../text-decoding"
-import { formatExecutionNotice } from "../util/output-notice"
+import { formatShellExecutionNotice } from "../util/output-notice"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -99,7 +99,7 @@ const modelOutput = (output: Output) => {
     : ""
   // 终止原因已由唯一finish写入正文，状态投影不再叠加第二条同义提示。
   if (output.timeout || output.interrupted) return [output.executionNotice, warnings.trimStart()].filter(Boolean).join("\n\n")
-  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.`
+  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.${output.executionNotice ? "\n\n" + output.executionNotice : ""}`
 }
 
 const isTimeout = (error: AppProcess.AppProcessError) =>
@@ -353,8 +353,11 @@ const layer = Layer.effectDiscard(
               const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
               const truncated = cut || result?.outputTruncated === true
               const outcome = interrupted ? { interrupted: true } : result ? { exit: result.exitCode } : { timeout: true }
-              const executionNotice = result && !interrupted ? undefined : formatExecutionNotice({
-                severity: "warning", reason: interrupted ? "user_abort" : "timeout", ...(interrupted ? {} : { timeout_ms: timeout }),
+              // 两代共用唯一outcome policy；READY和原文仍由原capture/finish保存。
+              const executionNotice = formatShellExecutionNotice({
+                aborted: interrupted, expired: !result && !interrupted,
+                exitCode: result?.exitCode ?? null, emptyOutput: text.length === 0,
+                timeoutMs: timeout, elapsedMs: durationMs,
               })
               const emptyTimeout = !result && !interrupted && !text ? "The process produced no output before timeout. This may indicate:\n- The command is block-buffering output (common for build tools like bun install, bundle install); consider adding --verbose or running with a larger timeout.\n- The process is waiting for interactive input; provide input or use a non-interactive flag.\n- The process is hung; check the command and environment." : undefined
               const command = input.command.trim().toLowerCase()

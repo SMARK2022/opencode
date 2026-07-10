@@ -4587,6 +4587,16 @@ describe("SessionRunnerLLM", () => {
         },
       ])
 
+      // 实际durable error保留唯一取消提示；无partial的新调用也不能只留下日志。
+      const interrupted = (yield* session.context(sessionID)).findLast(message => message.type === "assistant")
+      if (interrupted?.type !== "assistant") return yield* Effect.die("Expected interrupted assistant")
+      const tool = interrupted.content.find(part => part.type === "tool")
+      if (tool?.type !== "tool" || tool.state.status !== "error") return yield* Effect.die("Expected interrupted tool")
+      const content = tool.state.content?.flatMap(part => part.type === "text" ? [part.text] : []).join("\n") ?? ""
+      expect(content).toContain('reason="user_abort"')
+      expect(content).toMatch(/elapsed_ms="\d+"/)
+      expect(content.match(/type="execution"/g)).toHaveLength(1)
+
       yield* replaySessionProjection(sessionID)
 
       expect(yield* session.context(sessionID)).toMatchObject([
@@ -4598,6 +4608,7 @@ describe("SessionRunnerLLM", () => {
       response = []
       yield* session.resume(sessionID)
       expect(requests[0]?.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+      expect(JSON.stringify(requests[0]?.messages)).toContain("elapsed_ms")
     }),
   )
 

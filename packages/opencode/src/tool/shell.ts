@@ -16,7 +16,7 @@ import { parts, permissionPattern, rawPattern } from "@opencode-ai/core/shell-pe
 import { ShellID } from "./shell/id"
 import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 // #282：超时/中止/截断改用统一 notice 信封
-import { formatExecutionNotice, formatExitNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
+import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } from "@/util/output-notice"
 
 import { Truncate } from "./truncate"
 import { Plugin } from "@/plugin"
@@ -663,13 +663,8 @@ export const ShellTool = Tool.define(
         }),
       ).pipe(Effect.orDie)
 
-      const meta: string[] = []
-      if (expired) {
-        meta.push(
-          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
-        )
-      }
-      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
+      // [local-smark] 统一调用 pure outcome policy，保证一个 Bash 结果只生成一种系统 Notice
+      const shellElapsedMs = Date.now() - started
       const raw = list.map((item) => item.text).join("")
       // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
@@ -742,11 +737,18 @@ export const ShellTool = Tool.define(
       if (appendix) output += "\n\n" + appendix
       // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
-      const exitNotice = formatExitNotice(code, emptyOutput)
-      if (exitNotice) meta.push(exitNotice)
-
-      if (meta.length > 0) {
-        output += "\n\n" + meta.join("\n")
+      // [local-smark] outcome policy 在 emptyOutput 确定后统一处理
+      // timeout/abort/exit/long-completed，优先级固定不叠加
+      const shellNotice = formatShellExecutionNotice({
+        aborted,
+        expired,
+        exitCode: code,
+        emptyOutput,
+        timeoutMs: input.timeout,
+        elapsedMs: shellElapsedMs,
+      })
+      if (shellNotice) {
+        output += "\n\n" + shellNotice
       }
 
       // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
