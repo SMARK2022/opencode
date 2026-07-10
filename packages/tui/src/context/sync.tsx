@@ -48,6 +48,8 @@ type SessionGoalInfo = {
   tokenBudget: number | null
   tokensUsed: number
   timeUsedSeconds: number
+  // [local-smark] 错误后续跑策略：用户通过 GUI 控制，跨重启持久化
+  continueOnError: boolean
   time: { created: number; updated: number }
 }
 
@@ -1204,6 +1206,12 @@ export const {
           })
           syncingSessions.set(sessionID, task)
           return task
+        },
+      },
+      // [local-smark] goal reconcile：POST 成功后立即更新 store，不等 SSE
+      goal: {
+        reconcile: (sessionID: string, goal: SessionGoalInfo) => {
+          setStore("session_goal", sessionID, goal)
         },
       },
       sessionStatus: { refresh: refreshStatus },

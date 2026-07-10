@@ -193,6 +193,12 @@ import type {
   SessionForkResponses,
   SessionGetErrors,
   SessionGetResponses,
+  SessionGoalClearErrors,
+  SessionGoalClearResponses,
+  SessionGoalErrors,
+  SessionGoalResponses,
+  SessionGoalSetErrors,
+  SessionGoalSetResponses,
   SessionInitErrors,
   SessionInitResponses,
   SessionListErrors,
@@ -201,6 +207,8 @@ import type {
   SessionMessageResponses,
   SessionMessagesErrors,
   SessionMessagesResponses,
+  SessionPreviewErrors,
+  SessionPreviewResponses,
   SessionPromptAsyncErrors,
   SessionPromptAsyncResponses,
   SessionPromptErrors,
@@ -261,6 +269,8 @@ import type {
   TuiOpenSessionsResponses,
   TuiOpenThemesErrors,
   TuiOpenThemesResponses,
+  TuiProviderEndpointStatusErrors,
+  TuiProviderEndpointStatusResponses,
   TuiPublishErrors,
   TuiPublishResponses,
   TuiSelectSessionErrors,
@@ -351,6 +361,12 @@ import type {
   V2SessionEventsResponses,
   V2SessionGetErrors,
   V2SessionGetResponses,
+  V2SessionGoalClearErrors,
+  V2SessionGoalClearResponses,
+  V2SessionGoalErrors,
+  V2SessionGoalResponses,
+  V2SessionGoalSetErrors,
+  V2SessionGoalSetResponses,
   V2SessionHistoryErrors,
   V2SessionHistoryResponses,
   V2SessionInterruptErrors,
@@ -369,6 +385,8 @@ import type {
   V2SessionPermissionListResponses,
   V2SessionPermissionReplyErrors,
   V2SessionPermissionReplyResponses,
+  V2SessionPreviewErrors,
+  V2SessionPreviewResponses,
   V2SessionPromptErrors,
   V2SessionPromptResponses,
   V2SessionQuestionListErrors,
@@ -3375,7 +3393,7 @@ export class RequestUsage extends HeyApiClient {
       directory?: string
       workspace?: string
       limit?: string
-      before?: string
+      before?: number
       rootRequestID?: string
       source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
     },
@@ -3477,6 +3495,85 @@ export class RequestUsage extends HeyApiClient {
       url: "/session/{sessionID}/request_usage/{requestID}/assistant",
       ...options,
       ...params,
+    })
+  }
+}
+
+export class Goal extends HeyApiClient {
+  /**
+   * Clear session goal
+   *
+   * Clear the persistent goal for a session.
+   */
+  public clear<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<SessionGoalClearResponses, SessionGoalClearErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Set session goal
+   *
+   * Create or update the persistent goal for a session. If objective is omitted, only status/budget are updated.
+   */
+  public set<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      objective?: string
+      status?: "active" | "paused" | "complete" | "blocked"
+      tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      continueOnError?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "objective" },
+            { in: "body", key: "status" },
+            { in: "body", key: "tokenBudget" },
+            { in: "body", key: "continueOnError" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionGoalSetResponses, SessionGoalSetErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 }
@@ -4448,9 +4545,85 @@ export class Session2 extends HeyApiClient {
     })
   }
 
+  /**
+   * Get session goal
+   *
+   * Retrieve the current persistent goal for a session.
+   */
+  public goal<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionGoalResponses, SessionGoalErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Batch session preview
+   *
+   * Retrieve the most recent user message text for multiple sessions in a single request.
+   */
+  public preview<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      sessionIDs?: Array<string>
+      limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "sessionIDs" },
+            { in: "body", key: "limit" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionPreviewResponses, SessionPreviewErrors, ThrowOnError>({
+      url: "/session/preview",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
   private _requestUsage?: RequestUsage
   get requestUsage(): RequestUsage {
     return (this._requestUsage ??= new RequestUsage({ client: this.client }))
+  }
+
+  private _goal?: Goal
+  get goal2(): Goal {
+    return (this._goal ??= new Goal({ client: this.client }))
   }
 }
 
@@ -5142,6 +5315,42 @@ export class Tui extends HeyApiClient {
     })
   }
 
+  /**
+   * Get provider endpoint status
+   *
+   * Return daemon-owned proxy route and latency for a provider endpoint origin.
+   */
+  public providerEndpointStatus<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      url: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "url" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      TuiProviderEndpointStatusResponses,
+      TuiProviderEndpointStatusErrors,
+      ThrowOnError
+    >({
+      url: "/tui/provider-endpoint-status",
+      ...options,
+      ...params,
+    })
+  }
+
   private _control?: Control
   get control(): Control {
     return (this._control ??= new Control({ client: this.client }))
@@ -5206,6 +5415,66 @@ export class Agent extends HeyApiClient {
       url: "/api/agent",
       ...options,
       ...params,
+    })
+  }
+}
+
+export class Goal2 extends HeyApiClient {
+  /**
+   * Clear session goal
+   */
+  public clear<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
+    return (options?.client ?? this.client).delete<V2SessionGoalClearResponses, V2SessionGoalClearErrors, ThrowOnError>(
+      {
+        url: "/api/session/{sessionID}/goal",
+        ...options,
+        ...params,
+      },
+    )
+  }
+
+  /**
+   * Set session goal
+   */
+  public set<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      objective?: string
+      status?: "active" | "paused" | "complete" | "blocked"
+      tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      continueOnError?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "body", key: "objective" },
+            { in: "body", key: "status" },
+            { in: "body", key: "tokenBudget" },
+            { in: "body", key: "continueOnError" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2SessionGoalSetResponses, V2SessionGoalSetErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/goal",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 }
@@ -5561,6 +5830,7 @@ export class Session3 extends HeyApiClient {
       workspace?: string
       limit?: number
       order?: "asc" | "desc"
+      start?: number
       search?: string
       directory?: string
       project?: string
@@ -5577,6 +5847,7 @@ export class Session3 extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "query", key: "limit" },
             { in: "query", key: "order" },
+            { in: "query", key: "start" },
             { in: "query", key: "search" },
             { in: "query", key: "directory" },
             { in: "query", key: "project" },
@@ -5658,6 +5929,23 @@ export class Session3 extends HeyApiClient {
     const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
     return (options?.client ?? this.client).get<V2SessionGetResponses, V2SessionGetErrors, ThrowOnError>({
       url: "/api/session/{sessionID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get session goal
+   */
+  public goal<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
+    return (options?.client ?? this.client).get<V2SessionGoalResponses, V2SessionGoalErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/goal",
       ...options,
       ...params,
     })
@@ -5951,6 +6239,41 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
+   * Batch session preview
+   *
+   * Retrieve the most recent user message text for multiple sessions in a single request.
+   */
+  public preview<ThrowOnError extends boolean = false>(
+    parameters?: {
+      sessionIDs?: Array<string>
+      limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "sessionIDs" },
+            { in: "body", key: "limit" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<V2SessionPreviewResponses, V2SessionPreviewErrors, ThrowOnError>({
+      url: "/api/session/preview",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
    * Get session messages
    *
    * Retrieve projected messages for a session. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline.
@@ -5982,6 +6305,11 @@ export class Session3 extends HeyApiClient {
       ...options,
       ...params,
     })
+  }
+
+  private _goal?: Goal2
+  get goal2(): Goal2 {
+    return (this._goal ??= new Goal2({ client: this.client }))
   }
 
   private _revert?: Revert

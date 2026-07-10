@@ -24,6 +24,9 @@ export const Goal = Schema.Struct({
   tokenBudget: optional(Schema.NullOr(Schema.Number)),
   tokensUsed: Schema.Number,
   timeUsedSeconds: Schema.Number,
+  // [local-smark] 错误后续跑策略：用户通过 GUI/API 控制，模型不可修改。
+  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续
+  continueOnError: Schema.Boolean,
   time: Schema.Struct({
     created: Schema.Number,
     updated: Schema.Number,

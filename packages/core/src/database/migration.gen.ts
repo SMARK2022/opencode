@@ -45,5 +45,6 @@ export const migrations = (
     import("./migration/20260723100000_normalize_global_session_path"),
     import("./migration/20260725100000_migrate_review_agent"),
     import("./migration/20260726100000_session_goal"),
+    import("./migration/20260812100000_goal_continue_on_error"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

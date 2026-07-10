@@ -1440,6 +1440,9 @@ const layer = Layer.effect(
         // #364：goal 续跑计数器：独立于 step，
         // 防止 step++ 在 continue 路径被跳过导致无限循环
         let goalTurns = 0
+        // marker只属于本次loop的eligible错误，下一次迭代消费即清空。
+        // 不持久化错误内容，也不让历史助手错误触发新的续跑。
+        let pendingTerminalError: { assistantID: string } | undefined
         // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
         // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
         // 使后续再次达到 85% 时可以重新提示。
@@ -1471,14 +1474,26 @@ const layer = Layer.effect(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
 
-          if (
-            lastAssistant?.finish &&
+          // 消费本轮错误身份；新用户消息不能继承前一个请求的续跑资格。
+          const terminalError = pendingTerminalError
+          pendingTerminalError = undefined
+          const normalCompletion =
+            lastAssistant?.finish !== undefined &&
             !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
             lastAssistant.parentID === lastUser.id
-          ) {
-            // 错误助手仍走退出分支，不能因跳过整个if而重新进入模型或Goal续跑。
-            if (lastAssistant.error) break
+          // 相同精确allowlist复核marker指向的助手，其他终止路径仍保持退出。
+          const errorCompletion =
+            terminalError !== undefined &&
+            lastAssistant?.error !== undefined &&
+            lastAssistant.id === terminalError.assistantID &&
+            lastAssistant.parentID === lastUser.id &&
+            (SessionV1.APIError.isInstance(lastAssistant.error) ||
+              NamedError.Unknown.isInstance(lastAssistant.error))
+
+          if (normalCompletion || errorCompletion) {
+            // 仅本轮获准错误跳过旧错误退出，不能把一般错误重新送入模型。
+            if (lastAssistant.error && !errorCompletion) break
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
             )
@@ -1519,7 +1534,10 @@ const layer = Layer.effect(
                   goal.status === "active" &&
                   goalAgent &&
                   !isDecideAgent(goalAgent) &&
-                  step < maxSteps
+                  step < maxSteps &&
+                  // [local-smark] 错误续跑路径要求 continueOnError=true；
+                  // 正常完成路径（errorCompletion=false）始终允许
+                  (!errorCompletion || goal.continueOnError)
                 ) {
                   goalTurns++
                   // 注入 synthetic user message 作为续跑 prompt
@@ -1619,7 +1637,8 @@ const layer = Layer.effect(
               model,
             })
 
-          const outcome: "break" | "continue" = yield* Effect.gen(function* () {
+          // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
+          const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             // [local-smark] 事前提醒：当历史记录中使用了当前被 disable 的工具时，
@@ -1770,7 +1789,21 @@ const layer = Layer.effect(
               }
             }
 
-            if (result === "stop") return "break" as const
+            if (result === "stop") {
+              // [local-smark] eligible terminal error 检查：只有 APIError 和
+              // UnknownError 才允许进入错误续跑路径。其他错误
+              //（Abort/Auth/Overflow/StructuredOutput）仍返回普通 break。
+              // APIError 覆盖 provider API 终止错误，UnknownError 覆盖
+              // cyber_policy 等未分类错误
+              const err = handle.message.error
+              if (
+                err &&
+                (SessionV1.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
+              ) {
+                return "terminal-error" as const
+              }
+              return "break" as const
+            }
             // #364：goal token/time 计费：assistant message 完成后，
             // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
             if (handle.message.tokens && handle.message.time.completed) {
@@ -1805,6 +1838,11 @@ const layer = Layer.effect(
             Effect.ensuring(instruction.clear(handle.message.id)),
           )
           if (outcome === "break") break
+          // 下一轮复用active/策略/agent/共享额度检查，不在错误分支重复调度。
+          if (outcome === "terminal-error") {
+            pendingTerminalError = { assistantID: handle.message.id }
+            continue
+          }
           continue
         }
 

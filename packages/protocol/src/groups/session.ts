@@ -186,6 +186,8 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
           status: Schema.optional(SessionGoal.Status),
           // 缺省保留预算，null清除，数值由唯一存储owner校验。
           tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
+          // 用户策略由共享Goal持久化；省略不改，显式false可关闭错误续跑。
+          continueOnError: Schema.optional(Schema.Boolean),
         }),
         success: Schema.Struct({ goal: SessionGoal.Goal }),
         error: [InvalidRequestError, SessionNotFoundError],
