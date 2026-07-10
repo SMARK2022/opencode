@@ -15,23 +15,27 @@ describe("session layout width", () => {
       { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
       { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
     ]) {
-      const measured = await measureAssistantTextWidth(item)
-      expect(measured).toBe(
-        sessionMessageContentWidth({
-          terminalWidth: item.terminalWidth,
-          sidebarInLayout: item.sidebarVisible,
-          scrollbarEnabled: item.scrollbarEnabled,
-        }),
-      )
+      const expected = sessionMessageContentWidth({
+        terminalWidth: item.terminalWidth,
+        sidebarInLayout: item.sidebarVisible,
+        scrollbarEnabled: item.scrollbarEnabled,
+      })
+      // 同一 expected 同时约束普通正文和 reasoning preview，防止两套宽度公式日后漂移。
+      expect(await measureAssistantTextWidth(item, "text")).toBe(expected)
+      // reasoning 多一层左边框、少一格 padding，总 chrome 仍为四格；preview 预算依赖这一不变量。
+      expect(await measureAssistantTextWidth(item, "reasoning")).toBe(expected)
     }
   })
 })
 
-async function measureAssistantTextWidth(input: {
-  terminalWidth: number
-  sidebarVisible: boolean
-  scrollbarEnabled: boolean
-}) {
+async function measureAssistantTextWidth(
+  input: {
+    terminalWidth: number
+    sidebarVisible: boolean
+    scrollbarEnabled: boolean
+  },
+  kind: "text" | "reasoning",
+) {
   const setup = await createTestRenderer({
     width: input.terminalWidth,
     height: 20,
@@ -75,7 +79,12 @@ async function measureAssistantTextWidth(input: {
     main.add(scroll)
 
     const assistant = new BoxRenderable(setup.renderer, { border: ["left"], flexShrink: 0 })
-    const textPart = new BoxRenderable(setup.renderer, { paddingLeft: 3, flexShrink: 0 })
+    // 两条路径复刻生产树的实际水平 chrome，不能用手工减常量替代 Yoga 实测。
+    const textPart = new BoxRenderable(setup.renderer, {
+      paddingLeft: kind === "text" ? 3 : 2,
+      border: kind === "reasoning" ? ["left"] : false,
+      flexShrink: 0,
+    })
     const text = new TextRenderable(setup.renderer, { content: "x ".repeat(2_000), wrapMode: "word" })
     textPart.add(text)
     assistant.add(textPart)

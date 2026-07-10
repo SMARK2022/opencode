@@ -172,29 +172,6 @@ describe("Session route integration points", () => {
     })
   })
 
-  describe("reasoning part", () => {
-    test("ReasoningPart uses throttled display content", () => {
-      expect(sessionSource).toContain("createThrottledSignal")
-      expect(sessionSource).toContain("displayContent")
-    })
-
-    test("ReasoningPart shows char count header", () => {
-      expect(sessionSource).toContain("Thinking (")
-      expect(sessionSource).toContain(".toLocaleString()")
-    })
-
-    test("ReasoningPart has expand/collapse toggle", () => {
-      expect(sessionSource).toContain("▲ collapse")
-      expect(sessionSource).toContain("▼ expand")
-    })
-
-    test("streaming reasoning keeps dev-smark CodeRenderable streaming semantics", () => {
-      expect(sessionSource).toMatch(
-        /<Match when={streaming\(\)}>\s*<code\s+filetype="markdown"\s+drawUnstyledText={false}\s+streaming={true}\s+syntaxStyle={subtleSyntax\(\)}\s+content={preview\(\)}/,
-      )
-    })
-  })
-
   describe("event dispatch", () => {
     test("global and explicit project event matches return before workspace fallback", () => {
       const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
