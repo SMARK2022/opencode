@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Option } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Option, Semaphore } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
@@ -168,6 +168,10 @@ export const layer = Layer.effect(
         hasToolCall: false,
       }
       let aborted = false
+      // [local-smark] Tool 终态写入许可：串行化 completeToolCall / failToolCall /
+      // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner。
+      // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的。
+      const toolPermit = Semaphore.makeUnsafe(1)
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
       let timing:
         | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
@@ -250,75 +254,87 @@ export const layer = Layer.effect(
           attachments?: MessageV2.FilePart[]
         },
       ) {
-        const match = yield* readToolCall(toolCallID)
-        if (!match) return
-        if (match.part.state.status !== "running") {
-          // Another cleanup path may already have terminalized the persisted
-          // part.  Still settle the in-memory deferred so the LLM loop cannot
-          // wait forever on a tool call whose DB state is already final.
-          yield* settleToolCall(toolCallID)
-          return
-        }
-        yield* session.updatePart({
-          ...match.part,
-          state: {
-            status: "completed",
-            // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
-            // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
-            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
-            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
-            // 原始 input 不保留——format 后的内容才是真实落盘内容。
-            input: output.metadata?._formattedContent
-              ? { ...match.part.state.input, content: output.metadata._formattedContent }
-              : match.part.state.input,
-            output: output.output,
-            // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
-            metadata: (() => {
-              const { _formattedContent, ...rest } = output.metadata ?? {}
-              return match.part.state.metadata?.autoReview
-                ? { ...rest, autoReview: match.part.state.metadata.autoReview }
-                : rest
-            })(),
-            title: output.title,
-            time: { start: match.part.state.time.start, end: Date.now() },
-            attachments: output.attachments,
-          },
-        })
-        yield* settleToolCall(toolCallID)
+        // [local-smark] terminal state 写入需要串行化：确保 read-check-write 原子，
+          // 防止 late metadata/result 或 cleanup 与正常完成路径竞争覆盖终态。
+          yield* toolPermit.withPermits(1)(
+            Effect.gen(function* () {
+              const match = yield* readToolCall(toolCallID)
+              if (!match) return
+              if (match.part.state.status !== "running") {
+                // Another cleanup path may already have terminalized the persisted
+                // part.  Still settle the in-memory deferred so the LLM loop cannot
+                // wait forever on a tool call whose DB state is already final.
+                yield* settleToolCall(toolCallID)
+                return
+              }
+              yield* session.updatePart({
+                ...match.part,
+                state: {
+                  status: "completed",
+                  // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
+                  // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
+                  // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
+                  // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
+                  // 原始 input 不保留——format 后的内容才是真实落盘内容。
+                  input: output.metadata?._formattedContent
+                    ? { ...match.part.state.input, content: output.metadata._formattedContent }
+                    : match.part.state.input,
+                  output: output.output,
+                  // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
+                  metadata: (() => {
+                    const { _formattedContent, ...rest } = output.metadata ?? {}
+                    return match.part.state.metadata?.autoReview
+                      ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+                      : rest
+                  })(),
+                  title: output.title,
+                  time: { start: match.part.state.time.start, end: Date.now() },
+                  attachments: output.attachments,
+                },
+              })
+              yield* settleToolCall(toolCallID)
+            }),
+          )
       })
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
-        const match = yield* readToolCall(toolCallID)
-        if (!match) return false
-        if (match.part.state.status !== "running") {
-          yield* settleToolCall(toolCallID)
-          return false
-        }
-        const reason = errorMessage(error)
-        const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
-        // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
-        // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
-        // 非 abort error 仅保留 autoReview envelope，保持既有行为
-        const failStart = match.part.state.time?.start ?? Date.now()
-        yield* session.updatePart({
-          ...match.part,
-          state: {
-            status: "error",
-            input: match.part.state.input,
-            error: toolAborted ? TOOL_ABORTED_ERROR : reason,
-            metadata: toolAborted
-              ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
-              : match.part.state.metadata?.autoReview
-                ? { autoReview: match.part.state.metadata.autoReview }
-                : undefined,
-            time: { start: failStart, end: Date.now() },
-          },
-        })
-        if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
-          ctx.blocked = ctx.shouldBreak
-        }
-        yield* settleToolCall(toolCallID)
-        return true
+        // [local-smark] terminal state 写入串行化，与 completeToolCall 共享同一 permit，
+          // 确保 fail / complete / cleanup 三条终态路径有唯一 winner。
+          return yield* toolPermit.withPermits(1)(
+            Effect.gen(function* () {
+              const match = yield* readToolCall(toolCallID)
+              if (!match) return false
+              if (match.part.state.status !== "running") {
+                yield* settleToolCall(toolCallID)
+                return false
+              }
+              const reason = errorMessage(error)
+              const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
+              // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
+              // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
+              // 非 abort error 仅保留 autoReview envelope，保持既有行为
+              const failStart = match.part.state.time?.start ?? Date.now()
+              yield* session.updatePart({
+                ...match.part,
+                state: {
+                  status: "error",
+                  input: match.part.state.input,
+                  error: toolAborted ? TOOL_ABORTED_ERROR : reason,
+                  metadata: toolAborted
+                    ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
+                    : match.part.state.metadata?.autoReview
+                      ? { autoReview: match.part.state.metadata.autoReview }
+                      : undefined,
+                  time: { start: failStart, end: Date.now() },
+                },
+              })
+              if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
+                ctx.blocked = ctx.shouldBreak
+              }
+              yield* settleToolCall(toolCallID)
+              return true
+            }),
+          )
       })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
@@ -927,28 +943,37 @@ export const layer = Layer.effect(
         }
 
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
-          const match = yield* readToolCall(toolCallID)
-          if (!match) continue
-          const part = match.part
-          const end = Date.now()
-          const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
-          // Merge any un-flushed raw buffer into the part before writing error state.
-          const pendingRaw = ctx.toolInputBuffer[toolCallID]
-          if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
-          yield* session.updatePart({
-            ...part,
-            state: {
-              ...part.state,
-              ...(part.state.status === "pending" && pendingRaw
-                ? { raw: part.state.raw + pendingRaw }
-                : {}),
-              status: "error",
-              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
-              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
-              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
-              time: { start: "time" in part.state ? part.state.time.start : end, end },
-            },
-          })
+          // [local-smark] cleanup 终态写入也走 permit，确保与 completeToolCall /
+          // failToolCall 串行化。如果工具已完成（终态由 stream event 写入），
+          // readToolCall 重读后 status !== "running"，直接跳过不覆盖。
+          yield* toolPermit.withPermits(1)(
+            Effect.gen(function* () {
+              const match = yield* readToolCall(toolCallID)
+              if (!match) return
+              const part = match.part
+              // 已终态的 ToolPart 不覆盖——stream event 的 complete/fail 是 winner
+              if (part.state.status !== "running" && part.state.status !== "pending") return
+              const end = Date.now()
+              const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+              // Merge any un-flushed raw buffer into the part before writing error state.
+              const pendingRaw = ctx.toolInputBuffer[toolCallID]
+              if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
+              yield* session.updatePart({
+                ...part,
+                state: {
+                  ...part.state,
+                  ...(part.state.status === "pending" && pendingRaw
+                    ? { raw: part.state.raw + pendingRaw }
+                    : {}),
+                  status: "error",
+                  error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
+                  // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
+                  metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
+                  time: { start: "time" in part.state ? part.state.time.start : end, end },
+                },
+              })
+            }),
+          )
         }
         ctx.toolcalls = {}
         ctx.toolInputBuffer = {}

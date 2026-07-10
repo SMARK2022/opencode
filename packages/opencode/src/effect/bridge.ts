@@ -5,7 +5,10 @@ import { InstanceRef, WorkspaceRef } from "./instance-ref"
 import { attachWith } from "./run-service"
 
 export interface Shape {
-  readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>) => Promise<A>
+  // RunOptions 透传给 Effect.runPromise，用于支持 AbortSignal 等运行时控制。
+  // 非 Bash 工具通过 { signal: options.abortSignal } 实现协作式中断，
+  // 而 Bash 保持豁免以保留自身的 cooperative abort 输出语义。
+  readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>, options?: Effect.RunOptions) => Promise<A>
   readonly fork: <A, E, R>(effect: Effect.Effect<A, E, R>) => Fiber.Fiber<A, E>
   readonly run: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E>
   readonly bind: <Args extends readonly unknown[], Result>(fn: (...args: Args) => Result) => (...args: Args) => Result
@@ -61,8 +64,10 @@ export function make(): Effect.Effect<Shape> {
       attachWith(effect.pipe(Effect.provide(ctx)) as Effect.Effect<A, E, never>, { instance, workspace })
 
     return {
-      promise: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-        restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect))),
+      // 透传 RunOptions（含 AbortSignal）给 Effect.runPromise，
+      // 使调用方可通过 signal 中断 Effect 包装及其 finalizer。
+      promise: <A, E, R>(effect: Effect.Effect<A, E, R>, options?: Effect.RunOptions) =>
+        restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect), options)),
       fork: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         restoreWorkspace(workspace, () => Effect.runFork(wrap(effect))),
       run: <A, E, R>(effect: Effect.Effect<A, E, R>) =>

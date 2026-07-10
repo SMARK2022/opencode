@@ -1855,6 +1855,88 @@ it.instance(
   30_000,
 )
 
+// [local-smark] 验证重叠 cancel 共享同一个操作：第二个 cancel join 第一个的
+// Deferred，不会在第一个完成后重新执行 state.cancel 误伤 replacement loop。
+// 旧 semaphore 实现下，第二个 cancel 排队等待第一个完成，然后重新调用
+// state.cancel 取消已经启动的 replacement Runner。single-flight 修复后，
+// 两个 cancel 共享同一 Exit，replacement 安全。
+// 使用 task 工具挂起控制 cancel 耗时：task.execute 用 Effect.callback 永不 resume，
+// cancel 的 Fiber.interrupt 等待 Processor cleanup 的 2s settle 超时，
+// 这段时间内第二个 cancel 能 join 第一个的 Deferred。
+it.instance(
+  "overlapping cancels share single-flight and do not retarget replacement loop",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const status = yield* SessionStatus.Service
+      const registry = yield* ToolRegistry.Service
+      const { task } = yield* registry.named()
+      const chat = yield* sessions.create({ title: "Overlap cancel" })
+      yield* seed(chat.id)
+
+      // 修改 task.execute 使其永不返回（Effect.callback 不调用 resume），
+      // cancel 时 Processor cleanup 需等待 2s settle 超时才能终态化。
+      const taskReady = yield* Deferred.make<void>()
+      const original = task.execute
+      task.execute = (_args, ctx) =>
+        Effect.callback<never>((_resume) => {
+          succeedVoid(taskReady)
+          return Effect.sync(() => {})
+        })
+      yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = original)))
+
+      // 让 LLM 正常回复（不含工具调用），然后用 addSubtask 触发 task 工具
+      yield* llm.push(reply().text("thinking").stop().item())
+      yield* llm.hang
+      const msg = yield* user(chat.id, "first")
+      yield* addSubtask(chat.id, msg.id)
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+
+      // 等待 task 工具开始执行
+      yield* awaitWithTimeout(Deferred.await(taskReady), "task tool never started", "10 seconds")
+
+      // Fork 第一个 cancel——task 工具永不返回，Fiber.interrupt 需等待 2s settle
+      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+
+      // 等待 session 变 idle（Runner.cancel 已执行 idleIfCurrent，Fiber.interrupt 仍在进行）
+      yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const s = yield* status.get(chat.id)
+          return s.type === "idle" ? (true as const) : undefined
+        }),
+        "session never became idle after first cancel",
+      )
+
+      // 立即提交 replacement 和第二个 cancel
+      yield* llm.push(reply().text("replacement response").stop().item())
+      yield* user(chat.id, "second")
+      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+
+      // 第二个 cancel——single-flight 下 join 第一个的 Deferred，不重新执行 state.cancel
+      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+
+      // 等待 replacement loop 完成
+      const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("15 seconds"))
+      expect(Exit.isSuccess(exit2 ?? Exit.void)).toBe(true)
+
+      // 关键断言：replacement assistant 不应有 AbortedError
+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+      const assistants = messages.filter((m) => m.info.role === "assistant")
+      const lastAssistant = assistants.at(-1)
+      expect(lastAssistant?.info.role).toBe("assistant")
+      if (lastAssistant?.info.role === "assistant") {
+        expect(lastAssistant.info.error?.name).not.toBe("MessageAbortedError")
+      }
+
+      // 清理
+      yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore)
+    }),
+  { git: true },
+  60_000,
+)
+
 it.instance(
   "cancel finalizes subtask tool state",
   () =>

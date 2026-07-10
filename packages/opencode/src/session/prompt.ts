@@ -414,8 +414,9 @@ export const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      // 原子 check-and-set：Effect 协作式调度不会在同步代码块中切让 fiber，
-      // get 和 set 之间无 yield*，保证只一个 cancel 能进入 body。
+      // 原子 check-and-set：Deferred.make 虽有 yield* 但不涉及异步 I/O，
+      // Effect 协作式调度不会在此同步分配中切让 fiber。get 和 set 之间
+      // 无真正的异步边界，保证只一个 cancel 能进入 body。
       // 后续 cancel 观察到已有 Deferred，直接 await 并重放同一 Exit。
       const existing = cancelOps.get(sessionID)
       if (existing) {
@@ -445,7 +446,10 @@ export const layer = Layer.effect(
           Effect.uninterruptible(
             Effect.gen(function* () {
               cancelOps.delete(sessionID)
-              yield* Deferred.done(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
+              // 用 succeed 而非 done：Deferred 的成功类型就是 Exit<void>，
+              // exit 本身是 Effect.onExit 回调收到的 Exit<void, never>，
+              // 作为值存入 Deferred 供 joiner 重放。
+              yield* Deferred.succeed(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
             }),
           ),
         ),

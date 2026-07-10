@@ -165,7 +165,10 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
   return dynamicTool({
     description: mcpTool.description ?? "",
     inputSchema: jsonSchema(schema),
-    execute: async (args: unknown) => {
+    // 接收 AI SDK 传入的 ToolExecutionOptions（含 abortSignal），
+    // 将 signal 透传给 MCP client.callTool，使取消操作能协作式中断 MCP 传输层。
+    // timeout 和 resetTimeoutOnProgress 保持不变，避免破坏现有超时语义。
+    execute: async (args: unknown, options?: { abortSignal?: AbortSignal }) => {
       return client.callTool(
         {
           name: mcpTool.name,
@@ -175,6 +178,8 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
         {
           resetTimeoutOnProgress: true,
           timeout,
+          // 透传 abortSignal：MCP client 可在取消时中断正在进行的工具调用
+          ...(options?.abortSignal ? { signal: options.abortSignal } : {}),
         },
       )
     },
