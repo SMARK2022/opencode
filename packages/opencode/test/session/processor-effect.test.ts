@@ -775,6 +775,9 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         if (call?.state.status === "error") {
           expect(call.state.error).toBe("Tool execution aborted")
           expect(call.state.metadata?.interrupted).toBe(true)
+          // [local-smark] 新 abort 记录携带 server-owned executionElapsedMs marker
+          expect(call.state.metadata?.executionElapsedMs).toBeDefined()
+          expect(typeof call.state.metadata?.executionElapsedMs).toBe("number")
           expect(call.state.time.end).toBeDefined()
         }
       }),

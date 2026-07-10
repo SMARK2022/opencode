@@ -1,4 +1,5 @@
-import { describe, expect } from "bun:test"
+import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src/util/output-notice"
+import { describe, expect, test } from "bun:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
@@ -1810,7 +1811,9 @@ describe("tool.shell abort", () => {
             },
           )
           expect(res.output).toContain("before")
-          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
+          // [local-smark] abort Notice 必须包含 elapsed_ms，让模型知道实际运行时长
+          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort"')
+          expect(res.output).toContain('elapsed_ms="')
           expect(res.output).not.toContain('reason="exit"')
           expect(collected.length).toBeGreaterThan(0)
         }),
@@ -1832,9 +1835,11 @@ describe("tool.shell abort", () => {
             timeout: timeoutMs,
           })
           expect(result.output).toContain("started")
+          // [local-smark] timeout Notice 现在包含 elapsed_ms，不再以 /> 结尾
           expect(result.output).toContain(
-            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}" />`,
+            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}"`,
           )
+          expect(result.output).toContain('elapsed_ms="')
           expect(result.output).not.toContain('reason="exit"')
         }),
       ),
@@ -1904,7 +1909,7 @@ describe("tool.shell abort", () => {
         expect(result.metadata.exit).toBe(0)
         expect(result.output).toContain("(no output)")
         expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0" />',
+          '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
         )
       }),
     ),
@@ -1923,7 +1928,7 @@ describe("tool.shell abort", () => {
         expect(result.metadata.exit).toBe(42)
         expect(result.output).toContain("(no output)")
         expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42" />',
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42"',
         )
       }),
     ),
@@ -1942,7 +1947,7 @@ describe("tool.shell abort", () => {
         expect(result.metadata.exit).toBe(7)
         expect(result.output).toContain("plain output")
         expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />',
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7"',
         )
       }),
     ),
@@ -1970,7 +1975,7 @@ describe("tool.shell abort", () => {
         expect(result.metadata.exit).toBe(9)
         expect(result.output).toContain("<bash_high_signal_excerpt>")
         expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
         )
       }),
     ),
@@ -1998,7 +2003,7 @@ describe("tool.shell abort", () => {
         // <bash_high_signal_excerpt>，但执行状态 notice 仍然独立保留 exit code。
         expect(result.output).not.toContain("<bash_high_signal_excerpt>")
         expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
+          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
         )
       }),
     ),
@@ -2266,5 +2271,88 @@ describe("tool.shell truncation", () => {
           }),
         ),
     )
+  })
+})
+
+// [local-smark] execution notice policy 纯函数测试：不依赖真实子进程，
+// 确定性验证 Bash outcome 优先级、elapsed_ms 和 120 秒阈值
+describe("tool.shell execution notice policy", () => {
+  // pure policy 函数已通过顶部 ESM import 导入
+
+  test("abort 包含正整数 elapsed_ms 且不含 exit", () => {
+    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 61742 })
+    expect(notice).toContain('reason="user_abort"')
+    expect(notice).toContain('elapsed_ms="61742"')
+    expect(notice).not.toContain('reason="exit"')
+    expect(notice).not.toContain('reason="timeout"')
+  })
+
+  test("timeout 同时包含 timeout_ms 和 elapsed_ms", () => {
+    const notice = formatShellExecutionNotice({ aborted: false, expired: true, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 120487 })
+    expect(notice).toContain('reason="timeout"')
+    expect(notice).toContain('timeout_ms="120000"')
+    expect(notice).toContain('elapsed_ms="120487"')
+  })
+
+  test("non-zero exit 包含 exit_code 和 elapsed_ms", () => {
+    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 1, emptyOutput: false, timeoutMs: 120000, elapsedMs: 8421 })
+    expect(notice).toContain('reason="exit"')
+    expect(notice).toContain('exit_code="1"')
+    expect(notice).toContain('elapsed_ms="8421"')
+  })
+
+  test("exit 0 + 有输出 + 119999ms 不生成 Notice", () => {
+    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 119999 })
+    expect(notice).toBeUndefined()
+  })
+
+  test("exit 0 + 有输出 + 120000ms 生成 completed Notice", () => {
+    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 120000 })
+    expect(notice).toContain('reason="completed"')
+    expect(notice).toContain('elapsed_ms="120000"')
+  })
+
+  // 验证 outcome 互斥：abort 优先于 long completed
+  test("abort >=120000ms 只有 user_abort，不追加 completed", () => {
+    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 300000 })
+    expect(notice).toContain('reason="user_abort"')
+    expect(notice).not.toContain('reason="completed"')
+  })
+
+  // 验证 timeout 优先于 abort
+  test("timeout >=120000ms 只有 timeout", () => {
+    const notice = formatShellExecutionNotice({ aborted: true, expired: true, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 300000 })
+    expect(notice).toContain('reason="timeout"')
+    expect(notice).not.toContain('reason="user_abort"')
+  })
+
+  // 空输出 exit 0 保留 exit Notice，不改成 completed
+  test("空输出 exit 0 保留 exit Notice", () => {
+    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: true, timeoutMs: 120000, elapsedMs: 500 })
+    expect(notice).toContain('reason="exit"')
+    expect(notice).toContain('exit_code="0"')
+    expect(notice).not.toContain('reason="completed"')
+  })
+
+  // NaN/Infinity 被规范化为 0，不输出畸形属性
+  test("NaN elapsed 被规范化为 0", () => {
+    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: NaN })
+    expect(notice).toContain('elapsed_ms="0"')
+  })
+
+  test("正 Infinity elapsed 被规范化为 0", () => {
+    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: Infinity })
+    expect(notice).toContain('elapsed_ms="0"')
+  })
+
+  // 通用长成功 Notice 阈值
+  test("formatLongExecutionNotice 119999ms 返回 undefined", () => {
+    expect(formatLongExecutionNotice("tool", 119999)).toBeUndefined()
+  })
+
+  test("formatLongExecutionNotice 120000ms 返回 completed Notice", () => {
+    const notice = formatLongExecutionNotice("tool", 120000)
+    expect(notice).toContain('reason="completed"')
+    expect(notice).toContain('source="tool"')
   })
 })

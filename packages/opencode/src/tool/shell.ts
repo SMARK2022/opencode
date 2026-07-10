@@ -33,7 +33,7 @@ import {
   normalizePowerShellOutput,
   renderDiagnosticAppendix,
 } from "./bash-compress"
-import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
+import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } from "@/util/output-notice"
 
 export { Parameters } from "./shell/prompt"
 
@@ -1027,13 +1027,8 @@ export const ShellTool = Tool.define(
         }),
       ).pipe(Effect.orDie)
 
-      const meta: string[] = []
-      if (expired) {
-        meta.push(
-          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
-        )
-      }
-      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
+      // 统一调用 pure outcome policy，保证一个 Bash 结果只生成一种系统 execution Notice
+      const shellElapsedMs = Date.now() - started
       const raw = list.map((item) => item.text).join("")
       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
       const normalizedStats = outputStats(normalized)
@@ -1112,22 +1107,17 @@ export const ShellTool = Tool.define(
       // metadata.exit 已经保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
       // exit notice 只描述进程如何结束；它和隐藏输出诊断互相独立，不能互相抑制。
       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
-      const exitNotice =
-        code === null
-          ? undefined
-        : emptyOutput
-            ? formatExecutionNotice({
-                severity: code === 0 ? "info" : "error",
-                reason: "exit",
-                exit_code: code,
-              })
-            : code !== 0
-              ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
-              : undefined
-      if (exitNotice) meta.push(exitNotice)
-
-      if (meta.length > 0) {
-        output += "\n\n" + meta.join("\n")
+      // outcome policy 在 emptyOutput 确定后统一处理 timeout/abort/exit/long-completed
+      const shellNotice = formatShellExecutionNotice({
+        aborted,
+        expired,
+        exitCode: code,
+        emptyOutput,
+        timeoutMs: input.timeout,
+        elapsedMs: shellElapsedMs,
+      })
+      if (shellNotice) {
+        output += "\n\n" + shellNotice
       }
       const durationMs = Date.now() - started
       const displayOutput = preview(display.value())

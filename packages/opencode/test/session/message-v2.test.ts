@@ -1373,6 +1373,170 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  // [local-smark] 新 generic interrupted 记录携带 executionElapsedMs marker：
+  // 模型回放时追加 user_abort + elapsed_ms Notice，使模型能看到取消原因和耗时
+  test("appends abort notice for new generic interrupted with elapsed marker", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const partialOutput = "partial result line"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "read",
+            state: {
+              status: "error",
+              input: { filePath: "/tmp/test" },
+              error: "Tool execution aborted",
+              // 新记录：server 写入了 executionElapsedMs
+              metadata: { interrupted: true, executionElapsedMs: 152744, output: partialOutput },
+              time: { start: 0, end: 152744 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+    // 有 partial output 时走 output-available，输出末尾追加 abort Notice
+    expect(toolResult.output!.type).toBe("text")
+    expect(toolResult.output!.value).toContain(partialOutput)
+    expect(toolResult.output!.value).toContain('reason="user_abort"')
+    expect(toolResult.output!.value).toContain('elapsed_ms="152744"')
+    expect(toolResult.output!.value).toContain('source="tool"')
+  })
+
+  // [local-smark] 无 partial output 的新 interrupted 记录：errorText 后追加 abort Notice
+  test("appends abort notice for new generic interrupted without partial output", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "read",
+            state: {
+              status: "error",
+              input: { filePath: "/tmp/test" },
+              error: "Tool execution aborted",
+              metadata: { interrupted: true, executionElapsedMs: 5000 },
+              time: { start: 0, end: 5000 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+    expect(toolResult.output!.type).toBe("error-text")
+    expect(toolResult.output!.value).toContain("Tool execution aborted")
+    expect(toolResult.output!.value).toContain('reason="user_abort"')
+    expect(toolResult.output!.value).toContain('elapsed_ms="5000"')
+  })
+
+  // [local-smark] 旧记录无 executionElapsedMs：保持原样，不追溯伪造 elapsed
+  test("old interrupted without marker stays unchanged", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const output = "old partial"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "read",
+            state: {
+              status: "error",
+              input: { filePath: "/tmp/test" },
+              error: "Tool execution aborted",
+              // 旧记录：只有 interrupted=true，没有 executionElapsedMs
+              metadata: { interrupted: true, output },
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+      // 旧记录不追加 abort Notice
+      expect(toolResult.output!.value).toBe(output)
+      expect(toolResult.output!.value).not.toContain("opencode_notice")
+  })
+
+  // [local-smark] NaN/Infinity/负值 marker 被忽略，不输出畸形属性
+  test("invalid elapsed marker is ignored", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    for (const badValue of [NaN, Infinity, -1, "abc"]) {
+      const input: MessageV2.WithParts[] = [
+        {
+          info: userInfo(userID),
+          parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+        },
+        {
+          info: assistantInfo(assistantID, userID),
+          parts: [
+            {
+              ...basePart(assistantID, "a1"),
+              type: "tool",
+              callID: "call-1",
+              tool: "read",
+              state: {
+                status: "error",
+                input: { filePath: "/tmp/test" },
+                error: "Tool execution aborted",
+                metadata: { interrupted: true, executionElapsedMs: badValue as number },
+                time: { start: 0, end: 1 },
+              },
+            },
+          ] as MessageV2.Part[],
+        },
+      ]
+
+      const result = await MessageV2.toModelMessages(input, model)
+      const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+      // 无效 marker 不追加 Notice
+      expect(toolResult.output!.value).toBe("Tool execution aborted")
+    }
+  })
+
   test("filters assistant messages with non-abort errors", async () => {
     const assistantID = "m-assistant"
 

@@ -48,7 +48,7 @@ import { Truncate } from "@/tool/truncate"
 import { Image } from "@/image/image"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Semaphore, Types } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
@@ -397,7 +397,10 @@ export const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     // [local-smark] goal 服务：用于 break 点检查 active goal 并注入续跑 prompt
     const goalSvc = yield* SessionGoal.Service
-    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
+    // [local-smark] 单次取消操作共享：同一 Session 的重叠 cancel 调用 join 同一个
+    // Deferred<Exit>，而非各自独立执行 state.cancel。这消除了排队 cancel 在旧操作
+    // 完成后重新读取 Runner 并误伤 replacement loop 的时序窗口。
+    const cancelOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
     const runner = Effect.fn("SessionPrompt.runner")(function* () {
       return yield* EffectBridge.make()
     })
@@ -409,29 +412,43 @@ export const layer = Layer.effect(
         loop: (input: LoopInput) => loop(input),
       } satisfies TaskPromptOps
     })
-    const cancelLock = (sessionID: SessionID) => {
-      const hit = cancelLocks.get(sessionID)
-      if (hit) return hit
-      const next = Semaphore.makeUnsafe(1)
-      cancelLocks.set(sessionID, next)
-      return next
-    }
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-      yield* cancelLock(sessionID).withPermits(1)(
-        Effect.gen(function* () {
-          yield* elog.info("cancel", { sessionID })
-          // 在中断 runner 前快照待终态化的 assistant 消息 ID，
-          // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀。
-          // MessageV2.stream 是同步生成器（无 yield*），快照对 Effect 调度器原子。
-          const pendingIds = new Set(
-            Array.from(MessageV2.stream(sessionID))
-              .filter((m) => m.info.role === "assistant" && !m.info.time.completed)
-              .map((m) => m.info.id),
-          )
-          yield* state.cancel(sessionID)
-          yield* abortPendingAssistants(sessionID, pendingIds)
-        }),
+      // 原子 check-and-set：Effect 协作式调度不会在同步代码块中切让 fiber，
+      // get 和 set 之间无 yield*，保证只一个 cancel 能进入 body。
+      // 后续 cancel 观察到已有 Deferred，直接 await 并重放同一 Exit。
+      const existing = cancelOps.get(sessionID)
+      if (existing) {
+        const exit = yield* Deferred.await(existing)
+        if (Exit.isFailure(exit)) yield* Effect.failCause(exit.cause)
+        return
+      }
+      const deferred = yield* Deferred.make<Exit.Exit<void>>()
+      cancelOps.set(sessionID, deferred)
+
+      // 取消 body：onExit 保证即使被中断也能完成 Deferred，避免 joiner 永久等待。
+      // 不可中断的终态转换在 onExit 回调中执行，确保 map 清理和 Deferred 完成
+      // 不受 scope 关闭或 fiber 中断影响。
+      yield* Effect.gen(function* () {
+        yield* elog.info("cancel", { sessionID })
+        // 快照当前 pending assistant ID，防止 cancel 后新建的消息（用户输入的新命令）
+        // 被 abortPendingAssistants 误杀。MessageV2.stream 是同步生成器，快照原子。
+        const pendingIds = new Set(
+          Array.from(MessageV2.stream(sessionID))
+            .filter((m) => m.info.role === "assistant" && !m.info.time.completed)
+            .map((m) => m.info.id),
+        )
+        yield* state.cancel(sessionID)
+        yield* abortPendingAssistants(sessionID, pendingIds)
+      }).pipe(
+        Effect.onExit((exit) =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              cancelOps.delete(sessionID)
+              yield* Deferred.done(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
+            }),
+          ),
+        ),
       )
     })
 
@@ -930,6 +947,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 }
                 return output
               }),
+              // [local-smark] 非 Bash 工具透传 AbortSignal 给 Effect.runPromise，
+              // 使 Effect 包装可被协作式中断，避免取消时等待 2s settle 兜底。
+              // Bash 豁免：shell.ts 自行处理 cooperative abort、output drain 和 user_abort 语义。
+              item.id !== ShellID.ToolID && options.abortSignal
+                ? { signal: options.abortSignal }
+                : undefined,
             )
           },
         })
@@ -1037,6 +1060,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
               return output
             }),
+            // [local-smark] MCP 工具同样透传 AbortSignal，使 Effect 包装可被协作式中断。
+            // convertMcpTool 内部也已将 signal 传给 client.callTool，双重中断保证。
+            opts.abortSignal ? { signal: opts.abortSignal } : undefined,
           )
         tools[key] = item
       }

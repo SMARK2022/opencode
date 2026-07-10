@@ -21,7 +21,7 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
 import { AuthError, OutputLengthError } from "./message-error"
-import { formatCompactionClearedNotice } from "@/util/output-notice"
+import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
 export { AuthError, OutputLengthError } from "./message-error"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
@@ -992,14 +992,22 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
           }
           if (part.state.status === "error") {
-            const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
-            if (typeof output === "string") {
+            const interrupted = part.state.metadata?.interrupted === true
+            // [local-smark] 只有新记录携带 server 写入的 executionElapsedMs 才追加 abort Notice；
+            // 旧记录无此字段，保持原样不追溯伪造 elapsed
+            const rawElapsed = interrupted ? part.state.metadata?.executionElapsedMs : undefined
+            const abortNotice = typeof rawElapsed === "number" && Number.isFinite(rawElapsed) && rawElapsed >= 0
+              ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
+              : undefined
+            const partialOutput = interrupted ? part.state.metadata?.output : undefined
+            if (typeof partialOutput === "string") {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-available",
                 toolCallId: part.callID,
                 input: part.state.input,
-                output,
+                // 有 marker 时追加 abort Notice，使模型能看到取消原因和耗时
+                output: abortNotice ? partialOutput + "\n\n" + abortNotice : partialOutput,
                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
               })
@@ -1009,7 +1017,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                 state: "output-error",
                 toolCallId: part.callID,
                 input: part.state.input,
-                errorText: part.state.error,
+                errorText: abortNotice ? part.state.error + "\n\n" + abortNotice : part.state.error,
                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
               })

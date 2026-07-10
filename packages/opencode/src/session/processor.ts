@@ -38,11 +38,18 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 export const TOOL_ABORTED_ERROR = "Tool execution aborted"
 const log = Log.create({ service: "session.processor" })
 
-export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined) {
+// [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
+// 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
+export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
   const base = metadata ?? {}
   const autoReview = base.autoReview
-  if (!isRecord(autoReview)) return { ...base, interrupted: true }
-  return { ...base, interrupted: true, autoReview: { ...autoReview, status: "aborted", error: TOOL_ABORTED_ERROR } }
+  const result: Record<string, unknown> = isRecord(autoReview)
+    ? { ...base, interrupted: true, autoReview: { ...autoReview, status: "aborted", error: TOOL_ABORTED_ERROR } }
+    : { ...base, interrupted: true }
+  if (typeof elapsedMs === "number" && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+    result.executionElapsedMs = Math.floor(elapsedMs)
+  }
+  return result
 }
 
 export type Result = "compact" | "stop" | "continue"
@@ -289,21 +296,22 @@ export const layer = Layer.effect(
         }
         const reason = errorMessage(error)
         const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
+        // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
+        // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
+        // 非 abort error 仅保留 autoReview envelope，保持既有行为
+        const failStart = match.part.state.time?.start ?? Date.now()
         yield* session.updatePart({
           ...match.part,
           state: {
             status: "error",
             input: match.part.state.input,
             error: toolAborted ? TOOL_ABORTED_ERROR : reason,
-            // Denied/failed auto reviews terminalize the shell as an error, but
-            // the UI still needs the review result line and reviewer-session link
-            // that were attached while the tool was running.
-            metadata: match.part.state.metadata?.autoReview
-              ? toolAborted
-                ? interruptedToolMetadata(match.part.state.metadata)
-                : { autoReview: match.part.state.metadata.autoReview }
-              : undefined,
-            time: { start: match.part.state.time.start, end: Date.now() },
+            metadata: toolAborted
+              ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
+              : match.part.state.metadata?.autoReview
+                ? { autoReview: match.part.state.metadata.autoReview }
+                : undefined,
+            time: { start: failStart, end: Date.now() },
           },
         })
         if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
@@ -936,7 +944,8 @@ export const layer = Layer.effect(
                 : {}),
               status: "error",
               error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
-              metadata: aborted ? interruptedToolMetadata(metadata) : metadata,
+              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
+              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
               time: { start: "time" in part.state ? part.state.time.start : end, end },
             },
           })
