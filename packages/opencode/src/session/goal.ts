@@ -25,6 +25,9 @@ export const Goal = Schema.Struct({
   tokenBudget: optionalOmitUndefined(Schema.NullOr(Schema.Number)),
   tokensUsed: Schema.Number,
   timeUsedSeconds: Schema.Number,
+  // [local-smark] 错误后续跑策略：用户通过 GUI/API 控制，模型不可修改。
+  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续。
+  continueOnError: Schema.Boolean,
   time: Schema.Struct({
     created: Schema.Number,
     updated: Schema.Number,
@@ -49,6 +52,8 @@ export interface SetInput {
   status?: Status
   // null = 清除预算；正数 = 设置预算；缺省 = 不改
   tokenBudget?: number | null
+  // [local-smark] 错误后续跑策略：缺省 = 不改，true/false = 设置
+  continueOnError?: boolean
 }
 
 export class GoalError extends Schema.TaggedErrorClass<GoalError>()("GoalError", {
@@ -84,6 +89,8 @@ export const layer = Layer.effect(
       tokenBudget: row.token_budget,
       tokensUsed: row.tokens_used,
       timeUsedSeconds: row.time_used_seconds,
+      // [local-smark] 从 DB boolean 列映射到 domain 字段
+      continueOnError: row.continue_on_error,
       time: { created: row.time_created, updated: row.time_updated },
     })
 
@@ -130,6 +137,8 @@ export const layer = Layer.effect(
         if (input.objective !== undefined) updates.objective = input.objective.trim()
         if (input.status !== undefined) updates.status = input.status
         if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
+        // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
+        if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
         Database.use((db) =>
           db.update(SessionGoalTable).set(updates).where(eq(SessionGoalTable.session_id, sessionID)).run(),
         )
@@ -148,23 +157,25 @@ export const layer = Layer.effect(
       }
 
       const goalId = ulid()
-      Database.use((db) =>
-        db
-          .insert(SessionGoalTable)
-          .values({
-            session_id: sessionID,
-            id: goalId,
-            objective: objective.trim(),
-            // 新建时 status 缺省为 active，立即进入续跑态
-            status: input.status ?? "active",
-            token_budget: input.tokenBudget ?? null,
-            tokens_used: 0,
-            time_used_seconds: 0,
-            time_created: now,
-            time_updated: now,
-          })
-          .run(),
-      )
+        Database.use((db) =>
+          db
+            .insert(SessionGoalTable)
+            .values({
+              session_id: sessionID,
+              id: goalId,
+              objective: objective.trim(),
+              // 新建时 status 缺省为 active，立即进入续跑态
+              status: input.status ?? "active",
+              token_budget: input.tokenBudget ?? null,
+              tokens_used: 0,
+              time_used_seconds: 0,
+              // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
+              continue_on_error: input.continueOnError ?? false,
+              time_created: now,
+              time_updated: now,
+            })
+            .run(),
+        )
       const row = Database.use((db) =>
         db.select().from(SessionGoalTable).where(eq(SessionGoalTable.session_id, sessionID)).get(),
       )!

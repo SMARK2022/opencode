@@ -476,6 +476,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         objective: ctx.payload.objective,
         status: ctx.payload.status,
         tokenBudget: ctx.payload.tokenBudget,
+        // [local-smark] 透传错误续跑策略到 domain service
+        continueOnError: ctx.payload.continueOnError,
       }).pipe(
         // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
         // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"

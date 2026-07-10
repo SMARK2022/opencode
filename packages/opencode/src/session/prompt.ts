@@ -64,7 +64,7 @@ import { AgentAttachment, FileAttachment, ReferenceAttachment, Source } from "@o
 import { Reference } from "@/reference/reference"
 import * as DateTime from "effect/DateTime"
 import { eq } from "@/storage/db"
-import { formatExecutionNotice } from "@/util/output-notice"
+import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
 import * as Database from "@/storage/db"
 import { SessionTable } from "./session.sql"
 import { TokenEstimate } from "@/token/estimate"
@@ -266,16 +266,19 @@ function referenceTextPart(input: {
   }
 }
 
+// [local-smark] 保留原始 start 并传 elapsed 给 interruptedToolMetadata，
+// 使下一轮模型回放能看到 user_abort + elapsed_ms
 function interruptedToolState(
   state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
   now: number,
 ): MessageV2.ToolStateError {
+  const start = state.status === "running" ? state.time.start : now
   return {
     status: "error",
     input: state.input,
     error: SessionProcessor.TOOL_ABORTED_ERROR,
-    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined),
-    time: { start: state.status === "running" ? state.time.start : now, end: now },
+    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined, now - start),
+    time: { start, end: now },
   }
 }
 
@@ -845,7 +848,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
                 status: "running",
                 input: args,
-                time: { start: Date.now() },
+                // [local-smark] 保留原始 start 时间：progress metadata update 不应重置 start，
+                // 否则 end-start 会变成"最后一次进度更新到结束"而不是完整执行时间
+                time: { start: match.state.status === "running" ? match.state.time.start : Date.now() },
               },
             }
           }),
@@ -879,6 +884,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             return run.promise(
               Effect.gen(function* () {
                 const ctx = context(args, options)
+                // [local-smark] 记录 Adapter 入口时间，用于计算完整 elapsed
+                const adapterStartedAt = Date.now()
                 const timing = {
                   source: "local" as const,
                   tool: item.id,
@@ -906,8 +913,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
                   output,
                 )
+                // [local-smark] Adapter 终态：abort 优先于 long completed
+                // Bash 由 shell.ts 自己处理所有 outcome Notice，这里跳过避免重复
+                const adapterElapsedMs = Date.now() - adapterStartedAt
                 if (options.abortSignal?.aborted) {
+                  // 工具正常返回但 abort signal 已触发：追加 user_abort Notice
+                  // Bash 跳过：shell.ts 的 formatShellExecutionNotice 已包含 abort Notice
+                  if (item.id !== ShellID.ToolID) {
+                    output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: adapterElapsedMs })
+                  }
                   yield* input.processor.completeToolCall(options.toolCallId, output)
+                } else if (item.id !== ShellID.ToolID) {
+                  // 非 Bash 的 generic tool：长成功追加中性 completed Notice
+                  const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
+                  if (notice) output.output += "\n\n" + notice
                 }
                 return output
               }),
@@ -928,6 +947,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           run.promise(
             Effect.gen(function* () {
               const ctx = context(args, opts)
+              // [local-smark] 记录 MCP Adapter 入口时间
+              const mcpStartedAt = Date.now()
               const timing = {
                 source: "mcp" as const,
                 tool: key,
@@ -1006,7 +1027,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 content: result.content,
               }
               if (opts.abortSignal?.aborted) {
+                // [local-smark] MCP 工具正常返回但已 abort：追加 user_abort Notice
+                output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Date.now() - mcpStartedAt })
                 yield* input.processor.completeToolCall(opts.toolCallId, output)
+              } else {
+                // [local-smark] MCP 长成功：在 truncation 后追加 completed Notice
+                const notice = formatLongExecutionNotice("tool", Date.now() - mcpStartedAt)
+                if (notice) output.output += "\n\n" + notice
               }
               return output
             }),
@@ -1165,6 +1192,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       yield* sessions.updateMessage(assistantMessage)
 
       if (result && part.state.status === "running") {
+        // [local-smark] Task 长成功：在持久化前追加 completed Notice
+        const taskElapsedMs = Date.now() - (part.state.time.start ?? Date.now())
+        const taskNotice = formatLongExecutionNotice("tool", taskElapsedMs)
         yield* sessions.updatePart({
           ...part,
           state: {
@@ -1172,7 +1202,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             input: part.state.input,
             title: result.title,
             metadata: result.metadata,
-            output: result.output,
+            output: taskNotice ? result.output + "\n\n" + taskNotice : result.output,
             attachments,
             time: { ...part.state.time, end: Date.now() },
           },
@@ -1322,10 +1352,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           const finish = Effect.uninterruptible(
             Effect.gen(function* () {
+              // [local-smark] direct shell 终态 elapsed；started 在内部 gen 作用域，
+              // 这里用 part.state.time.start 获取原始开始时间（status 可能已被 cancel 改为 error）
+              const shellStart = "time" in part.state ? part.state.time.start : Date.now()
+              const shellElapsedMs = Date.now() - shellStart
               if (aborted) {
                 // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
-                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
+                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
+              } else {
+                // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice
+                const notice = formatLongExecutionNotice("shell", shellElapsedMs)
+                if (notice) output += "\n\n" + notice
               }
               const completed = Date.now()
               if (flags.experimentalEventSystem) {
@@ -2106,6 +2144,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // [local-smark] goal 续跑计数器：独立于 step，
         // 防止 step++ 在 continue 路径被跳过导致无限循环
         let goalTurns = 0
+        // [local-smark] 一次性 terminal-error marker：只在 eligible 错误发生时设置，
+        // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于 provenance 校验。
+        // marker 消费后立即清空，防止历史错误在新 iteration 或新 runLoop 中残留。
+        let pendingTerminalError: { assistantID: string } | undefined
         // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
         // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
         // 使后续再次达到 85% 时可以重新提示。
@@ -2134,7 +2176,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const hasToolCalls =
             lastAssistantMsg?.parts.some((part) => part.type === "tool" && !part.metadata?.providerExecuted) ?? false
 
-          if (
+          // [local-smark] 消费一次性 terminal-error marker：只在下一条 iteration 生效，
+          // 之后立即清空防止历史错误残留。marker 不携带错误内容。
+          const terminalError = pendingTerminalError
+          pendingTerminalError = undefined
+
+          // 正常完成路径：assistant 有 finish 且无 error
+          const normalCompletion =
             lastAssistant?.finish &&
             // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
             // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
@@ -2143,7 +2191,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
             lastUser.id < lastAssistant.id
-          ) {
+
+          // [local-smark] 错误续跑路径：marker 证明来源是 eligible terminal error，
+          // 且 latest assistant 仍是对应的 errored message。
+          // 使用同一个精确 allowlist predicate 重新验证，防止 assistant 被意外修改后误触发。
+          const errorCompletion =
+            terminalError !== undefined &&
+            lastAssistant?.error !== undefined &&
+            lastAssistant.id === terminalError.assistantID &&
+            (MessageV2.APIError.isInstance(lastAssistant.error) ||
+              NamedError.Unknown.isInstance(lastAssistant.error))
+
+          if (normalCompletion || errorCompletion) {
             // [local-smark] goal 续跑检查：assistant 正常结束后，
             // 如果 session 有 active goal 且未达上限，注入续跑 prompt 并 continue。
             // 续跑 prompt 作为 synthetic user message 注入，保留 synthetic=true
@@ -2171,7 +2230,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   goal.status === "active" &&
                   goalAgent &&
                   !isDecideAgent(goalAgent) &&
-                  step < maxSteps
+                  step < maxSteps &&
+                  // [local-smark] 错误续跑路径要求 continueOnError=true；
+                  // 正常完成路径（errorCompletion=false）始终允许
+                  (!errorCompletion || goal.continueOnError)
                 ) {
                   goalTurns++
                   // 注入 synthetic user message 作为续跑 prompt
@@ -2276,7 +2338,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             })
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
-          const outcome: "break" | "continue" = yield* Effect.gen(function* () {
+          // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
+          const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
             const decide = isDecideAgent(agent)
@@ -2527,7 +2590,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
             }
 
-            if (result === "stop") return "break" as const
+            if (result === "stop") {
+              // [local-smark] eligible terminal error 检查：只有 APIError 和 UnknownError
+              // 才允许进入错误续跑路径。其他错误（Abort/Auth/Overflow/StructuredOutput）
+              // 仍返回普通 break，保持现有行为不变。
+              // APIError 覆盖 provider API 终止错误，UnknownError 覆盖 cyber_policy 等未分类错误。
+              const err = handle.message.error
+              if (
+                err &&
+                (MessageV2.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
+              ) {
+                return "terminal-error" as const
+              }
+              return "break" as const
+            }
             // [local-smark] goal token/time 计费：assistant message 完成后，
             // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
             if (handle.message.tokens && handle.message.time.completed) {
@@ -2566,6 +2642,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
           if (outcome === "break") break
+          // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。
+          // 下一次 iteration 的 continuation block 会检查 continueOnError、goalTurns、
+          // active status 等条件。不满足条件时自然 fall through 到 break，
+          // 达到 maxGoalTurns 时按现有逻辑 pause。不在此处重复任何 guard。
+          if (outcome === "terminal-error") {
+            pendingTerminalError = { assistantID: handle.message.id }
+            continue
+          }
           continue
         }
 

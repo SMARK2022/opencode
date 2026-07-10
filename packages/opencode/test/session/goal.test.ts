@@ -432,3 +432,99 @@ it.instance(
     }),
   { git: true },
 )
+
+// [local-smark] continueOnError 字段测试：验证错误后续跑策略的持久化行为。
+// 默认 false 保证升级后旧 GOAL 行为不变；局部更新不得重置该字段。
+it.instance(
+  "new goal defaults to continueOnError false",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      // 新建 GOAL 不传 continueOnError，默认必须为 false
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      expect(goal.continueOnError).toBe(false)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "create goal with continueOnError true",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      // 显式开启错误续跑策略
+      const goal = yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
+      expect(goal.continueOnError).toBe(true)
+
+      // 持久化后读取仍为 true
+      const result = yield* goalSvc.get(session.id)
+      if (Option.isSome(result)) {
+        expect(result.value.continueOnError).toBe(true)
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "toggle continueOnError between true and false",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
+      // 关闭：false 应覆盖 true
+      const disabled = yield* goalSvc.set(session.id, { continueOnError: false })
+      expect(disabled.continueOnError).toBe(false)
+
+      // 再次开启
+      const enabled = yield* goalSvc.set(session.id, { continueOnError: true })
+      expect(enabled.continueOnError).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "objective update preserves continueOnError",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "original", continueOnError: true })
+      // 编辑 objective 不传 continueOnError，策略必须保留
+      const updated = yield* goalSvc.set(session.id, { objective: "revised" })
+      expect(updated.objective).toBe("revised")
+      expect(updated.continueOnError).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "status update preserves continueOnError",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
+      // Pause 不传 continueOnError，策略必须保留
+      const paused = yield* goalSvc.set(session.id, { status: "paused" })
+      expect(paused.status).toBe("paused")
+      expect(paused.continueOnError).toBe(true)
+
+      // Resume 也不传 continueOnError
+      const resumed = yield* goalSvc.set(session.id, { status: "active" })
+      expect(resumed.continueOnError).toBe(true)
+    }),
+  { git: true },
+)

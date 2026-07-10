@@ -29,6 +29,10 @@ export const SessionGoalTable = sqliteTable(
     token_budget: integer(),
     tokens_used: integer().notNull().default(0),
     time_used_seconds: integer().notNull().default(0),
+    // [local-smark] 错误后续跑策略：false=终止型错误后停止（默认），
+    // true=允许 GOAL continuation 在 eligible 错误后继续。
+    // 默认 false 保证升级后旧 GOAL 行为不变。
+    continue_on_error: integer({ mode: "boolean" }).notNull().default(false),
     ...Timestamps,
   },
   (table) => [index("session_goal_status_idx").on(table.session_id, table.status)],

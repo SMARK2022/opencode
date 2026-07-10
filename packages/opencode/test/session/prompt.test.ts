@@ -3374,3 +3374,85 @@ it.instance(
   { git: true },
   15_000,
 )
+
+// [local-smark] GOAL 错误后续跑测试：验证 continueOnError 策略控制
+// 终止型错误后是否自动创建新的 GOAL continuation turn。
+
+it.instance(
+  "goal error continuation disabled by default — terminal APIError stops loop",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+
+      const chat = yield* sessions.create({})
+      // 设置 GOAL 但不开启 continueOnError（默认 false）
+      yield* goalSvc.set(chat.id, { objective: "complete the task" })
+      yield* user(chat.id, "start working")
+
+      // 推入一个 400 错误（APIError，非重试）
+      yield* llm.error(400, { error: { message: "bad request" } })
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // 默认 false：错误后不创建 continuation。验证不存在 synthetic continuation 消息
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const continuations = msgs.filter(
+        (m) =>
+          m.info.role === "user" &&
+          m.parts.some(
+            (p) => p.type === "text" && (p as any).synthetic === true && p.text?.includes("<session-goal-continuation>"),
+          ),
+      )
+      expect(continuations.length).toBe(0)
+    }),
+  { git: true },
+  30_000,
+)
+
+it.instance(
+  "goal error continuation enabled — terminal APIError triggers one system_continue",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 1 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+
+      const chat = yield* sessions.create({})
+      // 开启错误续跑策略
+      yield* goalSvc.set(chat.id, { objective: "complete the task", continueOnError: true })
+      yield* user(chat.id, "start working")
+
+      // 第一次：400 错误（APIError），触发 terminal-error → 错误续跑
+      // 第二次：续跑后再次 400 错误 → goalTurns=1 >= maxGoalTurns=1 → pause + break
+      // 注意：400 非重试，AI SDK 不重试，SessionRetry 也不重试
+      yield* llm.error(400, { error: { message: "bad request" } })
+      yield* llm.error(400, { error: { message: "bad request" } })
+
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // 验证存在 system_continue 消息：source 字段被 schema decoder 剥离，
+      // 改为检查 synthetic text part 中的 continuation prompt 标记
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const continuations = msgs.filter(
+        (m) =>
+          m.info.role === "user" &&
+          m.parts.some(
+            (p) => p.type === "text" && (p as any).synthetic === true && p.text?.includes("<session-goal-continuation>"),
+          ),
+      )
+      // [local-smark] goal_max_turns=1：错误续跑一次后到达上限，GOAL paused
+      expect(continuations.length).toBe(1)
+
+      // 续跑 prompt 不包含错误消息内容
+      const continueText = continuations[0].parts.find(
+        (p) => p.type === "text" && (p as any).text?.includes("<session-goal-continuation>"),
+      ) as any
+      expect(continueText?.text).not.toContain("bad request")
+    }),
+  { git: true },
+  30_000,
+)

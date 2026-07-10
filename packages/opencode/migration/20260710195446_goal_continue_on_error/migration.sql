@@ -1,0 +1,1 @@
+ALTER TABLE `session_goal` ADD `continue_on_error` integer DEFAULT false NOT NULL;

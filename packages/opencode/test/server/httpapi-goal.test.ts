@@ -181,14 +181,112 @@ describe("session goal HttpApi", () => {
         })
         expect(res.status).toBe(404)
         const parsed = yield* responseJson(res)
-        expect(parsed).toEqual({
+      expect(parsed).toEqual({
           name: "NotFoundError",
           data: { message: `Session not found: ${missing}` },
         })
       }),
     { git: true, config: { formatter: false, lsp: false } },
-    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
-    // 默认 5s 在冷启动（首个用例）时可能超时
+    30000,
+  )
+
+  // [local-smark] continueOnError HTTP 契约测试：验证 boolean 透传、保留和拒绝
+  it.instance(
+    "POST with continueOnError true creates goal and GET returns true",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession()
+        // 创建时显式开启错误续跑
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "test", continueOnError: true }),
+        })
+        expect(res.status).toBe(200)
+        const parsed = yield* responseJson(res)
+        expect(parsed.goal.continueOnError).toBe(true)
+
+        // GET 也返回 true
+        const getRes = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          headers: { "x-opencode-directory": test.directory },
+        })
+        const getParsed = yield* responseJson(getRes)
+        expect(getParsed.goal.continueOnError).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30000,
+  )
+
+  it.instance(
+    "POST continueOnError update preserves objective and status",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession()
+        // 先创建带 objective 的 goal
+        yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "original" }),
+        })
+        // 只更新 continueOnError，objective 必须保留
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ continueOnError: true }),
+        })
+        expect(res.status).toBe(200)
+        const parsed = yield* responseJson(res)
+        expect(parsed.goal.continueOnError).toBe(true)
+        expect(parsed.goal.objective).toBe("original")
+        expect(parsed.goal.status).toBe("active")
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30000,
+  )
+
+  it.instance(
+    "POST without continueOnError preserves existing value",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession()
+        // 创建时开启
+        yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "test", continueOnError: true }),
+        })
+        // 更新 objective 不传 continueOnError，策略必须保留
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "updated" }),
+        })
+        const parsed = yield* responseJson(res)
+        expect(parsed.goal.continueOnError).toBe(true)
+        expect(parsed.goal.objective).toBe("updated")
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30000,
+  )
+
+  it.instance(
+    "POST with non-boolean continueOnError is rejected by schema",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession()
+        // 字符串 "true" 不是合法 boolean，schema 必须拒绝
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "test", continueOnError: "true" }),
+        })
+        expect(res.status).toBe(400)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
     30000,
   )
 })
