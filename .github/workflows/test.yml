@@ -304,7 +304,8 @@ jobs:
           for package in packages/* packages/console/* packages/stats/*; do
             if [ -f "$package/package.json" ]; then mkdir -p "$package/.artifacts/unit"; fi
           done
-          GITHUB_ACTIONS=false bun turbo test --continue=always --summarize -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
+          # 串行调度Turbo任务以减少Windows资源竞争；--后的包内reporter参数保持原样。
+          GITHUB_ACTIONS=false bun turbo test --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 
       - name: Warn on upstream unit failures
         if: always() && steps.upstream.outcome != 'success'
