@@ -306,7 +306,10 @@ jobs:
       - name: Run upstream unit compatibility tests
         id: upstream
         continue-on-error: true
-        run: bun turbo test:ci --continue=always --summarize
+        # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
+        # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
+        # 串行消除并行资源竞争，预期总时长 ~30m（opencode 24m + 其余 <2m + 安装 4m）。
+        run: bun turbo test:ci --continue=always --summarize --concurrency=1
 
       - name: Warn on upstream unit failures
         if: always() && steps.upstream.outcome != 'success'
