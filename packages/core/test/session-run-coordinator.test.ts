@@ -328,8 +328,12 @@ describe("SessionRunCoordinator", () => {
         const interrupt = yield* coordinator.interrupt("session").pipe(Effect.forkChild)
         yield* Deferred.await(cleanupStarted)
         yield* coordinator.wake("session")
+        // 第二个interrupt发生于同一清理窗口，后来的wake仍须触发唯一后继。
+        const overlap = yield* coordinator.interrupt("session").pipe(Effect.forkChild)
+        yield* Effect.yieldNow
         yield* Deferred.succeed(cleanupGate, undefined)
         yield* Fiber.join(interrupt)
+        yield* Fiber.join(overlap)
         yield* Deferred.await(secondStarted)
 
         expect(runs).toBe(2)

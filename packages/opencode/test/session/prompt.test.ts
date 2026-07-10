@@ -4468,6 +4468,8 @@ noLLMServer.instance(
           if (Exit.isFailure(firstExit) && Exit.isFailure(joinedExit)) {
             expect(Cause.squash(firstExit.cause)).toBe(failure)
             expect(Cause.squash(joinedExit.cause)).toBe(failure)
+            // 共享完整Cause而非只比较squash后的同一个Error对象。
+            expect(joinedExit.cause).toEqual(firstExit.cause)
           }
           expect(cancels).toBe(1)
           expect(replacementAborted).toBe(false)
