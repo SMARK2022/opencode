@@ -1,18 +1,18 @@
 # SMARK OpenCode IDE Bridge
 
-Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token.
+Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.19.12` until this repository build is published.
 
 | Field | Value |
 | --- | --- |
 | Extension ID | `SMARK2022.opencode-ide-bridge` |
 | Publisher | `SMARK2022` |
-| Extension version | `1.19.12` |
-| Compatible CLI | `opencode 1.19.13-smark` or newer |
+| Repository extension version | `1.19.13` |
+| Recommended CLI | `opencode 1.19.15-smark` |
 | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
 
 ## What It Adds
 
-The upstream VS Code extension mainly opens an `opencode` terminal. This SMARK extension keeps that terminal workflow and adds a bridge that lets OpenCode work with VS Code notebooks directly.
+The upstream VS Code extension mainly opens an `opencode` terminal. This SMARK extension keeps that terminal workflow and adds an authenticated notebook bridge; LSP integration is disabled in both CLI execution paths.
 
 | Capability | What it does |
 | --- | --- |
@@ -23,12 +23,14 @@ The upstream VS Code extension mainly opens an `opencode` terminal. This SMARK e
 | Notebook editing | Inserts, edits, deletes, and changes notebook cell language or kind through VS Code notebook APIs. |
 | Notebook execution | Runs one cell or a stable-ID range through VS Code's native notebook execution command. |
 | Output artifacts | Writes images, HTML, JSON, and large text outputs to artifact files and returns compact summaries. |
-| Kernel operations | Inspects, configures, restarts, and explicitly saves notebooks when requested. |
+| LSP | Fixed unavailable in both CLI execution paths; notebook and terminal features remain available. |
+| Kernel operations | Inspects, configures, restarts, or stops kernels and explicitly creates or saves notebooks when requested. |
 
 ## Prerequisites
 
 - Install the SMARK OpenCode CLI from https://github.com/SMARK2022/opencode/releases.
 - Install this extension as `SMARK2022.opencode-ide-bridge`.
+- LSP integration is disabled; enabling a language extension does not enable OpenCode language services.
 - For `.ipynb` work, install the VS Code Jupyter extension `ms-toolsai.jupyter`.
 - For Python notebooks, install the VS Code Python extension `ms-python.python` and configure a kernel.
 - Run OpenCode from the same local environment as the VS Code extension host. Remote SSH, WSL, or container workspaces need the CLI on the same side as the bridge.
@@ -48,7 +50,7 @@ Inspect this notebook and summarize the cells before making changes.
 ```
 
 ```text
-Run cells c3 through c5, then show me the output artifacts.
+Run the range between the stable #VSC-* cell IDs returned by the summary, then show me the output artifacts.
 ```
 
 ```text
@@ -78,7 +80,7 @@ OpenCode registers these tools when the SMARK CLI loads its built-in VS Code bri
 | `vscode_notebook_edit` | Insert, edit, delete, or change the kind/language of notebook cells using stable cell IDs and string-match edits. |
 | `vscode_notebook_run` | Execute a single code cell or a range of code cells in VS Code/Jupyter. |
 | `vscode_notebook_output` | Export cell outputs as compact summaries plus artifact file paths. |
-| `vscode_notebook_env` | Inspect kernel state, configure a kernel, restart a kernel, or save a notebook when explicitly requested. |
+| `vscode_notebook_env` | Inspect kernel state, configure, restart, or stop a kernel, and create or save a notebook when explicitly requested. |
 
 Recommended notebook flow:
 
@@ -99,7 +101,7 @@ On startup, the extension starts an HTTP server on `127.0.0.1:<random port>`. It
 ~/.local/state/opencode/ide/<uuid>.json
 ```
 
-Set `OPENCODE_IDE_REGISTRY_DIR` to override this location. The CLI scans the registry, checks live bridge health, scores matching workspaces, and uses the best matching bridge for notebook tools.
+Set `OPENCODE_IDE_REGISTRY_DIR` to override this location. The CLI scans the registry, checks live bridge health, scores matching workspaces, and uses the best matching bridge for notebook tools, not language services.
 
 Each registry manifest includes:
 
@@ -109,7 +111,11 @@ Each registry manifest includes:
 | `workspaceFolders` | VS Code workspace folders used for matching notebook paths. |
 | `active.textEditor` | Active text editor URI, when present. |
 | `active.notebook` | Active notebook URI, when present. |
-| `capabilities` | Bridge feature flags, including notebook support. |
+| `capabilities` | Bridge feature flags, including notebook support; this build does not advertise an `lsp` capability. |
+
+## Language Intelligence
+
+LSP integration is disabled in both CLI execution paths. Language diagnostics, hover, definition, references, symbols, implementation, and call hierarchy are unavailable; the bridge exposes no language-service routes and the CLI has no built-in LSP fallback. Notebook operations and formatter-final edit feedback remain available.
 
 ## HTTP Endpoints
 
@@ -125,7 +131,7 @@ The OpenCode CLI uses these bridge endpoints internally. Normal users should pre
 | `POST` | `/notebook/run` | Bearer | Execute a cell or range. |
 | `POST` | `/notebook/output` | Bearer | Export outputs as artifacts. |
 | `POST` | `/notebook/cell-output` | Bearer | Alias for `/notebook/output`. |
-| `POST` | `/notebook/env` | Bearer | Kernel info, configure, restart, and save operations. |
+| `POST` | `/notebook/env` | Bearer | Kernel info/configure/restart/stop and notebook create/save operations. |
 
 ## Security Model
 
@@ -137,7 +143,7 @@ The OpenCode CLI uses these bridge endpoints internally. Normal users should pre
 | Browser hardening | Requests with an `Origin` header are rejected. |
 | Token logging | Logs print `<redacted>` instead of the token. |
 | Registry permissions | Registry directories use `0o700` and manifest files use `0o600` on non-Windows systems. |
-| Write permissions | Notebook edits and notebook saves still go through OpenCode permission gates. |
+| Write permissions | Notebook edits, saves, and creates go through OpenCode permission gates; save/create also require the general `edit` gate. |
 
 ## Output Artifacts
 
@@ -158,6 +164,8 @@ Small text may be inlined in the tool response. Images, HTML, JSON, binary outpu
 | Source paging | `vscode_notebook_source` caps output at 16 KB and supports `offset`/`limit` pagination. |
 | Run ranges | Range execution is sequential and stops on the first failed or timed-out code cell. |
 | Kernel configure | A selected kernel may not become active until the first code cell executes. `selected` is a valid configure result. |
+| Language integration | LSP is fixed unavailable; configuration or bridge discovery cannot enable it. |
+| Diagnostics | An unavailable result is not a clean diagnostic report or a project typecheck. |
 | Save | `vscode_notebook_env` with `operation: "save"` should only be used after explicit user intent. |
 
 ## Local VSIX Install
@@ -215,7 +223,7 @@ VS Code Extension Host
     |-- edit.ts            Cell insert/edit/delete and language changes
     |-- run.ts             Cell execution through VS Code/Jupyter
     |-- output.ts          Artifact-first output export
-    |-- env.ts             Kernel info/configure/restart/save
+    |-- env.ts             Kernel info/configure/restart/stop and create/save
     |-- commands.ts        Interactive development test command
     |-- format.ts          Summary text and cell ID formatting
     `-- resolve.ts         Notebook and cell resolution
@@ -227,6 +235,7 @@ VS Code Extension Host
 | --- | --- |
 | `No live VS Code bridge found` | Ensure VS Code is open, this extension is enabled, and the workspace is open in VS Code. Run `Show OpenCode Bridge Log`. |
 | `No live VS Code bridge workspace matches filePath` | Reuse the exact notebook path returned by `vscode_notebook_summary`; check WSL/Remote path boundaries. |
+| LSP diagnostics unavailable | Expected in this build; use formatter-final diffs and explicit project checks rather than language-service bridge setup. |
 | Kernel configure returns `needs-selection` | Select a kernel in the VS Code notebook toolbar, then run configure again. |
 | Kernel configure returns `selected` | Proceed to run a code cell; Jupyter often starts the kernel on first execution. |
 | Output artifacts are missing | Ensure a workspace folder is open; artifacts require `.opencode/cache/notebook-outputs/` under a workspace. |
