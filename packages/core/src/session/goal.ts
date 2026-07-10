@@ -20,6 +20,8 @@ export interface SetInput {
   status?: Status
   // null = 清除预算；正数 = 设置预算；缺省 = 不改
   tokenBudget?: number | null
+  // [local-smark] 错误后续跑策略：缺省 = 不改，true/false = 设置
+  continueOnError?: boolean
 }
 
 // [local-smark] set 语义错误：无 objective 且无既有 goal 时抛出（无法凭空更新状态）
@@ -58,6 +60,8 @@ const layer = Layer.effect(
       tokenBudget: row.token_budget,
       tokensUsed: row.tokens_used,
       timeUsedSeconds: row.time_used_seconds,
+      // [local-smark] 从 DB boolean 列映射到 domain 字段
+      continueOnError: row.continue_on_error,
       time: { created: row.time_created, updated: row.time_updated },
     })
 
@@ -121,6 +125,8 @@ const layer = Layer.effect(
         if (input.objective !== undefined) updates.objective = input.objective.trim()
         if (input.status !== undefined) updates.status = input.status
         if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
+        // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
+        if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
         yield* db
           .update(SessionGoalTable)
           .set(updates)
@@ -156,6 +162,8 @@ const layer = Layer.effect(
           token_budget: input.tokenBudget ?? null,
           tokens_used: 0,
           time_used_seconds: 0,
+          // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
+          continue_on_error: input.continueOnError ?? false,
           time_created: now,
           time_updated: now,
         })

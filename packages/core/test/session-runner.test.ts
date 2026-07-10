@@ -8,6 +8,7 @@ import {
   LLMEvent,
   Model,
   TransportReason,
+  AuthenticationReason,
   InvalidRequestReason,
   type LLMClientShape,
   type LLMRequest,
@@ -824,6 +825,64 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
     const database = yield* Database.Service
     expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)).toBeUndefined()
+  }),
+)
+
+goalTests.effect("gates native terminal error continuation and preserves typed authentication failure", () =>
+  Effect.gen(function* () {
+    yield* setup
+    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0; responses = undefined; responseStream = undefined; streamFailure = undefined }))
+    const session = yield* SessionV2.Service
+    const runner = yield* SessionRunner.Service
+    const goals = yield* SessionGoal.Service
+    // 通过真实共享存储验证策略局部更新，不以Git fixture或影子对象替代持久化。
+    const original = yield* goals.set(sessionID, { objective: "policy", tokenBudget: 50000 })
+    expect(original.continueOnError).toBe(false)
+    expect(yield* goals.set(sessionID, { continueOnError: true })).toMatchObject({ id: original.id, objective: "policy", tokenBudget: 50000, continueOnError: true })
+    yield* goals.accountUsage(sessionID, 10, 1)
+    for (const input of [{ objective: "updated" }, { status: "paused" as const }, { status: "active" as const }]) {
+      expect((yield* goals.set(sessionID, input)).continueOnError).toBe(true)
+    }
+    expect(yield* goals.set(sessionID, { continueOnError: false })).toMatchObject({ id: original.id, objective: "updated", tokensUsed: 10, tokenBudget: 50000, continueOnError: false, time: { created: original.time.created } })
+    yield* goals.clear(sessionID)
+    const normal = [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+      LLMEvent.finish({ reason: "stop" }),
+    ]
+    for (const kind of ["raw", "event"] as const) {
+      for (const enabled of [false, true]) {
+        const id = SessionV2.ID.make(`ses_goal_error_${kind}_${enabled}`)
+        yield* insertSession(id)
+        yield* goals.set(id, { objective: "Complete the requested task", continueOnError: enabled })
+        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Start" }), resume: false })
+        requests.length = 0
+        responses = [normal, normal]
+        responseStream = kind === "raw"
+          ? Stream.fail(providerUnavailable())
+          : Stream.fromIterable([LLMEvent.providerError({ message: "Provider unavailable" })])
+        const exit = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit)
+        // raw失败默认保留typed cause；显式开启后，错误与正常轮次共用两次续跑额度。
+        expect(Exit.isFailure(exit)).toBe(kind === "raw" && !enabled)
+        expect(requests).toHaveLength(enabled ? 3 : 1)
+        expect(Option.getOrThrow(yield* goals.get(id)).status).toBe(enabled ? "paused" : "active")
+        if (enabled) {
+          // 新回合只携带标准Goal提示，不把错误内容变成新的用户指令。
+          expect(userTexts(requests[1]!).at(-1)).toContain("<session-goal-continuation>")
+          expect(userTexts(requests[1]!).at(-1)).not.toContain("Provider unavailable")
+        }
+      }
+    }
+    // 鉴权错误即使开启策略也不进入API/Unknown续跑集合。
+    const id = SessionV2.ID.make("ses_goal_error_auth")
+    yield* insertSession(id)
+    yield* goals.set(id, { objective: "Complete the task", continueOnError: true })
+    yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Start" }), resume: false })
+    requests.length = 0
+    responseStream = Stream.fail(new LLMError({ module: "test", method: "stream", reason: new AuthenticationReason({ message: "Invalid credentials", kind: "invalid" }) }))
+    expect((yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit))._tag).toBe("Failure")
+    expect(requests).toHaveLength(1)
+    expect(Option.getOrThrow(yield* goals.get(id)).status).toBe("active")
   }),
 )
 

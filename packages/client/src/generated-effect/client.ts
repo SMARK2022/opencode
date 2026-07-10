@@ -99,11 +99,17 @@ type Endpoint3_5Input = {
   readonly objective?: Endpoint3_5Request["payload"]["objective"]
   readonly status?: Endpoint3_5Request["payload"]["status"]
   readonly tokenBudget?: Endpoint3_5Request["payload"]["tokenBudget"]
+  readonly continueOnError?: Endpoint3_5Request["payload"]["continueOnError"]
 }
 const Endpoint3_5 = (raw: RawClient["server.session"]) => (input: Endpoint3_5Input) =>
   raw["session.goal.set"]({
     params: { sessionID: input["sessionID"] },
-    payload: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
+    payload: {
+      objective: input["objective"],
+      status: input["status"],
+      tokenBudget: input["tokenBudget"],
+      continueOnError: input["continueOnError"],
+    },
   }).pipe(Effect.mapError(mapClientError))
 
 type Endpoint3_6Request = Parameters<RawClient["server.session"]["session.goal.clear"]>[0]

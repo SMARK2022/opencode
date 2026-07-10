@@ -368,7 +368,12 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
-            body: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
+            body: {
+              objective: input["objective"],
+              status: input["status"],
+              tokenBudget: input["tokenBudget"],
+              continueOnError: input["continueOnError"],
+            },
             successStatus: 200,
             declaredStatuses: [400, 404, 401],
             empty: false,

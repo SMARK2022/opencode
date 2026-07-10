@@ -26,6 +26,7 @@ export type Event =
   | EventSessionNextRequestEstimated
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
+  | EventSessionNextMessagesHidden
   | EventSessionNextShellStarted
   | EventSessionNextShellEnded
   | EventSessionNextStepStarted
@@ -72,9 +73,15 @@ export type Event =
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
   | EventTodoUpdated
+  | EventSessionGoalUpdated
+  | EventSessionGoalCleared
   | EventLspUpdated
   | EventPermissionAsked
   | EventPermissionReplied
+  | EventPermissionReviewStarted
+  | EventPermissionReviewCompleted
+  | EventPermissionReviewFailed
+  | EventPermissionReviewCircuitBroken
   | EventTuiPromptAppend2
   | EventTuiCommandExecute2
   | EventTuiToastShow2
@@ -244,6 +251,10 @@ export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
 export type UserMessage = {
   id: string
   sessionID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   role: "user"
   time: {
     created: number
@@ -338,6 +349,10 @@ export type ApiError = {
 export type AssistantMessage = {
   id: string
   sessionID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   role: "assistant"
   time: {
     created: number
@@ -385,6 +400,10 @@ export type TextPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "text"
   text: string
   synthetic?: boolean
@@ -402,6 +421,10 @@ export type SubtaskPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "subtask"
   prompt: string
   description: string
@@ -417,6 +440,10 @@ export type ReasoningPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "reasoning"
   text: string
   metadata?: {
@@ -473,6 +500,10 @@ export type FilePart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "file"
   mime: string
   filename?: string
@@ -541,6 +572,10 @@ export type ToolPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "tool"
   callID: string
   tool: string
@@ -554,14 +589,25 @@ export type StepStartPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "step-start"
   snapshot?: string
+  inputChars?: number
+  inputTokens?: number
+  inputBreakdown?: SessionMessageInputBreakdown
 }
 
 export type StepFinishPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "step-finish"
   reason: string
   snapshot?: string
@@ -584,6 +630,10 @@ export type SnapshotPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "snapshot"
   snapshot: string
 }
@@ -592,6 +642,10 @@ export type PatchPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "patch"
   hash: string
   files: Array<string>
@@ -601,6 +655,10 @@ export type AgentPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "agent"
   name: string
   source?: {
@@ -614,6 +672,10 @@ export type RetryPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "retry"
   attempt: number
   error: ApiError
@@ -626,12 +688,15 @@ export type CompactionPart = {
   id: string
   sessionID: string
   messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
   type: "compaction"
   auto: boolean
   overflow?: boolean
   tail_start_id?: string
   recent_user_messages?: Array<{
-  // #256：生成文件与 schema 同步——SDK 消费者可类型化读取 memento
     id: string
     text: string
     truncated?: boolean
@@ -682,6 +747,21 @@ export type Todo = {
    * Priority level of the task: high, medium, low
    */
   priority: string
+}
+
+export type SessionGoal = {
+  sessionID: string
+  id: string
+  objective: string
+  status: "active" | "paused" | "complete" | "blocked"
+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  continueOnError: boolean
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
 }
 
 export type SessionStatus =
@@ -939,6 +1019,16 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.messages.hidden"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageIDs: Array<string>
+          hidden: SessionMessageHidden
+        }
+      }
+    | {
+        id: string
         type: "session.next.shell.started"
         properties: {
           timestamp: number
@@ -991,6 +1081,10 @@ export type GlobalEvent = {
           }
           snapshot?: string
           files?: Array<string>
+          summary?: {
+            messageID: string
+            diffs: Array<SnapshotFileDiff>
+          }
         }
       }
     | {
@@ -1212,6 +1306,12 @@ export type GlobalEvent = {
           reason: "auto" | "manual"
           text: string
           recent: string
+          recent_user_messages?: Array<{
+            id: string
+            text: string
+            truncated?: boolean
+          }>
+          file_evidence?: string
           usage?: {
             tokens: {
               input: number
@@ -1455,6 +1555,21 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.goal.updated"
+        properties: {
+          sessionID: string
+          goal: SessionGoal
+        }
+      }
+    | {
+        id: string
+        type: "session.goal.cleared"
+        properties: {
+          sessionID: string
+        }
+      }
+    | {
+        id: string
         type: "lsp.updated"
         properties: {
           [key: string]: unknown
@@ -1485,6 +1600,48 @@ export type GlobalEvent = {
           sessionID: string
           requestID: string
           reply: "once" | "always" | "reject"
+        }
+      }
+    | {
+        id: string
+        type: "permission.review.started"
+        properties: {
+          sessionID: string
+          reviewID: string
+          permission: string
+          patterns: Array<string>
+          precheck: {
+            level: "safe" | "general" | "cautious" | "dangerous"
+            reason: string
+          }
+        }
+      }
+    | {
+        id: string
+        type: "permission.review.completed"
+        properties: {
+          sessionID: string
+          reviewID: string
+          outcome: "allow" | "deny"
+          rationale: string
+        }
+      }
+    | {
+        id: string
+        type: "permission.review.failed"
+        properties: {
+          sessionID: string
+          reviewID: string
+          reason: string
+        }
+      }
+    | {
+        id: string
+        type: "permission.review.circuit_broken"
+        properties: {
+          sessionID: string
+          consecutive: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+          recent: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
         }
       }
     | {
@@ -1684,7 +1841,7 @@ export type GlobalEvent = {
         id: string
         type: "global.disposed"
         properties: {
-          [key: string]: unknown
+          reason?: string
         }
       }
     | EventServerInstanceDisposed
@@ -1705,6 +1862,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextRequestEstimated
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
+    | SyncEventSessionNextMessagesHidden
     | SyncEventSessionNextShellStarted
     | SyncEventSessionNextShellEnded
     | SyncEventSessionNextStepStarted
@@ -1747,25 +1905,37 @@ export type ServerConfig = {
 
 export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
 
-export type ApprovalsReviewer = "user" | "auto_review"
-
-export type AutoReviewConfig = {
-  model?: string
-  timeout_ms?: number
-  policy_path?: string
-  policy?: string
-  fallback?: "deny" | "user"
-  strict?: boolean
-  max_consecutive_denials?: number
-  max_recent_denials?: number
-  recent_denial_window?: number
-}
-
 export type PermissionObjectConfig = {
   [key: string]: PermissionActionConfig
 }
 
 export type PermissionRuleConfig = PermissionActionConfig | PermissionObjectConfig
+
+export type ApprovalsReviewer = "user" | "auto_review"
+
+export type AutoReviewConfig = {
+  model?: string
+  /**
+   * Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Defaults to 90000.
+   */
+  timeout_ms?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  policy_path?: string
+  policy?: string
+  fallback?: "deny" | "user"
+  strict?: boolean
+  /**
+   * Circuit breaker consecutive denial threshold.
+   */
+  max_consecutive_denials?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  /**
+   * Circuit breaker recent denial threshold.
+   */
+  max_recent_denials?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  /**
+   * Circuit breaker recent decision window.
+   */
+  recent_denial_window?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+}
 
 export type PermissionConfig =
   | PermissionActionConfig
@@ -1787,7 +1957,15 @@ export type PermissionConfig =
       skill?: PermissionRuleConfig
       approvals_reviewer?: ApprovalsReviewer
       auto_review?: AutoReviewConfig
-      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
+      [key: string]:
+        | PermissionRuleConfig
+        | ApprovalsReviewer
+        | AutoReviewConfig
+        | PermissionRuleConfig
+        | PermissionActionConfig
+        | ApprovalsReviewer
+        | AutoReviewConfig
+        | undefined
     }
 
 export type AgentConfig = {
@@ -1852,6 +2030,11 @@ export type ProviderConfig = {
   options?: {
     apiKey?: string
     baseURL?: string
+    headers?: {
+      [key: string]: string
+    }
+    "header-ua"?: string
+    version?: string
     enterpriseUrl?: string
     setCacheKey?: boolean
     /**
@@ -1866,7 +2049,20 @@ export type ProviderConfig = {
      * Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.
      */
     chunkTimeout?: number | false
-    [key: string]: unknown | string | boolean | number | false | number | false | number | false | undefined
+    [key: string]:
+      | unknown
+      | string
+      | {
+          [key: string]: string
+        }
+      | boolean
+      | number
+      | false
+      | number
+      | false
+      | number
+      | false
+      | undefined
   }
   models?: {
     [key: string]: {
@@ -2141,13 +2337,14 @@ export type Config = {
      */
     max_lines?: number
     /**
-     * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
+     * Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)
      */
     max_bytes?: number
     /**
      * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.
      */
     bash_compression?: boolean
+    shell_encoding?: "auto" | "utf-8" | "gb18030" | "utf-16le" | "utf-16be"
   }
   compaction?: {
     auto?: boolean
@@ -2156,6 +2353,7 @@ export type Config = {
     preserve_recent_tokens?: number
     reserved?: number
   }
+  goal_max_turns?: number
   experimental?: {
     disable_paste_summary?: boolean
     batch_tool?: boolean
@@ -2686,6 +2884,12 @@ export type NotFoundError = {
   }
 }
 
+export type SessionBusyError = {
+  _tag: "SessionBusyError"
+  sessionID: string
+  message: string
+}
+
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -2734,10 +2938,11 @@ export type SubtaskPartInput = {
   command?: string
 }
 
-export type SessionBusyError = {
-  _tag: "SessionBusyError"
-  sessionID: string
-  message: string
+export type GoalApiError = {
+  name: "GoalError"
+  data: {
+    message: string
+  }
 }
 
 export type EventTuiPromptAppend = {
@@ -2886,6 +3091,7 @@ export type SessionDurableEvent =
   | SessionNextRequestEstimated
   | SessionNextContextUpdated
   | SessionNextSynthetic
+  | SessionNextMessagesHidden
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
@@ -2939,6 +3145,21 @@ export type OutputFormat1 =
       schema: JsonSchema
       retryCount?: number
     }
+
+export type SessionGoal1 = {
+  sessionID: string
+  id: string
+  objective: string
+  status: "active" | "paused" | "complete" | "blocked"
+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity"
+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
+  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity"
+  continueOnError: boolean
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity"
+    updated: number | "NaN" | "Infinity" | "-Infinity"
+  }
+}
 
 export type SessionStatus2 = {
   id: string
@@ -3017,6 +3238,7 @@ export type V2Event =
   | SessionNextRequestEstimated
   | SessionNextContextUpdated
   | SessionNextSynthetic
+  | SessionNextMessagesHidden
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
@@ -3063,9 +3285,15 @@ export type V2Event =
   | QuestionV2Replied
   | QuestionV2Rejected
   | TodoUpdated
+  | SessionGoalUpdated
+  | SessionGoalCleared
   | LspUpdated
   | PermissionAsked
   | PermissionReplied
+  | PermissionReviewStarted
+  | PermissionReviewCompleted
+  | PermissionReviewFailed
+  | PermissionReviewCircuitBroken
   | TuiPromptAppend
   | TuiCommandExecute
   | TuiToastShow
@@ -3106,6 +3334,21 @@ export type ProjectCopyError = {
 
 export type EffectHttpApiErrorForbidden = {
   _tag: "Forbidden"
+}
+
+export type SessionGoal2 = {
+  sessionID: string
+  id: string
+  objective: string
+  status: "active" | "paused" | "complete" | "blocked"
+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity"
+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
+  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity"
+  continueOnError: boolean
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity"
+    updated: number | "NaN" | "Infinity" | "-Infinity"
+  }
 }
 
 export type EventTuiPromptAppend2 = {
@@ -3196,6 +3439,15 @@ export type SessionMessageInputBreakdown = {
     attachments: number
     total: number
   }
+  media?: {
+    rawChars: number
+    textChars: number
+    tokens: number
+    count: number
+    imageTokens: number
+    pdfTokens: number
+    otherTokens: number
+  }
 }
 
 export type SessionMessageInputEstimate = {
@@ -3259,6 +3511,11 @@ export type PromptAgentAttachment = {
 export type SessionErrorUnknown = {
   type: "unknown"
   message: string
+}
+
+export type SessionMessageHidden = {
+  time: number
+  reason: "permission-reviewer-protocol-retry"
 }
 
 export type LlmProviderMetadata = {
@@ -3664,6 +3921,23 @@ export type SyncEventSessionNextSynthetic = {
   }
 }
 
+export type SyncEventSessionNextMessagesHidden = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.messages.hidden.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageIDs: Array<string>
+      hidden: SessionMessageHidden
+    }
+  }
+}
+
 export type SyncEventSessionNextShellStarted = {
   type: "sync"
   id: string
@@ -3744,6 +4018,10 @@ export type SyncEventSessionNextStepEnded = {
       }
       snapshot?: string
       files?: Array<string>
+      summary?: {
+        messageID: string
+        diffs: Array<SnapshotFileDiff>
+      }
     }
   }
 }
@@ -4020,6 +4298,12 @@ export type SyncEventSessionNextCompactionEnded = {
       reason: "auto" | "manual"
       text: string
       recent: string
+      recent_user_messages?: Array<{
+        id: string
+        text: string
+        truncated?: boolean
+      }>
+      file_evidence?: string
       usage?: {
         tokens: {
           input: number
@@ -4171,12 +4455,12 @@ export type ProviderRequest = {
 
 export type AgentColor = string | "primary" | "secondary" | "accent" | "success" | "warning" | "error" | "info"
 
-export type PermissionV2Effect = "allow" | "deny" | "ask"
+export type PermissionRuleEffect = "allow" | "deny" | "ask" | "auto"
 
 export type PermissionV2Rule = {
   action: string
   resource: string
-  effect: PermissionV2Effect | "auto"
+  effect: PermissionRuleEffect
 }
 
 export type PermissionV2Ruleset = Array<PermissionV2Rule>
@@ -4274,6 +4558,9 @@ export type SessionMessageUser = {
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
+  summary?: {
+    diffs: Array<SnapshotFileDiff>
+  }
   type: "user"
 }
 
@@ -4437,6 +4724,12 @@ export type SessionMessageCompaction = {
   reason: "auto" | "manual"
   summary: string
   recent: string
+  recent_user_messages?: Array<{
+    id: string
+    text: string
+    truncated?: boolean
+  }>
+  file_evidence?: string
   id: string
   metadata?: {
     [key: string]: unknown
@@ -4661,6 +4954,26 @@ export type SessionNextSynthetic = {
   }
 }
 
+export type SessionNextMessagesHidden = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.messages.hidden"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageIDs: Array<string>
+    hidden: SessionMessageHidden
+  }
+}
+
 export type SessionNextShellStarted = {
   id: string
   metadata?: {
@@ -4754,6 +5067,10 @@ export type SessionNextStepEnded = {
     }
     snapshot?: string
     files?: Array<string>
+    summary?: {
+      messageID: string
+      diffs: Array<SnapshotFileDiff>
+    }
   }
 }
 
@@ -5072,6 +5389,12 @@ export type SessionNextCompactionEnded = {
     reason: "auto" | "manual"
     text: string
     recent: string
+    recent_user_messages?: Array<{
+      id: string
+      text: string
+      truncated?: boolean
+    }>
+    file_evidence?: string
     usage?: {
       tokens: {
         input: number
@@ -5405,6 +5728,8 @@ export type PermissionSavedInfo = {
   action: string
   resource: string
 }
+
+export type PermissionV2Effect = "allow" | "deny" | "ask"
 
 export type FileSystemEntry = {
   path: string
@@ -6083,6 +6408,41 @@ export type TodoUpdated = {
   }
 }
 
+export type SessionGoalUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.goal.updated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    goal: SessionGoal1
+  }
+}
+
+export type SessionGoalCleared = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.goal.cleared"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+  }
+}
+
 export type LspUpdated = {
   id: string
   metadata?: {
@@ -6144,6 +6504,88 @@ export type PermissionReplied = {
     sessionID: string
     requestID: string
     reply: "once" | "always" | "reject"
+  }
+}
+
+export type PermissionReviewStarted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "permission.review.started"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    reviewID: string
+    permission: string
+    patterns: Array<string>
+    precheck: {
+      level: "safe" | "general" | "cautious" | "dangerous"
+      reason: string
+    }
+  }
+}
+
+export type PermissionReviewCompleted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "permission.review.completed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    reviewID: string
+    outcome: "allow" | "deny"
+    rationale: string
+  }
+}
+
+export type PermissionReviewFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "permission.review.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    reviewID: string
+    reason: string
+  }
+}
+
+export type PermissionReviewCircuitBroken = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "permission.review.circuit_broken"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    consecutive: number | "NaN" | "Infinity" | "-Infinity"
+    recent: number | "NaN" | "Infinity" | "-Infinity"
   }
 }
 
@@ -6491,7 +6933,7 @@ export type ServerConnected = {
   }
   location?: LocationRef
   data: {
-    [key: string]: unknown
+    reason?: string
   }
 }
 
@@ -6770,6 +7212,17 @@ export type EventSessionNextSynthetic = {
   }
 }
 
+export type EventSessionNextMessagesHidden = {
+  id: string
+  type: "session.next.messages.hidden"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageIDs: Array<string>
+    hidden: SessionMessageHidden
+  }
+}
+
 export type EventSessionNextShellStarted = {
   id: string
   type: "session.next.shell.started"
@@ -6827,6 +7280,10 @@ export type EventSessionNextStepEnded = {
     }
     snapshot?: string
     files?: Array<string>
+    summary?: {
+      messageID: string
+      diffs: Array<SnapshotFileDiff>
+    }
   }
 }
 
@@ -7066,6 +7523,12 @@ export type EventSessionNextCompactionEnded = {
     reason: "auto" | "manual"
     text: string
     recent: string
+    recent_user_messages?: Array<{
+      id: string
+      text: string
+      truncated?: boolean
+    }>
+    file_evidence?: string
     usage?: {
       tokens: {
         input: number
@@ -7332,6 +7795,23 @@ export type EventTodoUpdated = {
   }
 }
 
+export type EventSessionGoalUpdated = {
+  id: string
+  type: "session.goal.updated"
+  properties: {
+    sessionID: string
+    goal: SessionGoal2
+  }
+}
+
+export type EventSessionGoalCleared = {
+  id: string
+  type: "session.goal.cleared"
+  properties: {
+    sessionID: string
+  }
+}
+
 export type EventLspUpdated = {
   id: string
   type: "lsp.updated"
@@ -7366,6 +7846,52 @@ export type EventPermissionReplied = {
     sessionID: string
     requestID: string
     reply: "once" | "always" | "reject"
+  }
+}
+
+export type EventPermissionReviewStarted = {
+  id: string
+  type: "permission.review.started"
+  properties: {
+    sessionID: string
+    reviewID: string
+    permission: string
+    patterns: Array<string>
+    precheck: {
+      level: "safe" | "general" | "cautious" | "dangerous"
+      reason: string
+    }
+  }
+}
+
+export type EventPermissionReviewCompleted = {
+  id: string
+  type: "permission.review.completed"
+  properties: {
+    sessionID: string
+    reviewID: string
+    outcome: "allow" | "deny"
+    rationale: string
+  }
+}
+
+export type EventPermissionReviewFailed = {
+  id: string
+  type: "permission.review.failed"
+  properties: {
+    sessionID: string
+    reviewID: string
+    reason: string
+  }
+}
+
+export type EventPermissionReviewCircuitBroken = {
+  id: string
+  type: "permission.review.circuit_broken"
+  properties: {
+    sessionID: string
+    consecutive: number | "NaN" | "Infinity" | "-Infinity"
+    recent: number | "NaN" | "Infinity" | "-Infinity"
   }
 }
 
@@ -8386,9 +8912,13 @@ export type FindTextData = {
 
 export type FindTextErrors = {
   /**
-   * Bad request
+   * BadRequest | InvalidRequestError
    */
-  400: BadRequestError
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * InternalServerError
+   */
+  500: EffectHttpApiErrorInternalServerError
 }
 
 export type FindTextError = FindTextErrors[keyof FindTextErrors]
@@ -10609,6 +11139,10 @@ export type SessionSummarizeErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * SessionBusyError
+   */
+  409: SessionBusyError
 }
 
 export type SessionSummarizeError = SessionSummarizeErrors[keyof SessionSummarizeErrors]
@@ -10969,7 +11503,7 @@ export type SessionRequestUsageListData = {
     directory?: string
     workspace?: string
     limit?: string
-    before?: string
+    before?: number
     rootRequestID?: string
     source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
   }
@@ -11160,6 +11694,152 @@ export type SessionRequestUsageAssistantsResponses = {
 
 export type SessionRequestUsageAssistantsResponse =
   SessionRequestUsageAssistantsResponses[keyof SessionRequestUsageAssistantsResponses]
+
+export type SessionGoalClearData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalClearErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalClearError = SessionGoalClearErrors[keyof SessionGoalClearErrors]
+
+export type SessionGoalClearResponses = {
+  /**
+   * Cleared session goal
+   */
+  200: {
+    cleared: boolean
+  }
+}
+
+export type SessionGoalClearResponse = SessionGoalClearResponses[keyof SessionGoalClearResponses]
+
+export type SessionGoalData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalError = SessionGoalErrors[keyof SessionGoalErrors]
+
+export type SessionGoalResponses = {
+  /**
+   * Session goal
+   */
+  200: {
+    goal: SessionGoal
+  }
+}
+
+export type SessionGoalResponse = SessionGoalResponses[keyof SessionGoalResponses]
+
+export type SessionGoalSetData = {
+  body?: {
+    objective?: string
+    status?: "active" | "paused" | "complete" | "blocked"
+    tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    continueOnError?: boolean
+  }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalSetErrors = {
+  /**
+   * BadRequest | GoalApiError | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | GoalApiError | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalSetError = SessionGoalSetErrors[keyof SessionGoalSetErrors]
+
+export type SessionGoalSetResponses = {
+  /**
+   * Updated session goal
+   */
+  200: {
+    goal: SessionGoal
+  }
+}
+
+export type SessionGoalSetResponse = SessionGoalSetResponses[keyof SessionGoalSetResponses]
+
+export type SessionPreviewData = {
+  body?: {
+    sessionIDs: Array<string>
+    limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/preview"
+}
+
+export type SessionPreviewErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+}
+
+export type SessionPreviewError = SessionPreviewErrors[keyof SessionPreviewErrors]
+
+export type SessionPreviewResponses = {
+  /**
+   * Session preview lines keyed by session ID
+   */
+  200: {
+    [key: string]: Array<string>
+  }
+}
+
+export type SessionPreviewResponse = SessionPreviewResponses[keyof SessionPreviewResponses]
 
 export type SyncStartData = {
   body?: never
@@ -11626,6 +12306,45 @@ export type TuiSelectSessionResponses = {
 
 export type TuiSelectSessionResponse = TuiSelectSessionResponses[keyof TuiSelectSessionResponses]
 
+export type TuiProviderEndpointStatusData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    url: string
+  }
+  url: "/tui/provider-endpoint-status"
+}
+
+export type TuiProviderEndpointStatusErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+}
+
+export type TuiProviderEndpointStatusError = TuiProviderEndpointStatusErrors[keyof TuiProviderEndpointStatusErrors]
+
+export type TuiProviderEndpointStatusResponses = {
+  /**
+   * Provider endpoint route and latency
+   */
+  200: {
+    url: string
+    status: "ok" | "down"
+    latency: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    route: {
+      type: "direct" | "proxy"
+      reason: string
+    }
+    checkedAt: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+}
+
+export type TuiProviderEndpointStatusResponse =
+  TuiProviderEndpointStatusResponses[keyof TuiProviderEndpointStatusResponses]
+
 export type TuiControlNextData = {
   body?: never
   path?: never
@@ -12021,6 +12740,7 @@ export type V2SessionListData = {
     workspace?: string
     limit?: number
     order?: "asc" | "desc"
+    start?: number
     search?: string
     directory?: string
     project?: string
@@ -12160,6 +12880,122 @@ export type V2SessionGetResponses = {
 }
 
 export type V2SessionGetResponse = V2SessionGetResponses[keyof V2SessionGetResponses]
+
+export type V2SessionGoalClearData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/goal"
+}
+
+export type V2SessionGoalClearErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionGoalClearError = V2SessionGoalClearErrors[keyof V2SessionGoalClearErrors]
+
+export type V2SessionGoalClearResponses = {
+  /**
+   * Success
+   */
+  200: {
+    cleared: boolean
+  }
+}
+
+export type V2SessionGoalClearResponse = V2SessionGoalClearResponses[keyof V2SessionGoalClearResponses]
+
+export type V2SessionGoalData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/goal"
+}
+
+export type V2SessionGoalErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionGoalError = V2SessionGoalErrors[keyof V2SessionGoalErrors]
+
+export type V2SessionGoalResponses = {
+  /**
+   * Success
+   */
+  200: {
+    goal: SessionGoal
+  }
+}
+
+export type V2SessionGoalResponse = V2SessionGoalResponses[keyof V2SessionGoalResponses]
+
+export type V2SessionGoalSetData = {
+  body: {
+    objective?: string
+    status?: "active" | "paused" | "complete" | "blocked"
+    tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    continueOnError?: boolean
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/goal"
+}
+
+export type V2SessionGoalSetErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionGoalSetError = V2SessionGoalSetErrors[keyof V2SessionGoalSetErrors]
+
+export type V2SessionGoalSetResponses = {
+  /**
+   * Success
+   */
+  200: {
+    goal: SessionGoal
+  }
+}
+
+export type V2SessionGoalSetResponse = V2SessionGoalSetResponses[keyof V2SessionGoalSetResponses]
 
 export type V2SessionSwitchAgentData = {
   body: {
@@ -12304,6 +13140,10 @@ export type V2SessionCompactErrors = {
    */
   404: SessionNotFoundError
   /**
+   * ConflictError
+   */
+  409: ConflictError
+  /**
    * ServiceUnavailableError
    */
   503: ServiceUnavailableError
@@ -12385,6 +13225,10 @@ export type V2SessionRevertStageErrors = {
    */
   404: MessageNotFoundError | SessionNotFoundError
   /**
+   * ConflictError
+   */
+  409: ConflictError
+  /**
    * UnknownError
    */
   500: UnknownError1
@@ -12426,6 +13270,10 @@ export type V2SessionRevertClearErrors = {
    */
   404: SessionNotFoundError
   /**
+   * ConflictError
+   */
+  409: ConflictError
+  /**
    * UnknownError
    */
   500: UnknownError1
@@ -12464,6 +13312,10 @@ export type V2SessionRevertCommitErrors = {
    * SessionNotFoundError
    */
   404: SessionNotFoundError
+  /**
+   * ConflictError
+   */
+  409: ConflictError
 }
 
 export type V2SessionRevertCommitError = V2SessionRevertCommitErrors[keyof V2SessionRevertCommitErrors]
@@ -12669,6 +13521,40 @@ export type V2SessionMessageResponses = {
 }
 
 export type V2SessionMessageResponse = V2SessionMessageResponses[keyof V2SessionMessageResponses]
+
+export type V2SessionPreviewData = {
+  body: {
+    sessionIDs: Array<string>
+    limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+  path?: never
+  query?: never
+  url: "/api/session/preview"
+}
+
+export type V2SessionPreviewErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2SessionPreviewError = V2SessionPreviewErrors[keyof V2SessionPreviewErrors]
+
+export type V2SessionPreviewResponses = {
+  /**
+   * Success
+   */
+  200: {
+    [key: string]: Array<string>
+  }
+}
+
+export type V2SessionPreviewResponse = V2SessionPreviewResponses[keyof V2SessionPreviewResponses]
 
 export type V2SessionMessagesData = {
   body?: never

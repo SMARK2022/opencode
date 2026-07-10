@@ -4,7 +4,7 @@ import { useDialog } from "../ui/dialog"
 import { useSync } from "../context/sync"
 import { useSDK } from "../context/sdk"
 import { useToast } from "../ui/toast"
-import { createMemo, onMount } from "solid-js"
+import { createMemo, createSignal, onMount } from "solid-js"
 import { useTheme } from "../context/theme"
 import { Locale } from "../util/locale"
 import { MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
@@ -37,7 +37,8 @@ function useGoalApi(sessionID: string) {
   }
 
   // POST /session/:id/goal — 设置或更新 goal
-  const setGoal = async (input: { objective?: string; status?: string }) => {
+  // [local-smark] 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
+  const setGoal = async (input: { objective?: string; status?: string; continueOnError?: boolean }, close = true) => {
     // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
     // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
     // 提前拦截避免无效往返
@@ -62,7 +63,10 @@ function useGoalApi(sessionID: string) {
         toast.show({ message: body?.data?.message ?? "Failed to update goal", variant: "error" })
         return
       }
-      dialog.clear()
+      // [local-smark] 解析成功 response，供调用方 reconcile
+      const goal = await resp.json()
+      if (close) dialog.clear()
+      return goal
     } catch {
       toast.show({ message: "Failed to update goal", variant: "error" })
     }
@@ -112,8 +116,26 @@ export function DialogGoalMenu(props: DialogGoalProps) {
   const sync = useSync()
   const { theme } = useTheme()
   const { setGoal, clearGoal } = useGoalApi(props.sessionID)
+  // [local-smark] toggle loading 状态：防止重复切换
+  const [toggleLoading, setToggleLoading] = createSignal(false)
 
   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
+
+  // [local-smark] 切换 continueOnError：POST 成功后 reconcile 到 sync store，
+  // 保持菜单打开
+  const toggleContinueOnError = async () => {
+    if (toggleLoading()) return
+    const g = goal()
+    if (!g) return
+    setToggleLoading(true)
+    // close=false：toggle 后菜单保持打开
+    const result = await setGoal({ continueOnError: !g.continueOnError }, false)
+    if (result?.goal) {
+      // 立即更新 store，不等 SSE
+      sync.goal.reconcile(props.sessionID, result.goal)
+    }
+    setToggleLoading(false)
+  }
 
   // 摘要使用large宽度；header只提供内容槽位，不能替代对话框尺寸。
   onMount(() => dialog.setSize("large"))
@@ -149,6 +171,18 @@ export function DialogGoalMenu(props: DialogGoalProps) {
           onSelect: () => {
             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)
           },
+        },
+        // [local-smark] Continue after errors toggle：开启显示 ✓ Enabled，
+        // 关闭显示 ○ Disabled，保存中显示 ⋯ Saving
+        {
+          title: "Continue after errors",
+          description: toggleLoading()
+            ? "⋯ Saving"
+            : goal()?.continueOnError
+              ? "✓ Enabled"
+              : "○ Disabled",
+          value: "toggle-continue",
+          onSelect: () => void toggleContinueOnError(),
         },
         // active 状态下显示 Pause 选项
         ...(goal()?.status === "active"

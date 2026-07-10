@@ -527,6 +527,7 @@ export type SessionsGoalOutput = {
     readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
+    readonly continueOnError: boolean
     readonly time: {
       readonly created: number | "Infinity" | "-Infinity" | "NaN"
       readonly updated: number | "Infinity" | "-Infinity" | "NaN"
@@ -540,17 +541,26 @@ export type SessionsGoalSetInput = {
     readonly objective?: string | undefined
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
+    readonly continueOnError?: boolean | undefined
   }["objective"]
   readonly status?: {
     readonly objective?: string | undefined
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
+    readonly continueOnError?: boolean | undefined
   }["status"]
   readonly tokenBudget?: {
     readonly objective?: string | undefined
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
+    readonly continueOnError?: boolean | undefined
   }["tokenBudget"]
+  readonly continueOnError?: {
+    readonly objective?: string | undefined
+    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+    readonly tokenBudget?: number | null | undefined
+    readonly continueOnError?: boolean | undefined
+  }["continueOnError"]
 }
 
 export type SessionsGoalSetOutput = {
@@ -562,6 +572,7 @@ export type SessionsGoalSetOutput = {
     readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
+    readonly continueOnError: boolean
     readonly time: {
       readonly created: number | "Infinity" | "-Infinity" | "NaN"
       readonly updated: number | "Infinity" | "-Infinity" | "NaN"

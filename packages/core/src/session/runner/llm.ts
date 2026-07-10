@@ -419,6 +419,8 @@ const layer = Layer.effect(
           entry.count = 0
         }))
       let overflowFailure: ProviderErrorEvent | undefined
+      // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
+      let terminalError = false
       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
         inputEstimate = {
@@ -453,6 +455,7 @@ const layer = Layer.effect(
                 overflowFailure = event
                 return
               }
+              terminalError = !isContextOverflowFailure(event)
             }
             yield* publish(event)
             if (event.type !== "tool-call" || event.providerExecuted) return
@@ -603,12 +606,17 @@ const layer = Layer.effect(
           if (stream._tag === "Success" && !publisher.hasProviderError())
             yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true, finalizer))
           if (settled._tag === "Failure" && isUserDeclined(settled.cause)) return yield* Effect.interrupt
+          // typed鉴权/路由/格式/策略错误不等同于source的API/Unknown错误。
+          // 只在本轮结算后读取显式策略，原始中断和未授权错误继续传播同一cause。
+          const eligibleFailure = stream._tag === "Failure" && !Cause.hasInterrupts(stream.cause) && llmFailure && !isContextOverflowFailure(llmFailure) && !["Authentication", "NoRoute", "InvalidProviderOutput", "ContentPolicy"].includes(llmFailure.reason._tag)
+          const goal = (stream._tag === "Success" && terminalError) || eligibleFailure ? yield* goals.get(session.id) : Option.none()
+          const continueAfterError = Option.isSome(goal) && goal.value.status === "active" && goal.value.continueOnError
           if (stream._tag === "Failure") {
             // LLMError 已按上游 hosted-only 清理；其他 cause 才补清理，保留本地 raw partial。
             if (!llmFailure) yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", false, true))
             if (publisher.hasAssistantStarted() && !Cause.hasInterrupts(stream.cause))
               yield* withPublication(publisher.failAssistant(String(Cause.squash(stream.cause)), false, true))
-            return yield* Effect.failCause(stream.cause)
+            if (!continueAfterError) return yield* Effect.failCause(stream.cause)
           }
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
@@ -621,14 +629,14 @@ const layer = Layer.effect(
               Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
             )
           }
-          if (publisher.hasActiveAssistant() && !stepSettlement) {
+          if (!continueAfterError && publisher.hasActiveAssistant() && !stepSettlement) {
             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
             yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))
             // 只补消息和账本终态；raw EOF 的成功返回及原 continuation 契约保持。
           }
           return {
-            needsContinuation: !publisher.hasProviderError() && needsContinuation,
-            canContinueGoal: !!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown"),
+            needsContinuation: !continueAfterError && !publisher.hasProviderError() && needsContinuation,
+            canContinueGoal: continueAfterError || (!!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown")),
             step: currentStep,
           }
         }),
