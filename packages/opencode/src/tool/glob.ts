@@ -47,15 +47,22 @@ export const GlobTool = Tool.define(
           })
 
           const limit = 100
-          const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
-          const truncated = files.length === limit
-          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
-          const originalCount = files.length
+          // [local-smark] glob 通道透出 partial：零匹配不再等同于确定性无匹配
+          const globResult = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit, signal: ctx.abort })
+          const globPartial = globResult.partial
+          const files = globResult.files
+          const truncated = globResult.truncated
+          // Core观察到limit+1才截断；恰好100条不能被误报为100+。
+          const originalCount = files.length + Number(truncated)
           // [local-smark] total: 截断前的真实文件数（rg 按 limit 截停时为下界）
           const totalFiles = originalCount
 
           const output = []
-          if (files.length === 0) output.push("No files found")
+          // [local-smark] partial 假阴性防护：部分路径不可访问时显式提示，
+        // 模型可据此收窄路径或调整 pattern，而不是误信全量无匹配
+        if (files.length === 0 && globPartial)
+          output.push("No files found, but some paths could not be accessed (permission denied); results may be incomplete.")
+        else if (files.length === 0) output.push("No files found")
           if (files.length > 0) {
             output.push(...files.map((file) => path.resolve(search, file.path)))
             if (truncated) {
@@ -67,6 +74,10 @@ export const GlobTool = Tool.define(
             }
           }
 
+          // [local-smark] partial 与源/grep 约定一致：无论是否有匹配都提示——
+          // 有匹配但部分路径不可访问时模型仍需知道结果可能不完整
+          if (globPartial) output.push("(Some paths could not be accessed; results may be incomplete.)")
+
           return {
             title: path.relative(ins.worktree, search),
             metadata: {
@@ -74,6 +85,9 @@ export const GlobTool = Tool.define(
               // [local-smark] total: 截断前的真实文件数
               total: totalFiles,
               truncated,
+              // [local-smark] partial: rg exit 2 部分路径不可访问时标记；
+              // 零匹配不再被误读为全量无匹配（wire 缺省无此键 = false，向后兼容）
+              ...(globPartial ? { partial: true } : {}),
             },
             output: output.join("\n"),
           }

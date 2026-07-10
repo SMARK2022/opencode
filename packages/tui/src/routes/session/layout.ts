@@ -6,8 +6,8 @@ export const SESSION_SIDEBAR_WIDTH = 42
 const SESSION_MAIN_HORIZONTAL_PADDING = 3
 // #184：消息 TextPart paddingLeft=3；tip 无 v1.17.x 左边框，按现布局实测重推导
 const SESSION_MESSAGE_LEFT_CHROME = 3
-// #184：tip viewport+content 各 paddingRight 1，合计 gutter 2
-const SESSION_SCROLLBAR_GUTTER = 2
+// viewport/content各留一列，原生vertical track作为横向兄弟另占一列。
+const SESSION_SCROLLBAR_GUTTER = 3
 
 export const sessionMessageContentWidth = (input: {
   terminalWidth: number

@@ -15,7 +15,8 @@ export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, wo
     const pattern = part.state.input.pattern
     if (typeof pattern !== "string" || !pattern) return []
     const count = part.tool === "grep" ? part.state.metadata.totalMatches ?? part.state.metadata.matches : part.state.metadata.total ?? part.state.metadata.count
-    return [{ tool: part.tool, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: typeof count === "number" ? count : 0 }]
+    // 剪枝之后仍保存权限不完整性，不能只把零匹配交给下一轮。
+    return [{ tool: part.tool, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: typeof count === "number" ? count : 0, partial: part.state.metadata.partial === true }]
   })), directory, commands: messages.flatMap(message => message.parts.flatMap(part => {
     if (part.type !== "tool" || part.tool !== "bash" || part.state.status !== "completed") return []
     const input = part.state.input

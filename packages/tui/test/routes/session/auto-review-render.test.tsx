@@ -453,6 +453,129 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
   },
 )
 
+// 复用现有真实Session和隔离SDK transport，断言字符帧与鼠标/SSE行为而非源码字符串。
+test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as const)("reasoning run replay: %s", async (scenario) => {
+  const messageID = `msg_reasoning_${scenario}`
+  const reasoning = (id: string, text: string): Part => ({ id, sessionID, messageID, type: "reasoning", text, time: { start: 1, end: 2 } })
+  const long = Array.from({ length: 7 }, (_, index) => `middle ${index}`).join("\n")
+  const boundary: Part = { id: "part_b", sessionID, messageID, type: "text", text: "   " }
+  const parts = scenario === "bounded" || scenario === "show"
+    ? Array.from({ length: 10 }, (_, index) => reasoning(`part_${String(index).padStart(2, "0")}`, `short thought ${index + 1}`))
+    : scenario === "boundary" ? [reasoning("part_a", "left source"), boundary, reasoning("part_c", "right source")]
+    : scenario === "conceal" ? [reasoning("part_a", "visible first source"), reasoning("part_b", "![](private-url)")]
+    : scenario === "remove" ? [reasoning("part_a", long), boundary, reasoning("part_c", "right source")]
+    : [reasoning("part_b", long)]
+  const info: AssistantMessage = {
+    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
+    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  await withRenderedReview([{ info, parts }], async (app, _route, emit) => {
+    const frame = async (...texts: string[]) => {
+      await waitForReviewFrame(app, async (value) => {
+        if (texts.every((text) => value.includes(text))) return true
+        await Bun.sleep(5)
+        return false
+      }, { maxPasses: 400 })
+      // 等预布局间距落定后才使用可见文本坐标点击。
+      await app.renderOnce()
+      await app.renderOnce()
+      return app.captureCharFrame()
+    }
+    if (scenario === "boundary") {
+      const value = await frame("left source", "right source")
+      expect(value.split("\n").filter((line) => line.includes("Thought")).length).toBe(2)
+      expect(value).not.toContain("2 segments")
+      return
+    }
+    if (scenario === "conceal") {
+      await frame("visible first source")
+      for (let index = 0; index < 12; index++) {
+        await app.renderOnce()
+        expect(app.captureCharFrame()).not.toContain("[seg 2/2]")
+        await Bun.sleep(5)
+      }
+      app.mockInput.pressKey("x", { ctrl: true })
+      app.mockInput.pressKey("h")
+      await frame("[seg 2/2]", "private-url")
+      app.mockInput.pressKey("x", { ctrl: true })
+      app.mockInput.pressKey("h")
+      // 逐帧验证conceal往返，晚到highlight不能留下只有marker的帧。
+      for (let index = 0; index < 12; index++) {
+        await app.renderOnce()
+        const value = app.captureCharFrame()
+        expect(value.includes("[seg 2/2]") && !value.includes("private-url")).toBe(false)
+        await Bun.sleep(5)
+      }
+      return
+    }
+    if (scenario === "bounded" || scenario === "show") {
+      if (scenario === "show") {
+        expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
+        await clickVisibleText(app, "▲ 收起推理")
+      }
+      const value = await frame("10 segments", "[seg 2/10]", "▼ 展开查看完整推理")
+      const lines = value.split("\n")
+      expect(lines.filter((line) => line.includes("Thought")).length).toBe(1)
+      const header = lines.findIndex((line) => line.includes("10 segments"))
+      const footer = lines.findIndex((line) => line.includes("▼ 展开查看完整推理"))
+      expect(footer - header + 1).toBeLessThanOrEqual(7)
+      expect(value).not.toContain("short thought 10")
+      await clickVisibleText(app, "▼ 展开查看完整推理")
+      expect(await frame("short thought 10", "▲ 收起推理")).toContain("[seg 10/10]")
+      // 再折叠再展开，完整正文不能因renderable销毁而变空。
+      await clickVisibleText(app, "▲ 收起推理")
+      await frame("▼ 展开查看完整推理")
+      await clickVisibleText(app, "▼ 展开查看完整推理")
+      await frame("short thought 10", "▲ 收起推理")
+      return
+    }
+    await frame("▼ 展开查看完整推理")
+    await clickVisibleText(app, "▼ 展开查看完整推理")
+    await frame("middle 6", "▲ 收起推理")
+    if (scenario === "insert") {
+      emit({ directory, project: "proj_test", payload: { id: "evt_prepend", type: "message.part.updated", properties: { sessionID, part: reasoning("part_a", "earlier source"), time: 3 } } })
+      await frame("earlier source", "2 segments", "▲ 收起推理")
+      emit({ directory, project: "proj_test", payload: { id: "evt_append", type: "message.part.updated", properties: { sessionID, part: reasoning("part_c", "later source"), time: 4 } } })
+      const value = await frame("later source", "3 segments", "▲ 收起推理")
+      expect(value.split("\n").filter((line) => line.includes("earlier source")).length).toBe(1)
+      return
+    }
+    emit({ directory, project: "proj_test", payload: { id: "evt_boundary_remove", type: "message.part.removed", properties: { sessionID, messageID, partID: "part_b" } } })
+    const value = await frame("right source", "2 segments", "▲ 收起推理")
+    expect(value.split("\n").filter((line) => line.includes("right source")).length).toBe(1)
+    emit({ directory, project: "proj_test", payload: { id: "evt_member_remove", type: "message.part.removed", properties: { sessionID, messageID, partID: "part_c" } } })
+    await waitForReviewFrame(app, async (next) => {
+      if (!next.includes("right source") && !next.includes("2 segments") && next.includes("middle 6")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+  }, { width: 110, height: 48 }, {}, { thinking_mode: scenario === "show" ? "show" : "hide" })
+})
+
+test.each(["glob", "grep"] as const)("completed partial %s remains visibly incomplete with details off", async (tool) => {
+  const messageID = `msg_partial_${tool}`
+  const info: AssistantMessage = {
+    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
+    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const part: Part = { id: "part_search", sessionID, messageID, type: "tool", tool, callID: "call_search", state: {
+    status: "completed", title: "search", input: { pattern: "needle", path: directory }, output: "No files found in accessible paths.",
+    metadata: { count: 0, matches: 0, partial: true, truncated: false }, time: { start: 1, end: 2 },
+  } }
+  await withRenderedReview([{ info, parts: [part] }], async (app) => {
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("incomplete")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+    expect(app.captureCharFrame()).toContain("incomplete")
+  }, {}, {}, { tool_details_visibility: false })
+})
+
 async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
   const lines = app.captureCharFrame().split("\n")
   const y = lines.findIndex((line) => line.includes(text))
@@ -477,9 +600,10 @@ async function withRenderedReview(
   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
   dimensions: { width?: number; height?: number } = {},
   children: Record<string, () => typeof messages> = {},
+  kv: Record<string, unknown> = {},
 ) {
   await using tmp = await tmpdir()
-  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
   const info = {
     id: sessionID, slug: "review-render", projectID: "proj_test", directory,
     version: "1", title: "Review render", time: { created: 1, updated: 3 },

@@ -104,7 +104,10 @@ export interface SearchResult {
 
 export interface Interface {
   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
-  readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
+  readonly glob: (input: GlobInput) => Effect.Effect<
+    { files: readonly Entry[]; partial: boolean; truncated: boolean; timedOut?: boolean },
+    Error
+  >
   readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
   readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
 }
@@ -113,8 +116,12 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 
 const failure = (message: string, cause?: unknown) => new Error({ message, cause })
 
+// #244：[local-smark] error parsing glob 与 regex 解析错误同级——include/exclude
+// 与 glob 工具的语法错误都是输入错误，不得落入 exit 2 的权限 partial 分类
 const isInvalidPattern = (stderr: string) =>
-  stderr.includes("regex parse error") || stderr.includes("error parsing regex")
+  stderr.includes("regex parse error") ||
+  stderr.includes("error parsing regex") ||
+  stderr.includes("error parsing glob")
 
 const layer = Layer.effect(
   Service,
@@ -187,8 +194,8 @@ const layer = Layer.effect(
           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
           }
-          // 原 source 对无匹配且带诊断的 exit2 判为失败，不能伪装成 partial 空结果。
-          if (code === 2 && rows.length === 0 && stderr.trim() && !timedOut) return yield* failure(stderr.trim())
+          // 交互搜索抑制遍历诊断后仍有stderr就是真错误；find保留原前缀语义。
+          if (code === 2 && stderr.trim() && (input.args.includes("--no-messages") || rows.length === 0 && !timedOut)) return yield* failure(stderr.trim())
           if (code !== 0 && code !== 1 && code !== 2) {
             return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
           }
@@ -224,9 +231,15 @@ const layer = Layer.effect(
           cwd: input.cwd,
           limit: input.limit,
           signal: input.signal,
+          // [local-smark] pattern 入 run 激活 InvalidPatternError 门（源 :1464-1467
+          // 契约：无效 pattern 保持 Tool error，不得伪装成权限 partial）
+          pattern: input.pattern,
           args: [
             "--no-config",
             "--files",
+            // [local-smark] --no-messages 抑制遍历诊断（源 :1425 等价）：权限
+            // partial 的 stderr 必须为空，真实输入错误的诊断才能与之可区分
+            "--no-messages",
             ...(input.hidden ? ["--hidden"] : []),
             ...(input.follow ? ["--follow"] : []),
             `--glob=${input.pattern}`,
@@ -241,14 +254,19 @@ const layer = Layer.effect(
                 .replaceAll("\\", "/"),
             ),
         }).pipe(
-          Effect.map((result) =>
-            result.items.map((relative) =>
+          // [local-smark] partial/timedOut 一并透出：glob 通道此前丢弃二者，
+          // tool 层无法区分「全量无匹配」与「部分路径不可访问的假阴性」
+          Effect.map((result) => ({
+            files: result.items.map((relative) =>
               Entry.make({
                 path: RelativePath.make(relative),
                 type: "file",
               }),
             ),
-          ),
+            partial: result.partial,
+            truncated: result.truncated,
+            timedOut: result.timedOut,
+          })),
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
       find: (input) =>
@@ -309,6 +327,8 @@ const layer = Layer.effect(
                   "--no-config",
                   "--files",
                   "--hidden",
+                  // 预扫与正文搜索共用I/O诊断策略，权限拒绝不能在候选阶段升级失败。
+                  "--no-messages",
                   ...globs.map((item) => `--glob=${item}`),
                   "--glob=!**/.git/**",
                   input.file ?? ".",

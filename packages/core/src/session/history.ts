@@ -147,11 +147,12 @@ export const evidence = Effect.fn("SessionHistory.evidence")(function* (
       const pattern = part.state.input.pattern
       if (typeof pattern !== "string" || !pattern) continue
       const output = part.state.structured
-      // 数组领域结果经publisher.record包装为value；不能拿正文行数伪造匹配数。
-      const items = part.name === "grep" ? output.items : output.value
+      // 新Glob保留files及完整性；旧持久数组仍读value，不从正文猜测条数。
+      const items = part.name === "grep" ? output.items : output.files ?? output.value
       if (!Array.isArray(items)) continue
       searches.push({ tool: part.name, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: items.length,
-        partial: part.name === "grep" ? output.partial === true || output.truncated === true || output.timedOut === true : typeof part.state.input.limit === "number" && items.length >= part.state.input.limit,
+        partial: output.partial === true || output.truncated === true || output.timedOut === true ||
+          part.name === "glob" && !Array.isArray(output.files) && typeof part.state.input.limit === "number" && items.length >= part.state.input.limit,
       })
     }
   }

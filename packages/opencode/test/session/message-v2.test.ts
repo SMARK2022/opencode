@@ -982,6 +982,22 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+    // 与原完整Bash占位共用fixture，验证剪枝后的零匹配partial不丢失，且不改原始正文。
+    const part = input[1].parts[0]
+    if (part.type !== "tool" || part.state.status !== "completed") throw new Error("expected completed tool")
+    for (const tool of ["glob", "grep"]) {
+      part.tool = tool
+      part.state.metadata = { partial: true }
+      const replay = await MessageV2.toModelMessages(input, model)
+      expect(replay[2]?.content[0]).toStrictEqual({
+        type: "tool-result", toolCallId: "call-1", toolName: tool,
+        output: {
+          type: "text",
+          value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />\nSearch incomplete: some paths were inaccessible and skipped.',
+        },
+      })
+      expect(part.state.output).toBe("this should be cleared")
+    }
   })
 
   test("omits provider metadata when assistant model differs", async () => {
