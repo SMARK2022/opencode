@@ -23,7 +23,8 @@ describe("Ripgrep", () => {
         yield* Effect.promise(() => fs.mkdir(path.join(cwd, "src")))
         yield* Effect.promise(() => fs.writeFile(path.join(cwd, "src", "match.ts"), "needle\n"))
         const result = yield* (yield* Ripgrep.Service).glob({ cwd, pattern: "**/*.ts", limit: 10 })
-        expect(result.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
+        // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
+        expect(result.files.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
       }),
     ),
   )

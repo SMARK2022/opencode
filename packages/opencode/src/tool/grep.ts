@@ -98,11 +98,12 @@ export const GrepTool = Tool.define(
           // #244：用户未传 timeout 也启用默认预算——grep 工具是需要时间边界的交互入口；
           // 默认值在执行层而非 schema 层兜底，避免 wire schema 对未传字段产生隐式值
           const timeout = params.timeout ?? DEFAULT_TIMEOUT
-          const emptyTimedOut = () => ({
+          // timeout与partial可并存，权限信息不能被预算文案吞掉。
+          const emptyTimedOut = (partial = false) => ({
             // #244：title 沿用 pattern 与普通结果对齐，调用方按 title 聚合时不受影响
             title: params.pattern,
             // #244：timedOut 必须同时置 truncated——下游消费者只看 truncated 判断结果不完整
-            metadata: { matches: 0, truncated: true, timedOut: true },
+            metadata: { matches: 0, truncated: true, timedOut: true, ...(partial ? { partial: true } : {}) },
             // #244：文案同时说明「结果不完整」与「下一步怎么办」，
             // 让模型能自主选择收窄范围或加大预算重试
             output: [
@@ -131,9 +132,21 @@ export const GrepTool = Tool.define(
             // 调用方用 signal 的错误通道区分「我取消」与「预算耗尽」
             signal: ctx.abort,
           })
-          if (result.items.length === 0 && result.timedOut) return emptyTimedOut()
+          if (result.items.length === 0 && result.timedOut) return emptyTimedOut(result.partial)
           // #244：非超时的空结果是完整搜索的确定性结果；两种空结果（确认无匹配 vs
           // 受控截断）的输出必须可区分，否则模型会把超时误读为全量确认无匹配
+          // [local-smark] partial（rg exit 2，TCC/ACL/EACCES）空结果同样不可当作
+          // 确定性阴性——必须显式携带 partial 标记，模型才能区分「全量无匹配」与
+          // 「部分路径不可访问导致的假阴性」（源提交修复的核心缺陷场景）
+          if (result.items.length === 0 && result.partial)
+            return {
+              title: params.pattern,
+              metadata: { matches: 0, truncated: false, partial: true },
+              output: [
+                "No files found, but the search could not access some paths (permission denied).",
+                "Results may be incomplete. Narrow the search path or adjust include/exclude patterns.",
+              ].join("\n"),
+            }
           if (result.items.length === 0) return empty
 
           // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文；
@@ -159,7 +172,17 @@ export const GrepTool = Tool.define(
           const totalMatches = rows.length
           // #244：超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
           // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"
-          if (final.length === 0 && result.timedOut) return emptyTimedOut()
+          if (final.length === 0 && result.timedOut) return emptyTimedOut(result.partial)
+          // [local-smark] 同上：RESULT_LIMIT 过滤后为零匹配也须区分 partial 假阴性
+          if (final.length === 0 && result.partial)
+            return {
+              title: params.pattern,
+              metadata: { matches: 0, truncated: false, partial: true },
+              output: [
+                "No files found, but the search could not access some paths (permission denied).",
+                "Results may be incomplete. Narrow the search path or adjust include/exclude patterns.",
+              ].join("\n"),
+            }
           if (final.length === 0) return empty
 
           const output = [
@@ -207,12 +230,15 @@ export const GrepTool = Tool.define(
             title: params.pattern,
             // #138：metadata.matches 为展示条数；
             // #244：timedOut 用条件展开写入 metadata，未超时时保持旧 wire 形状（无该键）
+            // [local-smark] partial 无条件持久化（源 :1657-1663 契约）：compaction
+            // 剪枝 output 后，metadata.partial 是不完整性的唯一载体
             metadata: {
               matches: final.length,
               // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
               totalMatches,
               truncated,
               ...(result.timedOut && { timedOut: true }),
+              partial: result.partial,
             },
             output: output.join("\n"),
           }

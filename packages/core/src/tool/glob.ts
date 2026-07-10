@@ -25,12 +25,20 @@ export const Input = Schema.Struct({
   }),
 })
 
-export const Output = Schema.Array(FileSystem.Entry)
+export const Output = Schema.Struct({
+  files: Schema.Array(FileSystem.Entry),
+  partial: Schema.Boolean,
+  truncated: Schema.Boolean,
+  timedOut: Schema.optional(Schema.Boolean),
+})
 type ModelOutput = typeof Output.Encoded
 
-/** Format raw search results into the concise line-oriented output models expect. */
+// 正常结果仍用原路径列表，完整性标记同时进入结构化结果和模型文本。
 export const toModelOutput = (output: ModelOutput) => {
-  const lines = output.length === 0 ? ["No files found"] : output.map((item) => item.path)
+  const lines = output.files.length === 0 ? ["No files found"] : output.files.map((item) => item.path)
+  if (output.truncated) lines.push("Results truncated; narrow the search path or pattern.")
+  if (output.timedOut) lines.push("Search timed out; results may be incomplete.")
+  if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
   return lines.join("\n")
 }
 
@@ -53,7 +61,7 @@ const layer = Layer.effectDiscard(
             {
               type: "text",
               text: toModelOutput(
-                output.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })),
+                { ...output, files: output.files.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })) },
               ),
             },
           ],
@@ -77,17 +85,20 @@ const layer = Layer.effectDiscard(
                 .glob({
                   cwd,
                   pattern: input.pattern,
-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                  // 默认同V1有界，Native显式limit仍保留其参数能力。
+                  limit: input.limit ?? 100,
                 })
                 .pipe(
-                  Effect.map((result) =>
-                    result.map((entry) =>
+                  // 仅重映射路径，不让数组投影吞掉partial/timeout/limit状态。
+                  Effect.map((result) => ({
+                    ...result,
+                    files: result.files.map((entry) =>
                       FileSystem.Entry.make({
                         ...entry,
                         path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
                       }),
                     ),
-                  ),
+                  })),
                 )
             }).pipe(
               Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to find files matching ${input.pattern}` })),

@@ -60,8 +60,10 @@ export const ripgrepLayer = Layer.effect(
               limit: input.limit ?? Number.MAX_SAFE_INTEGER,
             })
             .pipe(
+              // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装，
+              // consumer 取 .files 保持既有映射逻辑
               Effect.map((result) =>
-                result.map((entry) =>
+                result.files.map((entry) =>
                   Entry.make({
                     ...entry,
                     path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),

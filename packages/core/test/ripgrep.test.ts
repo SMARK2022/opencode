@@ -1,7 +1,10 @@
 import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Layer, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema, Sink, Stream } from "effect"
+import { ChildProcessSpawner } from "effect/unstable/process"
+import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
+import { GlobTool } from "@opencode-ai/core/tool/glob"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
@@ -270,6 +273,83 @@ describe("Ripgrep", () => {
     ),
   )
 
+  // [local-smark] 源 0413 契约「glob keeps invalid patterns fatal」等价：
+  // glob 语法错误（error parsing glob，exit 2 且 stderr 有诊断）必须保持
+  // Tool error，不得被归因为权限 partial——否则输入错误被隐藏成假阴性
+  it.live("glob keeps invalid glob patterns fatal", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.ts"), "needle\n"))
+
+          const exit = yield* (yield* Ripgrep.Service)
+            .glob({ cwd: tmp.path, pattern: "[", limit: 10 })
+            .pipe(Effect.exit)
+
+          // 无效 glob 是输入错误：失败而非「权限拒绝的部分结果」
+          expect(exit._tag).toBe("Failure")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // [local-smark] search 的 include/exclude 走 --glob 参数：语法错误同样是
+  // 输入错误，主 pattern 合法不能豁免 include 侧的错误分类
+  it.live("search keeps invalid include globs fatal", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.txt"), "needle\n"))
+
+          const exit = yield* (yield* Ripgrep.Service)
+            .search({ cwd: tmp.path, pattern: "needle", include: "[", limit: 10 })
+            .pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // [local-smark] 完整空结果是兼容基线：partial 只属于真实的 exit 2 空诊断
+  // 场景，正常无匹配必须保持确定性阴性（源 complete-empty 契约等价）
+  it.live("glob returns a deterministic empty result for a complete search", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.ts"), "needle\n"))
+
+          const result = yield* (yield* Ripgrep.Service).glob({ cwd: tmp.path, pattern: "*.nonexistent", limit: 10 })
+
+          expect(result.files).toEqual([])
+          expect(result.partial).toBe(false)
+          expect(result.timedOut).toBeUndefined()
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // [local-smark] 正常 glob 的 partial 契约：有匹配且无错误时 partial 必须为
+  // false，调用方依赖该缺省区分「全量结果」与「部分路径不可访问」
+  it.live("glob reports partial false for a healthy search", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "match.ts"), "needle\n"))
+
+          const result = yield* (yield* Ripgrep.Service).glob({ cwd: tmp.path, pattern: "*.ts", limit: 10 })
+
+          expect(result.files.map((item) => item.path)).toContain(RelativePath.make("match.ts"))
+          expect(result.partial).toBe(false)
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   // #244：timeout 存在时，正则语法错误仍是 rg 的真实失败，
   // 不能被降级成「超时后的空部分结果」
   it.live("search timeout does not hide invalid regex errors", () =>
@@ -292,3 +372,131 @@ describe("Ripgrep", () => {
   )
 
 })
+
+const scriptedCases: Array<{ name: string; code: number; stdout?: string; stderr?: string; pending?: boolean }> = [
+  { name: "partial", code: 2, stdout: "accessible.ts\n" },
+  { name: "partial-empty", code: 2 },
+  { name: "search-partial", code: 2, stdout: JSON.stringify({ type: "match", data: { path: { text: "accessible.ts" }, lines: { text: "needle\n" }, line_number: 1, absolute_offset: 0, submatches: [{ match: { text: "needle" }, start: 0, end: 6 }] } }) + "\n" },
+  { name: "invalid", code: 2, stderr: "error parsing glob '[': unclosed character class" },
+  { name: "unknown-diagnostic", code: 2, stderr: "unknown decoder error" },
+  { name: "unknown-code", code: 3 },
+  { name: "empty", code: 1 },
+  { name: "arguments", code: 1 },
+  { name: "find-diagnostics", code: 2, stdout: "accessible.ts\n", stderr: "blocked/: Permission denied (os error 13)" },
+  { name: "bounded", code: 0, pending: true, stdout: Array.from({ length: 11 }, (_, index) => `file-${index}.ts`).join("\n") + "\n" },
+  { name: "abort", code: 0, pending: true },
+]
+for (const scenario of scriptedCases) {
+  const spawned = Deferred.makeUnsafe<void>()
+  const released = Deferred.makeUnsafe<void>()
+  const calls: string[][] = []
+  // 同时替换进程和binary发现，不下载、不委托真实spawn；参数、parser及scope仍用生产实现。
+  const scripted = testEffect(LayerNode.compile(Ripgrep.node, [
+    [AppProcess.node, Layer.mock(AppProcess.Service)({
+      spawn: (command) => Effect.acquireRelease(
+        Effect.sync(() => {
+          if (command._tag !== "StandardCommand") throw new Error("expected standard command")
+          calls.push([...command.args])
+          const prescan = scenario.name === "search-partial" && command.args.includes("--files")
+          const stdout = prescan ? "accessible.ts\n" : scenario.stdout
+          const stderr = prescan && !command.args.includes("--no-messages") ? "blocked/: Permission denied (os error 13)" : scenario.stderr
+          return ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(0),
+            exitCode: scenario.pending ? Effect.never : Effect.succeed(ChildProcessSpawner.ExitCode(scenario.code)),
+            isRunning: Effect.succeed(scenario.pending === true), kill: () => Effect.void, stdin: Sink.drain,
+            stdout: stdout ? Stream.make(new TextEncoder().encode(stdout)) : Stream.empty,
+            stderr: stderr ? Stream.make(new TextEncoder().encode(stderr)) : Stream.empty,
+            all: Stream.empty, getInputFd: () => Sink.drain, getOutputFd: () => Stream.empty, unref: Effect.succeed(Effect.void),
+          })
+        }).pipe(Effect.tap(() => Deferred.succeed(spawned, undefined))),
+        () => Deferred.succeed(released, undefined),
+      ),
+    })],
+    [RipgrepBinary.node, Layer.succeed(RipgrepBinary.Service, RipgrepBinary.Service.of({ filepath: Effect.succeed("rg-fixture") }))],
+  ]))
+  scripted.live(`scripted ripgrep replay: ${scenario.name}`, () => Effect.gen(function* () {
+    const rg = yield* Ripgrep.Service
+    if (scenario.name === "search-partial") {
+      // 保留生产默认预扫；缺少抑制参数时替身真实返回权限诊断，不能绕过首个失败点。
+      const result = yield* rg.search({ cwd: process.cwd(), pattern: "needle", limit: 10 })
+      expect(calls).toHaveLength(2)
+      expect(calls[0]).toContain("--files")
+      expect(calls[0]).toContain("--no-messages")
+      expect(calls[1]).toContain("--json")
+      expect(result).toMatchObject({ partial: true, truncated: false })
+      expect(result.items.map((item) => item.entry.path)).toEqual([RelativePath.make("accessible.ts")])
+      expect(GrepTool.toModelOutput(result)).toContain("could not be accessed")
+      expect(GrepTool.toModelOutput(result)).toContain("needle")
+      return
+    }
+    if (scenario.name === "find-diagnostics") {
+      expect((yield* rg.find({ cwd: process.cwd(), pattern: "*", limit: 10 })).map(item => item.path)).toEqual([RelativePath.make("accessible.ts")])
+      expect(calls[0]).not.toContain("--no-messages")
+      return
+    }
+    const controller = new AbortController()
+    const input = { cwd: process.cwd(), pattern: scenario.name === "arguments" ? ".git/config" : "*.ts", limit: 10, signal: controller.signal }
+    if (scenario.name === "abort") {
+      const fiber = yield* rg.glob(input).pipe(Effect.forkScoped)
+      yield* Deferred.await(spawned).pipe(Effect.timeout("1 second"))
+      controller.abort()
+      expect(Exit.isFailure(yield* Fiber.await(fiber))).toBe(true)
+      yield* Deferred.await(released).pipe(Effect.timeout("1 second"))
+      return
+    }
+    const exit = yield* rg.glob(input).pipe(Effect.exit)
+    if (scenario.name === "invalid" || scenario.name === "unknown-diagnostic" || scenario.name === "unknown-code") {
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain(scenario.stderr ?? "code 3")
+      return
+    }
+    expect(Exit.isSuccess(exit)).toBe(true)
+    if (Exit.isFailure(exit)) return yield* exit
+    const result = exit.value
+    expect(result.partial).toBe(scenario.name.startsWith("partial"))
+    expect(result.truncated).toBe(scenario.name === "bounded")
+    if (scenario.name === "partial" || scenario.name === "partial-empty") {
+      expect(result.files.map((item) => item.path)).toEqual(scenario.name === "partial" ? [RelativePath.make("accessible.ts")] : [])
+      expect(GlobTool.toModelOutput(result)).toContain("could not be accessed")
+      // 真实Native注册/settle消费相同结果；只替换进程、搜索和授权，不启动产品运行时。
+      const limits: number[] = []
+      const graph = AppNodeBuilder.build(
+        LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, GlobTool.node, GrepTool.node]),
+        [
+          [Ripgrep.node, Layer.succeed(Ripgrep.Service, Ripgrep.Service.of({ ...rg, glob: input => Effect.sync(() => limits.push(input.limit)).pipe(Effect.andThen(rg.glob(input))), search: () => Effect.succeed({ items: [], partial: true, truncated: false }) }))],
+          [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(process.cwd()) })))],
+          [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: () => Effect.void })],
+          [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+        ],
+      )
+      yield* Effect.gen(function* () {
+        const registry = yield* ToolRegistry.Service
+        for (const name of ["glob", "grep"]) {
+          const settled = yield* settleTool(registry, {
+            sessionID: SessionSchema.ID.make("ses_native_partial"), ...toolIdentity,
+            call: { type: "tool-call", id: `partial-${name}`, name, input: { pattern: name === "grep" ? "needle" : "*.ts" } },
+          })
+          expect(settled.output?.structured).toMatchObject({ partial: true, truncated: false })
+          expect(settled.result.type === "text" ? settled.result.value : "").toContain("could not be accessed")
+        }
+      }).pipe(Effect.provide(graph))
+      expect(limits).toEqual([100])
+    }
+    if (scenario.name === "empty") {
+      expect(result.files).toEqual([])
+      expect(GlobTool.toModelOutput(result)).toBe("No files found")
+      expect(GrepTool.toModelOutput({ items: [], partial: false, truncated: false })).toBe("No files found")
+    }
+    if (scenario.name === "bounded") {
+      expect(result.files).toHaveLength(10)
+      // exit永久pending，只有正确的bounded返回及scope释放才能到达这里。
+      yield* Deferred.await(released).pipe(Effect.timeout("1 second"))
+    }
+    if (scenario.name === "arguments") {
+      expect(calls[0]).toContain("--no-messages")
+      expect(calls[0]).not.toContain("--follow")
+      // 保留上游统一排除git metadata的更强规则，不恢复旧source的覆盖例外。
+      expect(calls[0].indexOf("--glob=.git/config")).toBeLessThan(calls[0].indexOf("--glob=!**/.git/**"))
+    }
+  }))
+}

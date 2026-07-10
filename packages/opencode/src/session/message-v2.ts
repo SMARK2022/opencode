@@ -342,8 +342,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "tool") {
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
+            // 剪枝占位与共享Search History一起保留partial，不能把无正文当作完整阴性。
             const outputText = part.state.time.compacted
-              ? formatCompactionClearedNotice()
+              ? formatCompactionClearedNotice() + ((part.tool === "glob" || part.tool === "grep") && part.state.metadata.partial === true ? "\nSearch incomplete: some paths were inaccessible and skipped." : "")
               : truncateToolOutput(
                   part.state.output,
                   options?.toolOutputTruncation?.head,

@@ -140,6 +140,14 @@ test("file handoff compares real disk versions before applying its bounded evide
     expect(commandHandoff).toContain("Omitted: 3 executed commands due to evidence budget.")
     expect(commandHandoff).toContain("This is compaction #2.")
     expect(inspected).toHaveLength(untouched)
+    // 同一共享交接器保留partial空结果；完整空结果仍是确定性零匹配且不读盘。
+    const searchHandoff = yield* FileEvidence.render([], observed, tmp.path, { searches: [
+      { tool: "grep", pattern: "needle", path: ".", matches: 0, partial: true },
+      { tool: "glob", pattern: "*.missing", path: ".", matches: 0 },
+    ] })
+    expect(searchHandoff).toContain("| grep | needle | . | 0 (incomplete) |")
+    expect(searchHandoff).toContain("| glob | *.missing | . | 0 |")
+    expect(inspected).toHaveLength(untouched)
   }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
 })
 

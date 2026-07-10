@@ -436,3 +436,133 @@ describe("tool.grep", () => {
   )
 
 })
+
+  // [local-smark] 源 0413 核心缺陷场景：rg exit 2（TCC/ACL/EACCES）→
+  // search 零匹配 + partial——工具必须显式携带 partial 标记，与确定性
+  // empty / emptyTimedOut 三态可区分，不能把部分路径不可访问当作全量阴性
+  it.instance("flags zero matches as partial when search reports inaccessible paths", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            find: () => Effect.die("unused in partial test"),
+            glob: () => Effect.die("unused in partial test"),
+            grep: () => Effect.die("unused in partial test"),
+            search: () =>
+              Effect.succeed({
+                items: [],
+                partial: true,
+                truncated: false,
+                timedOut: false,
+              }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+          timeout: 1,
+        },
+        ctx,
+      )
+
+      // partial 空结果的三态可区分：metadata.partial 是模型判断
+      // 「结果可能不完整」的唯一信号；输出不得是确定性 "No files found"
+      expect(result.metadata.matches).toBe(0)
+      expect(result.metadata.truncated).toBe(false)
+      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
+      expect(result.output).toContain("could not access some paths")
+      expect(result.output).not.toBe("No files found")
+    }),
+  )
+
+  // [local-smark] 有匹配 + partial：已解析结果保留的同时追加不可访问提示，
+  // 与源提交「部分路径不可访问不改变已解析结果可信度」的语义一致
+  it.instance("keeps matches and marks inaccessibility on non-empty partial results", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            find: () => Effect.die("unused in partial test"),
+            glob: () => Effect.die("unused in partial test"),
+            grep: () => Effect.die("unused in partial test"),
+            search: () =>
+              Effect.succeed({
+                items: [
+                  Match.make({
+                    entry: Entry.make({ path: RelativePath.make("match.txt"), type: "file" }),
+                    line: 1,
+                    offset: 0,
+                    text: "needle",
+                    submatches: [],
+                  }),
+                ],
+                partial: true,
+                truncated: false,
+                timedOut: false,
+              }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+          timeout: 1,
+        },
+        ctx,
+      )
+
+      expect(result.metadata.matches).toBe(1)
+      expect(result.output).toContain("Line 1: needle")
+      expect(result.output).toContain("inaccessible")
+    }),
+  )
+
+  // [local-smark] 源 :3152-3168 契约：exit 2 竞态下 timedOut 与 partial 可并存——
+  // 四态 metadata（matches/truncated/timedOut/partial）都必须持久化，文案归因
+  // timeout 但 partial 独立记录路径跳过，模型据此同时获知预算与权限两种归因
+  it.instance("preserves partial metadata when an empty search also times out", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            find: () => Effect.die("unused in partial test"),
+            glob: () => Effect.die("unused in partial test"),
+            grep: () => Effect.die("unused in partial test"),
+            search: () =>
+              Effect.succeed({
+                items: [],
+                partial: true,
+                truncated: false,
+                timedOut: true,
+              }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+          timeout: 1,
+        },
+        ctx,
+      )
+
+      expect(result.metadata.matches).toBe(0)
+      expect(result.metadata.truncated).toBe(true)
+      expect((result.metadata as Record<string, unknown>).timedOut).toBe(true)
+      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
+      expect(result.output).toContain("timed out")
+    }),
+  )

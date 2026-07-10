@@ -40,7 +40,8 @@ const FilesCommand = effectCmd({
         limit: args.limit ?? 10_000,
       })
       .pipe(Effect.orDie)
-    process.stdout.write(files.map((file) => file.path).join(EOL) + EOL)
+    // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
+    process.stdout.write(files.files.map((file) => file.path).join(EOL) + EOL)
   }),
 })
 

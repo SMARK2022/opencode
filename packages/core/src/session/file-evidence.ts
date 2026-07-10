@@ -111,7 +111,8 @@ export const render = Effect.fn("FileEvidence.render")(function* (
       return `| ${commandDisplay(item.command)} | ${cell(cwd.replaceAll("\\", "/"))} | ${item.exit} |`
     })] : []),
     ...(commands.size > 10 ? [`Omitted: ${commands.size - 10} executed commands due to evidence budget.`] : []),
-    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? "+" : ""} |`)] : []),
+    // 数量与完整性是独立事实，保留source原话而非把权限遗漏伪装成更多匹配。
+    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? " (incomplete)" : ""} |`)] : []),
     ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
     "", "### Lost Context Notice", "- Use current evidence before repeating reads or commands.",
     "- Treat stale evidence as advisory only.",

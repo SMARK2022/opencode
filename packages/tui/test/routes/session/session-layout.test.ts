@@ -21,9 +21,9 @@ describe("sessionMessageContentWidth (#184)", () => {
   })
 
   test("subtracts scrollbar gutter when enabled", () => {
-    // #184：滚动条开启再扣 tip 双层 paddingRight 合计 2
+    // 双层padding之外还须计入真实track，预览预算与正文几何才能一致。
     const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: true })
-    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 2)
+    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 3)
   })
 })
 // CJK 全角字符在视觉行尾刚好填满整行时（偶数宽度），OpenTUI 的 native

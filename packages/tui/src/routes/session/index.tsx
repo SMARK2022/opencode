@@ -18,7 +18,7 @@ import { sessionMessageContentWidth } from "./layout"
 
 // #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
 export const isVisibleAssistantPart = (
-  part: { type?: string; text?: string; state?: { status?: string } },
+  part: { type?: string; tool?: string; text?: string; state?: { status?: string; metadata?: { partial?: unknown }; structured?: unknown } },
   opts: { showDetails: boolean; showThinking: boolean },
 ) => {
   // #185：text 仅非空可见
@@ -27,7 +27,13 @@ export const isVisibleAssistantPart = (
   if (part.type === "reasoning") return opts.showThinking && Boolean((part.text ?? "").trim())
   if (part.type === "tool") {
     // #185：详情关闭时隐藏已完成工具
-    if (!opts.showDetails && part.state?.status === "completed") return false
+    // #244：completed 的 glob/grep 携带 partial=true 时豁免——details 关闭会折叠
+    // 输出，part 可见性是「搜索不完整」的唯一信号（源 isIncompleteSearch 语义）
+    const completedPartialSearch =
+      (part.tool === "glob" || part.tool === "grep") &&
+      part.state?.status === "completed" &&
+      (part.state?.metadata?.partial === true || toolDisplayMetadata(part.state).partial === true)
+    if (!opts.showDetails && part.state?.status === "completed" && !completedPartialSearch) return false
     return true
   }
   return true
@@ -1631,6 +1637,40 @@ function UserMessage(props: {
   )
 }
 
+type MessageRenderItem =
+  | { kind: "part"; key: string; part: Part }
+  | { kind: "reasoning-run"; key: string; parts: ReasoningPart[] }
+
+function projectMessageParts(messageID: string, parts: Part[]) {
+  // 只投影本消息的原始Part引用，不改持久化身份、正文或delta路由。
+  const result: MessageRenderItem[] = []
+  let reasoning: ReasoningPart[] = []
+  let boundary: Part | undefined
+  const flush = () => {
+    if (reasoning.length === 0) return
+    // 身份锚定前置硬边界，乱序前插成员不会清掉用户的展开状态。
+    result.push({
+      kind: "reasoning-run",
+      key: boundary ? `${messageID}:reasoning:after:${boundary.id}` : `${messageID}:reasoning:start`,
+      parts: reasoning,
+    })
+    // 新数组不再修改已交给描述符的成员列表。
+    reasoning = []
+  }
+  parts.forEach((part) => {
+    if (part.type === "reasoning") {
+      reasoning.push(part)
+      return
+    }
+    // 空text和隐藏工具仍是原始边界，不能先按可见性过滤再聚合。
+    flush()
+    result.push({ kind: "part", key: `part:${part.id}`, part })
+    boundary = part
+  })
+  flush()
+  return result
+}
+
 function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
   const ctx = use()
   const local = useLocal()
@@ -1638,6 +1678,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const sync = useSync()
   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
+  const renderItems = createMemo(() => projectMessageParts(props.message.id, props.parts))
+  const itemByKey = createMemo(() => new Map(renderItems().map((item) => [item.key, item])))
+  const renderItemKeys = createMemo(() => renderItems().map((item) => item.key))
 
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
@@ -1654,7 +1697,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       // #185：工具是否计入 visibleParts 与 shouldHide 同口径
       if (part.type === "tool")
         return isVisibleAssistantPart(
-          { type: "tool", state: part.state },
+          { type: "tool", tool: part.tool, state: part.state },
           { showDetails: ctx.showDetails(), showThinking: true },
         )
       return false
@@ -1683,18 +1726,23 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   // 消息导航只匹配滚动容器直接子节点的 ID；整条助手消息共用锚点，保留内部各分块的间距。
   return (
     <box id={props.message.id} flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
-      <For each={props.parts}>
-        {(part, index) => {
-          const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
+      <For each={renderItemKeys()}>
+        {(key, index) => {
+          // For保留primitive key对应的root，普通正文delta不重挂run。
+          const item = createMemo(() => itemByKey().get(key)!)
           return (
-            <Show when={component()}>
-              <Dynamic
-                last={index() === props.parts.length - 1}
-                component={component()}
-                part={part as any}
-                message={props.message}
-              />
-            </Show>
+            <Switch>
+              <Match when={item().kind === "reasoning-run" && item()}>
+                {(current) => <ReasoningRun parts={(current() as Extract<MessageRenderItem, { kind: "reasoning-run" }>).parts} />}
+              </Match>
+              <Match when={item().kind === "part" && item()}>
+                {(current) => {
+                  const part = () => (current() as Extract<MessageRenderItem, { kind: "part" }>).part
+                  const component = createMemo(() => PART_MAPPING[part().type as keyof typeof PART_MAPPING])
+                  return <Show when={component()}><Dynamic last={index() === renderItemKeys().length - 1} component={component()} part={part() as any} message={props.message} /></Show>
+                }}
+              </Match>
+            </Switch>
           )
         }}
       </For>
@@ -1771,132 +1819,144 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
 const PART_MAPPING = {
   text: TextPart,
   tool: ToolPart,
-  reasoning: ReasoningPart,
 }
 
 const INLINE_TOOL_ICON_WIDTH = 2
 
-function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
+const REASONING_PREVIEW_ROWS = 5
+function normalizeReasoning(text: string) {
+  return text.replace("[REDACTED]", "").trim()
+}
+
+function reasoningRows(text: string, width: number) {
+  const bodyWidth = Math.max(width, 1)
+  return text.split("\n").reduce((total, line) => {
+    // 与char-wrap使用相同终端cell口径；tab/control保守占一行，CJK不按字符个数算。
+    const cells = [...line].reduce((sum, char) => {
+      const code = char.codePointAt(0) ?? 0
+      return sum + (char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char))
+    }, 0)
+    return total + Math.max(1, Math.ceil(cells / bodyWidth))
+  }, 0)
+}
+
+function ReasoningRun(props: { parts: ReasoningPart[] }) {
   const { theme } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
-  // Collapsed by default in hide mode: a single line throughout, so the
-  // layout never shifts. Click to open the full markdown block, click to close.
-  const [expanded, setExpanded] = createSignal(false)
-
-  const content = createMemo(() => {
-    // OpenRouter encrypts some reasoning blocks; drop the placeholder.
-    return props.part.text.replace("[REDACTED]", "").trim()
-  })
-  const opaque = createMemo(() => !content() && Boolean(props.part.metadata))
-  // 全文共用既有 50ms 首尾值窗口，预览与展开正文不另设刷新计时器。
-  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
-  createEffect(() => setDisplayContent(content()))
-  // 首次 effect 尚未发布时沿源回退正文，已有节流值后不再逐字重排 markdown。
-  const renderedContent = createMemo(() => displayContent() || content())
-  // Reasoning is finalized when the server sets `time.end` (see processor.ts).
-  // Flips independently of the parent message completing.
-  const isDone = createMemo(() => props.part.time.end !== undefined)
-  // #137：完成后 remount 推理块，避免高度测量粘滞
-  const completedKey = createMemo(() => `${ctx.width}@${renderedContent()}`)
-  const inMinimal = createMemo(() => ctx.thinkingMode() === "hide")
-  const duration = createMemo(() => {
-    const end = props.part.time.end
-    return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
-  })
-  const summary = createMemo(() => reasoningSummary(renderedContent()))
+  const [override, setOverride] = createSignal<boolean>()
+  const [bodyMounted, setBodyMounted] = createSignal(false)
+  const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
+  // 加密占位仍显示上游Thought标题，不从metadata猜测正文或长度。
+  const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
+  // 标题、预算和每个正文共用同一次文本快照，不各自启动节流窗口。
+  const texts = createMemo(() => parts().map((part) => ({ part, text: normalizeReasoning(part.text) })))
+  const [displayTexts, setDisplayTexts] = createThrottledSignal<ReturnType<typeof texts>>([], 50)
+  createEffect(() => setDisplayTexts(texts()))
+  const renderedParts = createMemo(() => displayTexts().length ? displayTexts() : texts())
+  const renderedTexts = createMemo(() => renderedParts().map((entry) => entry.text))
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
-
-  // 选区只拦截鼠标入口；共享 toggle 保留模式与加密判断，键盘切换思考模式不应受残留选区影响。
-  const toggle = () => {
-    if (!inMinimal() || opaque()) return
-    setExpanded((prev) => !prev)
-  }
-
+  const previews = createMemo(() => {
+    let remaining = REASONING_PREVIEW_ROWS
+    return renderedParts().flatMap((entry, index) => {
+      // 后续成员必须同时分到marker及至少一行正文，不能留下孤立标记。
+      const markerRows = index === 0 ? 0 : 1
+      if (remaining <= markerRows) return []
+      const bodyRows = Math.min(reasoningRows(entry.text, ctx.width), remaining - markerRows)
+      remaining -= markerRows + bodyRows
+      return [{ ...entry, index, bodyRows }]
+    })
+  })
+  const overflow = createMemo(() => renderedParts().reduce((rows, entry, index) => rows + reasoningRows(entry.text, ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
+  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+  const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
+  const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
+  // 全局模式变化才清除局部选择；普通delta不得把已展开的run折回。
+  createEffect(on(() => ctx.thinkingMode(), () => setOverride(undefined), { defer: true }))
+  createEffect(() => { if (expanded()) setBodyMounted(true) })
   return (
-    <Show when={content() || opaque()}>
-      <box
-        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-        paddingLeft={3}
-        marginTop={1}
-        flexDirection="column"
-        flexShrink={0}
+    <Show when={ctx.showThinking() && (parts().length > 0 || opaque())}>
+      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}
         onMouseUp={() => {
-          // 拖选推理内容时保留展开状态，让外层应用复制选区，避免重排正文打断复制。
-          if (renderer.getSelection()?.getSelectedText()) return
-          toggle()
-        }}
-      >
-        <box>
-          {/* 字数与正文使用同一节流快照，避免标题逐字刷新绕过 markdown 的 50ms 窗口。 */}
-          <ReasoningHeader
-            toggleable={inMinimal() && !opaque()}
-            open={!inMinimal() || expanded()}
-            done={isDone()}
-            title={summary().title}
-            characters={opaque() ? undefined : renderedContent().length}
-            duration={isDone() ? Locale.duration(duration()) : undefined}
-            encrypted={opaque()}
-          />
+          if (renderer.getSelection()?.getSelectedText() || opaque() || !overflow()) return
+          setOverride(!expanded())
+        }}>
+        <ReasoningHeader toggleable={overflow() && !opaque()} open={expanded()} done={done()}
+          title={[reasoningSummary(renderedTexts()[0] ?? "").title, renderedTexts().length > 1 ? `${renderedTexts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
+          characters={opaque() ? undefined : renderedTexts().reduce((total, text) => total + text.length, 0)}
+          duration={done() ? Locale.duration(duration()) : undefined} encrypted={opaque()} />
+        {/* 总预览只有五行，且与普通正文同宽，不再额外增加横向padding。 */}
+        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
+          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part} text={preview.text}
+            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${renderedParts().length}]`} rows={preview.bodyRows}
+            width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />}</For>
         </box>
-        {/* 折叠推理：保留 5 行预览，避免 hide 模式只剩标题不可窥 */}
-        <Show when={inMinimal() && !expanded() && content()}>
-          <box paddingLeft={2} marginTop={1}>
-            {/* 用 content() 而非 summary().body：summary 可能只剩标题体为空 */}
-            <code
-              filetype="markdown"
-              // #137：预览流式用 styled streaming
-              drawUnstyledText={false}
-              streaming={!isDone()}
-              syntaxStyle={syntax()}
-              content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
-              conceal={ctx.conceal()}
-              fg={theme.textMuted}
-            />
-            {/* 超出预览行时提示可展开；点击由外层推理区统一处理 */}
-            {/* 溢出提示也按同一快照判定，正文尾值发布前不能提前改变折叠布局。 */}
-            <Show when={renderedContent().split(String.fromCharCode(10)).length > 5}>
-              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
-            </Show>
-          </box>
-        </Show>
-        <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
-          <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
-            <Switch>
-              <Match when={!isDone()}>
-                <code
-                  filetype="markdown"
-                  // #135/#137：流式推理 styled streaming，避免 unstyled 闪烁
-                  drawUnstyledText={false}
-                  streaming={true}
-                  syntaxStyle={syntax()}
-                  content={summary().body}
-                  conceal={ctx.conceal()}
-                  fg={theme.textMuted}
-                />
-              </Match>
-              {/* #137：推理完成后 keyed remount */}
-              <Match when={isDone()}>
-                <Show keyed when={completedKey()}>
-                  {(_key) => (
-                    <code
-                      filetype="markdown"
-                      drawUnstyledText={false}
-                      streaming={false}
-                      syntaxStyle={syntax()}
-                      content={summary().body}
-                      conceal={ctx.conceal()}
-                      fg={theme.textMuted}
-                    />
-                  )}
-                </Show>
-              </Match>
-            </Switch>
-          </box>
-        </Show>
+        {/* 首次展开后保留full树，仅切visible，避免复用已销毁的CodeRenderable。 */}
+        <Show when={bodyMounted()}><box visible={expanded()}>
+          <For each={renderedParts().map((entry) => entry.part.id)}>{(id) => {
+            const item = createMemo(() => renderedParts().find((entry) => entry.part.id === id)!)
+            const index = createMemo(() => renderedParts().findIndex((entry) => entry.part.id === id))
+            return <ReasoningBody id={`text-${id}`} part={item().part} text={item().text} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${renderedParts().length}]`}
+              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
+          }}</For>
+        </box></Show>
+        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${renderedParts().length > previews().length ? ` · +${renderedParts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
       </box>
     </Show>
   )
+}
+
+function ReasoningBody(props: { id: string; part: ReasoningPart; text: string; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
+  const { theme } = useTheme()
+  const renderedContent = createMemo(() => props.text)
+  // 保留上游per-Part完成判定，不等待父消息或其他成员结束。
+  const done = createMemo(() => props.part.time.end !== undefined)
+  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
+  const [markerReady, setMarkerReady] = createSignal(false)
+  let generation = 0
+  let active = true
+  createEffect(() => {
+    renderedContent()
+    props.conceal
+    generation++
+    setMarkerReady(false)
+  })
+  onCleanup(() => { active = false; generation++ })
+  // 每个Part独立解析Markdown；显式锁定正文宽度，避免CJK固有测量向偶数列扩张。
+  const code = () => <code id={props.id} width={props.width} filetype="markdown" drawUnstyledText={false} streaming={!done()}
+    syntaxStyle={props.syntaxStyle} content={renderedContent()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.rows ? "char" : "word"}
+    onChunks={(chunks, context) => {
+      const current = generation
+      const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
+      queueMicrotask(() => {
+        // 只认可当前conceal结果，晚到的highlight不能在正文消失后复活marker。
+        if (!active || current !== generation || context.content !== renderedContent()) return
+        setMarkerReady(visible)
+      })
+      return chunks
+    }} />
+  return <>
+    <Show when={props.marker && markerReady()}><text fg={theme.textMuted} wrapMode="none">{props.marker}</text></Show>
+    <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
+      <Show when={!done()} fallback={<Show keyed when={completedKey()}>{(_key) => code()}</Show>}>{code()}</Show>
+    </box>
+  </>
+}
+
+function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
+  // 仅控制下级marker，不能据此隐藏正文；裁剪后的远端glyph不能替首行背书。
+  const bodyWidth = Math.max(width, 1)
+  let row = 1
+  let column = 0
+  return [...text].some((char) => {
+    if (rows && row > rows) return false
+    if (char === "\n") { row++; column = 0; return false }
+    const code = char.codePointAt(0) ?? 0
+    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
+    if (column + cells > bodyWidth) { row++; column = 0 }
+    column += cells
+    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
+  })
 }
 
 function ReasoningHeader(props: {
@@ -1975,7 +2035,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
     // #185：与 isVisibleAssistantPart 同口径（详情关+completed 隐藏）
     if (ctx.showDetails()) return false
     return !isVisibleAssistantPart(
-      { type: "tool", state: props.part.state },
+      { type: "tool", tool: props.part.tool, state: props.part.state },
       { showDetails: ctx.showDetails(), showThinking: true },
     )
   })
@@ -2956,6 +3016,9 @@ function Glob(props: ToolProps) {
       <Show when={numberValue(props.metadata.count)}>
         ({numberValue(props.metadata.count)} {numberValue(props.metadata.count) === 1 ? "match" : "matches"})
       </Show>
+      {/* #244：partial 时补 (incomplete) 标记——=== true 与 grepResult 同口径，
+          防第三方工具同名字段改变 Glob 行可见性 */}
+      <Show when={props.metadata.partial === true}> (incomplete)</Show>
     </InlineTool>
   )
 }
@@ -3020,15 +3083,17 @@ function grepFilter(value: unknown, exclude = false) {
 
 // #246：numberValue 收窄后的 matches 才参与单复数与截断判断；
 // 字段缺失或类型不符时退化为空串/超时提示，不渲染误导性数字。
-function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
+function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown; partial?: unknown }) {
   const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
   const timedOut = metadata.timedOut === true
   // #246：TUI 与 run 模式的超时/截断组合语义保持一致——
   // metadata 缺 matches 字段时只显示 timed out，绝不渲染 undefined 字符串
-  if (matches === undefined) return timedOut ? "timed out" : ""
-  if (matches === 0 && timedOut) return "timed out"
+  // #244：partial 与 timeout/truncated 独立组合，不能用一个状态覆盖另一个完整性提示
+  const incomplete = metadata.partial === true
+  if (matches === undefined) return [timedOut && "timed out", incomplete && "incomplete"].filter(Boolean).join(", ")
+  if (matches === 0 && timedOut) return incomplete ? "timed out, incomplete" : "timed out"
   const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
-  return timedOut ? `${label}, timed out` : label
+  return [label, timedOut && "timed out", incomplete && "incomplete"].filter(Boolean).join(", ")
 }
 
 function Grep(props: ToolProps) {
