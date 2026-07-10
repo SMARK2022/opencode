@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Über diesen Branch**: Dies ist OpenCodes erweiterter `dev-smark`-Branch (aktuelle Version `1.15.7`, CLI release tag `v1.15.7-smark`). Er basiert auf dem Upstream-Branch `dev` und konzentriert sich auf TUI-Interaktion, Sitzungsverwaltung, Token-Statistiken, Windows/PowerShell-Kompatibilität, VS Code Notebook-Integration, Netzwerkproxy-Unterstützung und Installationserlebnis.
+> **Über diesen Branch**: Dies ist OpenCodes erweiterter `dev-smark`-Branch (aktuelle Version `1.15.10`, CLI release tag `v1.15.10-smark`). Er basiert auf dem Upstream-Branch `dev` und konzentriert sich auf TUI-Interaktion, Sitzungsverwaltung, Token-Statistiken, Windows/PowerShell-Kompatibilität, VS Code-Sprachdienste und Notebook-Integration, Netzwerkproxy-Unterstützung und Installationserlebnis.
 
 ---
 
@@ -93,10 +93,10 @@ Das übergibt `OPENCODE_INSTALL_DIR` nur an `curl`, nicht an den `bash`-Prozess,
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-Dies ist die vollständige Form: `bash -s --` weist `bash` an, den Installer von stdin zu lesen und `--version 1.15.7-smark` als Installer-Argumente zu übergeben. Die Version kann `1.15.7-smark` oder in release tag-Form `v1.15.7-smark` lauten.
+Dies ist die vollständige Form: `bash -s --` weist `bash` an, den Installer von stdin zu lesen und `--version 1.15.10-smark` als Installer-Argumente zu übergeben. Die Version kann `1.15.10-smark` oder in release tag-Form `v1.15.10-smark` lauten.
 
 ### Installer-Verhalten
 
@@ -181,7 +181,7 @@ Dieser Branch ist nicht nur eine Ansammlung von Funktionen; er macht häufige En
 | Token-Statistiken | Schwer zu erkennen, was Kontext verbraucht | Input-/Output-Token, Tool-Ergebnisse, Anhänge, Aufschlüsselungen des Request-Overheads |
 | Tool-System | Datei- und Shell-Ausgaben können Kontext verschmutzen | Strukturierte Read-Ausgabe, Shell-Ausgabekomprimierung, Write-Auto-Diff |
 | Provider | Multi-Account-, Endpoint- und Modell-Setup ist komplex | Provider-Aliasse, Client-Version-Override, ClaudeCode provider |
-| VSCode | Notebook-Szenarien können von CLI-Agents nicht zuverlässig bedient werden | Cell-Zusammenfassung, Lesen, Bearbeiten, Ausführen, Ausgabe lesen, Kernel-Verwaltung |
+| VS Code | CLI-Agents können Editor-Sprachdienste nicht direkt wiederverwenden oder Notebooks zuverlässig bedienen | VS Code-basierte Diagnose, Navigation und Symbolsuche, Zellenbearbeitung und -ausführung, Kernel-Verwaltung |
 | Windows | PowerShell, Encoding, Pfade und CRLF sind fehleranfällig | CLIXML-Decoding, UTF-8-Fixes, Pfadnormalisierung, CRLF-Erhaltung |
 | Netzwerkproxy | Provider-, Plugin- und fetch-Proxylogik ist verstreut | NetworkProxy behandelt HTTP_PROXY, HTTPS_PROXY, NO_PROXY konsistent |
 | Daemon | Multi-Instanzen, Locks, Health Checks und Clients sind komplex | Server Lock, Health Checks, HttpApi, PTY WebSocket-Tickets |
@@ -238,9 +238,11 @@ Interne Statistiken bevorzugen request usage-Daten und fallen für ältere Sitzu
 | ClaudeCode provider | Unterstützt API Key, Base URL und dynamische Authentifizierungsmodi |
 | Cloudflare AI Gateway | Routing-Fixes; tool streaming ist für Nicht-Anthropic-Modelle standardmäßig deaktiviert |
 
-### VS Code Notebook-Integration
+### VS Code-Sprachdienste Und Notebook-Integration
 
-Installiere vor der Nutzung von Notebook-Tools die VS Code-Erweiterung [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Die Erweiterungsversion bleibt `1.15.5` und kann weiterhin mit SMARK CLI `1.15.7` arbeiten; für dieses CLI-README-Update ist kein Upgrade erforderlich. Die Erweiterung erstellt eine lokale authentifizierte Bridge zwischen VS Code/Jupyter Notebook und der OpenCode CLI; ohne installierte oder verbundene Erweiterung kann die CLI Notebook-Zellen nicht zuverlässig lesen, bearbeiten oder ausführen.
+Installiere [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge), um VS Code-Sprachdienste oder Notebook-Tools zu verwenden. Die Repository-Version der Erweiterung ist `1.15.10`; empfohlen wird SMARK CLI `1.15.10-smark`. Beide werden unabhängig versioniert. Die Erweiterung stellt eine lokale authentifizierte Bridge für Sprachdienste und VS Code/Jupyter Notebook bereit. Ohne Verbindung nutzt die CLI weiter ihren eingebauten LSP, aber VS Code-Operationen und Notebook-Tools sind nicht verfügbar.
+
+Die Erweiterung bündelt keinen Language Server. Sie verwendet Provider, die aktive Spracherweiterungen im aktuellen VS Code-Fenster für touch, diagnostics, hover, definition, references und document/workspace symbols registrieren. Fehlgeschlagene Bridge-Anfragen fallen auf den eingebauten LSP zurück; diagnostics tut dies auch bei einer ungültigen Antwortstruktur, während andere erfolgreiche Antworten ohne erwartetes Ergebnisfeld derzeit als leer interpretiert werden können. Implementation und call hierarchy bleiben immer beim eingebauten LSP, und ein gültiges leeres Ergebnis beweist keinen vollständigen Projekt-Typecheck.
 
 Nach dem Start öffnet die Erweiterung eine lokale Bridge auf `127.0.0.1:<random port>` und schreibt ein Heartbeat-Manifest nach `~/.local/state/opencode/ide/<uuid>.json`. OpenCode wählt automatisch die passende VS Code bridge anhand von Workspace und Notebook-Pfad aus. In Remote-SSH-, WSL- oder Container-Setups muss die CLI auf derselben Seite laufen, die auf die Bridge zugreifen kann.
 
@@ -251,7 +253,7 @@ Nach dem Start öffnet die Erweiterung eine lokale Bridge auf `127.0.0.1:<random
 | `vscode_notebook_edit` | Zellen einfügen, bearbeiten oder löschen; unterstützt exakte `oldCode/newCode`-Stringersetzung und code/markdown-Typwechsel |
 | `vscode_notebook_run` | Eine Code-Zelle oder einen Stable-ID-Bereich über VS Code/Jupyter ausführen; Bereichsausführung stoppt bei Fehler oder Timeout |
 | `vscode_notebook_output` | Text, Bilder, HTML, JSON und andere Ausgaben lesen; große Ausgaben werden nach `.opencode/cache/notebook-outputs/` geschrieben und als Artifact-Pfade zurückgegeben |
-| `vscode_notebook_env` | Kernel/Runtime inspizieren, Kernel-Auswahl auslösen, Kernel neu starten oder ein Notebook speichern, wenn der Benutzer dies ausdrücklich verlangt |
+| `vscode_notebook_env` | Kernel/Runtime inspizieren, Kernel auswählen, neu starten oder stoppen und ein Notebook auf ausdrücklichen Wunsch erstellen oder speichern |
 
 Empfohlener Ablauf: Nutze `vscode_notebook_summary`, um die aktuelle Cell-ID zu erhalten, `vscode_notebook_source`, um die Zielzelle zu lesen, `vscode_notebook_run`, um nach der Bearbeitung zu validieren, und `vscode_notebook_output`, um Ergebnisse zu prüfen. Behandle den Anzeigeindex `cN` nicht als langfristig stabile Referenz; verwende nach Einfügungen, Löschungen oder Typwechseln die vom Tool zurückgegebene neue `#VSC-*` ID oder führe summary erneut aus.
 

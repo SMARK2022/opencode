@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **このブランチについて**: これは OpenCode の `dev-smark` 強化ブランチです（現在のバージョン `1.15.7`、CLI release tag は `v1.15.7-smark`）。上流 `dev` を基にしており、TUI 操作、セッション管理、Token 統計、Windows/PowerShell 互換性、VS Code Notebook 統合、ネットワークプロキシ対応、インストール体験に重点を置いています。
+> **このブランチについて**: これは OpenCode の `dev-smark` 強化ブランチです（現在のバージョン `1.15.10`、CLI release tag は `v1.15.10-smark`）。上流 `dev` を基にしており、TUI 操作、セッション管理、Token 統計、Windows/PowerShell 互換性、VS Code の言語サービスと Notebook 統合、ネットワークプロキシ対応、インストール体験に重点を置いています。
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-これが完全な形式です。`bash -s --` は `bash` に stdin から installer を読ませ、`--version 1.15.7-smark` を installer 引数として渡します。バージョンは `1.15.7-smark`、または release tag 形式の `v1.15.7-smark` を指定できます。
+これが完全な形式です。`bash -s --` は `bash` に stdin から installer を読ませ、`--version 1.15.10-smark` を installer 引数として渡します。バージョンは `1.15.10-smark`、または release tag 形式の `v1.15.10-smark` を指定できます。
 
 ### Installer の動作
 
@@ -181,7 +181,7 @@ SMARK `dev-smark` ブランチは現在 CLI releases のみを公開しており
 | Token statistics | 何が context を消費しているか分かりにくい | Input/output tokens、tool results、attachments、request overhead breakdowns |
 | Tool system | File と shell output が context を汚染しやすい | Structured Read output、Shell output compression、Write auto diff |
 | Provider | Multi-account、endpoint、model setup が複雑 | Provider aliases、client version override、ClaudeCode provider |
-| VSCode | Notebook scenarios を CLI agents が確実に操作できない | Cell summary、read、edit、run、output read、kernel management |
+| VS Code | CLI agents は editor の言語サービスを直接再利用できず Notebook も確実に操作できない | VS Code-backed diagnostics、navigation、symbol query、cell edit/run、kernel management |
 | Windows | PowerShell、encoding、paths、CRLF で error が起きやすい | CLIXML decoding、UTF-8 fixes、path normalization、CRLF preservation |
 | Network proxy | Provider、plugin、fetch proxy logic が分散している | NetworkProxy が HTTP_PROXY、HTTPS_PROXY、NO_PROXY を一貫して処理する |
 | Daemon | Multi-instance、locks、health checks、clients が複雑 | Server Lock、health checks、HttpApi、PTY WebSocket tickets |
@@ -238,9 +238,11 @@ SMARK `dev-smark` ブランチは現在 CLI releases のみを公開しており
 | ClaudeCode provider | API Key、Base URL、dynamic authentication modes をサポートする |
 | Cloudflare AI Gateway | Routing fixes。non-Anthropic models では tool streaming がデフォルトで無効になる |
 
-### VS Code Notebook Integration
+### VS Code Language Services And Notebook Integration
 
-Notebook tools を使用する前に、VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) をインストールしてください。extension version は `1.15.5` のままで、SMARK CLI `1.15.7` と引き続き動作します。この CLI README update のために upgrade する必要はありません。この extension は VS Code/Jupyter Notebook と OpenCode CLI の間に local authenticated bridge を作成します。インストールまたは接続されていない場合、CLI は notebook cells を確実に read、edit、run できません。
+VS Code の言語サービスまたは Notebook tools を使用するには、[SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) をインストールしてください。リポジトリ内の extension version は `1.15.10`、推奨 SMARK CLI は `1.15.10-smark` で、両者は独立して versioning されます。Extension は言語サービスと VS Code/Jupyter Notebook 用の local authenticated bridge を提供します。未接続時も CLI は内蔵 LSP を使いますが、VS Code-backed 操作と Notebook tools は利用できません。
+
+Extension は language server を同梱せず、現在の VS Code window で有効な language extension が登録した provider を touch、diagnostics、hover、definition、references、document/workspace symbols に再利用します。Bridge request が失敗すると内蔵 LSP に fallback し、diagnostics は response structure が無効な場合も fallback します。その他の successful response で expected result field が欠ける場合、現在は空結果として解釈されることがあります。Implementation と call hierarchy は常に内蔵 LSP を使い、有効な空結果は project 全体の typecheck 成功を証明しません。
 
 起動後、extension は `127.0.0.1:<random port>` に local bridge を開き、heartbeat manifest を `~/.local/state/opencode/ide/<uuid>.json` に書き込みます。OpenCode は workspace と notebook path によって一致する VS Code bridge を自動選択します。remote SSH、WSL、container setup では、CLI は bridge にアクセスできる同じ側で実行する必要があります。
 
@@ -251,7 +253,7 @@ Notebook tools を使用する前に、VS Code extension [SMARK2022.opencode-ide
 | `vscode_notebook_edit` | cells を insert、edit、delete する。exact `oldCode/newCode` string replacement と code/markdown type switching をサポートする |
 | `vscode_notebook_run` | VS Code/Jupyter 経由で 1 つの code cell または stable-ID range を実行する。range execution は failure または timeout で停止する |
 | `vscode_notebook_output` | text、image、HTML、JSON、その他の outputs を読む。large outputs は `.opencode/cache/notebook-outputs/` に書き込まれ、artifact paths として返される |
-| `vscode_notebook_env` | kernel/runtime の inspect、kernel selection の trigger、kernel restart、または user が明示的に要求した場合の notebook save を行う |
+| `vscode_notebook_env` | kernel/runtime の inspect、kernel の select/restart/stop、明示的な要求時の notebook create/save を行う |
 
 Recommended flow: `vscode_notebook_summary` で現在の cell ID を取得し、`vscode_notebook_source` で target cell を読み、edit 後に `vscode_notebook_run` で validate し、`vscode_notebook_output` で results を inspect します。display index `cN` を長期的に安定した reference として扱わないでください。insert、delete、type switch の後は、tool が返す新しい `#VSC-*` ID を使用するか、summary を再実行してください。
 

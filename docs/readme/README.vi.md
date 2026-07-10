@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Ve nhanh nay**: Day la nhanh nang cao `dev-smark` cua OpenCode (phien ban hien tai `1.15.7`, CLI release tag `v1.15.7-smark`). Nhanh nay dua tren upstream `dev` va tap trung vao tuong tac TUI, quan ly phien, thong ke token, tuong thich Windows/PowerShell, tich hop VS Code Notebook, ho tro network proxy va trai nghiem cai dat.
+> **Ve nhanh nay**: Day la nhanh nang cao `dev-smark` cua OpenCode (phien ban hien tai `1.15.10`, CLI release tag `v1.15.10-smark`). Nhanh nay dua tren upstream `dev` va tap trung vao tuong tac TUI, quan ly phien, thong ke token, tuong thich Windows/PowerShell, dich vu ngon ngu va tich hop Notebook cua VS Code, ho tro network proxy va trai nghiem cai dat.
 
 ---
 
@@ -93,10 +93,10 @@ Cach do chi truyen `OPENCODE_INSTALL_DIR` cho `curl`, khong truyen cho tien trin
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-Day la dang day du: `bash -s --` bao `bash` doc installer tu stdin va truyen `--version 1.15.7-smark` lam doi so installer. Phien ban co the la `1.15.7-smark` hoac dang release tag `v1.15.7-smark`.
+Day la dang day du: `bash -s --` bao `bash` doc installer tu stdin va truyen `--version 1.15.10-smark` lam doi so installer. Phien ban co the la `1.15.10-smark` hoac dang release tag `v1.15.10-smark`.
 
 ### Hanh Vi Installer
 
@@ -181,7 +181,7 @@ Nhanh nay khong chi la mot tap hop tinh nang; no bien cac diem dau pho bien tron
 | Token statistics | Kho biet thu gi tieu thu context | Token dau vao/dau ra, ket qua tool, attachments, phan tach request overhead |
 | Tool system | Dau ra file va shell co the lam ban context | Dau ra Read co cau truc, nen dau ra Shell, Write tu dong diff |
 | Provider | Cai dat nhieu tai khoan, endpoint va model rat phuc tap | Provider aliases, client version override, ClaudeCode provider |
-| VSCode | Khong the thao tac cac kich ban Notebook mot cach tin cay bang CLI agents | Tong quan cell, doc, sua, chay, doc dau ra, quan ly kernel |
+| VS Code | CLI agents khong the truc tiep dung language services cua editor hoac thao tac Notebook mot cach tin cay | VS Code-backed diagnostics/navigation/symbol query, cell edit/run, quan ly kernel |
 | Windows | PowerShell, encoding, duong dan va CRLF de gay loi | Giai ma CLIXML, sua UTF-8, chuan hoa duong dan, bao toan CRLF |
 | Network proxy | Logic proxy cho provider, plugin va fetch bi phan tan | NetworkProxy xu ly HTTP_PROXY, HTTPS_PROXY, NO_PROXY nhat quan |
 | Daemon | Nhieu instance, locks, health checks va clients phuc tap | Server Lock, health checks, HttpApi, PTY WebSocket tickets |
@@ -238,9 +238,11 @@ Thong ke noi bo uu tien du lieu request usage va fallback ve message metadata ch
 | ClaudeCode provider | Ho tro API Key, Base URL va cac che do xac thuc dong |
 | Cloudflare AI Gateway | Sua routing; tool streaming mac dinh bi tat cho cac model khong phai Anthropic |
 
-### Tich Hop VS Code Notebook
+### Tich Hop Language Services Va Notebook Cua VS Code
 
-Truoc khi dung Notebook tools, hay cai VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Phien ban extension van la `1.15.5` va tiep tuc hoat dong voi SMARK CLI `1.15.7`; khong can nang cap cho ban cap nhat CLI README nay. Extension tao mot local authenticated bridge giua VS Code/Jupyter Notebook va OpenCode CLI; neu no chua duoc cai dat hoac ket noi, CLI khong the doc, sua hoac chay notebook cells mot cach tin cay.
+De dung dich vu ngon ngu cua VS Code hoac Notebook tools, hay cai [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Phien ban extension trong repository la `1.15.10`, va khuyen dung SMARK CLI `1.15.10-smark`; hai phien ban doc lap. Extension tao local authenticated bridge cho dich vu ngon ngu va VS Code/Jupyter Notebook. Khi khong ket noi, CLI van dung LSP tich hop, nhung khong co VS Code-backed operations va Notebook tools.
+
+Extension khong kem language server; no dung providers do language extensions dang bat trong cua so VS Code hien tai dang ky cho touch, diagnostics, hover, definition, references va document/workspace symbols. Khi bridge request that bai, CLI fallback ve LSP tich hop; diagnostics cung fallback khi response structure khong hop le, con successful responses khac thieu expected result field hien co the bi hieu la rong. Implementation va call hierarchy luon dung LSP tich hop, va ket qua rong hop le khong chung minh toan bo project typecheck da pass.
 
 Sau khi khoi dong, extension mo mot local bridge tai `127.0.0.1:<random port>` va ghi heartbeat manifest vao `~/.local/state/opencode/ide/<uuid>.json`. OpenCode tu dong chon VS Code bridge phu hop theo workspace va notebook path. Trong cac thiet lap remote SSH, WSL hoac container, CLI phai chay cung phia co the truy cap bridge.
 
@@ -251,7 +253,7 @@ Sau khi khoi dong, extension mo mot local bridge tai `127.0.0.1:<random port>` v
 | `vscode_notebook_edit` | Chen, sua hoac xoa cells; ho tro thay the chuoi chinh xac `oldCode/newCode` va chuyen doi kieu code/markdown |
 | `vscode_notebook_run` | Chay mot code cell hoac mot khoang stable-ID qua VS Code/Jupyter; chay khoang se dung khi loi hoac timeout |
 | `vscode_notebook_output` | Doc text, image, HTML, JSON va cac dau ra khac; dau ra lon duoc ghi vao `.opencode/cache/notebook-outputs/` va tra ve duoi dang artifact paths |
-| `vscode_notebook_env` | Kiem tra kernel/runtime, kich hoat kernel selection, restart kernel, hoac save notebook khi nguoi dung yeu cau ro rang |
+| `vscode_notebook_env` | Kiem tra kernel/runtime, select/restart/stop kernel va create/save notebook khi nguoi dung yeu cau ro rang |
 
 Flow khuyen nghi: dung `vscode_notebook_summary` de lay cell ID hien tai, `vscode_notebook_source` de doc cell muc tieu, `vscode_notebook_run` de xac minh sau khi sua, va `vscode_notebook_output` de kiem tra ket qua. Khong coi display index `cN` la tham chieu on dinh dai han; sau khi chen, xoa hoac chuyen type, hay dung ID `#VSC-*` moi do tool tra ve hoac chay summary lai.
 

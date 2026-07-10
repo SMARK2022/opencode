@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Σχετικά με αυτόν τον κλάδο**: Αυτός είναι ο ενισχυμένος κλάδος `dev-smark` του OpenCode (τρέχουσα έκδοση `1.15.7`, CLI release tag `v1.15.7-smark`). Βασίζεται στον upstream κλάδο `dev` και εστιάζει στην αλληλεπίδραση TUI, στη διαχείριση συνεδριών, στα στατιστικά token, στη συμβατότητα Windows/PowerShell, στην ενσωμάτωση VS Code Notebook, στην υποστήριξη network proxy και στην εμπειρία εγκατάστασης.
+> **Σχετικά με αυτόν τον κλάδο**: Αυτός είναι ο ενισχυμένος κλάδος `dev-smark` του OpenCode (τρέχουσα έκδοση `1.15.10`, CLI release tag `v1.15.10-smark`). Βασίζεται στον upstream κλάδο `dev` και εστιάζει στην αλληλεπίδραση TUI, στη διαχείριση συνεδριών, στα στατιστικά token, στη συμβατότητα Windows/PowerShell, στις υπηρεσίες γλώσσας και στην ενσωμάτωση Notebook του VS Code, στην υποστήριξη network proxy και στην εμπειρία εγκατάστασης.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-Αυτή είναι η πλήρης μορφή: το `bash -s --` λέει στο `bash` να διαβάσει τον installer από stdin και να περάσει το `--version 1.15.7-smark` ως ορίσματα installer. Η έκδοση μπορεί να είναι `1.15.7-smark` ή η μορφή release tag `v1.15.7-smark`.
+Αυτή είναι η πλήρης μορφή: το `bash -s --` λέει στο `bash` να διαβάσει τον installer από stdin και να περάσει το `--version 1.15.10-smark` ως ορίσματα installer. Η έκδοση μπορεί να είναι `1.15.10-smark` ή η μορφή release tag `v1.15.10-smark`.
 
 ### Συμπεριφορά Installer
 
@@ -181,7 +181,7 @@ opencode
 | Token statistics | Δύσκολο να γνωρίζετε τι καταναλώνει context | Input/output tokens, tool results, attachments, request overhead breakdowns |
 | Tool system | Η έξοδος αρχείων και shell μπορεί να μολύνει το context | Structured Read output, Shell output compression, Write auto diff |
 | Provider | Η ρύθμιση πολλών λογαριασμών, endpoints και μοντέλων είναι σύνθετη | Provider aliases, client version override, ClaudeCode provider |
-| VSCode | Τα Notebook scenarios δεν μπορούν να λειτουργήσουν αξιόπιστα από CLI agents | Cell summary, read, edit, run, output read, kernel management |
+| VS Code | Οι CLI agents δεν επαναχρησιμοποιούν άμεσα υπηρεσίες γλώσσας ούτε χειρίζονται αξιόπιστα Notebooks | Διαγνωστικά, πλοήγηση και σύμβολα μέσω VS Code, επεξεργασία και εκτέλεση cells, διαχείριση kernel |
 | Windows | PowerShell, encoding, paths και CRLF είναι επιρρεπή σε σφάλματα | CLIXML decoding, UTF-8 fixes, path normalization, CRLF preservation |
 | Network proxy | Η λογική proxy για provider, plugin και fetch είναι διάσπαρτη | NetworkProxy χειρίζεται HTTP_PROXY, HTTPS_PROXY, NO_PROXY με συνέπεια |
 | Daemon | Multi-instance, locks, health checks και clients είναι σύνθετα | Server Lock, health checks, HttpApi, PTY WebSocket tickets |
@@ -238,9 +238,11 @@ opencode
 | ClaudeCode provider | Υποστηρίζει API Key, Base URL και dynamic authentication modes |
 | Cloudflare AI Gateway | Διορθώσεις routing. Το tool streaming είναι απενεργοποιημένο από προεπιλογή για non-Anthropic models |
 
-### Ενσωμάτωση VS Code Notebook
+### Ενσωμάτωση Υπηρεσιών Γλώσσας Και Notebook Του VS Code
 
-Πριν χρησιμοποιήσετε Notebook tools, εγκαταστήστε το VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Η έκδοση του extension παραμένει `1.15.5` και μπορεί να συνεχίσει να λειτουργεί με SMARK CLI `1.15.7`. Δεν χρειάζεται αναβάθμιση για αυτήν την ενημέρωση CLI README. Το extension δημιουργεί ένα τοπικό authenticated bridge μεταξύ VS Code/Jupyter Notebook και OpenCode CLI. Χωρίς να είναι εγκατεστημένο ή συνδεδεμένο, το CLI δεν μπορεί να διαβάσει, να επεξεργαστεί ή να εκτελέσει notebook cells αξιόπιστα.
+Για να χρησιμοποιήσετε υπηρεσίες γλώσσας του VS Code ή Notebook tools, εγκαταστήστε το [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Η έκδοση του extension στο repository είναι `1.15.10` και προτείνεται SMARK CLI `1.15.10-smark`· οι εκδόσεις είναι ανεξάρτητες. Το extension δημιουργεί ένα τοπικό authenticated bridge για υπηρεσίες γλώσσας και VS Code/Jupyter Notebook. Χωρίς σύνδεση, το CLI διατηρεί το ενσωματωμένο LSP, αλλά οι λειτουργίες VS Code και τα Notebook tools δεν είναι διαθέσιμα.
+
+Το extension δεν περιλαμβάνει language server· επαναχρησιμοποιεί providers που έχουν καταχωριστεί από ενεργά language extensions στο τρέχον παράθυρο VS Code για touch, diagnostics, hover, definition, references και document/workspace symbols. Αποτυχία bridge request επιστρέφει στο ενσωματωμένο LSP, ενώ το diagnostics επιστρέφει επίσης όταν η δομή απόκρισης είναι άκυρη· άλλες επιτυχείς αποκρίσεις χωρίς το αναμενόμενο πεδίο μπορεί σήμερα να ερμηνευτούν ως κενές. Implementation και call hierarchy παραμένουν πάντα στο ενσωματωμένο LSP, και ένα έγκυρο κενό αποτέλεσμα δεν αποδεικνύει πλήρες project typecheck.
 
 Μετά την εκκίνηση, το extension ανοίγει ένα local bridge στο `127.0.0.1:<random port>` και γράφει ένα heartbeat manifest στο `~/.local/state/opencode/ide/<uuid>.json`. Το OpenCode επιλέγει αυτόματα το αντίστοιχο VS Code bridge με βάση workspace και notebook path. Σε remote SSH, WSL ή container setups, το CLI πρέπει να τρέχει στην ίδια πλευρά που μπορεί να προσπελάσει το bridge.
 
@@ -251,7 +253,7 @@ opencode
 | `vscode_notebook_edit` | Insert, edit ή delete cells. Υποστηρίζει ακριβή αντικατάσταση string `oldCode/newCode` και code/markdown type switching |
 | `vscode_notebook_run` | Εκτέλεση ενός code cell ή stable-ID range μέσω VS Code/Jupyter. Το range execution σταματά σε failure ή timeout |
 | `vscode_notebook_output` | Ανάγνωση text, image, HTML, JSON και άλλων outputs. Τα μεγάλα outputs γράφονται στο `.opencode/cache/notebook-outputs/` και επιστρέφονται ως artifact paths |
-| `vscode_notebook_env` | Έλεγχος kernel/runtime, trigger kernel selection, restart kernel ή save notebook όταν ζητηθεί ρητά από τον χρήστη |
+| `vscode_notebook_env` | Έλεγχος kernel/runtime, επιλογή, restart ή stop kernel και create ή save notebook όταν ζητηθεί ρητά |
 
 Συνιστώμενη ροή: χρησιμοποιήστε `vscode_notebook_summary` για να πάρετε το τρέχον cell ID, `vscode_notebook_source` για να διαβάσετε το target cell, `vscode_notebook_run` για validation μετά την επεξεργασία και `vscode_notebook_output` για έλεγχο αποτελεσμάτων. Μην αντιμετωπίζετε το display index `cN` ως stable long-term reference. Μετά από inserts, deletes ή type switches, χρησιμοποιήστε το νέο `#VSC-*` ID που επιστρέφει το tool ή εκτελέστε ξανά summary.
 

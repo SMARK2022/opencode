@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **O ovoj grani**: Ovo je OpenCode `dev-smark` poboljšana grana (trenutna verzija `1.15.7`, CLI release tag `v1.15.7-smark`). Zasnovana je na upstream `dev` grani i fokusira se na TUI interakciju, upravljanje sesijama, statistiku tokena, Windows/PowerShell kompatibilnost, VS Code Notebook integraciju, podršku za mrežni proxy i iskustvo instalacije.
+> **O ovoj grani**: Ovo je OpenCode `dev-smark` poboljšana grana (trenutna verzija `1.15.10`, CLI release tag `v1.15.10-smark`). Zasnovana je na upstream `dev` grani i fokusira se na TUI interakciju, upravljanje sesijama, statistiku tokena, Windows/PowerShell kompatibilnost, integraciju VS Code jezičkih servisa i Notebooka, podršku za mrežni proxy i iskustvo instalacije.
 
 ---
 
@@ -93,10 +93,10 @@ To prosljeđuje `OPENCODE_INSTALL_DIR` samo komandi `curl`, ne `bash` procesu ko
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-Ovo je potpuni oblik: `bash -s --` kaže komandi `bash` da čita installer iz stdin i proslijedi `--version 1.15.7-smark` kao argumente installera. Verzija može biti `1.15.7-smark` ili oblik release taga `v1.15.7-smark`.
+Ovo je potpuni oblik: `bash -s --` kaže komandi `bash` da čita installer iz stdin i proslijedi `--version 1.15.10-smark` kao argumente installera. Verzija može biti `1.15.10-smark` ili oblik release taga `v1.15.10-smark`.
 
 ### Ponašanje Installera
 
@@ -181,7 +181,7 @@ Ova grana nije samo skup funkcija; ona pretvara česte razvojne probleme u vidlj
 | Statistika tokena | Teško je znati šta troši kontekst | Input/output tokeni, rezultati alata, prilozi, razrada request overheada |
 | Sistem alata | Izlaz datoteka i shell-a može zagaditi kontekst | Strukturirani Read izlaz, Shell kompresija izlaza, Write automatski diff |
 | Provider | Podešavanje više računa, endpointa i modela je složeno | Provider aliasi, override verzije klijenta, ClaudeCode provider |
-| VSCode | Notebook scenarijima CLI agenti ne mogu pouzdano upravljati | Sažetak ćelija, čitanje, uređivanje, pokretanje, čitanje izlaza, upravljanje kernelom |
+| VS Code | CLI agenti ne mogu direktno koristiti jezičke servise editora niti pouzdano upravljati Notebookom | VS Code dijagnostika, navigacija i simboli, uređivanje i izvršavanje ćelija, upravljanje kernelom |
 | Windows | PowerShell, kodiranje, putanje i CRLF su skloni greškama | CLIXML dekodiranje, UTF-8 popravci, normalizacija putanja, očuvanje CRLF |
 | Network proxy | Provider, plugin i fetch proxy logika je raspršena | NetworkProxy dosljedno obrađuje HTTP_PROXY, HTTPS_PROXY, NO_PROXY |
 | Daemon | Više instanci, lockovi, health checkovi i klijenti su složeni | Server Lock, health checkovi, HttpApi, PTY WebSocket ticketi |
@@ -238,9 +238,11 @@ Interna statistika preferira request usage podatke i vraća se na metapodatke po
 | ClaudeCode provider | Podržava API Key, Base URL i dinamičke authentication modove |
 | Cloudflare AI Gateway | Popravci routinga; tool streaming je podrazumijevano isključen za non-Anthropic modele |
 
-### VS Code Notebook Integracija
+### Integracija VS Code Jezičkih Servisa I Notebooka
 
-Prije korištenja Notebook alata instalirajte VS Code ekstenziju [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Verzija ekstenzije ostaje `1.15.5` i može nastaviti raditi sa SMARK CLI `1.15.7`; ne mora se nadograditi za ovo ažuriranje CLI README-a. Ekstenzija kreira lokalni autentificirani bridge između VS Code/Jupyter Notebook i OpenCode CLI-ja; bez nje instalirane ili povezane, CLI ne može pouzdano čitati, uređivati ili pokretati notebook ćelije.
+Za korištenje VS Code jezičkih servisa ili Notebook alata instalirajte [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Verzija ekstenzije u repozitoriju je `1.15.10`, a preporučeni SMARK CLI je `1.15.10-smark`; verzije su nezavisne. Ekstenzija kreira lokalni autentificirani bridge za jezičke servise i VS Code/Jupyter Notebook. Bez veze CLI zadržava ugrađeni LSP, ali VS Code operacije i Notebook alati nisu dostupni.
+
+Ekstenzija ne sadrži language server; koristi providere koje registruju aktivne jezičke ekstenzije u trenutnom VS Code prozoru za touch, diagnostics, hover, definition, references i document/workspace symbols. Neuspješan bridge zahtjev vraća se na ugrađeni LSP, a diagnostics se vraća i kada struktura odgovora nije ispravna; drugi uspješni odgovori bez očekivanog polja trenutno se mogu tumačiti kao prazni. Implementation i call hierarchy uvijek ostaju na ugrađenom LSP-u, a ispravan prazan rezultat ne dokazuje potpuni project typecheck.
 
 Nakon pokretanja, ekstenzija otvara lokalni bridge na `127.0.0.1:<random port>` i upisuje heartbeat manifest u `~/.local/state/opencode/ide/<uuid>.json`. OpenCode automatski bira odgovarajući VS Code bridge prema workspaceu i notebook putanji. U remote SSH, WSL ili container postavkama, CLI mora raditi na istoj strani koja može pristupiti bridgeu.
 
@@ -251,7 +253,7 @@ Nakon pokretanja, ekstenzija otvara lokalni bridge na `127.0.0.1:<random port>` 
 | `vscode_notebook_edit` | Umeće, uređuje ili briše ćelije; podržava tačnu `oldCode/newCode` zamjenu stringa i code/markdown promjenu tipa |
 | `vscode_notebook_run` | Pokreće jednu code ćeliju ili stable-ID raspon kroz VS Code/Jupyter; izvršavanje raspona staje pri grešci ili timeoutu |
 | `vscode_notebook_output` | Čita tekst, slike, HTML, JSON i druge izlaze; veliki izlazi se zapisuju u `.opencode/cache/notebook-outputs/` i vraćaju kao artifact putanje |
-| `vscode_notebook_env` | Provjerava kernel/runtime, pokreće izbor kernela, restartuje kernel ili sprema notebook kada korisnik to eksplicitno zatraži |
+| `vscode_notebook_env` | Provjerava kernel/runtime, bira, restartuje ili zaustavlja kernel te kreira ili sprema notebook kada korisnik to zatraži |
 
 Preporučeni tok: koristite `vscode_notebook_summary` da dobijete trenutni ID ćelije, `vscode_notebook_source` da pročitate ciljnu ćeliju, `vscode_notebook_run` za validaciju nakon uređivanja i `vscode_notebook_output` za pregled rezultata. Ne tretirajte display index `cN` kao stabilnu dugoročnu referencu; nakon umetanja, brisanja ili promjene tipa koristite novi `#VSC-*` ID koji alat vrati ili ponovo pokrenite summary.
 

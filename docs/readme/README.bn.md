@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **এই শাখা সম্পর্কে**: এটি OpenCode-এর `dev-smark` উন্নত শাখা (বর্তমান সংস্করণ `1.15.7`, CLI release tag `v1.15.7-smark`)। এটি upstream `dev`-এর উপর ভিত্তি করে তৈরি এবং TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code Notebook integration, network proxy support, ও installation experience উন্নত করার উপর কেন্দ্রীভূত।
+> **এই শাখা সম্পর্কে**: এটি OpenCode-এর `dev-smark` উন্নত শাখা (বর্তমান সংস্করণ `1.15.10`, CLI release tag `v1.15.10-smark`)। এটি upstream `dev`-এর উপর ভিত্তি করে তৈরি এবং TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language services ও Notebook integration, network proxy support, এবং installation experience উন্নত করার উপর কেন্দ্রীভূত।
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-এটি সম্পূর্ণ form: `bash -s --` `bash`-কে stdin থেকে installer পড়তে এবং `--version 1.15.7-smark` installer arguments হিসেবে পাঠাতে বলে। version `1.15.7-smark` হতে পারে অথবা release tag form `v1.15.7-smark` হতে পারে।
+এটি সম্পূর্ণ form: `bash -s --` `bash`-কে stdin থেকে installer পড়তে এবং `--version 1.15.10-smark` installer arguments হিসেবে পাঠাতে বলে। version `1.15.10-smark` হতে পারে অথবা release tag form `v1.15.10-smark` হতে পারে।
 
 ### Installer Behavior
 
@@ -181,7 +181,7 @@ SMARK `dev-smark` branch বর্তমানে শুধু CLI releases publ
 | Token statistics | কী context consume করছে বোঝা কঠিন | Input/output tokens, tool results, attachments, request overhead breakdowns |
 | Tool system | File এবং shell output context pollute করতে পারে | Structured Read output, Shell output compression, Write auto diff |
 | Provider | Multi-account, endpoint, এবং model setup complex | Provider aliases, client version override, ClaudeCode provider |
-| VSCode | Notebook scenarios CLI agents দ্বারা reliably operate করা যায় না | Cell summary, read, edit, run, output read, kernel management |
+| VS Code | CLI agents editor language services সরাসরি reuse বা Notebook reliably operate করতে পারে না | VS Code-backed diagnostics/navigation/symbol queries, cell edit/run, kernel management |
 | Windows | PowerShell, encoding, paths, এবং CRLF error-prone | CLIXML decoding, UTF-8 fixes, path normalization, CRLF preservation |
 | Network proxy | Provider, plugin, এবং fetch proxy logic scattered | NetworkProxy HTTP_PROXY, HTTPS_PROXY, NO_PROXY consistently handle করে |
 | Daemon | Multi-instance, locks, health checks, এবং clients complex | Server Lock, health checks, HttpApi, PTY WebSocket tickets |
@@ -238,9 +238,11 @@ Internal stats request usage data পছন্দ করে এবং older sess
 | ClaudeCode provider | API Key, Base URL, এবং dynamic authentication modes support করে |
 | Cloudflare AI Gateway | Routing fixes; non-Anthropic models-এর জন্য tool streaming defaultভাবে disabled |
 
-### VS Code Notebook Integration
+### VS Code Language Services ও Notebook Integration
 
-Notebook tools ব্যবহার করার আগে VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) install করুন। extension version `1.15.5`-ই থাকে এবং SMARK CLI `1.15.7`-এর সাথে কাজ চালিয়ে যেতে পারে; এই CLI README update-এর জন্য upgrade দরকার নেই। extension VS Code/Jupyter Notebook এবং OpenCode CLI-এর মধ্যে local authenticated bridge তৈরি করে; এটি installed বা connected না থাকলে CLI reliably notebook cells read, edit, বা run করতে পারে না।
+VS Code language services বা Notebook tools ব্যবহার করতে [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) install করুন। repository extension version `1.15.10`, আর SMARK CLI `1.15.10-smark` recommended; দুটির version স্বাধীন। Extension language services ও VS Code/Jupyter Notebook-এর জন্য local authenticated bridge তৈরি করে। Bridge connected না থাকলে CLI built-in LSP ব্যবহার করে, কিন্তু VS Code-backed operations বা Notebook tools পাওয়া যায় না।
+
+Extension কোনো language server bundle করে না; এটি বর্তমান VS Code window-তে enabled language extensions-এর registered providers ব্যবহার করে touch, diagnostics, hover, definition, references এবং document/workspace symbols দেয়। Bridge request fail হলে built-in LSP fallback হয়, আর diagnostics response structure invalid হলেও fallback হয়; অন্য successful response-এ expected result field না থাকলে বর্তমানে empty result হিসেবে ধরা হতে পারে। Implementation ও call hierarchy সবসময় built-in LSP-তে থাকে, এবং valid empty result পুরো project typecheck pass করেছে এমন প্রমাণ নয়।
 
 Startup-এর পরে extension `127.0.0.1:<random port>`-এ local bridge খোলে এবং heartbeat manifest `~/.local/state/opencode/ide/<uuid>.json`-এ লেখে। OpenCode workspace এবং notebook path অনুযায়ী matching VS Code bridge automatically select করে। remote SSH, WSL, বা container setups-এ CLI একই side-এ run করতে হবে যেখান থেকে bridge access করা যায়।
 
@@ -251,7 +253,7 @@ Startup-এর পরে extension `127.0.0.1:<random port>`-এ local bridge �
 | `vscode_notebook_edit` | cells insert, edit, বা delete করুন; exact `oldCode/newCode` string replacement এবং code/markdown type switching support করে |
 | `vscode_notebook_run` | VS Code/Jupyter-এর মাধ্যমে এক code cell বা stable-ID range run করুন; range execution failure বা timeout-এ থেমে যায় |
 | `vscode_notebook_output` | text, image, HTML, JSON, এবং অন্যান্য outputs পড়ুন; বড় outputs `.opencode/cache/notebook-outputs/`-এ লেখা হয় এবং artifact paths হিসেবে returned হয় |
-| `vscode_notebook_env` | kernel/runtime inspect করুন, kernel selection trigger করুন, kernel restart করুন, অথবা user স্পষ্টভাবে request করলে notebook save করুন |
+| `vscode_notebook_env` | kernel/runtime inspect করুন, kernel select/restart/stop করুন, এবং user স্পষ্টভাবে request করলে notebook create বা save করুন |
 
 Recommended flow: current cell ID পেতে `vscode_notebook_summary` ব্যবহার করুন, target cell পড়তে `vscode_notebook_source` ব্যবহার করুন, edit-এর পরে validate করতে `vscode_notebook_run` ব্যবহার করুন, এবং results inspect করতে `vscode_notebook_output` ব্যবহার করুন। display index `cN`-কে stable long-term reference ভাববেন না; inserts, deletes, বা type switches-এর পরে tool-returned নতুন `#VSC-*` ID ব্যবহার করুন অথবা summary আবার run করুন।
 

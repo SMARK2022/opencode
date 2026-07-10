@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **이 브랜치에 대하여**: 이 브랜치는 OpenCode의 `dev-smark` 강화 브랜치입니다(현재 버전 `1.15.7`, CLI release tag `v1.15.7-smark`). 업스트림 `dev`를 기반으로 하며 TUI 상호작용, 세션 관리, token 통계, Windows/PowerShell 호환성, VS Code Notebook 통합, 네트워크 프록시 지원, 설치 경험에 집중합니다.
+> **이 브랜치에 대하여**: 이 브랜치는 OpenCode의 `dev-smark` 강화 브랜치입니다(현재 버전 `1.15.10`, CLI release tag `v1.15.10-smark`). 업스트림 `dev`를 기반으로 하며 TUI 상호작용, 세션 관리, token 통계, Windows/PowerShell 호환성, VS Code 언어 서비스와 Notebook 통합, 네트워크 프록시 지원, 설치 경험에 집중합니다.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-이것이 완전한 형식입니다. `bash -s --`는 `bash`가 stdin에서 installer를 읽고 `--version 1.15.7-smark`를 installer 인수로 전달하라는 뜻입니다. 버전은 `1.15.7-smark` 또는 release tag 형식인 `v1.15.7-smark`를 사용할 수 있습니다.
+이것이 완전한 형식입니다. `bash -s --`는 `bash`가 stdin에서 installer를 읽고 `--version 1.15.10-smark`를 installer 인수로 전달하라는 뜻입니다. 버전은 `1.15.10-smark` 또는 release tag 형식인 `v1.15.10-smark`를 사용할 수 있습니다.
 
 ### Installer 동작
 
@@ -181,7 +181,7 @@ SMARK `dev-smark` 브랜치는 현재 CLI release만 게시하며 desktop app in
 | Token statistics | 무엇이 context를 소비하는지 알기 어려움 | Input/output tokens, tool results, attachments, request overhead breakdowns |
 | Tool system | File 및 shell output이 context를 오염시킬 수 있음 | Structured Read output, Shell output compression, Write auto diff |
 | Provider | Multi-account, endpoint, model 설정이 복잡함 | Provider aliases, client version override, ClaudeCode provider |
-| VSCode | Notebook 시나리오를 CLI agents가 안정적으로 조작할 수 없음 | Cell summary, read, edit, run, output read, kernel management |
+| VS Code | CLI agents가 editor 언어 서비스를 직접 재사용하거나 Notebook을 안정적으로 조작할 수 없음 | VS Code-backed diagnostics/navigation/symbol query, cell edit/run, kernel management |
 | Windows | PowerShell, encoding, paths, CRLF가 오류를 일으키기 쉬움 | CLIXML decoding, UTF-8 fixes, path normalization, CRLF preservation |
 | Network proxy | Provider, plugin, fetch proxy logic이 흩어져 있음 | NetworkProxy가 HTTP_PROXY, HTTPS_PROXY, NO_PROXY를 일관되게 처리 |
 | Daemon | Multi-instance, locks, health checks, clients가 복잡함 | Server Lock, health checks, HttpApi, PTY WebSocket tickets |
@@ -238,9 +238,11 @@ SMARK `dev-smark` 브랜치는 현재 CLI release만 게시하며 desktop app in
 | ClaudeCode provider | API Key, Base URL, dynamic authentication modes 지원 |
 | Cloudflare AI Gateway | Routing fixes. Non-Anthropic models는 tool streaming이 기본적으로 비활성화됨 |
 
-### VS Code Notebook 통합
+### VS Code 언어 서비스 및 Notebook 통합
 
-Notebook tools를 사용하기 전에 VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)를 설치하세요. Extension version은 `1.15.5`로 유지되며 SMARK CLI `1.15.7`과 계속 함께 사용할 수 있습니다. 이 CLI README 업데이트를 위해 업그레이드할 필요가 없습니다. Extension은 VS Code/Jupyter Notebook과 OpenCode CLI 사이에 local authenticated bridge를 만듭니다. 설치되어 있지 않거나 연결되어 있지 않으면 CLI가 notebook cells를 안정적으로 읽고, 편집하고, 실행할 수 없습니다.
+VS Code 언어 서비스 또는 Notebook tools를 사용하려면 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)를 설치하세요. 저장소 extension version은 `1.15.10`, 권장 SMARK CLI는 `1.15.10-smark`이며 두 버전은 독립적입니다. Extension은 언어 서비스와 VS Code/Jupyter Notebook을 위한 local authenticated bridge를 제공합니다. 연결되지 않아도 CLI는 내장 LSP를 사용하지만 VS Code-backed 작업과 Notebook tools는 사용할 수 없습니다.
+
+Extension은 language server를 포함하지 않으며 현재 VS Code window에서 활성화된 언어 extension이 등록한 provider를 touch, diagnostics, hover, definition, references, document/workspace symbols에 재사용합니다. Bridge request가 실패하면 내장 LSP로 fallback하고 diagnostics는 response structure가 invalid일 때도 fallback합니다. 다른 successful response에서 expected result field가 없으면 현재 빈 결과로 해석될 수 있습니다. Implementation과 call hierarchy는 항상 내장 LSP를 사용하며 유효한 빈 결과는 전체 project typecheck 통과를 의미하지 않습니다.
 
 시작 후 extension은 `127.0.0.1:<random port>`에 local bridge를 열고 heartbeat manifest를 `~/.local/state/opencode/ide/<uuid>.json`에 씁니다. OpenCode는 workspace와 notebook path를 기준으로 일치하는 VS Code bridge를 자동 선택합니다. Remote SSH, WSL, container 환경에서는 CLI가 bridge에 접근할 수 있는 같은 쪽에서 실행되어야 합니다.
 
@@ -251,7 +253,7 @@ Notebook tools를 사용하기 전에 VS Code extension [SMARK2022.opencode-ide-
 | `vscode_notebook_edit` | Cell 삽입, 편집, 삭제. 정확한 `oldCode/newCode` string replacement 및 code/markdown type switching 지원 |
 | `vscode_notebook_run` | VS Code/Jupyter를 통해 하나의 code cell 또는 stable-ID range 실행. Range execution은 실패나 timeout에서 중단됨 |
 | `vscode_notebook_output` | Text, image, HTML, JSON 및 기타 outputs 읽기. 큰 outputs는 `.opencode/cache/notebook-outputs/`에 기록되고 artifact paths로 반환됨 |
-| `vscode_notebook_env` | Kernel/runtime 검사, kernel selection trigger, kernel restart, 또는 사용자가 명시적으로 요청한 경우 notebook 저장 |
+| `vscode_notebook_env` | Kernel/runtime 검사, kernel select/restart/stop, 사용자가 명시적으로 요청한 notebook create/save |
 
 권장 flow: `vscode_notebook_summary`로 현재 cell ID를 가져오고, `vscode_notebook_source`로 target cell을 읽고, edit 후 `vscode_notebook_run`으로 검증하고, `vscode_notebook_output`으로 결과를 확인하세요. Display index `cN`을 장기적으로 안정적인 reference로 취급하지 마세요. Insert, delete, type switch 후에는 tool이 반환한 새 `#VSC-*` ID를 사용하거나 summary를 다시 실행하세요.
 

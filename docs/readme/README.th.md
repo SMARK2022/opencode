@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **เกี่ยวกับสาขานี้**: นี่คือสาขาปรับปรุง `dev-smark` ของ OpenCode (เวอร์ชันปัจจุบัน `1.15.7`, CLI release tag `v1.15.7-smark`) โดยอิงจาก upstream `dev` และมุ่งเน้นประสบการณ์ TUI, การจัดการเซสชัน, สถิติ token, ความเข้ากันได้กับ Windows/PowerShell, การผสานรวม VS Code Notebook, การรองรับ network proxy และประสบการณ์การติดตั้ง
+> **เกี่ยวกับสาขานี้**: นี่คือสาขาปรับปรุง `dev-smark` ของ OpenCode (เวอร์ชันปัจจุบัน `1.15.10`, CLI release tag `v1.15.10-smark`) โดยอิงจาก upstream `dev` และมุ่งเน้นประสบการณ์ TUI, การจัดการเซสชัน, สถิติ token, ความเข้ากันได้กับ Windows/PowerShell, บริการภาษาและการผสานรวม Notebook ของ VS Code, การรองรับ network proxy และประสบการณ์การติดตั้ง
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-นี่คือรูปแบบเต็ม: `bash -s --` บอกให้ `bash` อ่าน installer จาก stdin และส่ง `--version 1.15.7-smark` เป็น installer arguments เวอร์ชันอาจเป็น `1.15.7-smark` หรือรูปแบบ release tag `v1.15.7-smark`
+นี่คือรูปแบบเต็ม: `bash -s --` บอกให้ `bash` อ่าน installer จาก stdin และส่ง `--version 1.15.10-smark` เป็น installer arguments เวอร์ชันอาจเป็น `1.15.10-smark` หรือรูปแบบ release tag `v1.15.10-smark`
 
 ### พฤติกรรมของ Installer
 
@@ -181,7 +181,7 @@ opencode
 | Token statistics | ยากที่จะรู้ว่าอะไรใช้ context | input/output tokens, tool results, attachments, request overhead breakdowns |
 | Tool system | output ของ file และ shell อาจทำให้ context ปนเปื้อน | Structured Read output, Shell output compression, Write auto diff |
 | Provider | การตั้งค่า multi-account, endpoint และ model ซับซ้อน | Provider aliases, client version override, ClaudeCode provider |
-| VSCode | Notebook scenarios ไม่สามารถถูกจัดการโดย CLI agents ได้อย่างน่าเชื่อถือ | Cell summary, read, edit, run, output read, kernel management |
+| VS Code | CLI agents ไม่สามารถใช้ language services ของ editor โดยตรงหรือจัดการ Notebook ได้อย่างน่าเชื่อถือ | VS Code-backed diagnostics/navigation/symbol query, cell edit/run, kernel management |
 | Windows | PowerShell, encoding, paths และ CRLF เกิดข้อผิดพลาดง่าย | CLIXML decoding, UTF-8 fixes, path normalization, CRLF preservation |
 | Network proxy | provider, plugin และ fetch proxy logic กระจัดกระจาย | NetworkProxy จัดการ HTTP_PROXY, HTTPS_PROXY, NO_PROXY อย่างสม่ำเสมอ |
 | Daemon | multi-instance, locks, health checks และ clients ซับซ้อน | Server Lock, health checks, HttpApi, PTY WebSocket tickets |
@@ -238,9 +238,11 @@ Internal stats จะเลือกใช้ request usage data ก่อน �
 | ClaudeCode provider | รองรับ API Key, Base URL และ dynamic authentication modes |
 | Cloudflare AI Gateway | routing fixes; tool streaming ถูกปิดโดย default สำหรับ non-Anthropic models |
 
-### การผสานรวม VS Code Notebook
+### การผสานรวม Language Services และ Notebook ของ VS Code
 
-ก่อนใช้ Notebook tools ให้ติดตั้ง VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) เวอร์ชัน extension ยังคงเป็น `1.15.5` และยังทำงานต่อกับ SMARK CLI `1.15.7` ได้ ไม่จำเป็นต้องอัปเกรดสำหรับการอัปเดต CLI README นี้ extension สร้าง local authenticated bridge ระหว่าง VS Code/Jupyter Notebook และ OpenCode CLI; หากไม่ได้ติดตั้งหรือเชื่อมต่อ CLI จะไม่สามารถอ่าน แก้ไข หรือรัน notebook cells ได้อย่างน่าเชื่อถือ
+หากต้องการใช้บริการภาษาของ VS Code หรือ Notebook tools ให้ติดตั้ง [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) เวอร์ชัน extension ใน repository คือ `1.15.10` และแนะนำ SMARK CLI `1.15.10-smark`; ทั้งสองแยกการกำหนดเวอร์ชันกัน Extension สร้าง local authenticated bridge สำหรับบริการภาษาและ VS Code/Jupyter Notebook หากไม่ได้เชื่อมต่อ CLI ยังใช้ LSP ในตัว แต่จะไม่มี VS Code-backed operations และ Notebook tools
+
+Extension ไม่ได้รวม language server แต่ใช้ providers ที่ language extensions ซึ่งเปิดใช้งานในหน้าต่าง VS Code ปัจจุบันลงทะเบียนไว้สำหรับ touch, diagnostics, hover, definition, references และ document/workspace symbols เมื่อ bridge request ล้มเหลวจะ fallback ไปยัง LSP ในตัว และ diagnostics จะ fallback ด้วยเมื่อ response structure ไม่ถูกต้อง ส่วน successful responses อื่นที่ไม่มี expected result field อาจถูกตีความเป็นผลลัพธ์ว่างในปัจจุบัน Implementation และ call hierarchy ใช้ LSP ในตัวเสมอ และผลลัพธ์ว่างที่ถูกต้องไม่ได้ยืนยันว่า project typecheck ทั้งหมดผ่าน
 
 หลังเริ่มต้น extension จะเปิด local bridge บน `127.0.0.1:<random port>` และเขียน heartbeat manifest ไปที่ `~/.local/state/opencode/ide/<uuid>.json` OpenCode จะเลือก VS Code bridge ที่ตรงกันโดยอัตโนมัติตาม workspace และ notebook path ใน remote SSH, WSL หรือ container setups CLI ต้องรันอยู่ฝั่งเดียวกับที่เข้าถึง bridge ได้
 
@@ -251,7 +253,7 @@ Internal stats จะเลือกใช้ request usage data ก่อน �
 | `vscode_notebook_edit` | insert, edit หรือ delete cells; รองรับ exact `oldCode/newCode` string replacement และ code/markdown type switching |
 | `vscode_notebook_run` | รัน code cell หนึ่ง cell หรือ stable-ID range ผ่าน VS Code/Jupyter; range execution หยุดเมื่อ failure หรือ timeout |
 | `vscode_notebook_output` | อ่าน text, image, HTML, JSON และ outputs อื่น; outputs ขนาดใหญ่ถูกเขียนไปที่ `.opencode/cache/notebook-outputs/` และคืนเป็น artifact paths |
-| `vscode_notebook_env` | inspect kernel/runtime, trigger kernel selection, restart kernel หรือ save notebook เมื่อผู้ใช้ร้องขออย่างชัดเจน |
+| `vscode_notebook_env` | inspect kernel/runtime, select/restart/stop kernel และ create/save notebook เมื่อผู้ใช้ร้องขออย่างชัดเจน |
 
 Recommended flow: ใช้ `vscode_notebook_summary` เพื่อรับ current cell ID, `vscode_notebook_source` เพื่ออ่าน target cell, `vscode_notebook_run` เพื่อ validate หลังแก้ไข และ `vscode_notebook_output` เพื่อตรวจผลลัพธ์ อย่าถือว่า display index `cN` เป็น stable long-term reference; หลัง inserts, deletes หรือ type switches ให้ใช้ `#VSC-*` ID ใหม่ที่ tool คืนมา หรือรัน summary อีกครั้ง
 

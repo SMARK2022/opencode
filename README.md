@@ -44,7 +44,7 @@
 
 ---
 
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.10`，CLI release tag 为 `v1.15.10-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
+> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.10`，CLI release tag 为 `v1.15.10-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VS Code 语言诊断与 Notebook 集成、网络代理及安装体验。
 
 > **数据库迁移提示**：SMARK 分支包含数据库 schema 自定义与迁移。若你从上游 `dev`、主分支或原分支切换到本分支，请先手动备份本地 `opencode.db`；迁移后的数据库可能无法无损迁移回上游或原分支。本项目不负责您本地数据库上下文信息的 schema 格式兼容性问题。
 
@@ -184,7 +184,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。�
 | 工具系统 | 文件读写和 shell 输出容易污染上下文 | Read 输出结构化、Shell 输出压缩、Write 自动 diff |
 | 语音转录 | 录音或语音内容缺少清晰的文本入口 | 可配合可选 MCP 进行 voice 转录，将音频转写结果纳入上下文 |
 | Provider | 多账号、多端点、多模型配置复杂 | Provider 别名、客户端版本覆盖、ClaudeCode provider |
-| VSCode | Notebook 场景无法被 CLI Agent 可靠操作 | 单元格概览、读取、编辑、执行、输出读取、内核管理 |
+| VS Code | CLI Agent 无法直接复用编辑器语言服务和可靠操作 Notebook | VS Code-backed 诊断/跳转/符号查询，单元格读写执行与内核管理 |
 | Windows | PowerShell、编码、路径、CRLF 容易出错 | CLIXML 解码、UTF-8 修复、路径规范化、CRLF 保留 |
 | 网络代理 | provider、插件、fetch 代理逻辑分散 | NetworkProxy 统一处理 HTTP_PROXY、HTTPS_PROXY、NO_PROXY |
 | 守护进程 | 多实例、锁、健康检查、客户端连接复杂 | Server Lock、健康检查、HttpApi、PTY WebSocket 票据 |
@@ -245,11 +245,13 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。�
 | ClaudeCode provider | 支持 API Key、Base URL 和动态鉴权模式 |
 | Cloudflare AI Gateway | 路由修复，非 Anthropic 模型默认关闭 tool streaming |
 
-### VS Code Notebook 集成
+### VS Code 语言服务与 Notebook 集成
 
-使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。当前扩展版本保持 `1.15.5`，可继续配合 SMARK CLI `1.15.10` 使用，不需要随本次 CLI README 更新而升级。该扩展负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
+需要复用 VS Code 语言服务或使用 Notebook 工具时，请安装扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.15.10`，推荐配合 SMARK CLI `1.15.10-smark`；两者独立版本化，Marketplace 在人工发布完成前仍可能显示 `1.15.5`。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge，扩展未安装或未连接时，CLI 会继续使用内置 LSP，但无法使用 VS Code-backed 语言能力或 Notebook 工具。
 
 扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 会按 workspace 与 notebook 路径自动选择匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 需要运行在能访问该 bridge 的同一侧环境。
+
+扩展不会捆绑 language server，而是复用当前 VS Code 窗口中语言扩展已经注册的 provider。Bridge 支持文件 touch、diagnostics、hover、definition、references、document symbols 和 workspace symbols；bridge 请求失败时回退内置 LSP，diagnostics 的无效结构也会回退。其他成功响应若缺少预期结果字段，当前可能被解释为空结果；合法空结果不会触发回退，也不能代替完整项目 typecheck。Implementation 和调用层级仍由内置 LSP 提供；强诊断刷新可能增加一个保持原焦点的 preview 标签页。
 
 | 工具 | 用途 |
 | --- | --- |
@@ -258,7 +260,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。�
 | `vscode_notebook_edit` | 插入、修改、删除 cell，支持 `oldCode/newCode` 精确字符串替换，也支持 code/markdown 类型切换 |
 | `vscode_notebook_run` | 通过 VS Code/Jupyter 执行单个代码 cell 或稳定 ID 范围，范围执行遇到失败或超时会停止 |
 | `vscode_notebook_output` | 读取文本、图片、HTML、JSON 等输出；大输出会写入 `.opencode/cache/notebook-outputs/` 并返回 artifact 路径 |
-| `vscode_notebook_env` | 查看 kernel/runtime，触发 kernel 选择，重启 kernel，或在用户明确要求时保存 notebook |
+| `vscode_notebook_env` | 查看 kernel/runtime，选择、重启或停止 kernel，并在用户明确要求时创建或保存 notebook |
 
 推荐流程：先用 `vscode_notebook_summary` 获取当前 cell ID，再用 `vscode_notebook_source` 读取目标 cell，修改后用 `vscode_notebook_run` 验证，最后用 `vscode_notebook_output` 查看结果。不要把显示序号 `cN` 当成长期稳定引用；插入、删除或类型切换后应使用工具返回的新 `#VSC-*` ID 或重新 summary。
 

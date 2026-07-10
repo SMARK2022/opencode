@@ -10,11 +10,13 @@ This document describes how to build, inspect, install, and publish the SMARK Op
 | Package path | `sdks/vscode` |
 | Source repository | `https://github.com/SMARK2022/opencode` |
 | Source branch | `dev-smark` |
-| CLI compatibility | `opencode 1.15.5-smark` or newer |
-| Version source | `sdks/vscode/package.json` |
-| VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
+| Repository extension version | `1.15.10` |
+| Recommended CLI | `opencode 1.15.10-smark` |
+| Default version source | `sdks/vscode/package.json` |
+| Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
+| CI/GitHub Release VSIX name | `dist/opencode-vscode-<version>.vsix` |
 
-The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code notebook and workspace APIs through authenticated localhost endpoints.
+The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code language, notebook, and workspace APIs through authenticated localhost endpoints. The CLI and extension are versioned independently.
 
 ## Prerequisites
 
@@ -30,7 +32,7 @@ The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SM
 Run all commands from `sdks/vscode`.
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run check-types
 bun run lint
 bun run package
@@ -52,6 +54,8 @@ The script builds first, then runs `@vscode/vsce package --no-dependencies` and 
 dist/SMARK2022.opencode-ide-bridge-<version>.vsix
 ```
 
+The `build-vsix.yml` workflow uses `dist/opencode-vscode-<version>.vsix` for its workflow artifact and GitHub prerelease asset. The payload is the same extension, but publishing commands must use the filename of the artifact you actually downloaded.
+
 The package intentionally avoids `vscode:prepublish`. `vsce` runs that hook through an internal `npm run vscode:prepublish` child process, which can fail in Windows/Bun environments when `npm` is not available in the nested process environment.
 
 ## Inspect The VSIX
@@ -59,7 +63,14 @@ The package intentionally avoids `vscode:prepublish`. `vsce` runs that hook thro
 List packaged files before publishing:
 
 ```bash
-bun x @vscode/vsce ls
+bun x @vscode/vsce@^3 ls
+```
+
+Inspect the public manifest and Marketplace overview in the generated archive as well:
+
+```bash
+unzip -p "dist/SMARK2022.opencode-ide-bridge-<version>.vsix" extension/package.json
+unzip -p "dist/SMARK2022.opencode-ide-bridge-<version>.vsix" extension/readme.md
 ```
 
 The expected payload is compact:
@@ -101,9 +112,11 @@ After installing locally:
 1. Open a workspace in VS Code.
 2. Run `OpenCode: Show Bridge Log` and confirm the bridge is listening on `127.0.0.1`.
 3. Run `Open or Focus OpenCode Terminal` and confirm an `opencode` terminal starts.
-4. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
-5. If the notebook has executable cells, call `vscode_notebook_run` on one safe cell.
-6. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
+4. Open a source file supported by an enabled VS Code language extension and request hover or definition at a known symbol.
+5. Edit a file with a known diagnostic and confirm the post-edit LSP summary reports it; an empty provider result only proves the endpoint was callable.
+6. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
+7. If the notebook has executable cells, call `vscode_notebook_run` on one safe cell.
+8. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
 
 ## Security Checks
 
@@ -111,20 +124,16 @@ After installing locally:
 | --- | --- |
 | Local binding | Bridge listens only on `127.0.0.1`. |
 | Health endpoint | `/health` is unauthenticated. |
-| Tool endpoints | Notebook endpoints and `/manifest` require `Bearer <token>`. |
+| Tool endpoints | Language, Notebook, and `/manifest` endpoints require `Bearer <token>`. |
 | Cross-origin requests | Requests with an `Origin` header are rejected. |
 | Token logging | Output logs redact the token. |
 | Registry directory | Uses `0o700` on non-Windows systems. |
 | Registry file | Uses `0o600` on non-Windows systems. |
-| Save/edit permissions | CLI plugin still asks through OpenCode permission gates. |
+| Create/save/edit permissions | CLI plugin still asks through OpenCode permission gates; notebook create and save also require the general `edit` gate. |
 
 ## Publishing
 
-The publish script packages from the current `package.json` version and publishes that exact VSIX.
-
-```bash
-bun run script/publish
-```
+`bun run vsix` is the supported local packaging entry point. Marketplace and Open VSX publishing remain explicit manual operations; the repository root `script/release` and `script/publish.ts` are not VS Code extension release commands. In particular, `script/publish.ts` rewrites package versions across the repository and must not be used to publish this independently versioned extension.
 
 Marketplace-only manual flow:
 
@@ -141,13 +150,19 @@ bun x ovsx create-namespace SMARK2022 -p "$OPENVSX_TOKEN"
 bun x ovsx publish "dist/SMARK2022.opencode-ide-bridge-<version>.vsix" -p "$OPENVSX_TOKEN"
 ```
 
-Do not publish before the CLI release and README compatibility statement are aligned.
+If publishing an artifact downloaded from the GitHub prerelease, substitute its actual `dist/opencode-vscode-<version>.vsix` filename. Do not assume local and CI artifact names are interchangeable paths.
+
+The legacy `sdks/vscode/script/publish` script derives its version from the latest local `vscode-v*` tag and immediately publishes to both registries. The legacy `sdks/vscode/script/release` script force-fetches tags, creates a new tag, and pushes all tags. Neither is the supported flow documented here: do not run them for a manifest-driven release or when the CI workflow may create the same tag.
+
+Do not publish before the extension manifest, README, and recommended CLI statement are aligned.
 
 ## Versioning
 
-Use `sdks/vscode/package.json` as the source of truth for the extension version. The current extension version is ordinary semver (`1.15.5`) so Marketplace tooling accepts it, while the README documents compatibility with the SMARK CLI release (`1.15.5-smark`).
+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.15.10`) so Marketplace tooling accepts it; the recommended CLI is `1.15.10-smark`, but the two packages remain independently versioned.
 
-The helper `script/release` prints the next `vscode-v<version>` tag suggestion. It does not create or push tags. Create tags manually after the package version, README, packaging guide, and changelog are updated.
+Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
+
+The repository root `script/release` currently targets a `publish.yml` workflow that is absent from this checkout. It is not an extension tag helper. Do not substitute either root release script for the local VSIX and manual publishing flow documented above.
 
 ## CLI Integration
 
@@ -166,14 +181,16 @@ sdks/vscode/src/
 |-- extension.ts           Entry point, lifecycle, terminal commands
 |-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
 |-- bridge-registry.ts     Registry heartbeat and manifest writer
+|-- lsp.ts                 VS Code language-provider and diagnostics adapter
 |-- util.ts                Shared JSON, URI, and formatting helpers
 `-- notebook/
     |-- commands.ts        Interactive bridge testing command
     |-- edit.ts            Cell insert/edit/delete and language changes
-    |-- env.ts             Kernel info/configure/restart/save
+    |-- env.ts             Kernel info/configure/restart/stop and create/save
     |-- format.ts          Summary text formatting
     |-- output.ts          Artifact-first cell output export
     |-- resolve.ts         File-path to notebook resolution
     |-- run.ts             Cell execution through VS Code/Jupyter
+    |-- source.ts          Paginated virtual notebook source
     `-- summary.ts         Notebook structure overview
 ```

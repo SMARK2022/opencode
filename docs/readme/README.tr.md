@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Bu dal hakkında**: Bu, OpenCode'un `dev-smark` geliştirilmiş dalıdır (geçerli sürüm `1.15.7`, CLI release tag `v1.15.7-smark`). Upstream `dev` temel alınmıştır ve TUI etkileşimi, oturum yönetimi, token istatistikleri, Windows/PowerShell uyumluluğu, VS Code Notebook entegrasyonu, ağ proxy desteği ve kurulum deneyimine odaklanır.
+> **Bu dal hakkında**: Bu, OpenCode'un `dev-smark` geliştirilmiş dalıdır (geçerli sürüm `1.15.10`, CLI release tag `v1.15.10-smark`). Upstream `dev` temel alınmıştır ve TUI etkileşimi, oturum yönetimi, token istatistikleri, Windows/PowerShell uyumluluğu, VS Code dil servisleri ve Notebook entegrasyonu, ağ proxy desteği ve kurulum deneyimine odaklanır.
 
 ---
 
@@ -93,10 +93,10 @@ Bu yalnızca `OPENCODE_INSTALL_DIR` değerini `curl` için geçirir; installer'�
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-Tam biçim budur: `bash -s --`, `bash`'e installer'ı stdin'den okumasını ve `--version 1.15.7-smark` değerini installer argümanları olarak geçirmesini söyler. Sürüm `1.15.7-smark` veya release tag biçimi olan `v1.15.7-smark` olabilir.
+Tam biçim budur: `bash -s --`, `bash`'e installer'ı stdin'den okumasını ve `--version 1.15.10-smark` değerini installer argümanları olarak geçirmesini söyler. Sürüm `1.15.10-smark` veya release tag biçimi olan `v1.15.10-smark` olabilir.
 
 ### Installer Davranışı
 
@@ -181,7 +181,7 @@ Bu dal yalnızca bir özellik yığını değildir; yaygın geliştirme sorunlar
 | Token istatistikleri | Bağlamı neyin tükettiğini bilmek zordur | Input/output token'ları, tool sonuçları, ekler, request overhead kırılımları |
 | Tool sistemi | Dosya ve shell çıktısı bağlamı kirletebilir | Yapılandırılmış Read çıktısı, Shell çıktı sıkıştırması, Write otomatik diff |
 | Provider | Çoklu hesap, endpoint ve model kurulumu karmaşıktır | Provider alias'ları, client version override, ClaudeCode provider |
-| VSCode | Notebook senaryoları CLI agent'ları tarafından güvenilir işletilemez | Cell summary, read, edit, run, output read, kernel management |
+| VS Code | CLI agent'ları editor dil servislerini doğrudan kullanamaz veya Notebook'ları güvenilir işletemez | VS Code destekli diagnostics/navigation/symbol sorguları, cell edit/run, kernel yönetimi |
 | Windows | PowerShell, encoding, yollar ve CRLF hataya açıktır | CLIXML decoding, UTF-8 düzeltmeleri, path normalization, CRLF preservation |
 | Network proxy | Provider, plugin ve fetch proxy mantığı dağınıktır | NetworkProxy, HTTP_PROXY, HTTPS_PROXY, NO_PROXY değerlerini tutarlı işler |
 | Daemon | Çoklu instance, kilitler, health check'ler ve client'lar karmaşıktır | Server Lock, health checks, HttpApi, PTY WebSocket tickets |
@@ -238,9 +238,11 @@ Dahili istatistikler request usage verisini tercih eder ve eski oturumlar için 
 | ClaudeCode provider | API Key, Base URL ve dynamic authentication mode'larını destekler |
 | Cloudflare AI Gateway | Routing fix'leri; Anthropic olmayan modeller için tool streaming varsayılan olarak kapalıdır |
 
-### VS Code Notebook Entegrasyonu
+### VS Code Dil Servisleri Ve Notebook Entegrasyonu
 
-Notebook tools kullanmadan önce VS Code extension [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) kurun. Extension sürümü `1.15.5` olarak kalır ve SMARK CLI `1.15.7` ile çalışmaya devam edebilir; bu CLI README güncellemesi için yükseltme gerekmez. Extension, VS Code/Jupyter Notebook ile OpenCode CLI arasında yerel authenticated bridge oluşturur; kurulu veya bağlı değilse CLI notebook cell'lerini güvenilir şekilde okuyamaz, düzenleyemez veya çalıştıramaz.
+VS Code dil servislerini veya Notebook tools'u kullanmak için [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) kurun. Repository extension sürümü `1.15.10`, önerilen SMARK CLI sürümü `1.15.10-smark`tır; sürümler bağımsızdır. Extension, dil servisleri ve VS Code/Jupyter Notebook için yerel authenticated bridge oluşturur. Bağlantı olmadığında CLI dahili LSP'yi kullanmaya devam eder, ancak VS Code-backed işlemler ve Notebook tools kullanılamaz.
+
+Extension bir language server içermez; mevcut VS Code penceresinde etkin language extensions tarafından kaydedilen provider'ları touch, diagnostics, hover, definition, references ve document/workspace symbols için kullanır. Bridge request başarısızsa dahili LSP'ye fallback olur; diagnostics ayrıca response structure geçersizse fallback yapar, diğer başarılı response'larda beklenen result field eksikse sonuç şu anda boş yorumlanabilir. Implementation ve call hierarchy her zaman dahili LSP'de kalır ve geçerli boş sonuç tüm project typecheck'in geçtiğini kanıtlamaz.
 
 Başladıktan sonra extension `127.0.0.1:<random port>` üzerinde yerel bridge açar ve heartbeat manifest'ini `~/.local/state/opencode/ide/<uuid>.json` yoluna yazar. OpenCode, workspace ve notebook path'e göre eşleşen VS Code bridge'i otomatik seçer. Remote SSH, WSL veya container kurulumlarında CLI, bridge'e erişebilen aynı tarafta çalışmalıdır.
 
@@ -251,7 +253,7 @@ Başladıktan sonra extension `127.0.0.1:<random port>` üzerinde yerel bridge a
 | `vscode_notebook_edit` | Cell insert, edit veya delete yapar; exact `oldCode/newCode` string replacement ve code/markdown type switching destekler |
 | `vscode_notebook_run` | VS Code/Jupyter üzerinden tek code cell veya stable-ID range çalıştırır; range execution failure veya timeout durumunda durur |
 | `vscode_notebook_output` | Text, image, HTML, JSON ve diğer output'ları okur; büyük output'lar `.opencode/cache/notebook-outputs/` altına yazılır ve artifact path olarak döner |
-| `vscode_notebook_env` | Kernel/runtime incele, kernel selection tetikle, kernel restart et veya kullanıcı açıkça istediğinde notebook save et |
+| `vscode_notebook_env` | Kernel/runtime incele, kernel select/restart/stop et ve kullanıcı açıkça istediğinde notebook create/save et |
 
 Önerilen akış: geçerli cell ID'yi almak için `vscode_notebook_summary`, hedef cell'i okumak için `vscode_notebook_source`, düzenleme sonrası doğrulamak için `vscode_notebook_run` ve sonuçları incelemek için `vscode_notebook_output` kullanın. Display index `cN` değerini uzun vadeli stabil referans saymayın; insert, delete veya type switch sonrası tool'un döndürdüğü yeni `#VSC-*` ID'yi kullanın veya summary'yi yeniden çalıştırın.
 

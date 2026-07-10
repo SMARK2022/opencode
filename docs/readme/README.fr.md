@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.7-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **À propos de cette branche** : il s'agit de la branche améliorée `dev-smark` d'OpenCode (version actuelle `1.15.7`, tag de release CLI `v1.15.7-smark`). Elle est basée sur la branche amont `dev` et se concentre sur l'interaction TUI, la gestion des sessions, les statistiques de tokens, la compatibilité Windows/PowerShell, l'intégration VS Code Notebook, la prise en charge des proxys réseau et l'expérience d'installation.
+> **À propos de cette branche** : il s'agit de la branche améliorée `dev-smark` d'OpenCode (version actuelle `1.15.10`, tag de release CLI `v1.15.10-smark`). Elle est basée sur la branche amont `dev` et se concentre sur l'interaction TUI, la gestion des sessions, les statistiques de tokens, la compatibilité Windows/PowerShell, les services de langage et l'intégration Notebook de VS Code, la prise en charge des proxys réseau et l'expérience d'installation.
 
 ---
 
@@ -93,10 +93,10 @@ Cela transmet seulement `OPENCODE_INSTALL_DIR` à `curl`, pas au processus `bash
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.7-smark
+  bash -s -- --version 1.15.10-smark
 ```
 
-C'est la forme complète : `bash -s --` indique à `bash` de lire l'installateur depuis stdin et de transmettre `--version 1.15.7-smark` comme arguments de l'installateur. La version peut être `1.15.7-smark` ou la forme tag de release `v1.15.7-smark`.
+C'est la forme complète : `bash -s --` indique à `bash` de lire l'installateur depuis stdin et de transmettre `--version 1.15.10-smark` comme arguments de l'installateur. La version peut être `1.15.10-smark` ou la forme tag de release `v1.15.10-smark`.
 
 ### Comportement De L'installateur
 
@@ -181,7 +181,7 @@ Cette branche n'est pas seulement une pile de fonctionnalités ; elle transforme
 | Statistiques de tokens | Difficile de savoir ce qui consomme le contexte | Tokens d'entrée/sortie, résultats d'outils, pièces jointes, détails des surcoûts de requête |
 | Système d'outils | Les sorties de fichiers et de shell peuvent polluer le contexte | Sortie Read structurée, compression de sortie Shell, diff automatique Write |
 | Provider | La configuration multi-compte, endpoint et modèle est complexe | Alias de provider, remplacement de version client, ClaudeCode provider |
-| VSCode | Les scénarios Notebook ne peuvent pas être opérés fiablement par des agents CLI | Résumé, lecture, édition, exécution et lecture de sortie de cellules, gestion du kernel |
+| VS Code | Les agents CLI ne peuvent pas réutiliser directement les services de langage ni piloter fiablement les Notebooks | Diagnostics, navigation et symboles via VS Code, édition et exécution de cellules, gestion du kernel |
 | Windows | PowerShell, encodage, chemins et CRLF sont sujets aux erreurs | Décodage CLIXML, corrections UTF-8, normalisation des chemins, préservation CRLF |
 | Proxy réseau | La logique de proxy provider, plugin et fetch est dispersée | NetworkProxy gère HTTP_PROXY, HTTPS_PROXY, NO_PROXY de manière cohérente |
 | Daemon | Les multi-instances, verrous, health checks et clients sont complexes | Server Lock, health checks, HttpApi, tickets PTY WebSocket |
@@ -238,9 +238,11 @@ Les statistiques internes préfèrent les données d'utilisation des requêtes e
 | ClaudeCode provider | Prend en charge API Key, Base URL et les modes d'authentification dynamiques |
 | Cloudflare AI Gateway | Corrections de routage ; le tool streaming est désactivé par défaut pour les modèles non Anthropic |
 
-### Intégration VS Code Notebook
+### Intégration Des Services De Langage Et Notebook VS Code
 
-Avant d'utiliser les outils Notebook, installez l'extension VS Code [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La version de l'extension reste `1.15.5` et peut continuer à fonctionner avec SMARK CLI `1.15.7` ; elle n'a pas besoin d'une mise à niveau pour cette mise à jour du README CLI. L'extension crée un bridge local authentifié entre VS Code/Jupyter Notebook et l'OpenCode CLI ; sans installation ou connexion, le CLI ne peut pas lire, éditer ou exécuter fiablement les cellules de notebook.
+Pour utiliser les services de langage de VS Code ou les outils Notebook, installez [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La version de l'extension dans le dépôt est `1.15.10` et SMARK CLI `1.15.10-smark` est recommandé ; leurs versions sont indépendantes. L'extension crée un bridge local authentifié pour les services de langage et VS Code/Jupyter Notebook. Sans connexion, le CLI conserve son LSP intégré, mais les opérations VS Code et les outils Notebook sont indisponibles.
+
+L'extension n'embarque pas de language server ; elle réutilise les providers enregistrés par les extensions de langage actives dans la fenêtre VS Code courante pour touch, diagnostics, hover, definition, references et document/workspace symbols. Les échecs de requête bridge reviennent au LSP intégré, et diagnostics fait aussi ce fallback si la structure de réponse est invalide ; les autres réponses réussies sans le champ attendu peuvent actuellement être interprétées comme vides. Implementation et call hierarchy restent toujours sur le LSP intégré, et un résultat vide valide ne prouve pas la réussite d'un typecheck complet du projet.
 
 Après le démarrage, l'extension ouvre un bridge local sur `127.0.0.1:<random port>` et écrit un manifeste heartbeat dans `~/.local/state/opencode/ide/<uuid>.json`. OpenCode sélectionne automatiquement le bridge VS Code correspondant selon le workspace et le chemin du notebook. Dans les configurations SSH distant, WSL ou conteneur, le CLI doit s'exécuter du même côté que celui qui peut accéder au bridge.
 
@@ -251,7 +253,7 @@ Après le démarrage, l'extension ouvre un bridge local sur `127.0.0.1:<random p
 | `vscode_notebook_edit` | Insérer, éditer ou supprimer des cellules ; prend en charge le remplacement exact de chaîne `oldCode/newCode` et le changement de type code/markdown |
 | `vscode_notebook_run` | Exécuter une cellule de code ou une plage d'ID stables via VS Code/Jupyter ; l'exécution de plage s'arrête en cas d'échec ou de timeout |
 | `vscode_notebook_output` | Lire les sorties texte, image, HTML, JSON et autres ; les grandes sorties sont écrites dans `.opencode/cache/notebook-outputs/` et renvoyées comme chemins d'artefact |
-| `vscode_notebook_env` | Inspecter le kernel/runtime, déclencher la sélection de kernel, redémarrer le kernel ou sauvegarder un notebook lorsque l'utilisateur le demande explicitement |
+| `vscode_notebook_env` | Inspecter le kernel/runtime, sélectionner, redémarrer ou arrêter le kernel et créer ou sauvegarder un notebook sur demande explicite |
 
 Flux recommandé : utilisez `vscode_notebook_summary` pour obtenir l'ID de cellule courant, `vscode_notebook_source` pour lire la cellule cible, `vscode_notebook_run` pour valider après modification et `vscode_notebook_output` pour inspecter les résultats. Ne traitez pas l'index affiché `cN` comme une référence stable à long terme ; après des insertions, suppressions ou changements de type, utilisez le nouvel ID `#VSC-*` renvoyé par l'outil ou relancez summary.
 

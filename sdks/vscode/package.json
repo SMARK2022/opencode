@@ -1,8 +1,8 @@
 {
   "name": "opencode-ide-bridge",
   "displayName": "OpenCode IDE Bridge",
-  "description": "SMARK OpenCode IDE bridge for VS Code. Provides notebook operations, Jupyter kernel management, workspace context sharing, and terminal integration over a local authenticated bridge.",
-  "version": "1.15.5",
+  "description": "SMARK OpenCode IDE bridge for VS Code. Provides VS Code-backed language intelligence, notebook and Jupyter kernel operations, workspace context sharing, and terminal integration over a local authenticated bridge.",
+  "version": "1.15.10",
   "publisher": "SMARK2022",
   "homepage": "https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode",
   "repository": {
@@ -28,6 +28,8 @@
   "keywords": [
     "opencode",
     "bridge",
+    "lsp",
+    "language-server",
     "notebook",
     "jupyter",
     "kernel",
