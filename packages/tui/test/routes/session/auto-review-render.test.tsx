@@ -2,6 +2,7 @@
 // #209：auto-review 渲染逻辑单元测试
 import { describe, expect, test } from "bun:test"
 import { autoReviewLabel, autoReviewMetadata, toolDisplay } from "../../../src/routes/session"
+import { sessionMessageContentWidth } from "../../../src/routes/session/layout"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { onCleanup } from "solid-js"
@@ -675,3 +676,45 @@ function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => v
   props.observe(useRoute())
   return <Session />
 }
+
+// 在真实Session树测量两个正文renderable，不用私有组件名字或手工复制chrome替代布局。
+test.each([
+  { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: false },
+  { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: true },
+  { terminalWidth: 160, sidebarVisible: false, scrollbarEnabled: true },
+  { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
+  { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
+].flatMap((input) => (["hide", "show"] as const).map((thinkingMode) => ({ ...input, thinkingMode }))))("measures actual reasoning and text width: %j", async (input) => {
+  const messageID = "msg_layout"
+  const info: AssistantMessage = {
+    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
+    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const parts: Part[] = [
+    { id: "part_a_text", sessionID, messageID, type: "text", text: "reference width" },
+    { id: "part_b_reasoning", sessionID, messageID, type: "reasoning", text: "推理宽度".repeat(200), time: { start: 1, end: 2 } },
+  ]
+  await withRenderedReview([{ info, parts }], async (app) => {
+    const id = input.thinkingMode === "hide" ? "reasoning-preview-part_b_reasoning" : "text-part_b_reasoning"
+    await waitForReviewFrame(app, async () => {
+      const code = app.renderer.root.findDescendantById(id)
+      const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
+      if (code && text && code.width > 0 && text.width > 0 && (code.parent?.height ?? 0) > 0) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+    // 异步highlight和预布局都落定后再读几何，不以刚挂载时的零尺寸通过。
+    await app.renderOnce()
+    await app.renderOnce()
+    const code = app.renderer.root.findDescendantById(id)
+    const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
+    if (!code || !text) throw new Error("expected measured message bodies")
+    const expected = sessionMessageContentWidth({ terminalWidth: input.terminalWidth, sidebarInLayout: input.sidebarVisible && input.terminalWidth > 120, scrollbarEnabled: input.scrollbarEnabled })
+    expect({ text: text.width, reasoning: code.width }).toEqual({ text: expected, reasoning: expected })
+    expect(code.parent?.height).toBeGreaterThan(0)
+    // CJK单行会真实软换行；折叠容器仍受共享五行预算约束。
+    if (input.thinkingMode === "hide") expect(code.parent?.height).toBeLessThanOrEqual(5)
+  }, { width: input.terminalWidth, height: 48 }, {}, { sidebar: input.sidebarVisible ? "auto" : "hide", scrollbar_enabled: input.scrollbarEnabled, thinking_mode: input.thinkingMode })
+})
