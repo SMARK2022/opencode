@@ -3,7 +3,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema, Semaphore } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -202,6 +202,8 @@ const layer = Layer.effect(
         hasToolCall: false,
       }
       let aborted = false
+      // 三条终态写共享许可；只串行读写，不在其中等待工具完成信号。
+      const toolPermit = Semaphore.makeUnsafe(1)
 
       // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
       // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
@@ -313,7 +315,7 @@ const layer = Layer.effect(
           },
         })
         yield* settleToolCall(toolCallID)
-      })
+      }, toolPermit.withPermits(1))
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
         const match = yield* readToolCall(toolCallID)
@@ -348,7 +350,7 @@ const layer = Layer.effect(
         }
         yield* settleToolCall(toolCallID)
         return true
-      })
+      }, toolPermit.withPermits(1))
 
       const finishReasoning = Effect.fn("SessionProcessor.finishReasoning")(function* (reasoningID: string) {
         if (!(reasoningID in ctx.reasoningMap)) return
@@ -902,29 +904,31 @@ const layer = Layer.effect(
         }
 
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
-          const match = yield* readToolCall(toolCallID)
-          if (!match) continue
-          const part = match.part
-          const end = Date.now()
-          const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
-          // 协调信号唤醒后仍须先提交工具终态；error schema 不保留 state.raw，残余原文存入 metadata。
-          const pendingRaw = ctx.toolInputBuffer[toolCallID]
-          yield* session.updatePart({
-            ...part,
-            state: {
-              ...part.state,
-              status: "error",
-              // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
-              // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
-              // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
-              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
-              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
-              metadata: { ...(aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata),
-                ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
-              },
-              time: { start: "time" in part.state ? part.state.time.start : end, end },
-            },
-          })
+          yield* toolPermit.withPermits(1)(
+            Effect.gen(function* () {
+              const match = yield* readToolCall(toolCallID)
+              if (!match) return
+              const part = match.part
+              // 在许可内重读，已获胜的complete/fail不能被cleanup旧快照覆盖。
+              if (part.state.status !== "running" && part.state.status !== "pending") return
+              const end = Date.now()
+              const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+              const pendingRaw = ctx.toolInputBuffer[toolCallID]
+              yield* session.updatePart({
+                ...part,
+                state: {
+                  ...part.state,
+                  status: "error",
+                  error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
+                  // pending原文放入metadata，普通失败保留进度，中断沿用412耗时与审查信封。
+                  metadata: { ...(aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata),
+                    ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
+                  },
+                  time: { start: "time" in part.state ? part.state.time.start : end, end },
+                },
+              })
+            }),
+          )
         }
         ctx.toolcalls = {}
         // cleanup 终态提交后清空，重试与下一次 process 不继承上次工具的残片。

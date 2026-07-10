@@ -15,7 +15,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { Effect, Layer, Schema } from "effect"
+import { Deferred, Effect, Layer, Schema } from "effect"
 import { testEffect } from "../lib/effect"
 
 const callID = "call-test"
@@ -96,6 +96,9 @@ const it = testEffect(layer)
 
 it.effect("preserves running tool start time across metadata updates", () =>
   Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>()
+    let blocking = false
+    let finalized = false
     const state: SessionV1.ToolPart = {
       id: partID,
       sessionID,
@@ -131,7 +134,12 @@ it.effect("preserves running tool start time across metadata updates", () =>
           state.state = next.state
           if (state.state.status === "running") updates.push(state.state.time.start)
           return state
-        }),
+        }).pipe(
+          Effect.flatMap((part) => !blocking ? Effect.succeed(part) : Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() => Effect.sync(() => { finalized = true })),
+          )),
+        ),
       completeToolCall: () => Effect.void,
     } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
 
@@ -166,5 +174,16 @@ it.effect("preserves running tool start time across metadata updates", () =>
     if (state.state.status === "running") {
       expect(state.state.time.start).toBe(100)
     }
+    // 已有metadata用例再走真实非Bash adapter，中断必须到达其Effect finalizer。
+    blocking = true
+    const controller = new AbortController()
+    const pending = Promise.resolve(execute(
+      {},
+      { toolCallId: callID, abortSignal: controller.signal, messages: [] },
+    )).then(() => false, () => true)
+    yield* Deferred.await(entered)
+    controller.abort()
+    expect(yield* Effect.promise(() => pending)).toBe(true)
+    expect(finalized).toBe(true)
   }),
 )
