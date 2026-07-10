@@ -565,7 +565,9 @@ function renderSearchHistory(input: { events: ToolEvent[]; worktree: string }): 
       tool: event.part.tool,
       pattern: pattern.slice(0, 60),
       path: displayPath(searchPath, input.worktree),
-      matches: String(matchCount),
+      // 原始 Tool output 会被 Compaction 清除，必须在搜索证据里保留 partial，避免把 0 误读为全量阴性。
+      // 标识与同一 event 的计数一起生成，不能从旧搜索或输出文案中猜测，避免去重后状态串线。
+      matches: `${matchCount}${meta.partial === true ? " (incomplete)" : ""}`,
       sequence: event.sequence,
     })
   }

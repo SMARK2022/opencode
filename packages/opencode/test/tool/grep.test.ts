@@ -78,6 +78,63 @@ describe("tool.grep", () => {
     }),
   )
 
+  it.instance("reports an incomplete empty result without claiming no files exist", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      // 只替换 Ripgrep 系统边界，Grep 的路径检查、空结果分支和 ExecuteResult 均保持真实。
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            search: () => Effect.succeed({ items: [], partial: true, truncated: false }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute({ pattern: "needle", path: test.directory }, ctx)
+
+      // ExecuteResult 仍应成功返回；这里通过 output/metadata 观察行为，不依赖内部空结果 helper。
+      // 可访问范围内的零匹配不是全量阴性，模型必须看到 incomplete 而非确定性结论。
+      expect(result.output).not.toBe("No files found")
+      expect(result.output).toContain("inaccessible")
+      expect(result.metadata).toMatchObject({ matches: 0, truncated: false, partial: true })
+    }),
+  )
+
+  it.instance("keeps matches found before an inaccessible path", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* Effect.promise(() => Bun.write(path.join(test.directory, "match.txt"), "needle\n"))
+      // 创建真实文件让 post-search stat 参与测试，避免 mock 绕过匹配保留和排序链。
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            search: () =>
+              Effect.succeed({
+                items: [
+                  {
+                    path: { text: "match.txt" },
+                    lines: { text: "needle" },
+                    line_number: 1,
+                    absolute_offset: 0,
+                    submatches: [],
+                  },
+                ],
+                partial: true,
+                truncated: false,
+              }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute({ pattern: "needle", path: test.directory }, ctx)
+
+      // partial 是完整性标记而非失败状态，已找到的匹配和原有路径格式都必须保留。
+      expect(result.output).toContain("Line 1: needle")
+      expect(result.output).toContain("inaccessible")
+      expect(result.metadata).toMatchObject({ matches: 1, totalMatches: 1, truncated: false, partial: true })
+    }),
+  )
+
   it.instance("finds matches in tmp instance", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -210,8 +267,28 @@ describe("tool.grep", () => {
 
       expect(result.metadata.matches).toBe(0)
       expect(result.metadata.truncated).toBe(true)
+      expect(result.metadata.partial).toBe(false)
       expect(result.output).toContain("timed out")
       expect(result.output).not.toBe("No files found")
+    }),
+  )
+
+  it.instance("preserves partial metadata when an empty search also times out", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const info = yield* GrepTool.pipe(
+        Effect.provide(
+          Layer.mock(Ripgrep.Service)({
+            search: () => Effect.succeed({ items: [], partial: true, truncated: false, timedOut: true }),
+          }),
+        ),
+      )
+      const grep = yield* info.init()
+      const result = yield* grep.execute({ pattern: "needle", path: test.directory, timeout: 1 }, ctx)
+
+      // timeout 文案可以优先，但 metadata 不能覆盖同时存在的文件系统不完整性。
+      expect(result.output).toContain("timed out")
+      expect(result.metadata).toMatchObject({ matches: 0, truncated: true, timedOut: true, partial: true })
     }),
   )
 

@@ -1,6 +1,5 @@
 import path from "path"
 import { Effect, Option, Schema } from "effect"
-import * as Stream from "effect/Stream"
 import { InstanceState } from "@/effect/instance-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Ripgrep } from "../file/ripgrep"
@@ -52,46 +51,47 @@ export const GlobTool = Tool.define(
           })
 
           const limit = 100
-          let truncated = false
-          const files = yield* rg.files({ cwd: search, glob: [params.pattern], signal: ctx.abort }).pipe(
-            Stream.mapEffect((file) =>
-              Effect.gen(function* () {
-                const full = path.resolve(search, file)
-                const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
-                const mtime =
-                  info?.mtime.pipe(
-                    Option.map((date) => date.getTime()),
-                    Option.getOrElse(() => 0),
-                  ) ?? 0
-                return { path: full, mtime }
-              }),
-            ),
-            Stream.take(limit + 1),
-            Stream.runCollect,
-            Effect.map((chunk) => [...chunk]),
+          // limit 由 Tool 决定，Ripgrep 多观察一个 sentinel；不能在两层各自再次 take 造成双重截断。
+          const result = yield* rg.glob({ cwd: search, glob: [params.pattern], limit, signal: ctx.abort })
+          const files = yield* Effect.forEach(result.items, (file) =>
+            Effect.gen(function* () {
+              const full = path.resolve(search, file)
+              const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
+              // rg 已经确认路径存在；stat 竞态只降低排序优先级，不能删除可用结果。
+              const mtime =
+                info?.mtime.pipe(
+                  Option.map((date) => date.getTime()),
+                  Option.getOrElse(() => 0),
+                ) ?? 0
+              return { path: full, mtime }
+            }),
           )
 
-          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
-          const originalCount = files.length
-          if (files.length > limit) {
-            truncated = true
-            files.length = limit
-          }
-          // [local-smark] total: 截断前的真实文件数（非哨兵值）
-          const totalFiles = originalCount
+          // total 保持旧的 bounded 口径：101 只证明“至少还有一项”，不是精确全量。
+          const totalFiles = files.length + Number(result.truncated)
           files.sort((a, b) => b.mtime - a.mtime)
 
           const output = []
-          if (files.length === 0) output.push("No files found")
+          if (files.length === 0) {
+            // 只有 complete-empty 能沿用历史精确文案，partial-empty 必须限制结论到可访问路径。
+            output.push(result.partial ? "No files found in accessible paths." : "No files found")
+          }
           if (files.length > 0) {
             output.push(...files.map((file) => file.path))
-            if (truncated) {
+            if (result.truncated) {
               output.push("")
               // [local-smark] 显示真实总数而非仅 "first 100"，帮助模型判断文件密度
               output.push(
                 `(Results are truncated: showing first ${limit} results. ${totalFiles > limit ? `Total: ${totalFiles}+ files.` : ""} Consider using a more specific path or pattern.)`,
               )
             }
+          }
+          if (result.partial) {
+            output.push("")
+            // 不回传被拒绝路径，既避免隐私泄漏，也防止权限诊断重新淹没模型上下文。
+            output.push(
+              "(Search incomplete: some paths were inaccessible and skipped. Narrow the path before relying on absence.)",
+            )
           }
 
           return {
@@ -100,7 +100,9 @@ export const GlobTool = Tool.define(
               count: files.length,
               // [local-smark] total: 截断前的真实文件数
               total: totalFiles,
-              truncated,
+              truncated: result.truncated,
+              // metadata 供持久化、Compaction 和 UI 使用；模型提示仍必须存在于 output 中。
+              partial: result.partial,
             },
             output: output.join("\n"),
           }

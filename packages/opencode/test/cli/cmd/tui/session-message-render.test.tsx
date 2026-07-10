@@ -73,9 +73,7 @@ test("non-shell auto review status opens the reviewer child session", async () =
       // 导航进入 reviewer 子会话后,SubagentFooter 从 title 提取 agent 名显示。
       // 修复前: \w+ 不匹配连字符 → label 回退 "Subagent" → 此断言失败
       // 修复后: [\w-]+ 匹配 "permission-reviewer" → label "Permission-Reviewer"
-      const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("reviewer child visible")),
-      )
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
       // 行为级断言: footer 必须显示完整 agent 名,不能因连字符回退为泛化 "Subagent"
       expect(frame.some((line) => line.includes("Permission-Reviewer"))).toBe(true)
     },
@@ -83,7 +81,11 @@ test("non-shell auto review status opens the reviewer child session", async () =
     {},
     {
       [childID]: {
-        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        info: sessionInfo({
+          id: childID,
+          parentID: sessionID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+        }),
         messages: [
           {
             ...assistantMessage("msg_reviewer_child", 2),
@@ -91,7 +93,11 @@ test("non-shell auto review status opens the reviewer child session", async () =
             agent: "permission-reviewer",
           },
         ],
-        parts: { msg_reviewer_child: [textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID })] },
+        parts: {
+          msg_reviewer_child: [
+            textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID }),
+          ],
+        },
       },
     },
   )
@@ -138,7 +144,11 @@ test("block auto review click opens reviewer without toggling the tool card", as
     {},
     {
       [childID]: {
-        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        info: sessionInfo({
+          id: childID,
+          parentID: sessionID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+        }),
         messages: [
           {
             ...assistantMessage("msg_reviewer_child_block", 2),
@@ -146,7 +156,13 @@ test("block auto review click opens reviewer without toggling the tool card", as
             agent: "permission-reviewer",
           },
         ],
-        parts: { msg_reviewer_child_block: [textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", { sessionID: childID })] },
+        parts: {
+          msg_reviewer_child_block: [
+            textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", {
+              sessionID: childID,
+            }),
+          ],
+        },
       },
     },
   )
@@ -234,6 +250,282 @@ test("assistant first visible part ignores hidden completed tool parts", async (
   )
 })
 
+test("incomplete searches remain visible when completed tool details are hidden", async () => {
+  // 同一 Message 混入普通 completed Read，验证放行条件只影响 partial Glob/Grep 而非全局 details 策略。
+  await withRenderedSession(
+    [assistantMessage("msg_incomplete_search", 1)],
+    {
+      msg_incomplete_search: [
+        completedToolPart("part_hidden_read", "msg_incomplete_search", "read", { filePath: "hidden.ts" }),
+        completedToolPart(
+          "part_partial_glob",
+          "msg_incomplete_search",
+          "glob",
+          { pattern: "*.ts" },
+          { count: 0, partial: true },
+        ),
+        completedToolPart(
+          "part_partial_grep",
+          "msg_incomplete_search",
+          "grep",
+          { pattern: "needle" },
+          { matches: 0, partial: true },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes('Glob "*.ts"') && line.includes("incomplete")),
+      )
+
+      // partial completed 需要保留警告可见性，普通 completed Tool 仍遵守隐藏设置。
+      expect(frame.some((line) => line.includes('Grep "needle"') && line.includes("incomplete"))).toBe(true)
+      expect(frame.some((line) => line.includes("Read hidden.ts"))).toBe(false)
+    },
+    { tool_details_visibility: false },
+  )
+})
+
+test("adjacent reasoning parts share one bounded thinking block", async () => {
+  const messageID = "msg_reasoning_run"
+  // 十个短 Part 单独都达不到旧的五行阈值；该输入直接复现它们共同占满终端的问题。
+  const reasoning = Array.from({ length: 10 }, (_, index) =>
+    reasoningPart(`part_reasoning_${index + 1}`, messageID, `short thought ${index + 1}`),
+  )
+
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    { [messageID]: reasoning },
+    async (app) => {
+      // Markdown highlighting 是异步的；等待正文、marker 和折叠控制同时稳定后再断言最终用户帧。
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("short thought 1")) &&
+          lines.some((line) => line.includes("[seg 2/10]")) &&
+          lines.some((line) => line.includes("▼ expand")),
+      )
+      const header = findRow(frame, "Thinking (10 segments")
+      const footer = findRow(frame, "▼ expand")
+
+      // 用户观察 seam 是最终字符帧；这些断言不依赖 ReasoningRun 的私有函数或组件命名。
+      // Thinking 必须保持唯一视觉主体，不能再为每个 Provider source Part 重复标题。
+      expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(1)
+      // 紧凑标记表达真实 Part 边界；首段无标记，后续序号不能退化成醒目的 Segment 标题。
+      expect(frame.some((line) => line.includes("[seg 2/10]"))).toBe(true)
+      expect(frame.some((line) => line.includes("Segment 2/10"))).toBe(false)
+      // header、共享五行正文和 footer 构成同一个有界块，成员数不能线性扩大屏幕占用。
+      expect(footer - header + 1).toBeLessThanOrEqual(7)
+
+      await clickVisibleText(app, "▼ expand")
+      // 点击真实可见 footer 验证鼠标事件经过 OpenTUI hitbox，而不是直接操纵组件 signal。
+      const expanded = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("short thought 10")) && lines.some((line) => line.includes("▲ collapse")),
+      )
+      // 展开只改变显示投影，最后一个原始 Part 仍完整、保序且带自己的 source ordinal。
+      expect(expanded.some((line) => line.includes("[seg 10/10]"))).toBe(true)
+    },
+    {},
+    { height: 24 },
+  )
+})
+
+test("invisible raw parts still split adjacent reasoning runs", async () => {
+  const messageID = "msg_reasoning_boundary"
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    {
+      [messageID]: [
+        reasoningPart("part_reasoning_left", messageID, "left source thought"),
+        // 空 text 不显示，但仍是持久化 Part；先过滤它会错误跨越真实语义边界。
+        textPart("part_empty_boundary", messageID, "   "),
+        reasoningPart("part_reasoning_right", messageID, "right source thought"),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("left source thought")) &&
+          lines.some((line) => line.includes("right source thought")),
+      )
+      // 两侧都是 singleton run，因此各自保留兼容 header，不能被投影成一个 2-segment block。
+      expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(2)
+      expect(frame.some((line) => line.includes("2 segments"))).toBe(false)
+    },
+    {},
+    { height: 20 },
+  )
+})
+
+test("concealed reasoning never leaves an orphan source marker", async () => {
+  const messageID = "msg_reasoning_conceal"
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    {
+      [messageID]: [
+        reasoningPart("part_reasoning_visible", messageID, "visible first source"),
+        reasoningPart("part_reasoning_concealed", messageID, "![](private-url)"),
+      ],
+    },
+    async (app) => {
+      // 逐帧观察真实 renderer，而不是只检查最终帧；异步 highlighting 的短暂孤立 marker 也属于回归。
+      for (let frameIndex = 0; frameIndex < 12; frameIndex++) {
+        await app.renderOnce()
+        const frame = rows(app.captureCharFrame())
+        expect(frame.some((line) => line.includes("[seg 2/2]"))).toBe(false)
+        await Bun.sleep(5)
+      }
+
+      // 走真实默认快捷键关闭 conceal，确认 marker 只在对应 Markdown 自身可见时出现。
+      app.mockInput.pressKey("x", { ctrl: true })
+      app.mockInput.pressKey("h")
+      // 先证明 unconcealed 分支确实可见，后续竞态断言才不会因快捷键未触发而假绿。
+      await waitForFrame(
+        app,
+        (lines) => lines.some((line) => line.includes("[seg 2/2]")) && lines.some((line) => line.includes("private-url")),
+      )
+
+      app.mockInput.pressKey("x", { ctrl: true })
+      app.mockInput.pressKey("h")
+      // 重新 conceal 后逐帧校验配对不变量，旧 highlighting callback 不能单独复活 marker。
+      for (let frameIndex = 0; frameIndex < 12; frameIndex++) {
+        await app.renderOnce()
+        const frame = rows(app.captureCharFrame())
+        const marker = frame.some((line) => line.includes("[seg 2/2]"))
+        const body = frame.some((line) => line.includes("private-url"))
+        expect(marker && !body).toBe(false)
+        await Bun.sleep(5)
+      }
+    },
+    {},
+    { height: 16 },
+  )
+})
+
+test("reasoning run keeps expansion across out-of-order inserts", async () => {
+  const messageID = "msg_reasoning_insert"
+  const middle = reasoningPart(
+    "part_reasoning_b",
+    messageID,
+    Array.from({ length: 7 }, (_, index) => `middle ${index}`).join("\n"),
+  )
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    { [messageID]: [middle] },
+    async (app, emit) => {
+      // 初始长正文先建立 local override，后续事件才能验证稳定 identity 而不只是内容更新。
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
+      await clickVisibleText(app, "▼ expand")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("middle 6")))
+
+      // 更早 ID 模拟乱序到达；run key 不得依赖首个 reasoning Part，否则展开状态会丢失。
+      emit(partUpdatedEvent("evt_reasoning_prepend", reasoningPart("part_reasoning_a", messageID, "earlier source")))
+      let frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Thinking (2 segments")) &&
+          lines.some((line) => line.includes("earlier source")),
+      )
+      expect(frame.some((line) => line.includes("▲ collapse"))).toBe(true)
+
+      emit(partUpdatedEvent("evt_reasoning_append", reasoningPart("part_reasoning_c", messageID, "later source")))
+      // 第三段追加检验同一个 stable run root 的增量扩展，不允许通过整体 remount 假装更新成功。
+      frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Thinking (3 segments")) &&
+          lines.some((line) => line.includes("later source")),
+      )
+      // append 只增加一个 source，不能重复此前通过事件插入的正文。
+      expect(frame.filter((line) => line.includes("earlier source")).length).toBe(1)
+      expect(frame.some((line) => line.includes("▲ collapse"))).toBe(true)
+    },
+    {},
+    { height: 24 },
+  )
+})
+
+test("removing a hard boundary merges reasoning into the left run", async () => {
+  const messageID = "msg_reasoning_remove"
+  const boundaryID = "part_reasoning_boundary"
+  const rightID = "part_reasoning_right"
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    {
+      [messageID]: [
+        reasoningPart(
+          "part_reasoning_left",
+          messageID,
+          Array.from({ length: 7 }, (_, index) => `left ${index}`).join("\n"),
+        ),
+        textPart(boundaryID, messageID, "   "),
+        reasoningPart(rightID, messageID, "right source"),
+      ],
+    },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
+      await clickVisibleText(app, "▼ expand")
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("left 6")))
+
+      // 删除不可见硬边界后，合并必须继承左侧 key 和展开状态，右侧成员只出现一次。
+      emit(partRemovedEvent("evt_reasoning_boundary_remove", messageID, boundaryID))
+      let frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Thinking (2 segments")) &&
+          lines.some((line) => line.includes("right source")),
+      )
+      expect(frame.filter((line) => line.includes("right source")).length).toBe(1)
+      expect(frame.some((line) => line.includes("▲ collapse"))).toBe(true)
+
+      emit(partRemovedEvent("evt_reasoning_member_remove", messageID, rightID))
+      // 第二次删除验证 merge 后的新成员列表仍由 SyncProvider 的原始 Part ID 驱动。
+      frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("left 6")) && !lines.some((line) => line.includes("right source")),
+      )
+      // denominator 随成员删除回到 singleton 兼容格式，不能残留旧的 2-segment header。
+      expect(frame.some((line) => line.includes("Thinking (2 segments"))).toBe(false)
+      expect(frame.some((line) => line.includes("Thinking (48 chars)"))).toBe(true)
+    },
+    {},
+    { height: 24 },
+  )
+})
+
+test("global thinking show mode expands the whole reasoning run", async () => {
+  const messageID = "msg_reasoning_mode"
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    {
+      [messageID]: Array.from({ length: 8 }, (_, index) =>
+        reasoningPart(`part_reasoning_mode_${index + 1}`, messageID, `mode source ${index + 1}`),
+      ),
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("mode source 8")) && lines.some((line) => line.includes("▲ collapse")),
+      )
+      // thinking_mode 只改变屏幕展开状态；show 下不应先闪现或保留 compact footer。
+      expect(frame.some((line) => line.includes("▼ expand"))).toBe(false)
+      expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(1)
+
+      await clickVisibleText(app, "▲ collapse")
+      const collapsed = await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
+      // 全局 show 是进入页面时的默认值；明确显示的局部 collapse 不能成为无效操作。
+      expect(collapsed.some((line) => line.includes("mode source 8"))).toBe(false)
+    },
+    { thinking_mode: "show" },
+    { height: 24 },
+  )
+})
+
 test("session follows streaming growth when the viewport is visually at the bottom", async () => {
   await withRenderedSession(
     [userMessage("msg_user", 1), assistantMessage("msg_bottom", 2, "msg_user")],
@@ -253,7 +545,13 @@ test("session follows streaming growth when the viewport is visually at the bott
       expect(rows(app.captureCharFrame()).some((line) => line.includes("OLD_BOTTOM"))).toBe(false)
 
       emit(
-        partDeltaEvent("evt_bottom_growth", "msg_bottom", "part_bottom", `${" new content".repeat(80)} NEW_BOTTOM`, "text"),
+        partDeltaEvent(
+          "evt_bottom_growth",
+          "msg_bottom",
+          "part_bottom",
+          `${" new content".repeat(80)} NEW_BOTTOM`,
+          "text",
+        ),
       )
 
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("NEW_BOTTOM")))
@@ -268,7 +566,9 @@ test("narrow viewport keeps the user message cell from collapsing", async () => 
     [userMessage("msg_user_narrow", 1), assistantMessage("msg_assistant_after_user", 2, "msg_user_narrow")],
     {
       msg_user_narrow: [textPart("part_user_narrow", "msg_user_narrow", "keep this user request visible")],
-      msg_assistant_after_user: [textPart("part_assistant_after_user", "msg_assistant_after_user", "assistant remains below user")],
+      msg_assistant_after_user: [
+        textPart("part_assistant_after_user", "msg_assistant_after_user", "assistant remains below user"),
+      ],
     },
     async (app) => {
       const frame = await waitForFrame(
@@ -306,7 +606,10 @@ test("auto compaction boundary is labeled in the session message stream", async 
 
 test("session scrollbar marks compaction boundaries without user prompt text", async () => {
   await withRenderedSession(
-    [userMessage("msg_compaction_marker", 1), assistantMessage("msg_after_compaction_marker", 2, "msg_compaction_marker")],
+    [
+      userMessage("msg_compaction_marker", 1),
+      assistantMessage("msg_after_compaction_marker", 2, "msg_compaction_marker"),
+    ],
     {
       msg_compaction_marker: [compactionPart("part_compaction_marker", "msg_compaction_marker", true)],
       msg_after_compaction_marker: [
@@ -370,7 +673,9 @@ test("pending edit tool reports deletions before the JSON input is complete", as
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("partial.ts") && line.includes("-2")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Edit src") && line.includes("partial.ts") && line.includes("-2")),
+      )
       const row = frame[findRow(frame, "partial.ts")]
 
       expect(row).toContain("-2")
@@ -425,7 +730,9 @@ test("pending write tool shows streamed addition counts", async () => {
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src") && line.includes("new file.ts") && line.includes("+2")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Write src") && line.includes("new file.ts") && line.includes("+2")),
+      )
       expect(frame[findRow(frame, "new file.ts")]).toContain("+2")
     },
   )
@@ -447,7 +754,9 @@ test("task tool click opens its subagent session", async () => {
       ],
     },
     async (app) => {
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("General Task") && line.includes("inspect files")))
+      await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("General Task") && line.includes("inspect files")),
+      )
       const raw = app.captureCharFrame().split("\n")
       const y = raw.findIndex((line) => line.includes("General Task") && line.includes("inspect files"))
       expect(y).toBeGreaterThanOrEqual(0)
@@ -535,7 +844,11 @@ test("task tool click refreshes a stale prefetched subagent session", async () =
           childMessageRequests++
           return childMessageRequests === 1 ? [] : [childMessage]
         },
-        parts: { msg_child_stale: [textPart("part_child_stale", "msg_child_stale", "child session refreshed", { sessionID: childID })] },
+        parts: {
+          msg_child_stale: [
+            textPart("part_child_stale", "msg_child_stale", "child session refreshed", { sessionID: childID }),
+          ],
+        },
       },
     },
   )
@@ -561,9 +874,15 @@ test("pending tool line counts update from streamed raw deltas", async () => {
 
       await Bun.sleep(50)
       await app.renderOnce()
-      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2"))).toBe(false)
+      expect(
+        rows(app.captureCharFrame()).some(
+          (line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2"),
+        ),
+      ).toBe(false)
 
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2")),
+      )
       expect(frame[findRow(frame, "live.ts")]).toContain("+1 -2")
     },
   )
@@ -573,7 +892,9 @@ test("pending notebook edit shows throttled line counts without rendering raw so
   await withRenderedSession(
     [assistantMessage("msg_notebook_live_delta", 1)],
     {
-      msg_notebook_live_delta: [pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", "")],
+      msg_notebook_live_delta: [
+        pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", ""),
+      ],
     },
     async (app, emit) => {
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
@@ -595,10 +916,15 @@ test("pending notebook edit shows throttled line counts without rendering raw so
 
       await Bun.sleep(50)
       await app.renderOnce()
-      expect(rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2"))).toBe(false)
+      expect(
+        rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2")),
+      ).toBe(false)
 
       const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2")),
+        lines.some(
+          (line) =>
+            line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2"),
+        ),
       )
       expect(frame.some((line) => line.includes("new two"))).toBe(false)
     },
@@ -630,7 +956,14 @@ test("completed notebook edit renders a diff card instead of raw generic input",
               dirty: true,
               cellCountBefore: 4,
               cellCountAfter: 4,
-              diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1,2 @@", "-old value", "+new value", "+rendered diff line"].join("\n"),
+              diff: [
+                "--- notebooks/analysis.ipynb#c3.py",
+                "+++ notebooks/analysis.ipynb#c3.py",
+                "@@ -1 +1,2 @@",
+                "-old value",
+                "+new value",
+                "+rendered diff line",
+              ].join("\n"),
               added: 2,
               removed: 1,
             },
@@ -639,7 +972,9 @@ test("completed notebook edit renders a diff card instead of raw generic input",
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")),
+      )
       expect(frame.some((line) => line.includes("rendered diff line"))).toBe(true)
       expect(frame.some((line) => line.includes("RAW_ONLY_SHOULD_NOT_RENDER"))).toBe(false)
     },
@@ -685,7 +1020,12 @@ test("completed notebook edit uses notebook language for supported diff syntax h
       const start = Date.now()
       for (;;) {
         await app.renderOnce()
-        const line = app.captureSpans().lines.find((item) => item.spans.map((span) => span.text).join("").includes("const verified = true"))
+        const line = app.captureSpans().lines.find((item) =>
+          item.spans
+            .map((span) => span.text)
+            .join("")
+            .includes("const verified = true"),
+        )
         const identifierSpan = line?.spans.find((span) => span.text.includes("verified"))
         const keywordSpan = line?.spans.find((span) => span.text.includes("const"))
         if (identifierSpan && keywordSpan && JSON.stringify(keywordSpan.fg) !== JSON.stringify(identifierSpan.fg)) break
@@ -714,8 +1054,8 @@ test("completed shell edit uses the existing bash parser for shellscript file ex
               "--- scripts/install.sh",
               "+++ scripts/install.sh",
               "@@ -1 +1 @@",
-              "-echo \"old\"",
-              "+echo \"new\"",
+              '-echo "old"',
+              '+echo "new"',
             ].join("\n"),
           },
         ),
@@ -726,7 +1066,9 @@ test("completed shell edit uses the existing bash parser for shellscript file ex
       // 真实颜色回填依赖 OpenTUI worker 下载远程 parser 资源；这里锁定本地
       // 回归点：`.sh` 仍保持 LSP 的 shellscript id，并由 bash parser alias 承接。
       expect(LANGUAGE_EXTENSIONS[".sh"]).toBe("shellscript")
-      expect(parsers.parsers.some((item) => item.filetype === "bash" && item.aliases?.includes("shellscript"))).toBe(true)
+      expect(parsers.parsers.some((item) => item.filetype === "bash" && item.aliases?.includes("shellscript"))).toBe(
+        true,
+      )
     },
   )
 })
@@ -746,8 +1088,8 @@ test("completed toml edit uses the registered toml parser", async () => {
               "--- config/opencode.toml",
               "+++ config/opencode.toml",
               "@@ -1 +1 @@",
-              "-name = \"old\"",
-              "+name = \"opencode\"",
+              '-name = "old"',
+              '+name = "opencode"',
             ].join("\n"),
           },
         ),
@@ -791,7 +1133,9 @@ test("completed oversized notebook insert renders inserted source preview when t
               diffOmitted: "too-large",
               added: 3003,
               removed: 0,
-              insertedSourcePreview: ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()"].join("\n"),
+              insertedSourcePreview: ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()"].join(
+                "\n",
+              ),
               insertedSourcePreviewTruncated: true,
             },
           },
@@ -799,10 +1143,12 @@ test("completed oversized notebook insert renders inserted source preview when t
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Notebook insert") && line.includes("+3003 -0")) &&
-        lines.some((line) => line.includes("import pandas as pd")) &&
-        lines.some((line) => line.includes("df.head()")),
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Notebook insert") && line.includes("+3003 -0")) &&
+          lines.some((line) => line.includes("import pandas as pd")) &&
+          lines.some((line) => line.includes("df.head()")),
       )
       expect(frame.some((line) => line.includes("RAW_INSERT_INPUT_SHOULD_NOT_RENDER"))).toBe(false)
       expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
@@ -835,7 +1181,12 @@ test("completed notebook insert renders inserted source as code instead of a dif
               dirty: true,
               cellCountBefore: 3,
               cellCountAfter: 4,
-              diff: ["--- DIFF_HEADER_SHOULD_NOT_RENDER", "+++ notebooks/analysis.ipynb#c4.py", "@@ -0,0 +1,12 @@", ...inserted.map((line) => `+${line}`)].join("\n"),
+              diff: [
+                "--- DIFF_HEADER_SHOULD_NOT_RENDER",
+                "+++ notebooks/analysis.ipynb#c4.py",
+                "@@ -0,0 +1,12 @@",
+                ...inserted.map((line) => `+${line}`),
+              ].join("\n"),
               added: 12,
               removed: 0,
               insertedSourcePreview: inserted.slice(0, 10).join("\n"),
@@ -858,7 +1209,9 @@ test("notebook tool switches from pending inline summary to completed rich card"
   await withRenderedSession(
     [assistantMessage("msg_notebook_transition", 1)],
     {
-      msg_notebook_transition: [pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", "")],
+      msg_notebook_transition: [
+        pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", ""),
+      ],
     },
     async (app, emit) => {
       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
@@ -877,7 +1230,13 @@ test("notebook tool switches from pending inline summary to completed rich card"
                 path: "notebooks/analysis.ipynb",
                 cellLabel: "c3",
                 editType: "edit",
-                diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1 @@", "-before transition", "+after transition"].join("\n"),
+                diff: [
+                  "--- notebooks/analysis.ipynb#c3.py",
+                  "+++ notebooks/analysis.ipynb#c3.py",
+                  "@@ -1 +1 @@",
+                  "-before transition",
+                  "+after transition",
+                ].join("\n"),
                 added: 1,
                 removed: 1,
               },
@@ -909,8 +1268,26 @@ test("notebook summary renders cells from notebook metadata without enabling gen
               dirty: false,
               runtime: "Python 3.11",
               cells: [
-                { i: 1, id: "#VSC-11111111", kind: "markdown", lang: "markdown", lines: 3, exec: "not-run", existing_outs: [], first: "# Analysis" },
-                { i: 2, id: "#VSC-22222222", kind: "code", lang: "python", lines: 5, exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z", existing_outs: ["error"], first: "raise Error" },
+                {
+                  i: 1,
+                  id: "#VSC-11111111",
+                  kind: "markdown",
+                  lang: "markdown",
+                  lines: 3,
+                  exec: "not-run",
+                  existing_outs: [],
+                  first: "# Analysis",
+                },
+                {
+                  i: 2,
+                  id: "#VSC-22222222",
+                  kind: "code",
+                  lang: "python",
+                  lines: 5,
+                  exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z",
+                  existing_outs: ["error"],
+                  first: "raise Error",
+                },
               ],
             },
           },
@@ -918,8 +1295,11 @@ test("notebook summary renders cells from notebook metadata without enabling gen
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) && lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) &&
+          lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
       )
       expect(frame.some((line) => line.includes("Notebook:"))).toBe(false)
     },
@@ -948,7 +1328,10 @@ test("collapsed notebook summary preview surfaces late failed cells", async () =
                 kind: index === 18 || index % 3 !== 0 ? "code" : "markdown",
                 lang: index === 18 || index % 3 !== 0 ? "python" : "markdown",
                 lines: 3,
-                exec: index === 18 || index < 6 ? `current-run #${index + 1} failed 12ms ended=2026-05-25T00:00:00.000Z` : "not-run",
+                exec:
+                  index === 18 || index < 6
+                    ? `current-run #${index + 1} failed 12ms ended=2026-05-25T00:00:00.000Z`
+                    : "not-run",
                 existing_outs: index === 18 || index < 6 ? ["error"] : [],
                 first: index === 18 ? "raise Error" : `cell ${index + 1}`,
               })),
@@ -958,10 +1341,12 @@ test("collapsed notebook summary preview surfaces late failed cells", async () =
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Notebook summary") && line.includes("19 cells")) &&
-        lines.some((line) => line.includes("c19")) &&
-        lines.some((line) => line.includes("failed")),
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Notebook summary") && line.includes("19 cells")) &&
+          lines.some((line) => line.includes("c19")) &&
+          lines.some((line) => line.includes("failed")),
       )
       expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
     },
@@ -993,7 +1378,9 @@ test("notebook env renders operation status from notebook metadata", async () =>
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")),
+      )
       expect(frame.some((line) => line.includes("Select a kernel manually"))).toBe(true)
       expect(frame.some((line) => line.includes("path with spaces | no shell"))).toBe(false)
     },
@@ -1042,7 +1429,14 @@ test("notebook source, run, and output tools render rich notebook cards", async 
                   lines: 3,
                   exec: "current-run #4 succeeded 12ms ended=2026-05-25T00:00:00.000Z",
                   existing_outs: ["text"],
-                  artifacts: [{ mime: "text/plain", bytes: 32, preview: "ok", artifactPath: ".opencode/cache/notebook-outputs/run.txt" }],
+                  artifacts: [
+                    {
+                      mime: "text/plain",
+                      bytes: 32,
+                      preview: "ok",
+                      artifactPath: ".opencode/cache/notebook-outputs/run.txt",
+                    },
+                  ],
                 },
               ],
             },
@@ -1058,7 +1452,14 @@ test("notebook source, run, and output tools render rich notebook cards", async 
               view: "output",
               path: "notebooks/analysis.ipynb",
               cell: { i: 5, id: "#VSC-output", kind: "code", lang: "python", lines: 2, existing_outs: ["png"] },
-              artifacts: [{ mime: "image/png", bytes: 4096, preview: "<image/png 4096 bytes>", artifactPath: ".opencode/cache/notebook-outputs/plot.png" }],
+              artifacts: [
+                {
+                  mime: "image/png",
+                  bytes: 4096,
+                  preview: "<image/png 4096 bytes>",
+                  artifactPath: ".opencode/cache/notebook-outputs/plot.png",
+                },
+              ],
             },
           },
         ),
@@ -1113,31 +1514,42 @@ test("notebook source card keeps content after collapse and re-expand", async ()
     },
     async (app) => {
       // 初始折叠态：预览可见（前 10 行），完整内容不可见
-      let frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Notebook source")) &&
-        lines.some((line) => line.includes("source line 10")) &&
-        lines.some((line) => line.includes("Click to expand")),
+      let frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Notebook source")) &&
+          lines.some((line) => line.includes("source line 10")) &&
+          lines.some((line) => line.includes("Click to expand")),
       )
       expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
 
       // 第一次展开：完整内容可见
       await clickVisibleText(app, "Click to expand")
-      frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
+      frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("source line 24")) &&
+          lines.some((line) => line.includes("Click to collapse")),
       )
       expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
 
       // 折叠回去：预览恢复可见，完整内容再次隐藏——这是原 bug 的复现点
       await clickVisibleText(app, "Click to collapse")
-      frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("source line 10")) && lines.some((line) => line.includes("Click to expand")),
+      frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("source line 10")) &&
+          lines.some((line) => line.includes("Click to expand")),
       )
       expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
 
       // 再次展开：完整内容仍然可见——验证 body 常驻后不会被销毁成空白
       await clickVisibleText(app, "Click to expand")
-      frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
+      frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("source line 24")) &&
+          lines.some((line) => line.includes("Click to collapse")),
       )
       expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
     },
@@ -1168,18 +1580,29 @@ test("collapsed notebook run preview surfaces late failed cells", async () => {
                 kind: "code",
                 lang: "python",
                 lines: 3,
-                exec: index === 18 ? "current-run #19 failed 12ms ended=2026-05-25T00:00:00.000Z" : "current-run #1 succeeded 4ms ended=2026-05-25T00:00:00.000Z",
+                exec:
+                  index === 18
+                    ? "current-run #19 failed 12ms ended=2026-05-25T00:00:00.000Z"
+                    : "current-run #1 succeeded 4ms ended=2026-05-25T00:00:00.000Z",
                 existing_outs: index === 18 ? ["error"] : index < 6 ? ["text"] : [],
-                artifacts: index === 18
-                  ? Array.from({ length: 8 }, (_, artifact) => ({
-                      mime: "text/plain",
-                      bytes: 32,
-                      preview: `artifact ${artifact}`,
-                      artifactPath: `.opencode/cache/notebook-outputs/artifact-${artifact}.txt`,
-                    }))
-                  : index === 17
-                    ? [{ mime: "text/plain", bytes: 32, preview: "extra artifact", artifactPath: ".opencode/cache/notebook-outputs/artifact-extra.txt" }]
-                    : [],
+                artifacts:
+                  index === 18
+                    ? Array.from({ length: 8 }, (_, artifact) => ({
+                        mime: "text/plain",
+                        bytes: 32,
+                        preview: `artifact ${artifact}`,
+                        artifactPath: `.opencode/cache/notebook-outputs/artifact-${artifact}.txt`,
+                      }))
+                    : index === 17
+                      ? [
+                          {
+                            mime: "text/plain",
+                            bytes: 32,
+                            preview: "extra artifact",
+                            artifactPath: ".opencode/cache/notebook-outputs/artifact-extra.txt",
+                          },
+                        ]
+                      : [],
               })),
             },
           },
@@ -1187,10 +1610,12 @@ test("collapsed notebook run preview surfaces late failed cells", async () => {
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) =>
-        lines.some((line) => line.includes("Notebook run") && line.includes("failed")) &&
-        lines.some((line) => line.includes("c19")) &&
-        lines.some((line) => line.includes("failed")),
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Notebook run") && line.includes("failed")) &&
+          lines.some((line) => line.includes("c19")) &&
+          lines.some((line) => line.includes("failed")),
       )
       expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
       expect(frame.some((line) => line.includes("Artifacts: 9 available after expand"))).toBe(true)
@@ -1265,7 +1690,11 @@ test("pending shell auto review navigation is owned by the status line", async (
     {},
     {
       [childID]: {
-        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
+        info: sessionInfo({
+          id: childID,
+          parentID: sessionID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+        }),
         messages: [
           {
             ...assistantMessage("msg_reviewer_child_shell", 2),
@@ -1273,7 +1702,13 @@ test("pending shell auto review navigation is owned by the status line", async (
             agent: "permission-reviewer",
           },
         ],
-        parts: { msg_reviewer_child_shell: [textPart("part_reviewer_child_shell", "msg_reviewer_child_shell", "reviewer child visible", { sessionID: childID })] },
+        parts: {
+          msg_reviewer_child_shell: [
+            textPart("part_reviewer_child_shell", "msg_reviewer_child_shell", "reviewer child visible", {
+              sessionID: childID,
+            }),
+          ],
+        },
       },
     },
   )
@@ -1513,7 +1948,9 @@ test("edit block shows auto review status below its card title", async () => {
           "edit",
           { filePath: "external folder/config.json", oldString: "old", newString: "new" },
           {
-            diff: ["--- external folder/config.json", "+++ external folder/config.json", "@@", "-old", "+new"].join("\n"),
+            diff: ["--- external folder/config.json", "+++ external folder/config.json", "@@", "-old", "+new"].join(
+              "\n",
+            ),
             diagnostics: {},
             autoReview: {
               reviewID: "review_edit_done",
@@ -1538,7 +1975,9 @@ test("tools without auto review metadata keep their original chrome", async () =
   await withRenderedSession(
     [assistantMessage("msg_read_without_review", 1)],
     {
-      msg_read_without_review: [completedToolPart("part_read_without_review", "msg_read_without_review", "read", { filePath: "src/local.ts" })],
+      msg_read_without_review: [
+        completedToolPart("part_read_without_review", "msg_read_without_review", "read", { filePath: "src/local.ts" }),
+      ],
     },
     async (app) => {
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read src")))
@@ -1564,7 +2003,11 @@ test("errored non-shell tools keep auto review status below the inline row", asy
               sessionID: "ses_reviewer_child",
               status: "denied",
               precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-              result: { risk_level: "high", user_authorization: "unknown", rationale: "private key read was not authorized" },
+              result: {
+                risk_level: "high",
+                user_authorization: "unknown",
+                rationale: "private key read was not authorized",
+              },
             },
           },
         ),
@@ -1594,7 +2037,11 @@ test("generic tools inherit the shared auto review chrome", async () => {
               sessionID: "ses_reviewer_child",
               status: "allowed",
               precheck: { level: "cautious", reason: "future tool external access requires reviewer approval" },
-              result: { risk_level: "medium", user_authorization: "high", rationale: "user approved this external access" },
+              result: {
+                risk_level: "medium",
+                user_authorization: "high",
+                rationale: "user approved this external access",
+              },
             },
           },
         ),
@@ -1660,7 +2107,15 @@ test("completed apply_patch with delete file shows diff content and stats in tit
                 // 删除文件的 patch 是带有完整 - 行的 unified diff，
                 // DiffView 应将其逐行渲染而非降级为纯 -N lines 摘要。
                 // "KEEP_THIS" 用作断言锚点，确保 diff 内容真实可见。
-                patch: ["--- src/old.ts", "+++ src/old.ts", "@@ -1,3 +0,0 @@", "-KEEP_THIS_first", "-KEEP_THIS_second", "-KEEP_THIS_third", "\\ No newline at end of file"].join("\n"),
+                patch: [
+                  "--- src/old.ts",
+                  "+++ src/old.ts",
+                  "@@ -1,3 +0,0 @@",
+                  "-KEEP_THIS_first",
+                  "-KEEP_THIS_second",
+                  "-KEEP_THIS_third",
+                  "\\ No newline at end of file",
+                ].join("\n"),
                 additions: 0,
                 deletions: 3,
               },
@@ -1745,7 +2200,9 @@ test("shell auto review status is not duplicated by generic tool chrome", async 
     },
     async (app) => {
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
-      expect(frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toHaveLength(1)
+      expect(
+        frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
+      ).toHaveLength(1)
     },
   )
 })
@@ -1805,7 +2262,9 @@ test("running shell output card keeps review placement below the title", async (
       ],
     },
     async (app) => {
-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read SSH private key via shell")))
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Read SSH private key via shell")),
+      )
       const title = findRow(frame, "Read SSH private key via shell")
       // Running shell cards use the same BlockTool review slot as completed
       // cards. This guards the real streaming state where shell output metadata
@@ -1858,7 +2317,9 @@ test("multi-file apply_patch renders one auto review status for the whole patch"
     },
     async (app) => {
       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched external/a.ts")))
-      const reviewRows = frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
+      const reviewRows = frame.filter((line) =>
+        line.includes("✓ auto review · allowed · auth high · @permission-reviewer"),
+      )
       expect(reviewRows).toHaveLength(1)
       expect(findRow(frame, "✓ auto review · allowed · auth high · @permission-reviewer")).toBeLessThan(
         findRow(frame, "Patched external/a.ts"),
@@ -2175,6 +2636,18 @@ function textPart(id: string, messageID: string, text: string, extra: Partial<Ex
   } satisfies Extract<Part, { type: "text" }>
 }
 
+function reasoningPart(id: string, messageID: string, text: string) {
+  // fixture 保留真实 ReasoningPart 的独立身份，防止测试无意中把数据层也合并。
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "reasoning",
+    text,
+    time: { start: 1, end: 2 },
+  } satisfies Extract<Part, { type: "reasoning" }>
+}
+
 function compactionPart(id: string, messageID: string, auto: boolean) {
   return {
     id,
@@ -2294,7 +2767,7 @@ function partDeltaEvent(id: string, messageID: string, partID: string, delta: st
   }
 }
 
-function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): GlobalEvent {
+function partUpdatedEvent(id: string, part: Part): GlobalEvent {
   return {
     directory,
     project: "proj_test",
@@ -2302,6 +2775,19 @@ function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): Gl
       id,
       type: "message.part.updated",
       properties: { sessionID, part, time: 2 },
+    },
+  }
+}
+
+function partRemovedEvent(id: string, messageID: string, partID: string): GlobalEvent {
+  // 使用公开事件形状驱动 SyncProvider，确保测试覆盖真实删除与 Solid dispose 链路。
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id,
+      type: "message.part.removed",
+      properties: { sessionID, messageID, partID },
     },
   }
 }

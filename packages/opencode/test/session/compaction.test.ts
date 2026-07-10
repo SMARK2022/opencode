@@ -1026,12 +1026,29 @@ describe("session.compaction.process", () => {
           toolInput: { command: "bun typecheck" },
           metadata: { exit: 0 },
         })
+        // 两个相邻搜索分别代表不完整空结果和完整空结果，防止表格级修复误伤兼容文案。
         yield* addCompletedToolPart({
           sessionID: session.id,
           messageID: assistant.id,
           tool: "bash",
           toolInput: { command: "git status" },
           metadata: { exit: 0 },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "grep",
+          toolInput: { pattern: "needle", path: "." },
+          output: "No files found in accessible paths.",
+          metadata: { matches: 0, partial: true, truncated: false },
+        })
+        yield* addCompletedToolPart({
+          sessionID: session.id,
+          messageID: assistant.id,
+          tool: "glob",
+          toolInput: { pattern: "*.missing", path: "." },
+          output: "No files found",
+          metadata: { count: 0, partial: false, truncated: false },
         })
         yield* todo.update({
           sessionID: session.id,
@@ -1060,6 +1077,11 @@ describe("session.compaction.process", () => {
         expect(text).toContain("| 0 |")
         // [local-smark] 移除 isSimpleVerificationCommand 后，git status 不再被过滤
         expect(text).toContain("git status")
+        expect(text).toContain("### Search History")
+        // 断言最终 summary 文本而非私有 formatter，确保真实模型 replay 能观察到完整性标记。
+        // Tool output 会在 Compaction 后清除，Search History 必须继续区分 partial-empty 与完整空结果。
+        expect(text).toContain("| grep | needle | . | 0 (incomplete) |")
+        expect(text).toContain("| glob | *.missing | . | 0 |")
         expect(text).toContain("### Outstanding Todos")
         expect(text).toContain("| completed | high | Read forensic report |")
         expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")

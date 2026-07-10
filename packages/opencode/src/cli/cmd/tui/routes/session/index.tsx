@@ -1099,20 +1099,19 @@ export function Session() {
 
           // 导出必须绕过 TUI 本地 200 条渲染窗口，直接让 daemon 从数据库分页读取完整可见会话；
           // 这样只影响 export 的快照来源，不改变当前页面渲染、copy transcript 或 sync store 的内存边界。
-          const sessionMessages = await sdk.client.session.messages({ sessionID: sessionData.id }, { throwOnError: true })
+          const sessionMessages = await sdk.client.session.messages(
+            { sessionID: sessionData.id },
+            { throwOnError: true },
+          )
           // 200 响应必须携带 messages 数组；如果 SDK/daemon 返回异常形态，应沿用现有失败 toast，不能静默写出空 Markdown。
           if (!sessionMessages.data) throw new Error("Missing session messages for export")
 
-          const transcript = formatTranscript(
-            sessionData,
-            sessionMessages.data,
-            {
-              thinking: options.thinking,
-              toolDetails: options.toolDetails,
-              assistantMetadata: options.assistantMetadata,
-              providers: sync.data.provider,
-            },
-          )
+          const transcript = formatTranscript(sessionData, sessionMessages.data, {
+            thinking: options.thinking,
+            toolDetails: options.toolDetails,
+            assistantMetadata: options.assistantMetadata,
+            providers: sync.data.provider,
+          })
 
           if (options.openWithoutSaving) {
             // Just open in editor without saving
@@ -1485,10 +1484,7 @@ function UserMessage(props: {
         // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体
         const m = x.text.match(/<objective>([\s\S]*?)<\/objective>/)
         if (!m) return null
-        return m[1].trim()
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
+        return m[1].trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
       })
       .filter(Boolean)
     return texts.join("\n\n")
@@ -1595,6 +1591,59 @@ const ToolPartTopMargin = createContext<() => boolean | undefined>(() => undefin
 // prop; shell and patch can opt out where their layouts need a bespoke position.
 const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
 
+function isIncompleteSearch(part: Part) {
+  // 只放行本次有明确定义的搜索 metadata，避免第三方 Tool 的同名字段改变 details 可见性。
+  return (
+    part.type === "tool" &&
+    (part.tool === "glob" || part.tool === "grep") &&
+    part.state.status === "completed" &&
+    part.state.metadata.partial === true
+  )
+}
+
+type MessageRenderItem =
+  // 普通 Part 仍交给既有 renderer；投影层只改变遍历单位，不改变 Part 数据。
+  | { kind: "part"; key: string; part: Part }
+  // run 是纯显示 descriptor，成员继续保留原始 ID、metadata、time 和 delta 路由。
+  | { kind: "reasoning-run"; key: string; parts: ReasoningPart[] }
+
+function projectMessageParts(messageID: string, parts: Part[]) {
+  // 该 helper 只返回渲染描述符，调用方不得把结果写回 Sync store 或数据库。
+  // 单次 O(n) 扫描发生在 Message 内，接口形状从根源上禁止跨 Message 聚合。
+  const result: MessageRenderItem[] = []
+  // 暂存数组只收集真正相邻的 reasoning；遇到任意其他 Part 必须立即 flush。
+  let reasoning: ReasoningPart[] = []
+  // boundary 保存最近原始非 reasoning Part，它既是语义切点，也是稳定 identity 锚点。
+  let boundary: Part | undefined
+
+  const flush = () => {
+    if (reasoning.length === 0) return
+    // run 的身份锚定在前置硬边界，乱序前插 reasoning 时不会重置用户的展开状态。
+    result.push({
+      kind: "reasoning-run",
+      // start key 允许更早 reasoning 乱序前插；after key 允许边界左侧继续保留原状态。
+      key: boundary ? `${messageID}:reasoning:after:${boundary.id}` : `${messageID}:reasoning:start`,
+      parts: reasoning,
+    })
+    // 新数组避免后续 push 修改已经交给 descriptor 的成员列表。
+    reasoning = []
+  }
+
+  parts.forEach((part) => {
+    if (part.type === "reasoning") {
+      // 连续成员只进入当前 run；这里不读取 text，普通 delta 不应重建拓扑。
+      reasoning.push(part)
+      return
+    }
+    // 任意原始非 reasoning Part 都是语义边界，不能因当前不可见而被过滤掉。
+    flush()
+    result.push({ kind: "part", key: `part:${part.id}`, part })
+    boundary = part
+  })
+  flush()
+  return result
+}
+
 function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean; index: number }) {
   const ctx = use()
   const local = useLocal()
@@ -1603,16 +1652,25 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
 
-  const visiblePartIDs = createMemo(() => {
-    return props.parts.flatMap((part) => {
-      if (part.type === "text") return part.text.trim().length > 0 ? [part.id] : []
-      if (part.type === "reasoning") {
+  const renderItems = createMemo(() => projectMessageParts(props.message.id, props.parts))
+  // Map 保存当前 reactive descriptor；For callback 只持有不会随更新重建的字符串 key。
+  const itemByKey = createMemo(() => new Map(renderItems().map((item) => [item.key, item])))
+  // key 数组只反映 topology；正文 delta 不应因字符变化制造新的 Solid child root。
+  const renderItemKeys = createMemo(() => renderItems().map((item) => item.key))
+  // 可见性只决定 spacing/footer，绝不能反向影响 raw topology 的 run 分组结果。
+  const visibleItemKeys = createMemo(() => {
+    return renderItems().flatMap((item) => {
+      if (item.kind === "reasoning-run") {
+        // 空/redacted reasoning 留在 topology 中，但整个 run 没有正文时不产生视觉占位。
         if (!ctx.showThinking()) return []
-        return part.text.replace("[REDACTED]", "").trim().length > 0 ? [part.id] : []
+        return item.parts.some((part) => normalizeReasoning(part.text)) ? [item.key] : []
       }
+      const part = item.part
+      if (part.type === "text") return part.text.trim().length > 0 ? [item.key] : []
       if (part.type === "tool") {
-        if (!ctx.showDetails() && part.state.status === "completed") return []
-        return [part.id]
+        // completed partial 仍需要告知用户搜索不完整，普通成功继续遵守 details 开关。
+        if (!ctx.showDetails() && part.state.status === "completed" && !isIncompleteSearch(part)) return []
+        return [item.key]
       }
       return []
     })
@@ -1620,7 +1678,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
-  const visibleParts = createMemo(() => visiblePartIDs().length > 0)
+  const visibleParts = createMemo(() => visibleItemKeys().length > 0)
   const footerVisible = createMemo(() => {
     if (!visibleParts() && !props.message.error) return false
     return final() || props.message.error?.name === "MessageAbortedError"
@@ -1647,30 +1705,54 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       // continuous left edge while adjacent messages have a visible break.
       marginTop={props.index === 0 ? 0 : 1}
     >
-      <For each={props.parts}>
-        {(part, index) => {
-          const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
-          const visibleIndex = createMemo(() => visiblePartIDs().indexOf(part.id))
+      <For each={renderItemKeys()}>
+        {(key, index) => {
+          // Solid 的 For 按 item identity 保留子树；primitive key 避免每次投影的新对象触发重挂。
+          const item = createMemo(() => itemByKey().get(key)!)
+          const visibleIndex = createMemo(() => visibleItemKeys().indexOf(key))
           // First visible part starts immediately under the message border;
           // only later visible parts get an internal separator row.
           const partTopMargin = createMemo(() => visibleIndex() > 0)
           const toolTopMargin = createMemo(() => {
             if (visibleIndex() <= 0) return false
-            const previous = props.parts.find((item) => item.id === visiblePartIDs()[visibleIndex() - 1])
-            return previous?.type === "tool" ? undefined : true
+            const previous = itemByKey().get(visibleItemKeys()[visibleIndex() - 1])
+            // run 对 tool spacing 表现为一个非 tool item，连续 tool 的既有 sibling 测量保持不变。
+            return previous?.kind === "part" && previous.part.type === "tool" ? undefined : true
           })
           return (
-            <Show when={component()}>
-              <ToolPartTopMargin.Provider value={toolTopMargin}>
-                <Dynamic
-                  last={index() === props.parts.length - 1}
-                  topMargin={partTopMargin()}
-                  component={component()}
-                  part={part as any}
-                  message={props.message}
-                />
-              </ToolPartTopMargin.Provider>
-            </Show>
+            <Switch>
+              {/* reasoning descriptor 进入统一 run shell，singleton 也不保留第二套旧 renderer。 */}
+              <Match when={item().kind === "reasoning-run" && item()}>
+                {(current) => (
+                  <ReasoningRun
+                    key={current().key}
+                    parts={(current() as Extract<MessageRenderItem, { kind: "reasoning-run" }>).parts}
+                    topMargin={partTopMargin()}
+                    message={props.message}
+                  />
+                )}
+              </Match>
+              {/* 普通 Part 原样走既有 Dynamic mapping，聚合不能改变 tool/text 的渲染职责。 */}
+              <Match when={item().kind === "part" && item()}>
+                {(current) => {
+                  const part = () => (current() as Extract<MessageRenderItem, { kind: "part" }>).part
+                  const component = createMemo(() => PART_MAPPING[part().type as keyof typeof PART_MAPPING])
+                  return (
+                    <Show when={component()}>
+                      <ToolPartTopMargin.Provider value={toolTopMargin}>
+                        <Dynamic
+                          last={index() === renderItemKeys().length - 1}
+                          topMargin={partTopMargin()}
+                          component={component()}
+                          part={part() as any}
+                          message={props.message}
+                        />
+                      </ToolPartTopMargin.Provider>
+                    </Show>
+                  )
+                }}
+              </Match>
+            </Switch>
           )
         }}
       </For>
@@ -1729,35 +1811,86 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
 const PART_MAPPING = {
   text: TextPart,
   tool: ToolPart,
-  reasoning: ReasoningPart,
 }
 
-function ReasoningPart(props: { last: boolean; topMargin: boolean; part: ReasoningPart; message: AssistantMessage }) {
+const REASONING_PREVIEW_ROWS = 5
+
+function normalizeReasoning(text: string) {
+  // 沿用旧 renderer 的规范化口径，避免聚合修复顺手改变 redacted 内容的显示语义。
+  return text.replace("[REDACTED]", "").trim()
+}
+
+function reasoningRows(text: string, width: number) {
+  // preview 明确使用 char wrap，因此估算也必须按终端 cell，而不是源码逻辑行。
+  const bodyWidth = Math.max(width, 1)
+  return text.split("\n").reduce((total, line) => {
+    // tab 与控制字符按整行收费，宁可少展示，也不能把不可预测宽度当成零成本。
+    const cells = [...line].reduce((sum, char) => {
+      const code = char.codePointAt(0) ?? 0
+      // 一整行是特殊字符的保守上限；过估只会少展示，低估却可能产生孤立 marker。
+      if (char === "\t" || code < 32 || (code >= 127 && code <= 159)) return sum + bodyWidth
+      // Bun.stringWidth 与终端 cell 口径一致，能正确处理 CJK 和零宽组合字符。
+      return sum + Bun.stringWidth(char)
+    }, 0)
+    return total + Math.max(1, Math.ceil(cells / bodyWidth))
+  }, 0)
+}
+
+function ReasoningRun(props: { key: string; topMargin: boolean; parts: ReasoningPart[]; message: AssistantMessage }) {
+  // run shell 是唯一折叠单位；成员数量增加时不能再复制 header、border 或 toggle。
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
-  const [expanded, setExpanded] = createSignal(false)
-
-  const content = createMemo(() => {
-    return props.part.text.replace("[REDACTED]", "").trim()
+  const [override, setOverride] = createSignal<boolean>()
+  // full body 首次展开后常驻；OpenTUI renderable 被销毁后不能安全复用同一个 JSX 树。
+  const [bodyMounted, setBodyMounted] = createSignal(false)
+  // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
+  const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
+  // denominator 使用规范化 source 数，不等待异步 conceal，避免 header 在 highlight 后跳变。
+  const previews = createMemo(() => {
+    // 所有成员共享同一个五行账户，彻底消除“每个短 Part 各拿五行”的线性增长。
+    let remaining = REASONING_PREVIEW_ROWS
+    return parts().flatMap((part, index) => {
+      // 首 source 不需要边界；后续 source 必须成对获得 marker 行和至少一行正文。
+      const markerRows = index === 0 ? 0 : 1
+      // 预算不足时整个成员留给 footer 汇总，绝不只渲染一个没有正文的 marker。
+      if (remaining <= markerRows) return []
+      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
+      // 分配结果只保存原 Part 引用和行数，不制造合成文本或新的持久化身份。
+      // bodyRows 是成员自己的 clipping 高度，run 级 maxHeight 只是最后一道安全兜底。
+      remaining -= markerRows + bodyRows
+      return [{ part, index, bodyRows }]
+    })
   })
-  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
-  createEffect(() => setDisplayContent(content()))
-  const renderedContent = createMemo(() => displayContent() || content())
-  const lines = createMemo(() => renderedContent().split("\n"))
-  const previewLines = 5
-  const overflow = createMemo(() => lines().length > previewLines)
-  const preview = createMemo(() => {
-    if (expanded() || !overflow()) return renderedContent()
-    return [...lines().slice(0, previewLines), "…"].join("\n")
-  })
+  // overflow 同时考虑未获 allocation 的成员和单成员长行，窄终端也能稳定折叠。
+  const overflow = createMemo(() => previews().length < parts().length || reasoningRowsTotal(parts(), ctx.width) > 5)
+  // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
+  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+  // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
+  const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
+  // hidden 只统计没有同步 allocation 的 source，不能被异步 highlighting 完成时反复改写。
+  const hidden = createMemo(() => parts().length - previews().length)
   const streaming = createMemo(() => !props.message.time.completed)
-  const completedKey = createMemo(() => `${ctx.width}\u0000${preview()}`)
+  // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
+
+  // 全局命令必须覆盖局部点击，否则 “Collapse thinking” 无法得到确定结果。
+  createEffect(
+    on(
+      () => ctx.thinkingMode(),
+      // 模式实际变化才清除 override，普通正文 delta 不得把用户局部展开强制折回。
+      () => setOverride(undefined),
+      { defer: true },
+    ),
+  )
+  createEffect(() => {
+    // 非 overflow run 和全局 show 也要触发首次挂载，保证短内容直接显示完整正文。
+    if (expanded()) setBodyMounted(true)
+  })
 
   return (
-    <Show when={content() && ctx.showThinking()}>
+    <Show when={parts().length > 0 && ctx.showThinking()}>
       <box
-        id={"text-" + props.part.id}
+        id={`reasoning-run-${props.key}`}
         paddingLeft={2}
         marginTop={props.topMargin ? 1 : 0}
         flexDirection="column"
@@ -1766,53 +1899,194 @@ function ReasoningPart(props: { last: boolean; topMargin: boolean; part: Reasoni
         borderColor={theme.backgroundElement}
         flexShrink={0}
         onMouseUp={() => {
+          // 保留既有 selection 保护；拖选 Thinking 文本不能意外触发展开或折叠。
           if (renderer.getSelection()?.getSelectedText()) return
-          setExpanded((prev) => !prev)
+          setOverride(!expanded())
         }}
       >
         <box>
+          {/* 多 source 才显示 segments，singleton 继续保持旧 Thinking (N chars) 兼容格式。 */}
           <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>
-            Thinking ({renderedContent().length.toLocaleString()} chars):
+            Thinking ({parts().length > 1 ? `${parts().length} segments · ` : ""}
+            {characters().toLocaleString()} chars):
           </text>
         </box>
-        <box>
-          <Switch>
-            <Match when={streaming()}>
-              <code
-                filetype="markdown"
-                drawUnstyledText={false}
-                streaming={true}
+        {/* 折叠树始终受五行硬上限保护，估算误差不能重新撑满 viewport。 */}
+        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
+          {/* preview 与 full 使用不同 ID 和不同 JSX 树，二者常驻时不会争用 OpenTUI renderable。 */}
+          <For each={previews()}>
+            {(preview) => (
+              <ReasoningBody
+                id={`reasoning-preview-${preview.part.id}`}
+                part={preview.part}
+                marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`}
+                rows={preview.bodyRows}
+                width={ctx.width}
+                streaming={streaming()}
                 syntaxStyle={subtleSyntax()}
-                content={preview()}
                 conceal={ctx.conceal()}
-                fg={theme.textMuted}
               />
-            </Match>
-            <Match when={!streaming()}>
-              <Show keyed when={completedKey()}>
-                {(_key) => (
-                  <code
-                    filetype="markdown"
-                    drawUnstyledText={false}
-                    streaming={false}
-                    syntaxStyle={subtleSyntax()}
-                    content={preview()}
-                    conceal={ctx.conceal()}
-                    fg={theme.textMuted}
-                  />
-                )}
-              </Show>
-            </Match>
-          </Switch>
+            )}
+          </For>
         </box>
+        <Show when={bodyMounted()}>
+          {/* full tree 首次挂载后只切 visible，避免反复展开时重挂已销毁的 CodeRenderable。 */}
+          <box visible={expanded()}>
+            {/* member key 只使用原 Part ID，run 成员前插不会重挂已有 source body。 */}
+            <For each={parts().map((part) => part.id)}>
+              {(id) => {
+                const part = createMemo(() => parts().find((item) => item.id === id)!)
+                const index = createMemo(() => parts().findIndex((item) => item.id === id))
+                return (
+                  <ReasoningBody
+                    id={`text-${id}`}
+                    part={part()}
+                    marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
+                    width={ctx.width}
+                    streaming={streaming()}
+                    syntaxStyle={subtleSyntax()}
+                    conceal={ctx.conceal()}
+                  />
+                )
+              }}
+            </For>
+          </box>
+        </Show>
         <Show when={overflow()}>
           <box>
-            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
+            {/* footer 只汇总未获 allocation 的成员，不暴露 Part ID 或 Provider metadata。 */}
+            <text fg={theme.textMuted}>
+              {expanded() ? "▲ collapse" : `…${hidden() ? ` · +${hidden()} segments` : ""} · ▼ expand`}
+            </text>
           </box>
         </Show>
       </box>
     </Show>
   )
+}
+
+function reasoningRowsTotal(parts: ReasoningPart[], width: number) {
+  // marker 也属于正文预算；漏算它会让许多短 Part 再次通过 chrome 撑高屏幕。
+  return parts.reduce(
+    (total, part, index) => total + reasoningRows(normalizeReasoning(part.text), width) + (index === 0 ? 0 : 1),
+    0,
+  )
+}
+
+function ReasoningBody(props: {
+  id: string
+  part: ReasoningPart
+  marker?: string
+  rows?: number
+  width: number
+  streaming: boolean
+  syntaxStyle: ReturnType<ReturnType<typeof useTheme>["subtleSyntax"]>
+  conceal: boolean
+}) {
+  const { theme } = useTheme()
+  // content 直接读取原 Part，SyncProvider 的 delta/final snapshot 仍沿既有对象链更新。
+  const content = createMemo(() => normalizeReasoning(props.part.text))
+  // 继续复用旧 50ms 节流，聚合不应放大流式 Markdown 的 highlight 频率。
+  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+  // marker 初始隐藏，只有 post-conceal chunks 证明自己正文可见后才揭示。
+  const [markerReady, setMarkerReady] = createSignal(false)
+  let generation = 0
+  // active 防止异步 tree-sitter callback 在 Solid cleanup 后更新已销毁组件。
+  let active = true
+
+  createEffect(() => setDisplayContent(content()))
+  const renderedContent = createMemo(() => displayContent() || content())
+  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
+  createEffect(() => {
+    renderedContent()
+    props.conceal
+    // 内容或 conceal 变化都先撤下 marker，旧 highlight 结果不能替新的可见性背书。
+    generation++
+    setMarkerReady(false)
+  })
+  onCleanup(() => {
+    active = false
+    generation++
+  })
+
+  // 每个 source 保持独立 CodeRenderable，未闭合 Markdown fence 不得跨 Part 污染。
+  const code = () => (
+    <code
+      id={props.id}
+      filetype="markdown"
+      drawUnstyledText={false}
+      streaming={props.streaming}
+      syntaxStyle={props.syntaxStyle}
+      content={renderedContent()}
+      conceal={props.conceal}
+      fg={theme.textMuted}
+      wrapMode={props.rows ? "char" : "word"}
+      onChunks={(chunks, context) => {
+        // chunks 已经过 conceal，检查它们不会泄露 drawUnstyledText=false 保护的原始 Markdown。
+        const current = generation
+        const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
+        queueMicrotask(() => {
+          // context.content 再校验流式 throttle 后的当前文本，阻止晚到 callback 造成状态倒退。
+          if (!active || current !== generation || context.content !== renderedContent()) return
+          // onChunks 已经过 conceal 转换；只在当前 generation 的可见前缀含 glyph 时显示边界。
+          setMarkerReady(visible)
+        })
+        return chunks
+      }}
+    />
+  )
+
+  return (
+    <>
+      <Show when={props.marker && markerReady()}>
+        {/* marker 是可选择的普通 text，但不进入 Markdown，也不会污染 transcript/export。 */}
+        <text fg={theme.textMuted} wrapMode="none">
+          {props.marker}
+        </text>
+      </Show>
+      <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
+        {/* completed key 保留宽度和本 Part 文本，终端 resize 后必须重新完成 conceal。 */}
+        <Show
+          when={props.streaming}
+          fallback={
+            <Show keyed when={completedKey()}>
+              {(_key) => code()}
+            </Show>
+          }
+        >
+          {code()}
+        </Show>
+      </box>
+    </>
+  )
+}
+
+function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
+  // 该检查只决定 subordinate marker，不得用于隐藏或改写对应 Reasoning Part 正文。
+  // preview 只检查成员自己获准的行；被成员 wrapper 裁掉的后文不能让 marker 提前出现。
+  const bodyWidth = Math.max(width, 1)
+  let row = 1
+  let column = 0
+  return [...text].some((char) => {
+    if (rows && row > rows) return false
+    if (char === "\n") {
+      // 换行重置列位置，确保多逻辑行与 CodeRenderable 的 char-wrap 行边界一致。
+      row++
+      column = 0
+      return false
+    }
+    const code = char.codePointAt(0) ?? 0
+    // 特殊字符继续沿用 allocator 的整行成本，readiness 与 allocation 不能使用两套数学。
+    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
+    if (column + cells > bodyWidth) {
+      // char-wrap 在字符放不下时先换行；必须在检查 glyph 之前推进到真实目标行。
+      row++
+      column = 0
+    }
+    column += cells
+    // 只认可分配行内真实占 cell 的非空白字符，后方被裁剪的 glyph 不能提前揭示 marker。
+    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
+  })
 }
 
 function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; message: AssistantMessage }) {
@@ -1883,7 +2157,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   const shouldHide = createMemo(() => {
     if (ctx.showDetails()) return false
     if (props.part.state.status !== "completed") return false
-    return true
+    return !isIncompleteSearch(props.part)
   })
 
   const toolprops = {
@@ -2260,7 +2534,11 @@ function openAutoReviewFromToolChrome(
   if (!match) return false
   if (match.direct) {
     if (evt.y !== match.row.screenY - 1) return false
-  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || !options?.inline || evt.y !== match.row.screenY - 1)) return false
+  } else if (
+    evt.y !== match.row.screenY &&
+    (review.tool === ShellID.ToolID || !options?.inline || evt.y !== match.row.screenY - 1)
+  )
+    return false
   return openAutoReviewSession(review, navigate, renderer, evt)
 }
 
@@ -2478,10 +2756,7 @@ function BlockTool(props: {
       </Show>
       {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
       <Show when={hasPreview()}>
-        <box
-          marginTop={collapsed() ? 1 : 0}
-          visible={collapsed()}
-        >
+        <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
           {props.preview}
         </box>
       </Show>
@@ -2577,12 +2852,7 @@ function Shell(props: ToolProps<typeof ShellTool>) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool
-          icon="$"
-          pending="Writing command..."
-          complete={props.input.command}
-          part={props.part}
-        >
+        <InlineTool icon="$" pending="Writing command..." complete={props.input.command} part={props.part}>
           {props.input.command}
         </InlineTool>
       </Match>
@@ -2711,7 +2981,11 @@ function Write(props: ToolProps<typeof WriteTool>) {
         >
           <box gap={1} flexDirection="column">
             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
+            <Diagnostics
+              diagnostics={props.metadata.diagnostics}
+              filePath={props.input.filePath ?? ""}
+              summary={props.metadata.diagnosticSummary}
+            />
           </box>
         </BlockTool>
       </Match>
@@ -2745,12 +3019,16 @@ function Write(props: ToolProps<typeof WriteTool>) {
                 content={code()}
               />
             </line_number>
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
-           </box>
-         </BlockTool>
-       </Match>
-       <Match when={true}>
-         <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
+            <Diagnostics
+              diagnostics={props.metadata.diagnostics}
+              filePath={props.input.filePath ?? ""}
+              summary={props.metadata.diagnosticSummary}
+            />
+          </box>
+        </BlockTool>
+      </Match>
+      <Match when={true}>
+        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
           Write {pathFormatter.format(props.input.filePath)}
         </InlineTool>
       </Match>
@@ -2766,6 +3044,7 @@ function Glob(props: ToolProps<typeof GlobTool>) {
       <Show when={props.metadata.count}>
         ({props.metadata.count} {props.metadata.count === 1 ? "match" : "matches"})
       </Show>
+      <Show when={props.metadata.partial}> (incomplete)</Show>
     </InlineTool>
   )
 }
@@ -2806,7 +3085,8 @@ function Read(props: ToolProps<typeof ReadTool>) {
 }
 
 function grepPatterns(value: unknown, exclude = false) {
-  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  const items =
+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
   // TUI 的 grep 行必须保持短促；不显示 include=/exclude= 字段名，
   // exclude 用 !glob 表达真实过滤语义，和 rg/glob 习惯保持一致。
   return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
@@ -2822,18 +3102,22 @@ function grepFilter(value: unknown, exclude = false) {
   return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
 }
 
-function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
+function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown; partial?: unknown }) {
   const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
   const timedOut = metadata.timedOut === true
-  if (matches === undefined) return timedOut ? "timed out" : ""
-  if (matches === 0 && timedOut) return "timed out"
+  const incomplete = metadata.partial === true
+  if (matches === undefined) return [timedOut && "timed out", incomplete && "incomplete"].filter(Boolean).join(", ")
+  if (matches === 0 && timedOut) return incomplete ? "timed out, incomplete" : "timed out"
   const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
-  return timedOut ? `${label}, timed out` : label
+  // partial 与 timeout/truncated 独立组合，不能用一个状态覆盖另一个完整性提示。
+  return [label, timedOut && "timed out", incomplete && "incomplete"].filter(Boolean).join(", ")
 }
 
 function Grep(props: ToolProps<typeof GrepTool>) {
   const pathFormatter = usePathFormatter()
-  const filters = createMemo(() => [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "))
+  const filters = createMemo(() =>
+    [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "),
+  )
   const result = createMemo(() => grepResult(props.metadata))
   return (
     <InlineTool icon="✱" pending="Searching content..." complete={props.input.pattern} part={props.part}>
@@ -2924,19 +3208,19 @@ function Task(props: ToolProps<typeof TaskTool>) {
     <InlineTool
       icon="│"
       spinner={isRunning()}
-        complete={props.input.description}
-        pending="Delegating..."
-        part={props.part}
-        onClick={() => {
-          if (props.metadata.sessionId) {
-            // Task metadata is written as soon as the child session exists, before
-            // its messages necessarily arrive. A previous prefetch can therefore
-            // mark the child as synced while it is still empty; force-refresh on
-            // explicit navigation so clicking a task always opens the live agent view.
-            void sync.session.sync(props.metadata.sessionId, { force: true })
-            navigate({ type: "session", sessionID: props.metadata.sessionId })
-          }
-        }}
+      complete={props.input.description}
+      pending="Delegating..."
+      part={props.part}
+      onClick={() => {
+        if (props.metadata.sessionId) {
+          // Task metadata is written as soon as the child session exists, before
+          // its messages necessarily arrive. A previous prefetch can therefore
+          // mark the child as synced while it is still empty; force-refresh on
+          // explicit navigation so clicking a task always opens the live agent view.
+          void sync.session.sync(props.metadata.sessionId, { force: true })
+          navigate({ type: "session", sessionID: props.metadata.sessionId })
+        }
+      }}
     >
       {content()}
     </InlineTool>
@@ -2994,7 +3278,11 @@ function Edit(props: ToolProps<typeof EditTool>) {
         >
           <box gap={1} flexDirection="column">
             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
-            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} summary={props.metadata.diagnosticSummary} />
+            <Diagnostics
+              diagnostics={props.metadata.diagnostics}
+              filePath={props.input.filePath ?? ""}
+              summary={props.metadata.diagnosticSummary}
+            />
           </box>
         </BlockTool>
       </Match>
@@ -3111,7 +3399,11 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
                   >
                     <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
                   </Show>
-                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary} />
+                  <Diagnostics
+                    diagnostics={props.metadata.diagnostics}
+                    filePath={file.movePath ?? file.filePath}
+                    summary={props.metadata.diagnosticSummary}
+                  />
                 </box>
               </BlockTool>
             )}
@@ -3231,7 +3523,8 @@ function Diagnostics(props: {
           <For each={errors()}>
             {(diagnostic) => (
               <text fg={theme.error}>
-                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {truncateMsg(normalizeMsg(diagnostic.message))}
+                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}]{" "}
+                {truncateMsg(normalizeMsg(diagnostic.message))}
               </text>
             )}
           </For>
@@ -3239,15 +3532,11 @@ function Diagnostics(props: {
       </Match>
       {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
       <Match when={summary() && summary()!.existingCount > 0}>
-        <text fg={theme.textMuted}>
-          LSP checked · 0 new · {summary()!.existingCount} existing
-        </text>
+        <text fg={theme.textMuted}>LSP checked · 0 new · {summary()!.existingCount} existing</text>
       </Match>
       {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
       <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
-        <text fg={theme.success ?? theme.textMuted}>
-          ✓ LSP checked · no errors in this file
-        </text>
+        <text fg={theme.success ?? theme.textMuted}>✓ LSP checked · no errors in this file</text>
       </Match>
     </Switch>
   )

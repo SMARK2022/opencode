@@ -127,6 +127,20 @@ export interface FilesInput {
   signal?: AbortSignal
 }
 
+// Glob 需要同时返回前缀结果和终态完整性，因此不能复用只发出文件名的 streaming files。
+// 该 contract 仍是 package 内部 Service seam，不进入 Tool input、HTTP 或 SDK schema。
+export interface GlobInput extends FilesInput {
+  limit: number
+}
+
+// partial 只表示自然 exit 2 的遍历不完整；达到 sentinel 时只设置 truncated，避免无证据猜测。
+// items 始终已经 clean 且不超过调用方 limit，Tool 无需再次读取进程或裁剪结果。
+export interface GlobResult {
+  items: string[]
+  partial: boolean
+  truncated: boolean
+}
+
 export interface SearchInput {
   cwd: string
   pattern: string
@@ -149,6 +163,7 @@ export interface TreeInput {
 
 export interface Interface {
   readonly files: (input: FilesInput) => Stream.Stream<string, PlatformError | Error>
+  readonly glob: (input: GlobInput) => Effect.Effect<GlobResult, PlatformError | Error>
   readonly tree: (input: TreeInput) => Effect.Effect<string, PlatformError | Error>
   readonly search: (input: SearchInput) => Effect.Effect<SearchResult, PlatformError | Error>
 }
@@ -221,8 +236,9 @@ function fail(queue: Queue.Queue<string, PlatformError | Error | Cause.Done>, er
   Queue.failCauseUnsafe(queue, Cause.fail(err))
 }
 
-function filesArgs(input: FilesInput) {
-  const args = ["--no-config", "--files", "--glob=!.git/*"]
+function filesArgs(input: FilesInput, noMessages = false) {
+  // 只为能传播 partial 的 bounded Glob 隐藏遍历诊断；streaming files 仍保留原失败语义。
+  const args = ["--no-config", "--files", ...(noMessages ? ["--no-messages"] : []), "--glob=!.git/*"]
   if (input.follow) args.push("--follow")
   if (input.hidden !== false) args.push("--hidden")
   if (input.hidden === false) args.push("--glob=!.*")
@@ -372,6 +388,45 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
           extendEnv: true,
           stdin: "ignore",
         })
+      })
+
+      const glob: Interface["glob"] = Effect.fn("Ripgrep.glob")(function* (input) {
+        yield* check(input.cwd)
+        // scoped program 统一拥有 child 和 collector；正常返回、limit、abort 都经过同一释放边界。
+        const program = Effect.scoped(
+          Effect.gen(function* () {
+            const handle = yield* spawner.spawn(yield* command(input.cwd, filesArgs(input, true)))
+            // stderr 必须从 spawn 起并发 drain，不能等 stdout 结束后才读取，否则大量诊断可能填满 pipe。
+            // collector 绑定当前 scope，abort 或 sentinel 返回时会与 child 一起被确定性中断。
+            const stderr = yield* Stream.mkString(Stream.decodeText(handle.stderr)).pipe(Effect.forkScoped)
+            const items = yield* Stream.decodeText(handle.stdout).pipe(
+              Stream.splitLines,
+              Stream.filter((line) => line.length > 0),
+              Stream.map(clean),
+              Stream.take(input.limit + 1),
+              Stream.runCollect,
+              Effect.map((chunk) => [...chunk]),
+            )
+
+            if (items.length > input.limit) {
+              // sentinel 分支不能等待 exit/stderr EOF；先返回结果，scope finalizer 才有机会终止 rg。
+              // 此时 truncated 已足够表达不完整，不再猜测尚未遍历区域是否还会产生权限错误。
+              return { items: items.slice(0, input.limit), partial: false, truncated: true }
+            }
+
+            // 只有自然读完 stdout 才有资格使用真实 exit code 判断 complete 与 partial。
+            const code = yield* handle.exitCode
+            const diagnostic = yield* Fiber.join(stderr)
+            // rg 对文件枚举通常只使用 0/1；保留 1 的空结果兼容，不能沿用 stdout 中的异常残片。
+            if (code === 0) return { items, partial: false, truncated: false }
+            if (code === 1) return { items: [], partial: false, truncated: false }
+            // --no-messages 只抑制文件 I/O 诊断；仍有 stderr 的 code 2 必须保留为 fatal 输入错误。
+            // 分类只依赖 exit/stderr 是否为空，不解析会随平台和语言变化的权限错误正文。
+            if (code === 2 && diagnostic.trim() === "") return { items, partial: true, truncated: false }
+            return yield* Effect.fail(error(diagnostic, code))
+          }),
+        )
+        return yield* raceAbort(program, input.signal)
       })
 
       const files: Interface["files"] = (input) =>
@@ -597,7 +652,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
         return lines.join("\n")
       })
 
-      return Service.of({ files, tree, search })
+      return Service.of({ files, glob, tree, search })
     }),
   )
 

@@ -61,8 +61,17 @@ export const GrepTool = Tool.define(
         Effect.gen(function* () {
           const empty = {
             title: params.pattern,
-            metadata: { matches: 0, truncated: false },
+            metadata: { matches: 0, truncated: false, partial: false },
             output: "No files found",
+          }
+          // partial-empty 是 completed 结果而非异常；独立对象确保两个空结果不会共享错误文案或 metadata。
+          const emptyPartial = {
+            title: params.pattern,
+            metadata: { matches: 0, truncated: false, partial: true },
+            output: [
+              "No files found in accessible paths.",
+              "(Some paths were inaccessible and skipped; narrow the path before relying on absence.)",
+            ].join("\n"),
           }
           if (!params.pattern) {
             throw new Error("pattern is required")
@@ -101,9 +110,10 @@ export const GrepTool = Tool.define(
             ...patterns(params.include),
             ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
           ]
-          const emptyTimedOut = () => ({
+          const emptyTimedOut = (partial = false) => ({
             title: params.pattern,
-            metadata: { matches: 0, truncated: true, timedOut: true },
+            // timeout 决定用户文案，partial 仍独立记录文件系统是否同时跳过了路径。
+            metadata: { matches: 0, truncated: true, timedOut: true, partial },
             output: [
               `Search timed out after ${timeout} ms before finding matches.`,
               "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.",
@@ -123,8 +133,10 @@ export const GrepTool = Tool.define(
             signal: ctx.abort,
           })
           if (result.items.length === 0 && result.timedOut) {
-            return emptyTimedOut()
+            return emptyTimedOut(result.partial)
           }
+          // partial 必须先于普通 empty；否则权限拒绝会被错误持久化为完整的阴性结论。
+          if (result.items.length === 0 && result.partial) return emptyPartial
           if (result.items.length === 0) return empty
 
           const rows = result.items.map((item) => ({
@@ -168,7 +180,8 @@ export const GrepTool = Tool.define(
           const totalMatches = matches.length
           // 超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
           // 阶段不可用，也不能把未完成搜索降级成确定性的 "No files found"。
-          if (final.length === 0 && result.timedOut) return emptyTimedOut()
+          if (final.length === 0 && result.timedOut) return emptyTimedOut(result.partial)
+          if (final.length === 0 && result.partial) return emptyPartial
           if (final.length === 0) return empty
 
           // [local-smark] 截断时显示数量 + "+" 后缀，不截断时显示精确数
@@ -217,6 +230,8 @@ export const GrepTool = Tool.define(
               // [local-smark] totalMatches: 截断前的真实匹配数，供 TUI 和后续逻辑使用
               totalMatches,
               truncated,
+              // 布尔值始终持久化，后续消费者无需通过自然语言 warning 反向推断完整性。
+              partial: result.partial,
               ...(result.timedOut && { timedOut: true }),
             },
             output: output.join("\n"),
