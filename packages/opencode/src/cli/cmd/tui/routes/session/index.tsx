@@ -30,9 +30,12 @@ import {
   TextAttributes,
   RGBA,
   MouseButton,
+  TextBuffer,
+  TextBufferView,
   type MouseEvent as TuiMouseEvent,
   type OptimizedBuffer,
   type Renderable,
+  type WidthMethod,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import type {
@@ -95,7 +98,6 @@ import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
 import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
-import { nextThinkingMode, reasoningTitle, useThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogRetryAction } from "../../component/dialog-retry-action"
@@ -189,7 +191,6 @@ const context = createContext<{
   width: number
   sessionID: string
   conceal: () => boolean
-  thinkingMode: () => ThinkingMode
   showThinking: () => boolean
   showTimestamps: () => boolean
   showDetails: () => boolean
@@ -255,9 +256,8 @@ export function Session() {
   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
-  const thinking = useThinkingMode()
-  const thinkingMode = thinking.mode
-  const showThinking = createMemo(() => true)
+  // 主 Session 恢复历史 visibility key；含义已混合的 thinking_mode 继续留给独立 v2 debug route。
+  const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
   const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
@@ -832,11 +832,7 @@ export function Session() {
       },
     },
     {
-      title: (() => {
-        const next = nextThinkingMode(thinkingMode())
-        if (next === "hide") return "Collapse thinking"
-        return "Expand thinking"
-      })(),
+      title: showThinking() ? "Hide thinking" : "Show thinking",
       value: "session.toggle.thinking",
       category: "Session",
       slash: {
@@ -844,7 +840,7 @@ export function Session() {
         aliases: ["toggle-thinking"],
       },
       run: () => {
-        thinking.set(nextThinkingMode(thinkingMode()))
+        setShowThinking((visible) => !visible)
         dialog.clear()
       },
     },
@@ -1242,7 +1238,6 @@ export function Session() {
           },
           sessionID: route.sessionID,
           conceal,
-          thinkingMode,
           showThinking,
           showTimestamps,
           showDetails,
@@ -1821,20 +1816,20 @@ function normalizeReasoning(text: string) {
   return text.replace("[REDACTED]", "").trim()
 }
 
-function reasoningRows(text: string, width: number) {
-  // preview 明确使用 char wrap，因此估算也必须按终端 cell，而不是源码逻辑行。
-  const bodyWidth = Math.max(width, 1)
-  return text.split("\n").reduce((total, line) => {
-    // tab 与控制字符按整行收费，宁可少展示，也不能把不可预测宽度当成零成本。
-    const cells = [...line].reduce((sum, char) => {
-      const code = char.codePointAt(0) ?? 0
-      // 一整行是特殊字符的保守上限；过估只会少展示，低估却可能产生孤立 marker。
-      if (char === "\t" || code < 32 || (code >= 127 && code <= 159)) return sum + bodyWidth
-      // Bun.stringWidth 与终端 cell 口径一致，能正确处理 CJK 和零宽组合字符。
-      return sum + Bun.stringWidth(char)
-    }, 0)
-    return total + Math.max(1, Math.ceil(cells / bodyWidth))
+function reasoningRowsTotal(content: string[], width: number, widthMethod: WidthMethod) {
+  const buffer = TextBuffer.create(widthMethod)
+  const view = TextBufferView.create(buffer)
+  view.setWrapWidth(Math.max(width, 1))
+  // disclosure 以自然 word wrap 为准；只有它超过预算后，正文才切换 char wrap 进入 compact。
+  view.setWrapMode("word")
+  const rows = content.reduce((total, text) => {
+    buffer.setText(text)
+    return total + view.getVirtualLineCount()
   }, 0)
+  // 每次 memo 计算都释放 native 句柄，不能用准确测量换取随流式 delta 累积的资源泄漏。
+  view.destroy()
+  buffer.destroy()
+  return rows
 }
 
 function ReasoningRun(props: { key: string; topMargin: boolean; parts: ReasoningPart[]; message: AssistantMessage }) {
@@ -1842,34 +1837,22 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
-  const [override, setOverride] = createSignal<boolean>()
+  // disclosure 是 run 局部状态；新 Session / 新 run 必须从长正文收缩态开始。
+  const [expanded, setExpanded] = createSignal(false)
+  const [rendered, setRendered] = createSignal<Record<string, string | undefined>>({})
   // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
   // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
   const streaming = createMemo(() => !props.message.time.completed)
-  // 流式 + hide 模式 + 无 override 时强制 overflow，避免内容从短到长时先撑开再收缩的视觉抖动。
-  // overflow 同时驱动 expanded、footer 可见性和 wrapMode，改这一处三者自动一致。
-  const overflow = createMemo(() =>
-    streaming() && override() === undefined && ctx.thinkingMode() === "hide"
-      ? true
-      : reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS,
-  )
-  // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
-  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+  // disclosure 只依据 post-conceal 文本；异步高亮未就绪时先限高但不显示无依据的 toggle。
+  const overflow = createMemo(() => {
+    const current = parts()
+    const content = current.map((part) => rendered()[part.id]).filter((text): text is string => text !== undefined)
+    if (content.length !== current.length) return false
+    return reasoningRowsTotal(content, ctx.width, renderer.widthMethod) > REASONING_PREVIEW_ROWS
+  })
   // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
   const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
-
-
-  // 全局命令必须覆盖局部点击，否则 “Collapse thinking” 无法得到确定结果。
-  createEffect(
-    on(
-      () => ctx.thinkingMode(),
-      // 模式实际变化才清除 override，普通正文 delta 不得把用户局部展开强制折回。
-      () => setOverride(undefined),
-      { defer: true },
-    ),
-  )
-
   return (
     <Show when={parts().length > 0 && ctx.showThinking()}>
       <box
@@ -1884,7 +1867,9 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
         onMouseUp={() => {
           // 保留既有 selection 保护；拖选 Thinking 文本不能意外触发展开或折叠。
           if (renderer.getSelection()?.getSelectedText()) return
-          setOverride(!expanded())
+          // 短正文没有 disclosure；禁止预写状态，避免后续增长或 resize 时意外保持展开。
+          if (!overflow()) return
+          setExpanded((value) => !value)
         }}
       >
         <box>
@@ -1908,11 +1893,14 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
                   id={`text-${id}`}
                   part={part}
                   separator={index() > 0}
-                  width={ctx.width}
-                  expanded={expanded()}
+                  // 短正文自然完整并保持 word wrap；只有真实 overflow 且未展开时才用 char wrap。
+                  expanded={expanded() || !overflow()}
                   streaming={streaming()}
                   syntaxStyle={subtleSyntax()}
                   conceal={ctx.conceal()}
+                  onContent={(content) =>
+                    setRendered((current) => (current[id] === content ? current : { ...current, [id]: content }))
+                  }
                 />
               )
             }}
@@ -1929,23 +1917,15 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
   )
 }
 
-function reasoningRowsTotal(parts: ReasoningPart[], width: number) {
-  // 非首 source 有 1 行 Markdown 水平线分隔符；估算必须包含它，否则短内容多 source 会误判不 overflow。
-  return parts.reduce(
-    (total, part, index) => total + (index === 0 ? 0 : 1) + reasoningRows(normalizeReasoning(part.text), width),
-    0,
-  )
-}
-
 function ReasoningBody(props: {
   id: string
   part: () => ReasoningPart
   separator: boolean
-  width: number
   expanded: boolean
   streaming: boolean
   syntaxStyle: ReturnType<ReturnType<typeof useTheme>["subtleSyntax"]>
   conceal: boolean
+  onContent: (content: string | undefined) => void
 }) {
   const { theme } = useTheme()
   // accessor 跟随 render descriptor replacement；只捕获旧 Part 对象会让 header 更新而正文停在旧 delta。
@@ -1954,6 +1934,8 @@ function ReasoningBody(props: {
     const text = normalizeReasoning(props.part().text)
     return props.separator ? REASONING_SEPARATOR + text : text
   })
+  // delta 期间沿用上一份可见文本可保持 footer 稳定；只有 conceal 变更会使其语义立即失效。
+  createEffect(on(() => props.conceal, () => props.onContent(undefined)))
 
   return (
     // source 不参与父级五行约束的 flex shrink；共享 wrapper 应裁掉尾部，而不是把成员压成隔项可见。
@@ -1968,6 +1950,12 @@ function ReasoningBody(props: {
         conceal={props.conceal}
         fg={theme.textMuted}
         wrapMode={props.expanded ? "word" : "char"}
+        onChunks={(chunks, context) => {
+          // 旧 highlight 回调不能覆盖新 delta；context.content 是 CodeRenderable 的 generation 边界。
+          if (context.content !== content()) return chunks
+          props.onContent(chunks.map((chunk) => chunk.text).join(""))
+          return chunks
+        }}
       />
     </box>
   )

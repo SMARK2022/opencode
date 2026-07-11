@@ -392,15 +392,34 @@ test("invisible raw parts still split adjacent reasoning runs", async () => {
       // 两侧都是 singleton run，因此各自保留兼容 header，不能被投影成一个 2-segment block。
       expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(2)
       expect(frame.some((line) => line.includes("2 segments"))).toBe(false)
+      // completed 短 run 自然完整，没有可披露尾部，因此不得出现任何 disclosure toggle。
+      expect(frame.some((line) => line.includes("▼ expand") || line.includes("▲ collapse"))).toBe(false)
     },
     {},
     { height: 20 },
   )
 })
 
-test("streaming reasoning collapses by default to avoid expand-collapse jitter", async () => {
+test("word-wrapped reasoning over five visual rows remains collapsible", async () => {
+  const messageID = "msg_reasoning_word_wrap"
+  const content = "abcdefghijkl 123456789012 longword12xx reasoningxxx abcdefghijkl 123456789012 longword12xx"
+  await withRenderedSession(
+    [assistantMessage(messageID, 1)],
+    { [messageID]: [reasoningPart("part_reasoning_word_wrap", messageID, content)] },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("abcdefghijkl")))
+      // ctx.width=21 时 char wrap 是 5 行而 word wrap 是 7 行；toggle 必须按更高的真实布局预算出现。
+      expect(frame.some((line) => line.includes("▼ expand"))).toBe(true)
+      expect(findRow(frame, "▼ expand") - findRow(frame, "Thinking (") + 1).toBeLessThanOrEqual(7)
+    },
+    {},
+    { width: 31, height: 18 },
+  )
+})
+
+test("streaming reasoning becomes bounded without disclosure prewrite", async () => {
   const messageID = "msg_reasoning_stream_collapse"
-  // 未完成 Message：streaming=true，短内容（1 行，不超 5 行阈值）。
+  // 未完成 Message 从真实短内容开始；容器应提前限高，但不能伪造无意义的 overflow toggle。
   const pending = {
     ...assistantMessage(messageID, 1),
     time: { created: 1 },
@@ -410,29 +429,29 @@ test("streaming reasoning collapses by default to avoid expand-collapse jitter",
     [pending],
     { [messageID]: [reasoningPart("part_reasoning_stream_collapse", messageID, "short stream thought")] },
     async (app, emit) => {
-      // 流式 + hide 模式默认收缩：即使内容只有 1 行也应显示 ▼ expand，不能先全文展开再收缩。
-      // reasoning 正文依赖异步 Markdown 高亮，必须同时等待 toggle 和正文出现。
-      const frame = await waitForFrame(
-        app,
-        (lines) =>
-          lines.some((line) => line.includes("▼ expand")) && lines.some((line) => line.includes("short stream thought")),
-      )
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("short stream thought")))
       expect(frame.some((line) => line.includes("short stream thought"))).toBe(true)
+      expect(frame.some((line) => line.includes("▼ expand") || line.includes("▲ collapse"))).toBe(false)
 
-      // delta 增长内容；toggle 必须始终存在，不能出现先展开再收缩的抖动。
+      // 短正文没有 disclosure；点击不能预写 expanded=true，否则后续增长会绕过五行上限。
+      await clickVisibleText(app, "short stream thought")
       emit(
         partDeltaEvent(
           "evt_reasoning_stream_grow",
           messageID,
           "part_reasoning_stream_collapse",
-          "\nsecond stream line",
+          Array.from({ length: 6 }, (_, index) => `\nstream line ${index + 2}`).join(""),
           "text",
         ),
       )
-      const grown = await waitForFrame(app, (lines) => lines.some((line) => line.includes("second stream line")))
+      await app.renderOnce()
+      // 直接检查事件后的首帧；等待稳定 toggle 会跳过最需要防止的尾部泄漏帧。
+      expect(rows(app.captureCharFrame()).some((line) => line.includes("stream line 7"))).toBe(false)
+      const grown = await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
+      // 从短增长成长时容器已经有上限，不能先泄漏尾部再依赖下一帧收回。
       expect(grown.some((line) => line.includes("▼ expand"))).toBe(true)
+      expect(grown.some((line) => line.includes("stream line 7"))).toBe(false)
 
-      // 完成 Message 后短内容恢复正常展开（无 toggle）。
       emit(
         messageUpdatedEvent("evt_reasoning_stream_done", {
           ...pending,
@@ -440,16 +459,14 @@ test("streaming reasoning collapses by default to avoid expand-collapse jitter",
           finish: "stop",
         }),
       )
-      // 完成 Message 后短内容恢复正常展开（无 toggle）；必须同时等待正文重新高亮出现。
-      // streaming→completed 切换会令 CodeRenderable 重新高亮，footer 消失不等于正文已可见。
       const completed = await waitForFrame(
         app,
         (lines) =>
-          !lines.some((line) => line.includes("▼ expand")) &&
+          lines.some((line) => line.includes("▼ expand")) &&
           lines.some((line) => line.includes("short stream thought")),
       )
       expect(completed.some((line) => line.includes("short stream thought"))).toBe(true)
-      expect(completed.some((line) => line.includes("second stream line"))).toBe(true)
+      expect(completed.some((line) => line.includes("stream line 7"))).toBe(false)
     },
     {},
     { height: 18 },
@@ -458,12 +475,13 @@ test("streaming reasoning collapses by default to avoid expand-collapse jitter",
 
 test("concealed reasoning separator stays visible between sources", async () => {
   const messageID = "msg_reasoning_conceal"
+  const privateURL = `private-url/${"hidden-path/".repeat(20)}image.png`
   await withRenderedSession(
     [assistantMessage(messageID, 1)],
     {
       [messageID]: [
         reasoningPart("part_reasoning_visible", messageID, "visible first source"),
-        reasoningPart("part_reasoning_concealed", messageID, "![](private-url)"),
+        reasoningPart("part_reasoning_concealed", messageID, `![](${privateURL})`),
       ],
     },
     async (app) => {
@@ -473,16 +491,17 @@ test("concealed reasoning separator stays visible between sources", async () => 
       // conceal 后第二个 source 的 image Markdown 不可见，但分隔符仍作为结构边界保留。
       expect(frame.some((line) => line.includes("private-url"))).toBe(false)
       expect(frame.some((line) => line.includes("visible first source"))).toBe(true)
+      expect(frame.some((line) => line.includes("▼ expand") || line.includes("▲ collapse"))).toBe(false)
 
       // 关闭 conceal 后第二个 source 的原始 Markdown 变得可见。
       app.mockInput.pressKey("x", { ctrl: true })
       app.mockInput.pressKey("h")
-      await waitForFrame(app, (lines) => lines.some((line) => line.includes("private-url")))
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("private-url")) && lines.some((line) => line.includes("▼ expand")))
 
       // 重新 conceal 后分隔符仍在，image 内容再次隐藏。
       app.mockInput.pressKey("x", { ctrl: true })
       app.mockInput.pressKey("h")
-      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("private-url")))
+      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("private-url")) && !lines.some((line) => line.includes("▼ expand")))
     },
     {},
     { height: 16 },
@@ -730,31 +749,41 @@ test("removing a hard boundary merges reasoning into the left run", async () => 
   )
 })
 
-test("global thinking show mode expands the whole reasoning run", async () => {
+test("persisted thinking mode does not expand a new reasoning run", async () => {
   const messageID = "msg_reasoning_mode"
   await withRenderedSession(
     [assistantMessage(messageID, 1)],
     {
-      [messageID]: Array.from({ length: 8 }, (_, index) =>
-        reasoningPart(`part_reasoning_mode_${index + 1}`, messageID, `mode source ${index + 1}`),
-      ),
+      [messageID]: [
+        ...Array.from({ length: 8 }, (_, index) =>
+          reasoningPart(`part_reasoning_mode_${index + 1}`, messageID, `mode source ${index + 1}`),
+        ),
+        textPart("part_reasoning_mode_answer", messageID, "answer remains visible"),
+      ],
     },
     async (app) => {
       const frame = await waitForFrame(
         app,
         (lines) =>
-          lines.some((line) => line.includes("mode source 8")) && lines.some((line) => line.includes("▲ collapse")),
+          lines.some((line) => line.includes("mode source 1")) && lines.some((line) => line.includes("▼ expand")),
       )
-      // thinking_mode 只改变屏幕展开状态；show 下不应先闪现或保留 compact footer。
-      expect(frame.some((line) => line.includes("▼ expand"))).toBe(false)
+      // 历史 mode 不能泄漏为新 run 的 disclosure；用户未操作前长正文必须保持五行上限。
+      expect(frame.some((line) => line.includes("mode source 8"))).toBe(false)
       expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(1)
 
-      await clickVisibleText(app, "▲ collapse")
-      const collapsed = await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
-      // 全局 show 是进入页面时的默认值；明确显示的局部 collapse 不能成为无效操作。
-      expect(collapsed.some((line) => line.includes("mode source 8"))).toBe(false)
+      await clickVisibleText(app, "▼ expand")
+      // 展开仍是 run 局部交互，不能通过删除全局 fallback 一并退化。
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("mode source 8")) && lines.some((line) => line.includes("▲ collapse")))
+
+      // visibility 只移除 Thinking 视觉树，不能连带隐藏同一 Message 的普通正文。
+      app.mockInput.pressKey("t", { ctrl: true })
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("answer remains visible")) && !lines.some((line) => line.includes("Thinking (")))
+
+      // 同一 Session 的 hide/show 不重置 run disclosure；只有新 run 才重新默认收缩。
+      app.mockInput.pressKey("t", { ctrl: true })
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("mode source 8")) && lines.some((line) => line.includes("▲ collapse")))
     },
-    { thinking_mode: "show" },
+    { thinking_visibility: true, thinking_mode: "show" },
     { height: 24 },
   )
 })
@@ -2728,7 +2757,8 @@ function SessionHarness(props: {
   events: ReturnType<typeof createEventSource>["source"]
 }) {
   const renderer = useRenderer()
-  const config = createTuiResolvedConfig()
+  // visibility 用例通过真实 binding 进入已注册 command，不给所有测试暴露 keymap 内部对象。
+  const config = createTuiResolvedConfig({ keybinds: { display_thinking: "ctrl+t" } })
   const keymap = createDefaultOpenTuiKeymap(renderer)
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
