@@ -97,7 +97,6 @@ import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { nextThinkingMode, reasoningTitle, useThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
-import { createThrottledSignal } from "../../util/signal"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogRetryAction } from "../../component/dialog-retry-action"
 import { SessionRetry } from "@/session/retry"
@@ -1814,6 +1813,8 @@ const PART_MAPPING = {
 }
 
 const REASONING_PREVIEW_ROWS = 5
+// 非首 source 前加 Markdown 水平线，由 CodeRenderable 的 Markdown 高亮自然渲染为分隔符。
+const REASONING_SEPARATOR = "---\n"
 
 function normalizeReasoning(text: string) {
   // 沿用旧 renderer 的规范化口径，避免聚合修复顺手改变 redacted 内容的显示语义。
@@ -1842,34 +1843,15 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
   const ctx = use()
   const renderer = useRenderer()
   const [override, setOverride] = createSignal<boolean>()
-  // full body 首次展开后常驻；OpenTUI renderable 被销毁后不能安全复用同一个 JSX 树。
-  const [bodyMounted, setBodyMounted] = createSignal(false)
   // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
-  // denominator 使用规范化 source 数，不等待异步 conceal，避免 header 在 highlight 后跳变。
-  const previews = createMemo(() => {
-    // 所有成员共享同一个五行账户，彻底消除“每个短 Part 各拿五行”的线性增长。
-    let remaining = REASONING_PREVIEW_ROWS
-    return parts().flatMap((part, index) => {
-      // 首 source 不需要边界；后续 source 必须成对获得 marker 行和至少一行正文。
-      const markerRows = index === 0 ? 0 : 1
-      // 预算不足时整个成员留给 footer 汇总，绝不只渲染一个没有正文的 marker。
-      if (remaining <= markerRows) return []
-      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
-      // 分配结果只保存原 Part 引用和行数，不制造合成文本或新的持久化身份。
-      // bodyRows 是成员自己的 clipping 高度，run 级 maxHeight 只是最后一道安全兜底。
-      remaining -= markerRows + bodyRows
-      return [{ part, index, bodyRows }]
-    })
-  })
-  // overflow 同时考虑未获 allocation 的成员和单成员长行，窄终端也能稳定折叠。
-  const overflow = createMemo(() => previews().length < parts().length || reasoningRowsTotal(parts(), ctx.width) > 5)
+  // overflow 估算包含分隔符行数；只依赖 parts() 和 ctx.width，不依赖 expanded，
+  // 因此 wrapMode 切换不会制造 expand→overflow→collapse 抖动反馈环。
+  const overflow = createMemo(() => reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS)
   // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
   const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
   // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
   const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
-  // hidden 只统计没有同步 allocation 的 source，不能被异步 highlighting 完成时反复改写。
-  const hidden = createMemo(() => parts().length - previews().length)
   const streaming = createMemo(() => !props.message.time.completed)
   // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
 
@@ -1882,10 +1864,6 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
       { defer: true },
     ),
   )
-  createEffect(() => {
-    // 非 overflow run 和全局 show 也要触发首次挂载，保证短内容直接显示完整正文。
-    if (expanded()) setBodyMounted(true)
-  })
 
   return (
     <Show when={parts().length > 0 && ctx.showThinking()}>
@@ -1911,53 +1889,34 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
             {characters().toLocaleString()} chars):
           </text>
         </box>
-        {/* 折叠树始终受五行硬上限保护，估算误差不能重新撑满 viewport。 */}
-        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
-          {/* preview 与 full 使用不同 ID 和不同 JSX 树，二者常驻时不会争用 OpenTUI renderable。 */}
-          <For each={previews()}>
-            {(preview) => (
-              <ReasoningBody
-                id={`reasoning-preview-${preview.part.id}`}
-                part={preview.part}
-                marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`}
-                rows={preview.bodyRows}
-                width={ctx.width}
-                streaming={streaming()}
-                syntaxStyle={subtleSyntax()}
-                conceal={ctx.conceal()}
-              />
-            )}
+        {/* 唯一正文树只改变布局约束；展开时不能先隐藏已高亮正文再异步挂载另一棵树。 */}
+        <box
+          maxHeight={expanded() ? undefined : REASONING_PREVIEW_ROWS}
+          overflow={expanded() ? "visible" : "hidden"}
+        >
+          {/* member key 只使用原 Part ID，run 成员前插不会重挂已有 source body。 */}
+          <For each={parts().map((part) => part.id)}>
+            {(id, index) => {
+              const part = createMemo(() => parts().find((item) => item.id === id)!)
+              return (
+                <ReasoningBody
+                  id={`text-${id}`}
+                  part={part}
+                  separator={index() > 0}
+                  width={ctx.width}
+                  expanded={expanded()}
+                  streaming={streaming()}
+                  syntaxStyle={subtleSyntax()}
+                  conceal={ctx.conceal()}
+                />
+              )
+            }}
           </For>
         </box>
-        <Show when={bodyMounted()}>
-          {/* full tree 首次挂载后只切 visible，避免反复展开时重挂已销毁的 CodeRenderable。 */}
-          <box visible={expanded()}>
-            {/* member key 只使用原 Part ID，run 成员前插不会重挂已有 source body。 */}
-            <For each={parts().map((part) => part.id)}>
-              {(id) => {
-                const part = createMemo(() => parts().find((item) => item.id === id)!)
-                const index = createMemo(() => parts().findIndex((item) => item.id === id))
-                return (
-                  <ReasoningBody
-                    id={`text-${id}`}
-                    part={part()}
-                    marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
-                    width={ctx.width}
-                    streaming={streaming()}
-                    syntaxStyle={subtleSyntax()}
-                    conceal={ctx.conceal()}
-                  />
-                )
-              }}
-            </For>
-          </box>
-        </Show>
         <Show when={overflow()}>
           <box>
-            {/* footer 只汇总未获 allocation 的成员，不暴露 Part ID 或 Provider metadata。 */}
-            <text fg={theme.textMuted}>
-              {expanded() ? "▲ collapse" : `…${hidden() ? ` · +${hidden()} segments` : ""} · ▼ expand`}
-            </text>
+            {/* footer 只表达整个 run 的折叠/展开状态。 */}
+            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
           </box>
         </Show>
       </box>
@@ -1966,127 +1925,47 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
 }
 
 function reasoningRowsTotal(parts: ReasoningPart[], width: number) {
-  // marker 也属于正文预算；漏算它会让许多短 Part 再次通过 chrome 撑高屏幕。
+  // 非首 source 有 1 行 Markdown 水平线分隔符；估算必须包含它，否则短内容多 source 会误判不 overflow。
   return parts.reduce(
-    (total, part, index) => total + reasoningRows(normalizeReasoning(part.text), width) + (index === 0 ? 0 : 1),
+    (total, part, index) => total + (index === 0 ? 0 : 1) + reasoningRows(normalizeReasoning(part.text), width),
     0,
   )
 }
 
 function ReasoningBody(props: {
   id: string
-  part: ReasoningPart
-  marker?: string
-  rows?: number
+  part: () => ReasoningPart
+  separator: boolean
   width: number
+  expanded: boolean
   streaming: boolean
   syntaxStyle: ReturnType<ReturnType<typeof useTheme>["subtleSyntax"]>
   conceal: boolean
 }) {
   const { theme } = useTheme()
-  // content 直接读取原 Part，SyncProvider 的 delta/final snapshot 仍沿既有对象链更新。
-  const content = createMemo(() => normalizeReasoning(props.part.text))
-  // 继续复用旧 50ms 节流，聚合不应放大流式 Markdown 的 highlight 频率。
-  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
-  // marker 初始隐藏，只有 post-conceal chunks 证明自己正文可见后才揭示。
-  const [markerReady, setMarkerReady] = createSignal(false)
-  let generation = 0
-  // active 防止异步 tree-sitter callback 在 Solid cleanup 后更新已销毁组件。
-  let active = true
-
-  createEffect(() => setDisplayContent(content()))
-  const renderedContent = createMemo(() => displayContent() || content())
-  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
-  createEffect(() => {
-    renderedContent()
-    props.conceal
-    // 内容或 conceal 变化都先撤下 marker，旧 highlight 结果不能替新的可见性背书。
-    generation++
-    setMarkerReady(false)
+  // accessor 跟随 render descriptor replacement；只捕获旧 Part 对象会让 header 更新而正文停在旧 delta。
+  // 非首 source 前加 Markdown 水平线，由 CodeRenderable 的 Markdown 高亮自然渲染为视觉分隔符。
+  const content = createMemo(() => {
+    const text = normalizeReasoning(props.part().text)
+    return props.separator ? REASONING_SEPARATOR + text : text
   })
-  onCleanup(() => {
-    active = false
-    generation++
-  })
-
-  // 每个 source 保持独立 CodeRenderable，未闭合 Markdown fence 不得跨 Part 污染。
-  const code = () => (
-    <code
-      id={props.id}
-      filetype="markdown"
-      drawUnstyledText={false}
-      streaming={props.streaming}
-      syntaxStyle={props.syntaxStyle}
-      content={renderedContent()}
-      conceal={props.conceal}
-      fg={theme.textMuted}
-      wrapMode={props.rows ? "char" : "word"}
-      onChunks={(chunks, context) => {
-        // chunks 已经过 conceal，检查它们不会泄露 drawUnstyledText=false 保护的原始 Markdown。
-        const current = generation
-        const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
-        queueMicrotask(() => {
-          // context.content 再校验流式 throttle 后的当前文本，阻止晚到 callback 造成状态倒退。
-          if (!active || current !== generation || context.content !== renderedContent()) return
-          // onChunks 已经过 conceal 转换；只在当前 generation 的可见前缀含 glyph 时显示边界。
-          setMarkerReady(visible)
-        })
-        return chunks
-      }}
-    />
-  )
 
   return (
-    <>
-      <Show when={props.marker && markerReady()}>
-        {/* marker 是可选择的普通 text，但不进入 Markdown，也不会污染 transcript/export。 */}
-        <text fg={theme.textMuted} wrapMode="none">
-          {props.marker}
-        </text>
-      </Show>
-      <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
-        {/* completed key 保留宽度和本 Part 文本，终端 resize 后必须重新完成 conceal。 */}
-        <Show
-          when={props.streaming}
-          fallback={
-            <Show keyed when={completedKey()}>
-              {(_key) => code()}
-            </Show>
-          }
-        >
-          {code()}
-        </Show>
-      </box>
-    </>
+    // source 不参与父级五行约束的 flex shrink；共享 wrapper 应裁掉尾部，而不是把成员压成隔项可见。
+    <box flexShrink={0}>
+      <code
+        id={props.id}
+        filetype="markdown"
+        drawUnstyledText={false}
+        streaming={props.streaming}
+        syntaxStyle={props.syntaxStyle}
+        content={content()}
+        conceal={props.conceal}
+        fg={theme.textMuted}
+        wrapMode={props.expanded ? "word" : "char"}
+      />
+    </box>
   )
-}
-
-function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
-  // 该检查只决定 subordinate marker，不得用于隐藏或改写对应 Reasoning Part 正文。
-  // preview 只检查成员自己获准的行；被成员 wrapper 裁掉的后文不能让 marker 提前出现。
-  const bodyWidth = Math.max(width, 1)
-  let row = 1
-  let column = 0
-  return [...text].some((char) => {
-    if (rows && row > rows) return false
-    if (char === "\n") {
-      // 换行重置列位置，确保多逻辑行与 CodeRenderable 的 char-wrap 行边界一致。
-      row++
-      column = 0
-      return false
-    }
-    const code = char.codePointAt(0) ?? 0
-    // 特殊字符继续沿用 allocator 的整行成本，readiness 与 allocation 不能使用两套数学。
-    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
-    if (column + cells > bodyWidth) {
-      // char-wrap 在字符放不下时先换行；必须在检查 glyph 之前推进到真实目标行。
-      row++
-      column = 0
-    }
-    column += cells
-    // 只认可分配行内真实占 cell 的非空白字符，后方被裁剪的 glyph 不能提前揭示 marker。
-    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
-  })
 }
 
 function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; message: AssistantMessage }) {
