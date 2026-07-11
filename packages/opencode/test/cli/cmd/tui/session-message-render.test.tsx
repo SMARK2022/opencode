@@ -398,6 +398,64 @@ test("invisible raw parts still split adjacent reasoning runs", async () => {
   )
 })
 
+test("streaming reasoning collapses by default to avoid expand-collapse jitter", async () => {
+  const messageID = "msg_reasoning_stream_collapse"
+  // 未完成 Message：streaming=true，短内容（1 行，不超 5 行阈值）。
+  const pending = {
+    ...assistantMessage(messageID, 1),
+    time: { created: 1 },
+  } satisfies AssistantMessage
+
+  await withRenderedSession(
+    [pending],
+    { [messageID]: [reasoningPart("part_reasoning_stream_collapse", messageID, "short stream thought")] },
+    async (app, emit) => {
+      // 流式 + hide 模式默认收缩：即使内容只有 1 行也应显示 ▼ expand，不能先全文展开再收缩。
+      // reasoning 正文依赖异步 Markdown 高亮，必须同时等待 toggle 和正文出现。
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("▼ expand")) && lines.some((line) => line.includes("short stream thought")),
+      )
+      expect(frame.some((line) => line.includes("short stream thought"))).toBe(true)
+
+      // delta 增长内容；toggle 必须始终存在，不能出现先展开再收缩的抖动。
+      emit(
+        partDeltaEvent(
+          "evt_reasoning_stream_grow",
+          messageID,
+          "part_reasoning_stream_collapse",
+          "\nsecond stream line",
+          "text",
+        ),
+      )
+      const grown = await waitForFrame(app, (lines) => lines.some((line) => line.includes("second stream line")))
+      expect(grown.some((line) => line.includes("▼ expand"))).toBe(true)
+
+      // 完成 Message 后短内容恢复正常展开（无 toggle）。
+      emit(
+        messageUpdatedEvent("evt_reasoning_stream_done", {
+          ...pending,
+          time: { created: 1, completed: 2 },
+          finish: "stop",
+        }),
+      )
+      // 完成 Message 后短内容恢复正常展开（无 toggle）；必须同时等待正文重新高亮出现。
+      // streaming→completed 切换会令 CodeRenderable 重新高亮，footer 消失不等于正文已可见。
+      const completed = await waitForFrame(
+        app,
+        (lines) =>
+          !lines.some((line) => line.includes("▼ expand")) &&
+          lines.some((line) => line.includes("short stream thought")),
+      )
+      expect(completed.some((line) => line.includes("short stream thought"))).toBe(true)
+      expect(completed.some((line) => line.includes("second stream line"))).toBe(true)
+    },
+    {},
+    { height: 18 },
+  )
+})
+
 test("concealed reasoning separator stays visible between sources", async () => {
   const messageID = "msg_reasoning_conceal"
   await withRenderedSession(

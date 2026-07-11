@@ -1845,15 +1845,20 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
   const [override, setOverride] = createSignal<boolean>()
   // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
-  // overflow 估算包含分隔符行数；只依赖 parts() 和 ctx.width，不依赖 expanded，
-  // 因此 wrapMode 切换不会制造 expand→overflow→collapse 抖动反馈环。
-  const overflow = createMemo(() => reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS)
+  // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
+  const streaming = createMemo(() => !props.message.time.completed)
+  // 流式 + hide 模式 + 无 override 时强制 overflow，避免内容从短到长时先撑开再收缩的视觉抖动。
+  // overflow 同时驱动 expanded、footer 可见性和 wrapMode，改这一处三者自动一致。
+  const overflow = createMemo(() =>
+    streaming() && override() === undefined && ctx.thinkingMode() === "hide"
+      ? true
+      : reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS,
+  )
   // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
   const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
   // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
   const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
-  const streaming = createMemo(() => !props.message.time.completed)
-  // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
+
 
   // 全局命令必须覆盖局部点击，否则 “Collapse thinking” 无法得到确定结果。
   createEffect(
