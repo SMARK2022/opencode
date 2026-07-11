@@ -494,19 +494,19 @@ test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as cons
       await frame("visible first source")
       for (let index = 0; index < 12; index++) {
         await app.renderOnce()
-        expect(app.captureCharFrame()).not.toContain("[seg 2/2]")
+        expect(app.captureCharFrame()).not.toContain("private-url")
         await Bun.sleep(5)
       }
       app.mockInput.pressKey("x", { ctrl: true })
       app.mockInput.pressKey("h")
-      await frame("[seg 2/2]", "private-url")
+      await frame("private-url")
       app.mockInput.pressKey("x", { ctrl: true })
       app.mockInput.pressKey("h")
-      // 逐帧验证conceal往返，晚到highlight不能留下只有marker的帧。
+      // 固定分隔符属于结构；隐藏image后仍逐帧确认正文不会被晚到highlight复活。
+      await waitForReviewFrame(app, async (value) => { if (!value.includes("private-url")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
       for (let index = 0; index < 12; index++) {
         await app.renderOnce()
-        const value = app.captureCharFrame()
-        expect(value.includes("[seg 2/2]") && !value.includes("private-url")).toBe(false)
+        expect(app.captureCharFrame()).not.toContain("private-url")
         await Bun.sleep(5)
       }
       return
@@ -516,7 +516,7 @@ test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as cons
         expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
         await clickVisibleText(app, "▲ 收起推理")
       }
-      const value = await frame("10 segments", "[seg 2/10]", "▼ 展开查看完整推理")
+      const value = await frame("10 segments", "short thought 2", "▼ 展开查看完整推理")
       const lines = value.split("\n")
       expect(lines.filter((line) => line.includes("Thought")).length).toBe(1)
       const header = lines.findIndex((line) => line.includes("10 segments"))
@@ -524,7 +524,7 @@ test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as cons
       expect(footer - header + 1).toBeLessThanOrEqual(7)
       expect(value).not.toContain("short thought 10")
       await clickVisibleText(app, "▼ 展开查看完整推理")
-      expect(await frame("short thought 10", "▲ 收起推理")).toContain("[seg 10/10]")
+      expect(await frame("short thought 10", "▲ 收起推理")).toContain("short thought 10")
       // 再折叠再展开，完整正文不能因renderable销毁而变空。
       await clickVisibleText(app, "▲ 收起推理")
       await frame("▼ 展开查看完整推理")
@@ -697,7 +697,7 @@ test.each([
     { id: "part_b_reasoning", sessionID, messageID, type: "reasoning", text: "推理宽度".repeat(200), time: { start: 1, end: 2 } },
   ]
   await withRenderedReview([{ info, parts }], async (app) => {
-    const id = input.thinkingMode === "hide" ? "reasoning-preview-part_b_reasoning" : "text-part_b_reasoning"
+    const id = "text-part_b_reasoning"
     await waitForReviewFrame(app, async () => {
       const code = app.renderer.root.findDescendantById(id)
       const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
@@ -714,7 +714,94 @@ test.each([
     const expected = sessionMessageContentWidth({ terminalWidth: input.terminalWidth, sidebarInLayout: input.sidebarVisible && input.terminalWidth > 120, scrollbarEnabled: input.scrollbarEnabled })
     expect({ text: text.width, reasoning: code.width }).toEqual({ text: expected, reasoning: expected })
     expect(code.parent?.height).toBeGreaterThan(0)
-    // CJK单行会真实软换行；折叠容器仍受共享五行预算约束。
-    if (input.thinkingMode === "hide") expect(code.parent?.height).toBeLessThanOrEqual(5)
+    // 单个source常驻完整高度，共享run容器负责五行裁尾；实际同宽断言不变。
+    if (input.thinkingMode === "hide") expect(code.parent?.parent?.height).toBeLessThanOrEqual(5)
   }, { width: input.terminalWidth, height: 48 }, {}, { sidebar: input.sidebarVisible ? "auto" : "hide", scrollbar_enabled: input.scrollbarEnabled, thinking_mode: input.thinkingMode })
+})
+
+// 复用真实Session/事件/鼠标，单树回归必须观察首帧和原生renderable身份。
+test.each(["first-frame", "streaming", "resize", "selection", "errors"] as const)("single reasoning tree replay: %s", async (scenario) => {
+  const messageID = `msg_single_${scenario}`
+  const content = scenario === "first-frame" ? Array.from({ length: 400 }, (_, index) => `stable thought ${index + 1}`).join("\n")
+    : scenario === "resize" ? `${"resize content ".repeat(24)}RESIZE_TAIL`
+    : Array.from({ length: 7 }, (_, index) => `single thought ${index}`).join("\n")
+  const source = { id: "part_source", sessionID, messageID, type: "reasoning" as const, text: content, time: { start: 1, ...(scenario === "streaming" ? {} : { end: 2 }) } }
+  const info: AssistantMessage = {
+    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: scenario === "streaming" ? undefined : "stop",
+    time: { created: 1, ...(scenario === "streaming" ? {} : { completed: 3 }) }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const failed: AssistantMessage = { ...info, id: "msg_single_failed", finish: "error", error: { name: "APIError", data: { message: "provider reasoning failed", isRetryable: false } } }
+  const messages = scenario === "errors" ? [
+    { info: { ...info, error: { name: "MessageAbortedError" as const, data: { message: "interrupted by user" } } }, parts: [{ ...source, text: "partial aborted thought" }] },
+    { info: failed, parts: [{ ...source, id: "part_failed", messageID: failed.id, text: "partial failed thought" }] },
+  ] : [{ info, parts: [source] }]
+  await withRenderedReview(messages, async (app, _route, emit) => {
+    const frame = async (...texts: string[]) => {
+      await waitForReviewFrame(app, async (value) => { if (texts.every((text) => value.includes(text))) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+      await app.renderOnce()
+      await app.renderOnce()
+      return app.captureCharFrame()
+    }
+    if (scenario === "errors") {
+      const value = await frame("partial aborted thought", "partial failed thought", "interrupted", "provider reasoning failed")
+      expect(value).toContain("partial aborted thought")
+      expect(value).toContain("partial failed thought")
+      return
+    }
+    await frame("▼ 展开查看完整推理", scenario === "first-frame" ? "stable thought 1" : scenario === "resize" ? "resize content" : "single thought 0")
+    const body = app.renderer.root.findDescendantById(`text-${source.id}`)
+    if (!body) throw new Error("expected mounted reasoning body")
+    if (scenario === "selection") {
+      const lines = app.captureCharFrame().split("\n")
+      const y = lines.findIndex((line) => line.includes("single thought 0"))
+      const x = lines[y].indexOf("single thought")
+      await app.mockMouse.drag(x, y, x + 12, y)
+      await app.renderOnce()
+      expect(app.renderer.getSelection()?.getSelectedText()?.length).toBeGreaterThan(0)
+      expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
+      return
+    }
+    await clickVisibleText(app, "▼ 展开查看完整推理")
+    await app.renderOnce()
+    if (scenario === "first-frame") {
+      // 只检查点击后第一帧，不能以等待最终高亮掩盖双树切换的正文空窗。
+      expect(app.captureCharFrame()).toContain("stable thought")
+      expect(app.captureCharFrame()).toContain("▲ 收起推理")
+      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+      await frame("stable thought 400", "▲ 收起推理")
+    }
+    if (scenario === "streaming") {
+      await frame("single thought 6", "▲ 收起推理")
+      emit({ directory, project: "proj_test", payload: { id: "evt_stream_delta", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: "\nstream final delta" } } })
+      await frame("stream final delta")
+      // Part先完成而父Message仍pending，沿上游生命周期结束推理，不重挂正文。
+      emit({ directory, project: "proj_test", payload: { id: "evt_part_done", type: "message.part.updated", properties: { sessionID, part: { ...source, text: content + "\nstream final delta", time: { start: 1, end: 2 } }, time: 3 } } })
+      await frame("Thought", "stream final delta")
+      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+      emit({ directory, project: "proj_test", payload: { id: "evt_message_done", type: "message.updated", properties: { sessionID, info: { ...info, finish: "stop", time: { created: 1, completed: 3 } } } } })
+      await frame("stream final delta")
+    }
+    await frame("▲ 收起推理")
+    await clickVisibleText(app, "▲ 收起推理")
+    await frame("▼ 展开查看完整推理")
+    if (scenario === "resize") {
+      app.resize(160, 48)
+      await waitForReviewFrame(app, async (value) => { if (value.includes("RESIZE_TAIL") && !value.includes("▼ 展开查看完整推理")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+      expect(app.captureCharFrame()).not.toContain("▲ 收起推理")
+      app.resize(60, 48)
+      expect(await frame("▼ 展开查看完整推理")).not.toContain("RESIZE_TAIL")
+      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+      return
+    }
+    await clickVisibleText(app, "▼ 展开查看完整推理")
+    await app.renderOnce()
+    if (scenario === "first-frame") {
+      expect(app.captureCharFrame()).toContain("stable thought")
+      expect(app.captureCharFrame()).toContain("▲ 收起推理")
+    }
+    if (scenario === "streaming") expect((await frame("stream final delta")).split("\n").filter((line) => line.includes("stream final delta"))).toHaveLength(1)
+    expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+  }, { width: scenario === "resize" ? 60 : 110, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
 })
