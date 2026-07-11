@@ -1851,10 +1851,14 @@ function ReasoningRun(props: { parts: ReasoningPart[] }) {
   const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
   const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
-  // 分隔行也计预算；估算不依赖expanded，避免布局反馈改变折叠选择。
-  const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
-  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
   const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
+  // 流式hide默认从首帧折叠；opaque只留标题，完成或显式选择后恢复真实行数规则。
+  const overflow = createMemo(() =>
+    !done() && !opaque() && override() === undefined && ctx.thinkingMode() === "hide"
+      ? true
+      : parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS,
+  )
+  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
   const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
   // 全局模式变化才清除局部选择；普通delta不得把已展开的run折回。
   createEffect(on(() => ctx.thinkingMode(), () => setOverride(undefined), { defer: true }))

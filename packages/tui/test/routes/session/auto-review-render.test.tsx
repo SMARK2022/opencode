@@ -805,3 +805,48 @@ test.each(["first-frame", "streaming", "resize", "selection", "errors"] as const
     expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
   }, { width: scenario === "resize" ? 60 : 110, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
 })
+
+test.each(["short", "long"] as const)("streaming reasoning defaults to stable collapse: %s", async (scenario) => {
+  const messageID = "msg_stream_default"
+  const source = { id: "part_stream", sessionID, messageID, type: "reasoning" as const, text: "short stream thought", time: { start: 1 } }
+  const info: AssistantMessage = {
+    id: messageID, sessionID, role: "assistant", parentID: "msg_request", time: { created: 1 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const suffix = scenario === "short" ? "\nsecond stream line" : "\nsecond stream line\nline 3\nline 4\nline 5\nline 6\nSTREAM_TAIL"
+  const opaque = { ...source, id: "part_opaque", messageID: "msg_stream_opaque", text: "[REDACTED]", metadata: { encrypted: true } }
+  await withRenderedReview([{ info, parts: [source] }, { info: { ...info, id: opaque.messageID }, parts: [opaque] }], async (app, _route, emit) => {
+    const frame = async (text: string) => {
+      await waitForReviewFrame(app, async (value) => { if (value.includes(text)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+      return app.captureCharFrame()
+    }
+    // 首个可见正文帧已带入口，不能等到跨过五行后才切换裁剪模式。
+    const initial = await frame("short stream thought")
+    expect(initial).toContain("▼ 展开查看完整推理")
+    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(1)
+    emit({ directory, project: "proj_test", payload: { id: "evt_default_grow", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: suffix } } })
+    const grown = await frame("second stream line")
+    expect(grown).toContain("▼ 展开查看完整推理")
+    if (scenario === "long") expect(grown).not.toContain("STREAM_TAIL")
+    const body = app.renderer.root.findDescendantById(`text-${source.id}`)
+    expect(body?.parent?.parent?.height).toBeLessThanOrEqual(5)
+    // 父Message仍pending，只以原始Part的end解除流式guard。
+    emit({ directory, project: "proj_test", payload: { id: "evt_default_done", type: "message.part.updated", properties: { sessionID, part: { ...source, text: source.text + suffix, time: { start: 1, end: 2 } }, time: 3 } } })
+    await waitForReviewFrame(app, async (value) => {
+      if (value.includes("Thought") && value.includes("second stream line") && (scenario === "long" || !value.includes("▼ 展开查看完整推理"))) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+    expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+    if (scenario === "short") {
+      expect(app.captureCharFrame()).not.toContain("▼ 展开查看完整推理")
+      expect(app.captureCharFrame()).toContain("short stream thought")
+      expect(app.captureCharFrame()).toContain("second stream line")
+      return
+    }
+    expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
+    expect(app.captureCharFrame()).not.toContain("STREAM_TAIL")
+    await clickVisibleText(app, "▼ 展开查看完整推理")
+    expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
+  }, { width: 80, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
+})
