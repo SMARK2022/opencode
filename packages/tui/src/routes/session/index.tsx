@@ -59,6 +59,9 @@ import {
   type MouseEvent,
   type OptimizedBuffer,
   type Renderable,
+  TextBuffer,
+  TextBufferView,
+  type WidthMethod,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
@@ -127,7 +130,7 @@ import { sessionEpilogue } from "../../util/presentation"
 import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
 import { useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
-import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
+import { reasoningSummary } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
 import { usePluginRuntime } from "../../plugin/runtime"
@@ -206,11 +209,10 @@ const sessionGlobalBindingCommands = [
 
 const sessionGlobalUnfocusedBindingCommands = ["session.first", "session.last"] as const
 
-const context = createContext<{
+export const context = createContext<{
   width: number
   sessionID: string
   conceal: () => boolean
-  thinkingMode: () => ThinkingMode
   showThinking: () => boolean
   showTimestamps: () => boolean
   showDetails: () => boolean
@@ -345,9 +347,8 @@ export function Session() {
   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
-  const thinking = useThinkingMode()
-  const thinkingMode = thinking.mode
-  const showThinking = createMemo(() => true)
+  // 整块可见性沿历史主键持久化；局部disclosure不再受thinking_mode驱动。
+  const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
   const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
@@ -840,11 +841,7 @@ export function Session() {
       },
     },
     {
-      title: (() => {
-        const next = nextThinkingMode(thinkingMode())
-        if (next === "hide") return "Collapse thinking"
-        return "Expand thinking"
-      })(),
+      title: showThinking() ? "Hide thinking" : "Show thinking",
       value: "session.toggle.thinking",
       category: "Session",
       slash: {
@@ -852,7 +849,7 @@ export function Session() {
         aliases: ["toggle-thinking"],
       },
       run: () => {
-        thinking.set(nextThinkingMode(thinkingMode()))
+        setShowThinking((visible) => !visible)
         dialog.clear()
       },
     },
@@ -1303,7 +1300,6 @@ export function Session() {
           },
           sessionID: route.sessionID,
           conceal,
-          thinkingMode,
           showThinking,
           showTimestamps,
           showDetails,
@@ -1838,45 +1834,50 @@ function normalizeReasoning(text: string) {
   return text.replace("[REDACTED]", "").trim()
 }
 
-function reasoningRows(text: string, width: number) {
-  const bodyWidth = Math.max(width, 1)
-  return text.split("\n").reduce((total, line) => {
-    // 与char-wrap使用相同终端cell口径；tab/control保守占一行，CJK不按字符个数算。
-    const cells = [...line].reduce((sum, char) => {
-      const code = char.codePointAt(0) ?? 0
-      return sum + (char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char))
+function reasoningRowsTotal(content: string[], width: number, widthMethod: WidthMethod) {
+  const buffer = TextBuffer.create(widthMethod)
+  const view = TextBufferView.create(buffer)
+  try {
+    view.setWrapWidth(Math.max(width, 1))
+    view.setWrapMode("word")
+    // 按真实终端宽度与宽字算法测量，每个Part的高亮chunk先拼回完整可见文本。
+    return content.reduce((total, text) => {
+      buffer.setText(text)
+      return total + view.getVirtualLineCount()
     }, 0)
-    return total + Math.max(1, Math.ceil(cells / bodyWidth))
-  }, 0)
+  } finally {
+    // view借用buffer，先释放view，流式重算不得积累native句柄。
+    view.destroy()
+    buffer.destroy()
+  }
 }
 
-function ReasoningRun(props: { parts: ReasoningPart[] }) {
+export function ReasoningRun(props: { parts: ReasoningPart[] }) {
   const { theme } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
-  const [override, setOverride] = createSignal<boolean>()
+  // 局部选择留在稳定run root内，隐藏视觉树不重置已展开状态。
+  const [expanded, setExpanded] = createSignal(false)
+  const [rendered, setRendered] = createSignal<Record<string, string | undefined>>({})
   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
   // 加密占位仍显示上游Thought标题，不从metadata猜测正文或长度。
   const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
   const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
   const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
-  // 流式hide默认从首帧折叠；opaque只留标题，完成或显式选择后恢复真实行数规则。
-  const overflow = createMemo(() =>
-    !done() && !opaque() && override() === undefined && ctx.thinkingMode() === "hide"
-      ? true
-      : parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS,
-  )
-  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+  // 高亮未就绪时不伪造toggle；外层始终限高，首帧也不会先泄漏尾部再收回。
+  const overflow = createMemo(() => {
+    const content = parts().map((part) => rendered()[part.id])
+    if (content.some((text) => text === undefined)) return false
+    return reasoningRowsTotal(content.filter((text): text is string => text !== undefined), ctx.width, renderer.widthMethod) > REASONING_PREVIEW_ROWS
+  })
   const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
-  // 全局模式变化才清除局部选择；普通delta不得把已展开的run折回。
-  createEffect(on(() => ctx.thinkingMode(), () => setOverride(undefined), { defer: true }))
   return (
     <Show when={ctx.showThinking() && (parts().length > 0 || opaque())}>
       <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}
         onMouseUp={() => {
           if (renderer.getSelection()?.getSelectedText() || opaque() || !overflow()) return
-          setOverride(!expanded())
+          setExpanded((value) => !value)
         }}>
         <ReasoningHeader toggleable={overflow() && !opaque()} open={expanded()} done={done()}
           title={[reasoningSummary(texts()[0] ?? "").title, texts().length > 1 ? `${texts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
@@ -1886,8 +1887,9 @@ function ReasoningRun(props: { parts: ReasoningPart[] }) {
         <box maxHeight={expanded() ? undefined : REASONING_PREVIEW_ROWS} overflow={expanded() ? "visible" : "hidden"}>
           <For each={parts().map((part) => part.id)}>{(id, index) => {
             const part = createMemo(() => parts().find((item) => item.id === id)!)
-            return <ReasoningBody id={`text-${id}`} part={part} separator={index() > 0} expanded={expanded()}
-              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
+            return <ReasoningBody id={`text-${id}`} part={part} separator={index() > 0} expanded={expanded() || !overflow()}
+              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()}
+              onContent={(content) => setRendered((current) => current[id] === content ? current : { ...current, [id]: content })} />
           }}</For>
         </box>
         <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : "▼ 展开查看完整推理"}</text></Show>
@@ -1896,20 +1898,28 @@ function ReasoningRun(props: { parts: ReasoningPart[] }) {
   )
 }
 
-function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
+function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean; onContent: (content: string | undefined) => void }) {
   const { theme } = useTheme()
   // accessor跟随Part快照替换；固定分隔符不依赖source序号和总数。
   const content = createMemo(() => {
     const text = normalizeReasoning(props.part().text)
     return props.separator ? REASONING_SEPARATOR + text : text
   })
+  // conceal改变会立即使旧可见文本失效，普通delta则保留已知文本直到新generation回报。
+  createEffect(on(() => props.conceal, () => props.onContent(undefined)))
   // 保留上游per-Part完成判定，不等待父消息或其他成员结束。
   const done = createMemo(() => props.part().time.end !== undefined)
   return (
     <box flexShrink={0}>
       {/* 成员不参与共享五行约束的shrink；原宽度固定，独立Markdown只由外层裁尾。 */}
       <code id={props.id} width={props.width} filetype="markdown" drawUnstyledText={false} streaming={!done()}
-        syntaxStyle={props.syntaxStyle} content={content()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.expanded ? "word" : "char"} />
+        syntaxStyle={props.syntaxStyle} content={content()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.expanded ? "word" : "char"}
+        onChunks={(chunks, context) => {
+          // 只接受当前正文的高亮回报，旧异步结果不能覆盖新delta的测量依据。
+          if (context.content !== content()) return chunks
+          props.onContent(chunks.map((chunk) => chunk.text).join(""))
+          return chunks
+        }} />
     </box>
   )
 }
