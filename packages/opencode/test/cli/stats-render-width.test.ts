@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { fitVisible, paint, renderContext, renderHeatmap, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
 import { renderBreakdown, renderCharts, renderCosts, renderDashboard, renderHeatmapPage, renderModels, renderOverview, renderProviders, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
 import { renderForecast, renderInsights } from "../../src/cli/cmd/stats-insights"
+import { buildForecast } from "../../src/cli/cmd/stats-insights"
 import type { StatsReport } from "../../src/cli/cmd/stats-data"
+import { emptyComponents } from "../../src/cli/cmd/stats-data"
 
 // #176：CJK 显示列宽与 breakdown 冒烟
 describe("stats render width (#176)", () => {
@@ -38,9 +40,9 @@ describe("stats render width (#176)", () => {
         requests: 2,
         assistantCalls: 2,
       },
-      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups,
+      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups.map((group) => ({ ...group, path: "/project" })),
       daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
+      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], toolCalls: [], requestsByHour: [],
       tokensPerSession: 110, medianTokensPerSession: 110,
     } satisfies StatsReport
     for (const render of [renderModels, renderProviders, renderBreakdown, renderCosts]) {
@@ -160,6 +162,358 @@ describe("stats render width (#176)", () => {
     const text = renderBreakdown(report, { by: "tool", metric: "tokens" })
     // #177：主路径必须出现系列标题
     expect(text).toContain("Tool context tokens over time")
+  })
+
+  // #483：footprint 表与 issuing runtime mix 必须同时到达页面边界
+  test("#483 tool breakdown surfaces footprint table and issuing runtime mix", () => {
+    const report = {
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 1,
+      totalTools: 3,
+      days: 1,
+      dateRange: { earliest: 0, latest: 0 },
+      total: {
+        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
+        cost: 0,
+        requests: 1,
+        assistantCalls: 1,
+      },
+      models: [],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [{ id: "bash", count: 3, inputChars: 30, outputChars: 60, contextTokens: 42 }],
+      toolCalls: [
+        {
+          toolID: "bash",
+          modelID: "m1",
+          providerID: "p1",
+          agent: "build",
+          projectID: "proj",
+          source: "prompt",
+          status: "completed",
+          calls: 3,
+          inputChars: 30,
+          outputChars: 60,
+          errors: 1,
+          durationMs: 900,
+        },
+      ],
+      toolSeries: [],
+      tokensPerSession: 15,
+      medianTokensPerSession: 15,
+    } as unknown as StatsReport
+    const text = renderBreakdown(report, { by: "tool", metric: "tokens" })
+    // 两个标题必须同时出现：footprint 锁定调用计量，mix 锁定发起方归因
+    expect(text).toContain("Tool footprint")
+    expect(text).toContain("Issuing runtime mix")
+    // 真实实体名代替编号矩阵：provider/model、agent 与 project 直接可见，
+    // 读者不再需要在编号图例与矩阵之间来回对照
+    expect(text).toContain("p1/m1")
+    // errors/avg-per-call 来自 ToolPart 状态，而非 owning request 的健康指标
+    expect(text).toContain("errors=1")
+    expect(text).toContain("avg/call=300ms")
+  })
+
+  // #483：编号矩阵退役后，heatmap 页的交叉信息改用真实实体名排行承载
+  test("#483 heatmap page replaces numbered matrix with real-name ranking", () => {
+    const report = {
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 1,
+      totalTools: 7,
+      days: 1,
+      dateRange: { earliest: 0, latest: 0 },
+      total: {
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+        cost: 0,
+        requests: 0,
+        assistantCalls: 0,
+      },
+      models: [],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolCalls: [
+        { toolID: "bash", modelID: "m1", providerID: "p1", agent: "build", projectID: "proj", source: "prompt", status: "completed", calls: 5, inputChars: 0, outputChars: 0, errors: 0, durationMs: 0 },
+        { toolID: "read", modelID: "m2", providerID: "p2", agent: "build", projectID: "proj", source: "prompt", status: "completed", calls: 2, inputChars: 0, outputChars: 0, errors: 0, durationMs: 0 },
+      ],
+      toolSeries: [],
+      tokensPerSession: 0,
+      medianTokensPerSession: 0,
+    } as unknown as StatsReport
+    const text = renderHeatmapPage(report, {})
+    // 旧矩阵标题必须消失：兼容层保留会让两套视图同时出现，违背“替换而非叠加”的源决策
+    expect(text).not.toContain("provider x model")
+    expect(text).toContain("provider/model by tool calls")
+    expect(text).toContain("p1/m1")
+  })
+
+  // #483：有 request 小时投影时 dashboard 必须优先使用它，与请求健康指标同源
+  test("#483 dashboard hour strip prefers request hour projection", () => {
+    const report = {
+      totalSessions: 0,
+      sessionsWithUsage: 0,
+      totalMessages: 0,
+      totalTools: 0,
+      days: 1,
+      dateRange: { earliest: 0, latest: 0 },
+      total: {
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+        cost: 0,
+        requests: 4,
+        assistantCalls: 0,
+      },
+      models: [],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolCalls: [],
+      toolSeries: [],
+      requestsByHour: Array.from({ length: 24 }, (_, i) => (i === 9 ? 4 : 0)),
+      tokensPerSession: 0,
+      medianTokensPerSession: 0,
+    } as unknown as StatsReport
+    const text = renderDashboard(report, {})
+    // 标题差异锁定了数据源切换：括号后缀证明该行来自 request 投影而非会话活跃回退；
+    // 全零 requestsByHour 时会回退旧标题，两种形态不可同时出现
+    expect(text).toContain("Hour of day (requests)")
+  })
+
+  // #483：预测以活跃日频率加权——稀疏用户的一次高费用不得外推成每日持续费用
+  test("#483 buildForecast weights run rates by observed active-day frequency", () => {
+    // 4 天窗口，仅 1 天活跃（cost 40）：activityRate=0.25、active dailyAverage=40
+    // → calendarDailyAverage=10，weeklyRunRate=70；σ 混入伯努利波动后 confidence<1
+    const active = { day: Date.now(), label: "d", cost: 40, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, requests: 1, assistantCalls: 1 }
+    const idle = { ...active, cost: 0, requests: 0, assistantCalls: 0 }
+    // daily 顺序故意非单调：buildForecast 不得依赖数组顺序，只能按 day.day 过滤锚定月
+    const forecast = buildForecast({
+      dateRange: { earliest: Date.now() - 3 * 86_400_000, latest: Date.now() },
+      daily: [idle, { ...idle, day: Date.now() - 2 * 86_400_000 }, active, { ...idle, day: Date.now() - 86_400_000 }],
+    } as unknown as StatsReport)
+
+    expect(forecast.activityRate).toBeCloseTo(0.25)
+    expect(forecast.weeklyRunRate).toBeCloseTo(70)
+    // 混合 σ 后置信不可能满格——满格即说明零日波动被忽略
+    expect(forecast.confidence).toBeLessThan(1)
+    const last = forecast.points[forecast.points.length - 1]
+    // 上界必须覆盖月末投影：置信带不能落在中心线下方
+    expect(last.upper).toBeGreaterThanOrEqual(forecast.projectedMonthEnd)
+  })
+
+  // #483：全空报告只输出事实陈述——不生成阈值卡片、Forecast 仪表或伪造数值
+  test("#483 empty report renders the no-usage statement on every derived surface", () => {
+    const empty = {
+      totalSessions: 0,
+      sessionsWithUsage: 0,
+      totalMessages: 0,
+      totalTools: 0,
+      days: 1,
+      dateRange: { earliest: 0, latest: 0 },
+      total: {
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+        cost: 0,
+        requests: 0,
+        assistantCalls: 0,
+      },
+      models: [],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolCalls: [],
+      toolSeries: [],
+      requestsByHour: Array.from({ length: 24 }, () => 0),
+      tokensPerSession: 0,
+      medianTokensPerSession: 0,
+    } as unknown as StatsReport
+    const insights = renderInsights(empty, {})
+    expect(insights).toContain("No usage data for the selected range")
+    // 阈值派生内容逐项排除：任何一张卡片出现都说明守卫失效
+    expect(insights).not.toContain("Session outliers")
+    expect(insights).not.toContain("Forecast confidence")
+  })
+
+  // #483：缺费用区间的派生金额显示不可用标注，而不是伪 $0.00 精度
+  test("#483 forecast renders unavailable marker instead of fabricated zero dollars", () => {
+    const report = {
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 1,
+      totalTools: 0,
+      days: 1,
+      dateRange: { earliest: Date.now() - 86_400_000, latest: Date.now() },
+      total: {
+        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
+        cost: 0,
+        requests: 1,
+        assistantCalls: 1,
+      },
+      models: [],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolCalls: [],
+      toolSeries: [],
+      requestsByHour: Array.from({ length: 24 }, () => 0),
+      tokensPerSession: 0,
+      medianTokensPerSession: 0,
+    } as unknown as StatsReport
+    const text = renderForecast(report, {})
+    expect(text).toContain("Forecast unavailable")
+    // $0.00 出现即表示伪造精度回归：零费用与无计费数据必须可区分；
+    // 不可用标注与伪造零值的区别正是本轮修复的核心语义
+    expect(text).not.toContain("$0.00")
+  })
+
+  // #483：持久化实体标签是纯终端文本——ESC/OSC 协议序列不得进入输出
+  test("#483 treats persisted entity identities as plain terminal text", () => {
+    const report = {
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 1,
+      totalTools: 1,
+      days: 1,
+      dateRange: { earliest: 0, latest: 0 },
+      total: {
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+        cost: 0,
+        requests: 0,
+        assistantCalls: 0,
+      },
+      models: [],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [{ id: "bash", count: 1, inputChars: 0, outputChars: 0, contextTokens: 0 }],
+      toolCalls: [
+        {
+          toolID: "bash",
+          // model 名携带 SGR 背景色序列、provider 名携带未终止 OSC 超链接——两者都是持久化 usage 行
+          modelID: "\u001b[41mred-model",
+          providerID: "\u009d]8;;https://malicious.invalid",
+          agent: "build",
+          projectID: "proj",
+          source: "prompt",
+          status: "completed",
+          calls: 1,
+          inputChars: 0,
+          outputChars: 0,
+          errors: 0,
+          durationMs: 0,
+        },
+      ],
+      toolSeries: [],
+      tokensPerSession: 0,
+      medianTokensPerSession: 0,
+    } as unknown as StatsReport
+    const output = stripAnsi(renderHeatmapPage(report, {}))
+    // 清洗后协议碎片与域名不得残留在可见输出中；
+    // SGR/OSC/未终止序列三种形态逐一验证，任何一种泄漏都是清洗回归
+    expect(output).not.toContain("[41m")
+    expect(output).not.toContain("]8;;")
+    expect(output).not.toContain("malicious.invalid")
+
+    // #483：session title 是用户可控自由文本——insights 卡片 body 内插出口同受清洗契约约束
+    const hostileSessions = [
+      {
+        id: "ses_hostile",
+        title: "\u001b]8;;https://evil.invalid\u0007hostile title",
+        projectID: "proj",
+        directory: "/tmp",
+        created: Date.now(),
+        updated: Date.now(),
+        messages: 1,
+        tools: 0,
+        providers: [],
+        models: [],
+        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
+        cost: 1,
+        requests: 1,
+        assistantCalls: 1,
+        components: { system: 0, instructions: 0, skills: 0, toolSchemas: 0, userMessages: 0, assistantText: 0, reasoning: 0, toolCalls: 0, toolResults: 0, attachments: 0 },
+        errors: 0,
+        aborted: 0,
+        durationMs: 0,
+      },
+    ]
+    const hostileReport = { ...report, total: { ...report.total, components: emptyComponents(), cost: 1, tokens: { ...report.total.tokens, total: 15 } }, sessions: hostileSessions } as unknown as StatsReport
+    const insights = renderInsights(hostileReport, {})
+    // insights 卡片 body 出口与表格出口共享同一清洗契约：session title 内插不泄漏协议序列
+    expect(insights).not.toContain("]8;;")
+    expect(insights).not.toContain("evil.invalid")
+    // 清洗保留可读正文：标题的去协议文本仍可被用户识别
+    expect(insights).toContain("hostile title")
   })
 })
 
@@ -624,3 +978,65 @@ describe("stats humanized labels (#183)", () => {
       else process.env.NO_COLOR = originalNoColor
     }
   })
+
+test("#483 preserves quantitative sections, complete identities and independent denominators", async () => {
+  const { emptyComponents } = await import("../../src/cli/cmd/stats-data")
+  const components = { system: 8, instructions: 5, skills: 4, toolSchemas: 12, userMessages: 24, assistantText: 10, reasoning: 4, toolCalls: 6, toolResults: 22, attachments: 5 }
+  const tokens = (value: number) => ({ input: value * 0.007, output: value * 0.002, reasoning: 0, cache: { read: value * 0.99, write: value * 0.001 }, total: value })
+  const usage = { tokens: tokens(130_000), components, cost: 30, requests: 100, assistantCalls: 200, errors: 12, aborted: 7, durationMs: 1000 }
+  const mix = [{ id: "first", tokens: 70 }, { id: "second", tokens: 10 }, { id: "third", tokens: 10 }, { id: "fourth", tokens: 10 }]
+  const group = (id: string) => ({ ...usage, id, label: id, sessions: 2, providers: mix, models: mix })
+  const daily = [1, 2, 1, 3, 2, 4].map((value, index) => ({ ...usage, day: new Date(2026, 3, index + 1).getTime(), label: `04-0${index + 1}`, tokens: tokens(value * 10_000), cost: index === 0 ? 30 : 0 }))
+  const report: StatsReport = {
+    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 4, totalTools: 1, days: 6, dateRange: { earliest: daily[0].day, latest: daily.at(-1)!.day }, total: usage,
+    models: [group("claude-opus-complete-model-name")], providers: [group("production-complete-provider-name")], agents: [group("build")], sources: [group("prompt")], projects: [{ ...group("project"), path: "/projects/完整目录/name with spaces" }],
+    statuses: [{ ...group("completed"), requests: 80, tokens: tokens(1000) }, { ...group("error"), requests: 12, tokens: tokens(0) }, { ...group("aborted"), requests: 7, tokens: tokens(0) }, { ...group("running"), requests: 1, tokens: tokens(0) }, { ...group("unattributed"), requests: 0, tokens: tokens(129_000) }],
+    daily, modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [], tokenPartSeries: [],
+    sessions: [{ ...usage, id: "ses_priced" as StatsReport["sessions"][number]["id"], title: "中文完整会话标题", projectID: "project", directory: "/project", created: daily[0].day, updated: daily[0].day, messages: 2, tools: 1, providers: ["provider"], models: ["model-one", "model-two", "complete-third-session-model"] }, { ...usage, tokens: tokens(0), cost: 0, id: "ses_unpriced" as StatsReport["sessions"][number]["id"], title: "unpriced", projectID: "project", directory: "/project", created: daily[0].day, updated: daily[0].day, messages: 2, tools: 0, providers: [], models: [] }],
+    toolUsage: [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }], toolSeries: [],
+    toolCalls: [{ toolID: "read", modelID: "claude-opus-complete-model-name", providerID: "production-complete-provider-name", agent: "build", projectID: "project", source: "prompt", status: "completed", calls: 1, inputChars: 10, outputChars: 20, errors: 0, durationMs: 10 }],
+    requestsByHour: Array.from({ length: 24 }, (_, hour) => hour === 4 ? 12 : hour === 6 ? 3 : 0), tokensPerSession: 65_000, medianTokensPerSession: 65_000,
+  }
+  const insights = stripAnsi(renderInsights(report, { color: "never" })).replace(/^│ ?/gm, "").replace(/\s+/g, " ")
+  for (const section of ["Usage shape", "Attribution", "Variability & outliers", "Actions"]) expect(insights).toContain(section)
+  for (const value of ["system 8.0%", "instructions 5.0%", "skills 4.0%", "schemas 12.0%", "user 24.0%", "assistant 10.0%", "reasoning 4.0%", "tool calls 6.0%", "tool results 22.0%", "attach 5.0%"]) expect(insights).toContain(value)
+  expect(insights).toContain("status │ completed")
+  expect(insights).toContain("Session cost p50 $30.0")
+  expect(insights).not.toContain("Forecast")
+  expect(insights).toContain("share 100.0% > 55%")
+  const model = renderBreakdown(report, { color: "never", by: "model" })
+  for (const value of ["Model portfolio", "Token composition", "Routing & tools", "owned req", "tok/call", "other 10.0%", "claude-opus-complete-model-name"]) expect(model).toContain(value)
+  const provider = renderBreakdown(report, { color: "never", by: "provider" })
+  for (const value of ["Provider economics", "Model portfolio by provider", "Capacity & reliability", "cost share", "tok/$"]) expect(provider).toContain(value)
+  for (const dimension of ["agent", "source", "project"] as const) expect(renderBreakdown(report, { by: dimension, color: "never" })).toContain("by tokens")
+  const project = renderBreakdown(report, { by: "project", color: "never" })
+  for (const value of ["Project portfolio", "/projects/完整目录/name with spaces", "Largest sessions", "中文完整会话标题"]) expect(project).toContain(value)
+  const status = renderBreakdown(report, { by: "status", color: "never" }).replace(/\s+/g, " ")
+  expect(status).toContain("100 total · 80 completed · 12 error · 7 aborted · 1 running")
+  expect(status).toContain("Unattributed usage")
+  expect(status).toContain("Failure leaders within each dimension")
+  const timeline = renderTimeline(report, { color: "never" }).replace(/\s+/g, " ")
+  for (const value of ["Daily token volume", "total 130.0K · peak 40.0K/day · avg 21.7K/day", "each trend independently normalized", "Cache Read 128.7K 99.0% · peak 39.6K/day", "Input 910 0.7% · peak 280/day", "Cache Write 130 0.1% · peak 40/day", "Output + Reasoning 260 0.2% · peak 80/day"]) expect(timeline).toContain(value)
+  expect(renderTimeline(report, { color: "never", heatmap: true })).toContain("calendar view")
+  expect(renderTimeline(report, { color: "never" })).not.toContain("calendar view")
+  const sessions = renderSessions(report, { color: "never", limit: 1 }).replace(/\s+/g, " ")
+  for (const value of ["p90", "p99", "positive recorded cost (1 sessions)", "No positive recorded cost · 1 sessions", "token share", "中文完整会话标题", "complete-third-session-model", "Visible 1 of 2"]) expect(sessions).toContain(value)
+  expect(sessions).not.toContain("Top tools")
+  report.providerSeries = [{ ...usage, id: "token-first", label: "token-first", cost: 1, points: daily.map((point) => ({ ...point, cost: 1 })) }, { ...usage, id: "cost-first", label: "cost-first", cost: 100, points: daily.map((point) => ({ ...point, cost: 10 })) }]
+  const forecast = renderInsights(report, { color: "never", forecast: true })
+  const drivers = forecast.slice(forecast.indexOf("Forecast drivers"))
+  expect(forecast).toContain("30-day run-rate")
+  expect(forecast).toContain("endpoint confidence band")
+  expect(drivers.indexOf("cost-first")).toBeLessThan(drivers.indexOf("token-first"))
+  const empty: StatsReport = { ...report, total: { ...usage, tokens: tokens(0), components: emptyComponents(), cost: 0, requests: 0, assistantCalls: 0, errors: 0, aborted: 0 }, models: [], providers: [], agents: [], sources: [], statuses: [], projects: [], sessions: [], daily: [], providerSeries: [], toolCalls: [], toolUsage: [] }
+  empty.toolUsage = [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }]
+  const toolOnly = renderInsights(empty, { color: "never" })
+  expect(toolOnly).toContain("Usage shape")
+  expect(toolOnly).not.toContain("Cache read 0.0% < 20%")
+  expect(renderBreakdown(empty, { by: "tool", color: "never" })).toContain("Tool footprint")
+  expect(renderBreakdown(empty, { by: "tool", color: "never" })).not.toContain("0 estimated context tokens")
+  expect(renderForecast(empty)).toContain("Forecast unavailable")
+  expect(renderTimeline(empty, { metric: "cost" })).toContain("No positive cost recorded")
+  empty.toolUsage = []
+  expect(renderInsights(empty)).toContain("No usage data")
+})
