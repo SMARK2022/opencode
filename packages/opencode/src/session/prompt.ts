@@ -334,21 +334,32 @@ const layer = Layer.effect(
             // 冻结一次旧ID，idle后不能再扫描replacement消息。
             // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
             const children = yield* sessions.children(sessionID)
-            const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
-              .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
-              .map((msg) => msg.info.id)
+            // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
+            const messages = yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([])))
+            const parentIDs = new Set(messages.flatMap((message) => message.info.role === "assistant" ? [message.info.parentID] : []))
+            const pending = messages.filter((message) => message.info.role === "assistant" && !message.info.time.completed).map((message) => message.info.id)
+            const orphanIDs = messages.flatMap((message) => message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [])
             yield* state.cancel(sessionID)
             yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
               discard: true,
             })
+            const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+            if (usage) {
+              yield* Effect.forEach(orphanIDs, Effect.fnUntraced(function* (requestID) {
+                const request = yield* usage.get({ sessionID, requestID })
+                // noReply或已完成请求仍可能没有assistant，只有running项属于待取消队列。
+                if (request?.status !== "running") return
+                yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
+              }), { discard: true })
+            }
             yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
           }),
         ).pipe(
           Effect.onExit((exit) =>
             Effect.gen(function* () {
-              // 成功、缺陷或中断都释放flight，并让joiner重放同一结果。
-              cancelFlights.delete(sessionID)
+              // 先发布完整Exit再删登记，重叠caller只能消费相同的取消结果。
               yield* Deferred.succeed(flight, exit)
+              cancelFlights.delete(sessionID)
             }),
           ),
         )
@@ -1419,7 +1430,20 @@ const layer = Layer.effect(
         }
         return message
       }
-      return yield* loop({ sessionID: input.sessionID })
+      const result = yield* loop({ sessionID: input.sessionID })
+      // 只有被更新parent合并的旧请求需要零计费闭合，既有终态不可二次覆盖。
+      if (reqUsage && result.info.role === "assistant" && !result.info.summary && message.info.id < result.info.parentID) {
+        const request = yield* reqUsage.get({ sessionID: input.sessionID, requestID: message.info.id })
+        if (request?.status === "running") {
+          // 不复制assistant账单；取消与provider失败分别保留aborted/error语义。
+          yield* reqUsage.complete({
+            sessionID: input.sessionID, requestID: message.info.id,
+            status: SessionV1.AbortedError.isInstance(result.info.error) ? "aborted" : result.info.error ? "error" : "completed",
+            timeCompleted: result.info.time.completed,
+          })
+        }
+      }
+      return result
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1433,15 +1457,12 @@ const layer = Layer.effect(
     // #242：compact 走与普通 prompt 相同的 runner/cancel 边界，但直调生产者——
     // 持久化 compact 标记只会是已完成边界，不会成为后续 loop 从旧历史拾取的排队命令
     const compact: Interface["compact"] = Effect.fn("SessionPrompt.compact")(function* (input) {
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      // Runner.ensureRunning 会加入既有 prompt 而非排队新工作；compact 必须显式
-      // 拒绝 busy 会话，调用方看到真实 busy 响应而非成功空操作
-      yield* state.assertNotBusy(input.sessionID)
-      yield* revert.cleanup(session)
-      return yield* state.ensureRunning(
+      return yield* state.startExclusive(
         input.sessionID,
         lastAssistant(input.sessionID),
         Effect.gen(function* () {
+          // cleanup与compaction在同一exclusive边界内，维护结束才交接已排队的普通loop。
+          yield* revert.cleanup(yield* sessions.get(input.sessionID).pipe(Effect.orDie))
           yield* compaction.run({
             sessionID: input.sessionID,
             agent: input.agent,

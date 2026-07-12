@@ -313,15 +313,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         Effect.gen(function* () {
           // #242：busy 会话先拒绝——revert 清理或模型选择前拦截，避免手动 compact
           // 改完状态后又在进行中的 prompt 后面空转
-          yield* SessionError.mapBusy(runState.assertNotBusy(info.id))
-          yield* revertSvc.cleanup(info)
           const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
           const defaultAgent = yield* agentSvc.defaultAgent()
           // 空会话回退 defaultAgent，保证 compaction 始终有可用 agent
           const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
 
-          // #242：Summarize 直接经 SessionPrompt 执行 compaction——取消归属 runner，
-          // 历史中不再遗留可被后续请求重放的 pending compact 命令
+          // Busy acquisition 与 revert cleanup 由 SessionPrompt 的 exclusive 边界统一负责，HTTP 层只做传输映射。
           yield* SessionError.mapBusy(
             promptSvc.compact({
               sessionID: ctx.params.sessionID,
