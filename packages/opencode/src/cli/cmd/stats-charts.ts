@@ -288,37 +288,36 @@ export const renderHistogram = (input: { title?: string; values: number[]; bins?
   return lines
 }
 
+// #483：同时覆盖 7-bit ESC 与 8-bit C1 形式；未终止序列再由控制字节清理兑底，
+// 持久化实体标签（model/provider/session/tool）绝不把终端协议参数交给终端执行
+const TERMINAL_ESCAPE_RE = /(?:(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c|$)|(?:\u001b\[|\u009b)[0-?]*[ -/]*(?:[@-~]|$)|\u001b[@-_])/g
+const TERMINAL_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g
+export const terminalText = (value: string) =>
+  // 控制序列整体移除后再折叠布局字符，标签保留可读正文而不泄漏终端协议参数
+  value.replace(TERMINAL_ESCAPE_RE, " ").replace(TERMINAL_CONTROL_RE, " ").replace(/\s+/g, " ").trim()
+
 // #174：rank 条相对当前页最大值
 // #174：条长相对当前页最大值缩放
-export const renderRankBars = (input: { title?: string; series?: ChartSeries[]; rows?: { label: string; value: number }[]; width?: number } | { label: string; value: number }[]) => {
+export const renderRankBars = (input: { title?: string; series?: ChartSeries[]; rows?: { label: string; value: number }[]; width?: number; labelWidth?: number } | { label: string; value: number }[]) => {
   // support both call shapes used by render pages
   const rows = Array.isArray(input)
     ? input
     : input.rows || (input.series ? input.series.flatMap((s) => s.points.map((p) => ({ label: String(p.label ?? p.x), value: p.y }))) : [])
   const title = Array.isArray(input) ? undefined : input.title
   const lines = title ? [title] : []
+  // #483：label 宽度可由调用方扩展——真实实体名是 Breakdown 的显示契约，
+  // 默认仍为 14 保持既有页面布局；宽度上限由调用方按终端预算控制
+  const labelWidth = Array.isArray(input) ? 14 : input.labelWidth ?? 14
   const m = Math.max(1, ...rows.map((r) => r.value), 0)
   for (const r of rows.slice(0, 20)) {
-    lines.push(`${fitVisible(r.label, 14)} ${bar(r.value / m * 16, 16)} ${formatNumber(r.value)}`)
+    // #483：rank 行是持久化实体标签的直接出口，统一经 terminalText 清洗
+    lines.push(`${fitVisible(terminalText(r.label), labelWidth)} ${bar(r.value / m * 16, 16)} ${formatNumber(r.value)}`)
   }
   return lines.length ? lines : ["(empty ranks)"]
 }
 
-// #174：matrix 单元格用密度字符编码强度
-// #174：矩阵横纵为 provider/model 交叉
-export const renderMatrix = (input: { title?: string; rows: string[]; cols: string[]; values: number[][]; width?: number }) => {
-  const lines = input.title ? [input.title] : []
-  const hi = Math.max(1, ...input.values.flat(), 0)
-  lines.push("     " + input.cols.map((c) => fitVisible(c, 4)).join(" "))
-  input.rows.forEach((r, i) => {
-    const cells = (input.values[i] || []).map((v) => {
-      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
-      return `  ${DENSITY[idx]}`
-    })
-    lines.push(`${fitVisible(r, 5)}${cells.join("")}`)
-  })
-  return lines
-}
+// #483：renderMatrix 编号矩阵已删除——实体身份与数值需要来回对照，
+// Breakdown 改用真实实体名、绝对值与占比的维度专属视图，不再保留兼容层
 
 // #174：waterfall 步进表示增量而非绝对值
 export const renderWaterfall = (input: { title?: string; steps: { label: string; delta: number }[] }) => {
@@ -409,11 +408,24 @@ export const renderSlopeChart = (input: { title?: string; series: ChartSeries })
   return [input.title || "slope", `${a.x}:${formatNumber(a.y)} → ${b.x}:${formatNumber(b.y)}`]
 }
 // #174：每列除以列和使总和 100%
-export const renderPercentStack = (input: { title?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
+export const renderPercentStack = (input: { title?: string; color?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
   const lines = input.title ? [input.title] : []
+  const labelWidth = Math.max(1, ...input.columns.map((column) => visibleLength(terminalText(column.label))))
+  const width = Math.max(8, Math.min(32, statsContentWidth() - labelWidth - 4))
+  const colors: Record<string, ChartColor> = { input: "blue", output: "green", reasoning: "magenta", cacheread: "yellow", cachewrite: "cyan" }
   for (const col of input.columns) {
-    const sum = Math.max(1, col.parts.reduce((a, p) => a + p.value, 0))
-    lines.push(col.label + " " + col.parts.map((p) => `${p.label}:${((p.value / sum) * 100).toFixed(0)}%`).join(" "))
+    const sum = col.parts.reduce((total, part) => total + part.value, 0)
+    let consumed = 0
+    let cells = 0
+    // 按累计占比分配字符，不强制每个非零分量占格，防止极小reasoning扭曲组成。
+    const bar = col.parts.map((part) => {
+      consumed += part.value
+      const end = sum > 0 ? Math.round(consumed / sum * width) : 0
+      const chunk = paint("█".repeat(Math.max(0, end - cells)), colors[part.label.toLowerCase().replaceAll(" ", "")] ?? "white", renderContext(input.color))
+      cells = end
+      return chunk
+    }).join("")
+    lines.push(`${padEndVisible(terminalText(col.label), labelWidth)} [${bar}${" ".repeat(Math.max(0, width - cells))}]`, col.parts.map((part) => `${terminalText(part.label)} ${formatNumber(part.value)} ${(sum > 0 ? part.value / sum * 100 : 0).toFixed(1)}%`).join(" · "))
   }
   return lines
 }
@@ -422,7 +434,13 @@ export const renderDayLabels = (daily: DailyUsage[], step = 1) => daily.filter((
 // #174：callout 标题与正文靠样式分层而非第二数据源
 export const renderCallout = (title: string, body: string) => [`▸ ${title}`, `  ${body}`]
 // #174：列宽按可见字符最大值决定
-export const renderComparisonTable = (rows: string[][]) => rows.map((r) => r.map((c) => fitVisible(c, 12)).join("  "))
+export const renderComparisonTable = (rows: string[][]) => {
+  // 终端窄时增加行数，不能让固定十二列吞掉身份、金额或归因分母。
+  const cells = rows.map((row) => row.map(terminalText))
+  const widths = cells[0]?.map((_, index) => Math.max(...cells.map((row) => visibleLength(row[index] ?? "")))) ?? []
+  const fits = widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 3 <= statsContentWidth()
+  return cells.flatMap((row) => wrapVisible(row.map((cell, index) => fits ? padEndVisible(cell, widths[index]) : cell).join(" │ "), statsContentWidth()))
+}
 // #174：无数据输出 empty，保持管道可解析成功路径
 export const renderEmptyState = (msg = "no data") => [`(empty) ${msg}`]
 
@@ -443,15 +461,31 @@ export const dailyCostPoints = (report: StatsReport): HeatPoint[] =>
     const dt = new Date(d.day)
     return [{ day: d.day, dow: (dt.getDay() + 6) % 7, value: d.cost, label: d.label }]
   })
-// #174：modelProviderMatrix 只读报告字段
-// #174：交叉矩阵只读报告字段不查库
-// #174：modelProviderMatrix 构造 provider×model 交叉表
-export const modelProviderMatrix = (report: StatsReport) => {
-  const providers = [...new Set(report.providers.map((p) => p.id))].slice(0, 8)
-  const models = [...new Set(report.models.map((m) => m.id))].slice(0, 8)
-  const values = models.map((m) => {
-    const mg = report.models.find((x) => x.id === m)
-    return providers.map((p) => mg?.providers.find((x) => x.id === p)?.tokens || 0)
-  })
-  return { rows: models, cols: providers, values }
+// 编号矩阵退役，token portfolio由原有group明细承接，工具发起方则独立按calls统计。
+
+// 最终边界按终端列换行，保留可信样式序列和全部码点，不静默截断实体名。
+export const wrapAnsiVisible = (text: string, width = statsContentWidth()) => {
+  const lines = [""]
+  let used = 0
+  for (const token of text.match(/\x1b\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
+    if (token.startsWith("\x1b[")) { lines[lines.length - 1] += token; continue }
+    if (token === "\n") { lines.push(""); used = 0; continue }
+    const columns = charWidth(token.codePointAt(0) ?? 0)
+    if (used > 0 && used + columns > width) { lines.push(""); used = 0 }
+    lines[lines.length - 1] += token
+    used += columns
+  }
+  return lines
+}
+export const wrapVisible = (text: string, width = statsContentWidth()) => {
+  // 语义文本优先按词换行，过长ID再按显示列拆开，避免把标签和值拆成不可读片段。
+  const lines = [""]
+  for (const word of terminalText(text).split(/\s+/)) {
+    for (const part of wrapAnsiVisible(word, width)) {
+      const last = lines.length - 1
+      if (lines[last] && visibleLength(`${lines[last]} ${part}`) > width) lines.push(part)
+      else lines[last] += `${lines[last] ? " " : ""}${part}`
+    }
+  }
+  return lines
 }

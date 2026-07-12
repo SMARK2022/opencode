@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { renderCharts, renderCosts, renderModels, renderProviders, renderSessions, renderTokens } from "../../src/cli/cmd/stats-render"
 import type { StatsReport } from "../../src/cli/cmd/stats-data"
+import { emptyComponents } from "../../src/cli/cmd/stats-data"
 import { formatNumber } from "../../src/cli/format"
 import { renderHeatmap, renderRoundedLineChart } from "../../src/cli/cmd/stats-charts"
 
@@ -8,18 +9,20 @@ test("small costs survive total, model, daily and session rendering", () => {
   // 最小报告只提供这些真实 renderer 消费的字段，金额断言不能仅验证 formatter 本身。
   const tokens = { input: 80, output: 10, reasoning: 10, cache: { read: 0, write: 0 }, total: 100 }
   const report = {
-    totalSessions: 1, days: 1, total: { cost: 0.25, tokens },
-    models: [{ id: "sample-model", label: "sample-model", cost: 0.25, tokens, assistantCalls: 2, requests: 1, sessions: 1 }],
-    providers: [{ id: "sample-provider", label: "sample-provider", cost: 0.25, tokens }],
-    modelSeries: [], providerSeries: [],
-    daily: [{ day: 0, label: "day", cost: 0.25, tokens }],
-    sessions: [{ id: "sample-session", title: "sample-session", cost: 0.25, tokens }],
+    totalSessions: 1, sessionsWithUsage: 1, days: 1, dateRange: { earliest: 0, latest: 0 }, total: { cost: 0.25, tokens, components: emptyComponents(), requests: 1, assistantCalls: 2, errors: 0, aborted: 0, durationMs: 0 },
+    models: [{ id: "sample-model", label: "sample-model", cost: 0.25, tokens, components: emptyComponents(), assistantCalls: 2, requests: 1, sessions: 1, errors: 0, aborted: 0, durationMs: 0, models: [], providers: [] }],
+    providers: [{ id: "sample-provider", label: "sample-provider", cost: 0.25, tokens, components: emptyComponents(), models: [], providers: [] }],
+    modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], projectSeries: [], statusSeries: [],
+    agents: [], sources: [], projects: [], statuses: [], toolCalls: [], toolUsage: [], toolSeries: [],
+    tokensPerSession: 100, medianTokensPerSession: 100,
+    daily: [{ day: 0, label: "day", cost: 0.25, tokens, requests: 1, errors: 0, aborted: 0, durationMs: 0 }],
+    sessions: [{ id: "sample-session", title: "sample-session", projectID: "project", cost: 0.25, tokens, models: [], providers: [], requests: 1, assistantCalls: 2, messages: 1, tools: 0, errors: 0, aborted: 0, durationMs: 0 }],
   } as unknown as StatsReport
   const costs = renderCosts(report, { color: "never" })
   expect(costs).toContain("cost=0.25")
   expect(costs).toMatch(/sample-model[^\n]*0\.25/)
   expect(costs).toMatch(/day[^\n]*0\.25/)
-  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[^\n]*cost=0\.25/)
+  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[\s\S]*\$0\.2500/)
   expect(formatNumber(100)).toBe("100")
   expect(formatNumber(1000)).toBe("1.0K")
   expect(formatNumber(0.001)).toBe("0.001")
@@ -39,8 +42,11 @@ test("small costs survive total, model, daily and session rendering", () => {
       const text = render(ranked, { color: "never", limit: 1, sort })
       const first = sort === "cost" ? "cost-top" : "token-top"
       expect(text).toContain(first)
-      // 排名条与明细必须各出现一次，同一 limit 不能在两处选择不同对象。
-      expect(text.split(first)).toHaveLength(3)
+      // 新定量面板会再次显示实体；分别锁定排名和原明细各一次，不能用整页次数限制完整信息。
+      const detailAt = text.indexOf(`${first} cost=`)
+      expect(detailAt).toBeGreaterThanOrEqual(0)
+      expect(text.slice(0, detailAt).split(first)).toHaveLength(2)
+      expect(text.split(`${first} cost=`)).toHaveLength(2)
       expect(text).not.toContain(sort === "cost" ? "token-top" : "cost-top")
     }
   }

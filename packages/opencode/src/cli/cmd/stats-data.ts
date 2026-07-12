@@ -1,5 +1,5 @@
 // #180：SQL 会话预过滤 + 工具事件单遍生成
-import { Effect, Schema } from "effect"
+import { DateTime, Effect, Schema } from "effect"
 import { MessageID } from "@/session/schema"
 import { Session } from "@/session/session"
 // #174：assistant 表优先费用
@@ -16,13 +16,30 @@ import { eq, sql, gte } from "drizzle-orm"
 import { SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import type { Project } from "@/project/project"
+// #483：Project 身份读取——project group 的 label/path 来自存储行，不再用裸 ID 展示
+import { ProjectTable } from "@opencode-ai/core/project/sql"
 import type { SessionID } from "@/session/schema"
 
 // #174：MICROS 定义存库到显示的换算
 // #174：费用以微美元存库，显示只除一次 1e6
 const MICROS = 1_000_000
-// #174：MS_IN_DAY 与 days 窗口同口径
-const MS_IN_DAY = 24 * 60 * 60 * 1000
+// #483：自然日运算改用 shiftDay 日历语义，固定 24h 常数已无消费方
+
+// #483：用户数据只替换会控制终端布局的控制字符；shell 元字符不进执行路径，应原样显示
+const displayText = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()
+
+// #483：project 身份解析——名称与路径都来自用户数据，控制字符已清洗；
+// id 是唯一关联键：同名项目不会被合并，缺失元数据时 label 回退路径末段再到裸 id
+const projectIdentity = (
+  id: string,
+  row: { name: string | null; worktree: string } | undefined,
+  directory: string | undefined,
+) => {
+  const projectPath = displayText(row?.worktree ?? directory ?? "")
+  // 数据库可跨操作系统复制；同时识别两种分隔符，避免把 Windows 路径整段当作名称
+  const label = displayText(row?.name ?? "") || displayText(projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "") || id
+  return { label, path: projectPath }
+}
 
 // #174：TokenTotals 固定五类+total 字段
 export type TokenTotals = {
@@ -58,6 +75,11 @@ export type UsageGroup = UsageTotals & {
   sessions: number
   providers: { id: string; tokens: number }[]
   models: { id: string; tokens: number }[]
+}
+
+// #483：ProjectUsage 携带可识别展示路径；project id 继续承担过滤和 series 关联，不能互换
+export type ProjectUsage = UsageGroup & {
+  path: string
 }
 
 // #174：DailyUsage 是日聚合点
@@ -108,6 +130,25 @@ export type ToolUsage = {
   contextTokens: number
 }
 
+// #483：工具调用归因——toolID 是真实 ToolPart 名称；其余维度描述拥有该 ToolPart 的 Assistant 运行时
+export type ToolCallAttribution = {
+  toolID: string
+  modelID: string
+  providerID: string
+  agent: string
+  projectID: string
+  // source/status 来自关联请求；无法关联的历史记录必须显式标为 unattributed/unknown
+  source: string
+  status: string
+  // calls 与字符数是 ToolPart footprint，不能解释为计费 token 或费用
+  calls: number
+  inputChars: number
+  outputChars: number
+  // errors/duration 描述工具执行本身，与 owning request 的健康指标相互独立
+  errors: number
+  durationMs: number
+}
+
 // #174：StatsReport 是渲染只读契约
 export type StatsReport = {
 // #174：totalSessions 计数
@@ -139,14 +180,17 @@ export type StatsReport = {
   agents: UsageGroup[]
   sources: UsageGroup[]
   statuses: UsageGroup[]
-  projects: UsageGroup[]
+  projects: ProjectUsage[]
   agentSeries: UsageSeries[]
   sourceSeries: UsageSeries[]
   statusSeries: UsageSeries[]
   projectSeries: UsageSeries[]
-  modelProviderTokens: { providerID: string; modelID: string; tokens: number }[]
+  // 工具发起方按调用计量；模型和供应商的token组合仍由UsageGroup明细提供。
+  toolCalls: ToolCallAttribution[]
   // #177：工具上下文 token 时间序列
   toolSeries: UsageSeries[]
+  // #483：24 槽使用 RequestUsage.time_created 的本地小时；只计 request shell，不重复计算 Assistant rows
+  requestsByHour: number[]
 // #174：tokensPerSession 均摊
   tokensPerSession: number
 // #174：median 抗长尾
@@ -186,6 +230,8 @@ type UsageEvent = {
   agent?: string
   status?: string
   projectID?: string
+  // #483：Request outcome 与 Assistant 自身状态可能不同；健康筛选和 Status 页面必须以前者为准
+  outcome?: string
   // #176：组件归因与请求结局计量，构造时携带避免事后猜测式 join
   components: InputComponentTotals
   errors: number
@@ -199,6 +245,8 @@ type SessionAggregate = {
   toolUsage: Record<string, ToolUsage>
   // #176：工具上下文事件供跨会话归因
   toolEvents: ToolUsageEvent[]
+  // #483：逐调用归因 tuple，聚合层按 owner 过滤后再投影 ToolUsage
+  toolCalls: ToolCallAttribution[]
   totalEvents: UsageEvent[]
   breakdownEvents: UsageEvent[]
 }
@@ -279,7 +327,8 @@ const addTokens = (target: TokenTotals, value: TokenTotals) => {
 }
 
 // #174：addUsage 同步 cost 与次数
-const addUsage = (target: UsageTotals, event: UsageTotals | UsageEvent) => {
+// #483：汇总只依赖数值字段，不要求伪造 session/provider 等身份；这也避免非法品牌值进入运行时
+const addUsage = (target: UsageTotals, event: UsageTotals) => {
   addTokens(target.tokens, event.tokens)
   // #176：组件与结局计量随事件同步累加，不事后补算
   addComponents(target.components, event.components)
@@ -361,14 +410,24 @@ export const dateLabel = (time: number) => {
   return `${mm}-${dd}`
 }
 
+// #483：本地日历加减而非固定毫秒，跨 DST 时仍保持在目标自然日零点；正反方向遵守同一日历语义
+const shiftDay = (time: number, amount: number) => {
+  const date = new Date(time)
+  date.setDate(date.getDate() + amount)
+  return dayStart(date.getTime())
+}
+
 // #176：稠密日轴：窗口内逐日生成零基桶，保证空闲日连续
 const buildDayBuckets = (start: number, end: number) => {
   const startDay = dayStart(start)
   const endDay = dayStart(Math.max(startDay, end))
-  return Array.from({ length: Math.floor((endDay - startDay) / MS_IN_DAY) + 1 }, (_, index) => {
-    const day = startDay + index * MS_IN_DAY
-    return { day, label: dateLabel(day), ...emptyUsage() } satisfies DailyUsage
-  })
+  // #483：自然日不能用固定 24 小时递增；跨 DST 时一天可能是 23 或 25 小时
+  const days: DailyUsage[] = []
+  for (const date = new Date(startDay); date.getTime() <= endDay; date.setDate(date.getDate() + 1)) {
+    const day = dayStart(date.getTime())
+    days.push({ day, label: dateLabel(day), ...emptyUsage() })
+  }
+  return days
 }
 
 // #174：getDaily 按日懒建
@@ -403,25 +462,8 @@ const finalizeSeries = (map: Map<string, Map<number, DailyUsage>>, days: DailyUs
       days
         .map((day) => byDay.get(day.day) ?? zeroDaily(day))
         .reduce((series, point) => {
-          addUsage(series, {
-            time: point.day,
-            sessionID: "" as SessionID,
-            projectID: id,
-            providerID: id,
-            modelID: id,
-            source: id,
-            agent: id,
-            status: id,
-            tokens: point.tokens,
-            // #176：合成事件携带全部新计量，保持 UsageEvent 契约完整
-            components: point.components,
-            cost: point.cost,
-            requests: point.requests,
-            assistantCalls: point.assistantCalls,
-            errors: point.errors,
-            aborted: point.aborted,
-            durationMs: point.durationMs,
-          })
+          // #483：addUsage 只读数值字段，直接传日点即可，无需合成伪身份事件
+          addUsage(series, point)
           series.points.push(point)
           return series
         }, emptySeriesTotals(id)),
@@ -478,21 +520,29 @@ const getSessions = Effect.fnUntraced(function* (cutoff: number) {
   return rows.map((row) => Session.fromRow(row))
 })
 
+// #483：一次批量读取即可覆盖所有聚合行，避免在 project group 循环中形成 N+1 查询
+const getProjects = Effect.fnUntraced(function* () {
+  const { db } = yield* Database.Service
+  return yield* db
+    .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: ProjectTable.worktree })
+    .from(ProjectTable)
+    .all()
+    .pipe(Effect.orDie)
+})
+
 // #174：cutoffFromDays 解释 0/缺省/正数
 const cutoffFromDays = (days?: number) => {
   if (days === undefined) return 0
 // #174：显式 0 天取今日本地零点，不是空窗口
-  if (days === 0) {
-    const now = new Date()
-    now.setHours(0, 0, 0, 0)
-    return now.getTime()
-  }
-  return Date.now() - days * MS_IN_DAY
+  if (days === 0) return dayStart(Date.now())
+  // #483：正数 N 包含今天在内的 N 个完整自然日；cutoff 是闭区间起点，需要回退 N-1 天
+  return shiftDay(Date.now(), -(days - 1))
 }
 
 // #174：windowDays 避免除零
-const windowDays = (days?: number) => {
-  if (days === undefined) return
+// #483：bucket 数与 cutoff 共享同一语义，防止总计覆盖范围大于图表日期范围
+const windowDays = (days?: number): number | undefined => {
+  if (days === undefined) return undefined
   if (days === 0) return 1
   return days
 }
@@ -549,7 +599,18 @@ const eventMatches = (event: UsageEvent & { source?: string; agent?: string; sta
   textMatches(event.providerID, input.providerFilter) &&
   textMatches(event.source, input.sourceFilter) &&
   textMatches(event.agent, input.agentFilter) &&
-  textMatches(event.status, input.statusFilter)
+  // #483：有 owning request 时按最终结果过滤，避免 error request 中已完成的 Assistant usage 被提前丢弃
+  textMatches(event.outcome ?? event.status, input.statusFilter)
+
+// #483：owner tuple 过滤与 toolUsage 投影使用同一谓词，
+// 避免页面总数与会话计数因两套匹配规则而分母漂移
+const toolCallMatches = (call: ToolCallAttribution, input: StatsFilter) =>
+  textMatches(call.toolID, input.toolFilter) &&
+  textMatches(call.modelID, input.modelFilter) &&
+  textMatches(call.providerID, input.providerFilter) &&
+  textMatches(call.source, input.sourceFilter) &&
+  textMatches(call.agent, input.agentFilter) &&
+  textMatches(call.status, input.statusFilter)
 
 // #176：工具事件维过滤
 // #176：工具事件维 AND 过滤
@@ -585,6 +646,18 @@ const addToolContextTokens = (map: Record<string, ToolUsage>, toolID: string, co
   getToolUsage(map, toolID).contextTokens += contextTokens
 }
 
+// #483：复合 owner 键保留发起方，不能先按 toolID 合并后再反推模型、Agent 或 Project 占比
+const addToolCall = (map: Map<string, ToolCallAttribution>, call: ToolCallAttribution) => {
+  const key = [call.projectID, call.agent, call.providerID, call.modelID, call.source, call.status, call.toolID].join("\0")
+  const item = map.get(key) ?? { ...call, calls: 0, inputChars: 0, outputChars: 0, errors: 0, durationMs: 0 }
+  item.calls += call.calls
+  item.inputChars += call.inputChars
+  item.outputChars += call.outputChars
+  item.errors += call.errors
+  item.durationMs += call.durationMs
+  map.set(key, item)
+}
+
 // #176：tip ToolPart 状态机上的输入字符
 // #176：pending 用 raw，其余序列化 input
 const toolInputChars = (part: { state: { status: string; raw?: string; input?: unknown } }) => {
@@ -606,6 +679,14 @@ const toolOutputChars = (part: {
   }
   if (part.state.status === "error") return (part.state.error ?? "").length
   return 0
+}
+
+// #483：pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时
+const toolDuration = (part: { state: { status: string; time?: { start: number; end?: number } } }) => {
+  if (part.state.status !== "completed" && part.state.status !== "error") return 0
+  const time = part.state.time
+  if (!time) return 0
+  return Math.max(0, (time.end ?? time.start) - time.start)
 }
 
 
@@ -803,6 +884,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
         ...(assistant?.content ?? []).flatMap((part) => part.type !== "tool" ? [] : [{
           type: "tool" as const, tool: part.name, state: {
             status: part.state.status, input: part.state.input,
+            // 原生时间经Schema解码为DateTime，在此统一成旧投影的毫秒契约。
+            time: {
+              start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
+              end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
+            },
             raw: typeof part.state.input === "string" ? part.state.input : undefined,
             output: part.state.status === "completed" ? part.state.content.filter((item) => item.type === "text").map((item) => item.text).join("\n") : undefined,
             error: part.state.status === "error" ? part.state.error.message : undefined,
@@ -814,6 +900,40 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     }
   })
   const visibleMessages = [...legacyMessages, ...nativeMessages].filter((message) => includeTime(cutoff, message.info.time.created))
+  // #483：ToolPart ownership 与 context consumption 在同一次 Message 扫描中建立，避免第二次读取 Session；
+  // 两个索引都以原始行为准，cutoff 只影响事件投影不影响 ownership 关联
+  const storedRequestsByID = new Map(requestUsageRows.map((row) => [row.request_id, row]))
+  const assistantUsageByMessageID = new Map(assistantUsageRows.map((row) => [row.assistant_message_id, row]))
+  const toolCalls: ToolCallAttribution[] = []
+  for (const message of visibleMessages) {
+    const info = message.info
+    if (info.role !== "assistant") continue
+    const assistant = assistantUsageByMessageID.get(info.id)
+    const request = assistant ? storedRequestsByID.get(assistant.request_id) : undefined
+    // #483：有 request 数据却找不到 Assistant row 通常是 fork/cutoff 历史，不能猜测它原属哪个请求；
+    // source 三态：assistant-row 归因 > unattributed（有 request 体系但断链）> legacy-message（无 request 体系）
+    const source = assistant ? request?.source ?? "assistant" : requestUsageRows.length > 0 ? "unattributed" : "legacy-message"
+    // #483：status 同样三态——request 终局优先于 assistant 自身状态，
+    // legacy completed 仅在无 request 体系时可用，防伪造归因
+    const status = assistant ? request?.status ?? assistant.status : requestUsageRows.length > 0 ? "unknown" : "completed"
+    for (const part of message.parts) {
+      if (part.type !== "tool" || !part.tool) continue
+      toolCalls.push({
+        toolID: part.tool,
+        modelID: assistant?.model_id ?? (info as { modelID?: string }).modelID ?? "unknown",
+        providerID: assistant?.provider_id ?? (info as { providerID?: string }).providerID ?? "unknown",
+        agent: request?.agent ?? (info as { agent?: string }).agent ?? session.agent ?? "unknown",
+        projectID: session.projectID,
+        source,
+        status,
+        calls: 1,
+        inputChars: toolInputChars(part),
+        outputChars: toolOutputChars(part),
+        errors: part.state.status === "error" ? 1 : 0,
+        durationMs: toolDuration(part),
+      })
+    }
+  }
   const totalEvents: UsageEvent[] = []
   const breakdownEvents: UsageEvent[] = []
 
@@ -846,6 +966,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
         source: request?.source ?? "assistant",
         agent: request?.agent ?? session.agent ?? "unknown",
         status: row.status,
+        // #483：窗口外 request 无法提供最终结果，此时保留 undefined 并由筛选回退 Assistant status
+        outcome: request?.status,
         components: componentsFromAssistant(messagesByID.get(row.assistant_message_id)),
         errors: 0,
         aborted: 0,
@@ -867,14 +989,12 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
           source: row.source,
           agent: row.agent || session.agent || "unknown",
           status: row.status,
+          outcome: row.status,
           components: emptyComponents(),
           ...statusCounts(row.status, 1),
           durationMs: rowDuration(row),
         }))
-      totalEvents.push(...assistantEvents)
-      totalEvents.push(...fallbackRequestEvents)
-      totalEvents.push(
-        ...requestRows.filter((row) => assistantRequests.has(row.request_id)).map((row) => ({
+      const requestEvents = requestRows.filter((row) => assistantRequests.has(row.request_id)).map((row) => ({
           time: row.time_created,
           sessionID: session.id,
           providerID: row.provider_id,
@@ -887,13 +1007,17 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
           source: row.source,
           agent: row.agent || session.agent || "unknown",
           status: row.status,
+          outcome: row.status,
           components: emptyComponents(),
           ...statusCounts(row.status, 1),
           durationMs: rowDuration(row),
-        })),
-      )
+        }))
+      totalEvents.push(...assistantEvents, ...fallbackRequestEvents, ...requestEvents)
       breakdownEvents.push(...assistantEvents)
       breakdownEvents.push(...fallbackRequestEvents)
+      // #483：Shell 只携带一次 request 健康指标；加入 Breakdown 后不能复制给每个 Assistant owner。
+      // assistantEvents 的 tokens/cost 已由 assistant 行承担，request shell 只补 requests/errors/duration
+      breakdownEvents.push(...requestEvents)
     } else {
       const requestEvents = requestRows.map((row) => ({
         time: row.time_created,
@@ -908,6 +1032,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
         source: row.source,
         agent: row.agent || session.agent || "unknown",
         status: row.status,
+        outcome: row.status,
         components: emptyComponents(),
         ...statusCounts(row.status, 1),
         durationMs: rowDuration(row),
@@ -983,7 +1108,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
           modelID: row.model_id,
           source: request?.source ?? "assistant",
           agent: request?.agent ?? session.agent ?? "unknown",
-          status: row.status,
+          // #483：context 归因事件同样采用 request 最终结局，与 owner tuple 口径一致
+          status: request?.status ?? row.status,
         },
       }
     })
@@ -1016,7 +1142,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     event.status = event.status ?? "completed"
   }
 
-  return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, totalEvents, breakdownEvents } satisfies SessionAggregate
+  return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, toolCalls, totalEvents, breakdownEvents } satisfies SessionAggregate
 })
 
 // #174：aggregateStats 唯一写路径
@@ -1064,11 +1190,14 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
   const sources = new Map<string, UsageGroupAccumulator>()
   const statuses = new Map<string, UsageGroupAccumulator>()
   const projects = new Map<string, UsageGroupAccumulator>()
+  // #483：工具调用归因按复合 owner tuple 聚合；小时投影只计 request shell
+  const toolCalls = new Map<string, ToolCallAttribution>()
+  const requestsByHour = Array.from({ length: 24 }, () => 0)
   const agentSeries = new Map<string, Map<number, DailyUsage>>()
   const sourceSeries = new Map<string, Map<number, DailyUsage>>()
   const statusSeries = new Map<string, Map<number, DailyUsage>>()
   const projectSeries = new Map<string, Map<number, DailyUsage>>()
-  const modelProviderTokens = new Map<string, number>()
+  // 编号矩阵退役；token portfolio继续使用各UsageGroup的models/providers明细。
   // #177：按日累加工具 contextTokens
   const toolSeries = new Map<string, Map<number, DailyUsage>>()
   const sessionsWithUsage: SessionUsage[] = []
@@ -1086,8 +1215,28 @@ const filteredAggregates =
           Object.values(aggregate.toolUsage).some((tool) => textMatches(tool.id, input.toolFilter)),
         )
 
+  // #483：查询结果只作显示索引；显式 string 键避免 branded ProjectID 泄漏到通用统计类型
+  const projectRows = new Map<string, { name: string | null; worktree: string }>(
+    (yield* getProjects()).map((row) => [row.id, row] as const),
+  )
+  // #483：代表性 Session directory 仅在 Project row 缺失时回退，不参与 project filter；
+  // 同一 project 多 Session 时取任一目录即可，display 身份不要求目录唯一
+  const projectDirectories = new Map<string, string>(
+    filteredAggregates.map((aggregate) => [aggregate.session.projectID, aggregate.session.directory] as const),
+  )
+  // #483：每个 project 只解析一次安全 display identity；
+  // group 与 series 共享同一解析结果，两处名称永远不会互不相配
+  const projectIdentities = new Map<string, { label: string; path: string }>(
+    Array.from(new Set(filteredAggregates.map((aggregate) => aggregate.session.projectID))).map((id) => [
+      id,
+      projectIdentity(id, projectRows.get(id), projectDirectories.get(id)),
+    ]),
+  )
+
   for (const aggregate of filteredAggregates) {
-    const matchingTools = Object.values(aggregate.toolUsage).filter((tool) => textMatches(tool.id, input.toolFilter))
+    // #483：先过滤 owner tuple，再同时生成 Session、总调用量和 ToolUsage，三者分母必须一致；
+    // toolFilter 命中判定从“工具名子串”升级为全 tuple 匹配，未命中 owner 的工具不再进榜
+    const matchingToolCalls = aggregate.toolCalls.filter((call) => toolCallMatches(call, input))
     const sessionUsage: SessionUsage = {
       id: aggregate.session.id,
       title: aggregate.session.title,
@@ -1096,7 +1245,7 @@ const filteredAggregates =
       created: aggregate.session.time.created,
       updated: aggregate.session.time.updated,
       messages: aggregate.messageCount,
-      tools: matchingTools.reduce((acc, tool) => acc + tool.count, 0),
+      tools: matchingToolCalls.reduce((acc, call) => acc + call.calls, 0),
       providers: [],
       models: [],
       ...emptyUsage(),
@@ -1106,8 +1255,17 @@ const filteredAggregates =
 
     totalMessages += aggregate.messageCount
     totalTools += sessionUsage.tools
-    // #176：先累加 IO/count，context 由事件叠加
-    matchingTools.forEach((tool) => addToolUsage(toolUsage, { ...tool, contextTokens: 0 }))
+    // #483：ToolUsage 是页面总表投影；calls/chars 必须来自同一批已过滤 owner tuple
+    matchingToolCalls.forEach((call) => {
+      addToolCall(toolCalls, call)
+      addToolUsage(toolUsage, {
+        id: call.toolID,
+        count: call.calls,
+        inputChars: call.inputChars,
+        outputChars: call.outputChars,
+        contextTokens: 0,
+      })
+    })
     // #176：上下文 token 由 toolEvents 叠加，避免与 count 双计字符
     aggregate.toolEvents
       .filter((event) => toolEventMatches(event, input))
@@ -1123,6 +1281,9 @@ const filteredAggregates =
       })
 
     for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
+      // #483：Request shell 的 requests 为 1、Assistant usage 为 0；由同一事件同时维护总量和小时投影才能闭合；
+      // 时间取 RequestUsage.time_created 的本地小时，与行内健康指标同一时间戳
+      if (event.requests > 0) requestsByHour[new Date(event.time).getHours()] += event.requests
       addUsage(sessionUsage, event)
       addUsage(getDaily(daily, event.time), event)
     }
@@ -1140,18 +1301,18 @@ const filteredAggregates =
       addGroup(agents, event.agent ?? "unknown", event.agent ?? "unknown", event)
       // #176：source 维分组
       addGroup(sources, event.source ?? "unknown", event.source ?? "unknown", event)
-      // #176：status 维分组
-      addGroup(statuses, event.status ?? "unknown", event.status ?? "unknown", event)
-      // #176：project 维分组
-      addGroup(projects, event.projectID ?? aggregate.session.projectID, event.projectID ?? aggregate.session.projectID, event)
+      // #483：无 request provenance 的 legacy/cutoff usage 单列为 unattributed；
+      // 与真实 outcome 共用分母会让 Status 页的完成率凭空变好
+      const outcome = event.outcome ?? "unattributed"
+      addGroup(statuses, outcome, outcome, event)
+      // #483：project 分组 label 使用解析后的 display identity
+      addGroup(projects, event.projectID ?? aggregate.session.projectID, projectIdentities.get(event.projectID ?? aggregate.session.projectID)?.label ?? event.projectID ?? aggregate.session.projectID, event)
       addUsage(getSeriesDaily(modelSeries, event.modelID, event.time), event)
       addUsage(getSeriesDaily(providerSeries, event.providerID, event.time), event)
       addUsage(getSeriesDaily(agentSeries, event.agent ?? "unknown", event.time), event)
       addUsage(getSeriesDaily(sourceSeries, event.source ?? "unknown", event.time), event)
-      addUsage(getSeriesDaily(statusSeries, event.status ?? "unknown", event.time), event)
+      addUsage(getSeriesDaily(statusSeries, event.outcome ?? "unattributed", event.time), event)
       addUsage(getSeriesDaily(projectSeries, event.projectID ?? aggregate.session.projectID, event.time), event)
-      // #176：provider\0model 复合键累加 tokens
-      increment(modelProviderTokens, `${event.providerID}\0${event.modelID}`, event.tokens.total)
       sessionProviders.add(event.providerID)
       sessionModels.add(event.modelID)
     }
@@ -1170,15 +1331,17 @@ const filteredAggregates =
     Date.now(),
   )
   const fallbackLatest = filteredSessions.reduce((latest, session) => Math.max(latest, session.time.updated), 0)
-  // #176：稠密日轴锚定今天；无显式窗口时以数据首末日为界
+  // #483：显式窗口以今天为末日；all-time 才用真实数据首尾确定范围；
+  // 空数据库使用 fallback 日期，保证报告结构完整而不是抛错
   const requestedWindow = windowDays(input.days)
   const latest = requestedWindow ? dayStart(Date.now()) : dayStart((sortedDaily.at(-1)?.day ?? fallbackLatest) || fallbackEarliest)
   const earliest = requestedWindow
-    ? latest - (requestedWindow - 1) * MS_IN_DAY
+    ? shiftDay(latest, -(requestedWindow - 1))
     : dayStart(sortedDaily.at(0)?.day ?? fallbackEarliest)
   const completeDaily = buildDayBuckets(earliest, latest).map((day) => daily.get(day.day) ?? day)
   const effectiveDays = completeDaily.length
   const sortedSessionTotals = sessionTokenTotals.sort((a, b) => a - b)
+  // #483：中位数抗长尾——大会话不能拉高典型会话的基准；偶数样本取中间两数均值
   const mid = Math.floor(sortedSessionTotals.length / 2)
   const medianTokensPerSession =
     sortedSessionTotals.length === 0
@@ -1204,14 +1367,23 @@ const filteredAggregates =
     agents: finalizeGroups(agents),
     sources: finalizeGroups(sources),
     statuses: finalizeGroups(statuses),
-    projects: finalizeGroups(projects),
+    // #483：聚合 identity 与 group 使用同一 id；缺失元数据时 path 为空而 label 仍保留 id，
+    // renderer 依据空 path 省略路径后缀而不是输出空分隔符
+    projects: finalizeGroups(projects).map((group) => ({ ...group, path: projectIdentities.get(group.id)?.path ?? "" })),
     daily: completeDaily,
+    // #483：小时投影随报告输出，供 Dashboard 时段分布直接消费
+    requestsByHour,
     modelSeries: finalizeSeries(modelSeries, completeDaily),
     providerSeries: finalizeSeries(providerSeries, completeDaily),
     agentSeries: finalizeSeries(agentSeries, completeDaily),
     sourceSeries: finalizeSeries(sourceSeries, completeDaily),
     statusSeries: finalizeSeries(statusSeries, completeDaily),
-    projectSeries: finalizeSeries(projectSeries, completeDaily),
+    // #483：series id 保持 project ID，只替换读者可见名称；
+    // 若同步改 id，历史图表与 --project 筛选都会失配
+    projectSeries: finalizeSeries(projectSeries, completeDaily).map((series) => ({
+      ...series,
+      label: projectIdentities.get(series.id)?.label ?? series.label,
+    })),
     tokenPartSeries: tokenPartSeries(completeDaily),
     sessions: sessionsWithUsage.sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost),
     // #176：默认按 contextTokens 再按 count
@@ -1220,10 +1392,8 @@ const filteredAggregates =
     // #176：模型×供应矩阵供热图/对比
     // #177：输出 toolSeries 供渲染
     toolSeries: finalizeSeries(toolSeries, completeDaily),
-    modelProviderTokens: Array.from(modelProviderTokens, ([key, tokens]) => {
-      const [providerID, modelID] = key.split("\0")
-      return { providerID, modelID, tokens }
-    }),
+    // #483：复合 tuple 按调用量稳定排序，renderer 可直接构建 issuing runtime mix 而无需重新扫 Message
+    toolCalls: Array.from(toolCalls.values()).sort((a, b) => b.calls - a.calls || b.durationMs - a.durationMs),
     tokensPerSession: sessionsWithUsage.length > 0 ? total.tokens.total / sessionsWithUsage.length : 0,
     medianTokensPerSession,
   } satisfies StatsReport

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { renderBreakdown, renderDashboard, renderTimeline, renderSessions } from "../../src/cli/cmd/stats-render"
 import { renderInsights } from "../../src/cli/cmd/stats-insights"
 import type { StatsReport } from "../../src/cli/cmd/stats-data"
+import { emptyComponents } from "../../src/cli/cmd/stats-data"
 
 // #249：fixture 是最小 StatsReport——各渲染函数只读取自身需要的序列，
 // 空数组代表无数据视图；背景色发射与数据内容无关，不影响本回归的有效性
@@ -39,7 +40,7 @@ function concreteBackgroundAnsi(text: string): string[] {
 const report = {
   totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
   dateRange: { earliest: 0, latest: 1 },
-  total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
+  total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, components: emptyComponents(), cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, durationMs: 0 },
   models: [], providers: [], agents: [], sources: [], statuses: [], projects: [],
   daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
   tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],

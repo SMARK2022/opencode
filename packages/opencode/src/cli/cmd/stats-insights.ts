@@ -17,11 +17,17 @@ import {
   paint,
   padEndVisible,
   padStartVisible,
+  terminalText,
+  wrapAnsiVisible,
+  wrapVisible,
+  renderPercentStack,
   type ChartColor,
   type ChartSeries,
 } from "./stats-charts"
 
 // 严重度→色彩映射：info 蓝 / good 绿 / warn 黄 / risk 红，与终端 256 色板对齐
+// #483：severity 字段保留为元数据（历史 call ID/归档兼容），但不再驱动色彩或建议路由——
+// 主观好坏分级从页面呈现中完全退出
 export type InsightSeverity = "info" | "good" | "warn" | "risk"
 
 // 洞察卡片三要素：标题/正文/严重度 + 可选数值与明细，渲染层按存在性降级
@@ -42,11 +48,13 @@ export type ForecastPoint = {
   upper: number
 }
 
-// 预测报告聚合五个口径：日均/周率/月率/月末投影/置信度
+// 预测报告口径：dailyAverage 是活跃日均值，activityRate 是活跃日占比；两者不可混成同一指标，
+// 月度预测需要两者相乘（calendarDailyAverage）；30-day run rate 用固定窗口而非自然月天数
 export type ForecastReport = {
   dailyAverage: number
   weeklyRunRate: number
-  monthlyRunRate: number
+  activityRate: number
+  thirtyDayRunRate: number
   projectedMonthEnd: number
   confidence: number
   points: ForecastPoint[]
@@ -72,20 +80,17 @@ type Efficiency = {
   tokensPerDollar: number
 }
 
-const severityColor: Record<InsightSeverity, ChartColor> = {
-  info: "blue",
-  good: "green",
-  warn: "yellow",
-  risk: "red",
-}
+// #483：severityColor 已随 severity 色标一并退役——定量证据不做好坏红绿暗示
 
 // 布局常量：半宽图与紧凑条共用宽度下限，避免窄终端下双栏内容重叠截断
 const halfChartWidth = () => Math.max(22, Math.floor((statsContentWidth() - 5) / 2) - 8)
 const compactBarWidth = () => Math.max(8, halfChartWidth() - 42)
 
+// #483：金额展示与不可用标注共用入口——调用方不再各自判断零/缺失语义
 // 金额精度分层：≥100 取整、≥10 一位小数、其余四位——大数降噪、小数保留量级
 const money = (value: number) => {
-  if (!Number.isFinite(value)) return "$0.00"
+  // #483：价格缺失或零展示为不可用标注，不伪造 $0.00——零费用与无计费数据是两件事
+  if (!Number.isFinite(value) || value <= 0) return "—"
   if (value >= 100) return `$${value.toFixed(0)}`
   if (value >= 10) return `$${value.toFixed(1)}`
   return `$${value.toFixed(4)}`
@@ -182,6 +187,7 @@ const efficiency = (report: StatsReport): Efficiency => {
 }
 
 // 阈值分级：成本上涨比 token 更严格（50%/25% vs 25%），回落 15% 即为改善
+// #483：趋势方向仍是定量派生（first/last 差值），direction 只描述变化不评判好坏
 const severityForTrend = (item: Trend, metric: "tokens" | "cost"): InsightSeverity => {
   if (item.direction === "flat") return "info"
   if (metric === "cost" && item.ratio > 0.5) return "risk"
@@ -190,6 +196,7 @@ const severityForTrend = (item: Trend, metric: "tokens" | "cost"): InsightSeveri
   return "info"
 }
 
+// #483：卡片工厂保留 severity 赋值仅为元数据完整性，页面不消费
 const trendInsight = (report: StatsReport, metric: "tokens" | "cost"): InsightCard => {
   const item = trend(dailyValues(report.daily, metric))
   const formatter = metricFormatter
@@ -266,7 +273,8 @@ const sessionOutlierInsight = (report: StatsReport): InsightCard => {
       ? `${top.title || top.id} is the highest-cost session at ${money(top.cost)}; p95 is ${money(p95)}.`
       : "No session-level usage was found.",
     severity,
-    value: top ? money(top.cost) : "$0.00",
+    // #483：无带费用 session 时无数值可示——显示不可用标注而非伪造 $0.00
+    value: top ? money(top.cost) : "—",
     detail: top?.id,
   }
 }
@@ -335,69 +343,85 @@ export const buildInsights = (report: StatsReport): InsightCard[] => [
   volatilityInsight(report),
 ]
 
+// #483：insight 卡片渲染契约：标题/数值/明细三段均为定量事实，
+// 色彩只承担扫描锚点不做健康评判
 // 渲染上下文统一解析 color 模式（auto/always/never），与全站统计输出一致
 const renderInsightCards = (cards: InsightCard[], color?: ColorMode) => {
   const ctx = renderContext(color)
-  return cards.flatMap((card) => {
-    // 强调色只用于数值与圆点，正文保持中性色以免整版花哨
-    const accent = severityColor[card.severity]
-    const value = card.value ? paint(card.value, accent, ctx, true) : ""
-    // 目标色板无 muted/subtitle 语义色：明细用 gray、正文用 white
-    const detail = card.detail ? paint(card.detail, "gray", ctx) : ""
-    return [
-      `${paint("●", accent, ctx, true)} ${padEndVisible(paint(card.title, "white", ctx, true), 28)} ${padStartVisible(value, 12)} ${detail}`,
-      `  ${paint(card.body, "white", ctx)}`,
-    ]
-  })
+  // #483：severity 色标退役——good/warn/risk 是主观建议信号；
+  // insights 页只呈现定量证据，数值保留强调色但不作健康暗示
+  const accent: ChartColor = "cyan"
+  const value = (card: InsightCard) => (card.value ? paint(card.value, accent, ctx, true) : "")
+  const detail = (card: InsightCard) => (card.detail ? paint(terminalText(card.detail), "gray", ctx) : "")
+  // #483：title/body 内插持久化实体标签（session title/model/provider），
+  // 卡片出口与同页 observation 表共享同一 terminalText 清洗契约
+  const title = (card: InsightCard) => padEndVisible(paint(terminalText(card.title), "white", ctx, true), 28)
+  const body = (card: InsightCard) => paint(terminalText(card.body), "white", ctx)
+  return cards.flatMap((card) => [
+    `${paint("●", accent, ctx, true)} ${title(card)} ${padStartVisible(value(card), 12)} ${detail(card)}`,
+    `  ${body(card)}`,
+  ])
 }
 
-// 建议按卡片 id 精确路由到可执行动作，未知 id 落到通用调查建议而非空白
-const recommendationRows = (cards: InsightCard[]) =>
-  cards
-    .filter((card) => card.severity === "risk" || card.severity === "warn")
-    .map((card) => {
-      if (card.id === "model-concentration") return [card.title, "Try splitting heavy workflows across models or agents."]
-      if (card.id === "provider-concentration") return [card.title, "Keep a fallback provider configured for availability and cost control."]
-      if (card.id === "cache-efficiency") return [card.title, "Review prompt reuse and cache-friendly system prompt boundaries."]
-      if (card.id === "cost-efficiency") return [card.title, "Inspect expensive models and route routine tasks to lower-cost models."]
-      if (card.id === "session-outlier") return [card.title, "Open the top session and inspect long loops or repeated tool retries."]
-      if (card.id === "cost-volatility") return [card.title, "Use stats timeline/costs to find burst days before they become habits."]
-      return [card.title, "Investigate this signal with the detailed stats subcommands."]
-    })
-
-// 无风险/警告卡片时给出平衡结论，避免空面板让用户误以为数据缺失
-const noRecommendationRows = (cards: InsightCard[]) =>
-  recommendationRows(cards).length > 0 ? recommendationRows(cards) : [["No urgent recommendations", "Current usage shape looks balanced for this range."]]
+// #483：建议路由整表退役——severity 驱动的可执行建议是主观判断；
+// insight 表改为定量观察（signal → 卡片自带 body），空范围只陈述事实
+const observationRows = (cards: InsightCard[]) =>
+  // hasUsage 守卫后恒为非空卡片流；空态已由守卫提前返回，无需防御分支
+  cards.map((card) => [card.title, card.body])
 
 // 预测用活跃日均值（0 值日剔除）而非自然日均，避免间歇使用拉低 run-rate
 export function buildForecast(report: StatsReport): ForecastReport {
+  // #483：预测只使用当前已选窗口，不暗中加载 all-time 数据，保持命令范围可预期
   const costs = dailyValues(report.daily, "cost")
-  // 活跃日下限 1：全零区间也能给出可用 run-rate 而非 NaN
-  const activeDays = Math.max(1, costs.filter((value) => value > 0).length)
-  const dailyAverage = safeDivide(sum(costs), activeDays)
-  const sigma = stddev(costs)
-  // 月末锚点用本地时区实算，跨月边界由 getDate 归零自然处理
-  const dayOfMonth = new Date().getDate()
-  const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate()
+  const activeCosts = costs.filter((value) => value > 0)
+  // #483：活跃日均值描述单次使用强度，活跃率描述使用频率；月度预测需要两者相乘，
+  // 避免稀疏用户的一次高费用被外推成每日持续费用
+  const dailyAverage = safeDivide(sum(activeCosts), Math.max(1, activeCosts.length))
+  const activityRate = safeDivide(activeCosts.length, costs.length)
+  const calendarDailyAverage = dailyAverage * activityRate
+  const activeSigma = stddev(activeCosts)
+  // #483：将“当天是否活跃”的伯努利波动与活跃日费用波动合并为日历口径 σ，
+  // 只用 activeCosts 的标准差会忽略大量零日，误报稳定
+  const calendarSigma = Math.sqrt(Math.max(0, activityRate * (activeSigma ** 2 + dailyAverage ** 2) - calendarDailyAverage ** 2))
+  // 方差恒等式 Var(X) = E[p·σ² + (p·μ)²] - (p·μ)²；负值只能来自浮点误差，clamp 到 0
+  // #483：月份边界按本地自然日计算；锚点用窗口 latest，查看旧月份不会掺入当前系统日期
+  const anchor = new Date(report.dateRange.latest || Date.now())
+  const year = anchor.getFullYear()
+  const month = anchor.getMonth()
+  const dayOfMonth = anchor.getDate()
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
   const remainingDays = Math.max(0, daysInMonth - dayOfMonth)
-  const projectedMonthEnd = report.total.cost + dailyAverage * remainingDays
+  // #483：月末投影只能以当前自然月的已发生费用为基线；选择区间可能跨月，
+  // 不能把整个 report.total.cost 误当成 month-to-date
+  const monthToDate = sum(
+    report.daily
+      .filter((day) => {
+        const date = new Date(day.day)
+        return date.getFullYear() === year && date.getMonth() === month && day.day <= report.dateRange.latest
+      })
+      .map((day) => day.cost),
+  )
+  const projectedMonthEnd = monthToDate + calendarDailyAverage * remainingDays
   // 置信度 = 1 - σ/(2×日均)：波动越大置信越低，clamp 到 [0,1] 防越界
-  const confidence = clampConfidence(1 - safeDivide(sigma, dailyAverage * 2))
-  // 投影窗口取 min(14, remaining+1)：远期预测只保留两周，超出部分噪声主导
-  const points = Array.from({ length: Math.min(14, remainingDays + 1) }, (_, index) => {
-    const value = report.total.cost + dailyAverage * index
+  const confidence = calendarDailyAverage > 0 ? clampConfidence(1 - safeDivide(calendarSigma, calendarDailyAverage * 2)) : 0
+  // 投影覆盖到月末：基线是 month-to-date，点列从 now 起按日历日均推算
+  const points = Array.from({ length: remainingDays + 1 }, (_, index) => {
+    const value = monthToDate + calendarDailyAverage * index
     return {
       label: index === 0 ? "now" : `+${index}d`,
       value,
       // 置信带按 √index 放大 σ：随机游走假设下不确定性随天数开方增长
-      lower: Math.max(0, value - sigma * Math.sqrt(index)),
-      upper: value + sigma * Math.sqrt(index),
+      lower: Math.max(0, value - calendarSigma * Math.sqrt(index)),
+      upper: value + calendarSigma * Math.sqrt(index),
     }
   })
   return {
     dailyAverage,
-    weeklyRunRate: dailyAverage * 7,
-    monthlyRunRate: dailyAverage * daysInMonth,
+    weeklyRunRate: calendarDailyAverage * 7,
+    activityRate,
+    // #483：30-day run rate 使用固定窗口；自然月天数只参与独立的 month-end 投影，
+    // 两者口径不同，禁止混在同一字段里导出
+    thirtyDayRunRate: calendarDailyAverage * 30,
     projectedMonthEnd,
     confidence,
     points,
@@ -476,52 +500,68 @@ function providerMomentumRows(report: StatsReport) {
 }
 
 // insights 面板分三段双栏：卡片+雷达/建议、双动量表、置信仪表+方差直方
-export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number } = {}) {
-  const cards = buildInsights(report)
-  const forecast = buildForecast(report)
+export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number; forecast?: boolean } = {}) {
+  // 工具独立存在也是用量；仅有Session数量则不能产生使用结论。
+  const hasUsage = report.total.tokens.total > 0 || report.total.cost > 0 || report.total.requests > 0 || report.total.assistantCalls > 0 || report.toolUsage.some((tool) => tool.count > 0 || tool.contextTokens > 0)
+  if (!hasUsage) return renderPanel("opencode stats insights", ["No usage data for the selected range."]).join("\n")
+  const section = (title: string) => ["", paint(`━━━ ${title}`, "magenta", renderContext(options.color), true), ""]
+  const components = Object.entries({ system: report.total.components.system, instructions: report.total.components.instructions, skills: report.total.components.skills, schemas: report.total.components.toolSchemas, user: report.total.components.userMessages, assistant: report.total.components.assistantText, reasoning: report.total.components.reasoning, "tool calls": report.total.components.toolCalls, "tool results": report.total.components.toolResults, attach: report.total.components.attachments })
+  // 十类输入共享完整分母，不能把未展示的部分删除后重新归一化。
+  const inputTotal = sum(components.map(([, value]) => value))
+  const attribution = [
+    { dimension: "model", groups: report.models, series: report.modelSeries },
+    { dimension: "provider", groups: report.providers, series: report.providerSeries },
+    { dimension: "agent", groups: report.agents, series: report.agentSeries },
+    { dimension: "source", groups: report.sources, series: report.sourceSeries },
+    { dimension: "project", groups: report.projects, series: report.projectSeries },
+    { dimension: "status", groups: report.statuses.filter((group) => group.id !== "unattributed"), series: report.statusSeries },
+  ].map((entry) => {
+    const leader = entry.groups.toSorted((a, b) => b.tokens.total - a.tokens.total)[0]
+    const item = trend(entry.series.find((series) => series.id === leader?.id)?.points.map((point) => point.cost) ?? [])
+    return [entry.dimension, leader?.label ?? "—", percent(leader?.tokens.total ?? 0, report.total.tokens.total), money(leader?.cost ?? 0), `${item.ratio >= 0 ? "+" : ""}${(item.ratio * 100).toFixed(1)}%`, percent((leader?.errors ?? 0) + (leader?.aborted ?? 0), leader?.requests ?? 0)]
+  })
+  const costs = dailyValues(report.daily, "cost")
+  // 零费用可能表示未定价，不参与正费用会话分位数。
+  const sessionCosts = report.sessions.map((session) => session.cost).filter((value) => value > 0)
+  const p95 = percentile(sessionCosts, 95)
+  const top = report.sessions.toSorted((a, b) => b.cost - a.cost)[0]
+  const model = report.models[0]
+  const provider = report.providers[0]
+  const actions = [
+    ...(model && safeDivide(model.tokens.total, report.total.tokens.total) > 0.55 ? [`Model ${terminalText(model.label)} share ${percent(model.tokens.total, report.total.tokens.total)} > 55% · inspect breakdown model`] : []),
+    ...(provider && safeDivide(provider.tokens.total, report.total.tokens.total) > 0.55 ? [`Provider ${terminalText(provider.label)} share ${percent(provider.tokens.total, report.total.tokens.total)} > 55% · inspect breakdown provider`] : []),
+    ...(top && top.cost > p95 * 1.5 ? [`Session ${terminalText(top.title || top.id)} costs ${money(top.cost)} vs p95 ${money(p95)} · inspect sessions --sort cost`] : []),
+    ...(safeDivide(report.total.errors + report.total.aborted, report.total.requests) > 0.02 ? [`Failure rate ${percent(report.total.errors + report.total.aborted, report.total.requests)} > 2% · inspect breakdown status`] : []),
+    // ToolPart不是Assistant token分母，tool-only不能生成低缓存行动项。
+    ...(report.total.tokens.total > 0 && safeDivide(report.total.tokens.cache.read, report.total.tokens.total) < 0.2 ? [`Cache read ${percent(report.total.tokens.cache.read, report.total.tokens.total)} < 20% · compare reusable prompt prefixes`] : []),
+  ].slice(0, 3)
+  const unattributed = report.statuses.find((group) => group.id === "unattributed")
   const lines = [
-    // 面板头 callout 说明数据口径（所选时间范围），避免跨范围误读
-    ...renderCallout("opencode stats insights", "Signals, recommendations, and outlier analysis derived from the selected stats range."),
-    "",
-    ...renderInsightCards(cards, options.color),
-    "",
-    // 双栏布局：短侧留白优于溢出换行
-    ...renderTwoColumn(
-      // 目标条形 API 不接受 formatter：数值预格式化为金额字符串
-      renderRankBars({
-        title: "Session outlier radar",
-        rows: sessionOutlierRows(report.sessions).map((row) => ({ label: row.label, value: row.value })),
-        width: compactBarWidth(),
-      }),
-      renderComparisonTable([
-        ["signal", "action"],
-        ...noRecommendationRows(cards),
-      ]),
-    ),
-    "",
-    ...renderTwoColumn(
-      renderComparisonTable([
-        ["model", "tokens", "trend", "dir"],
-        ...modelMomentumRows(report),
-      ]),
-      renderComparisonTable([
-        ["provider", "cost", "trend", "dir"],
-        ...providerMomentumRows(report),
-      ]),
-    ),
-    "",
-    ...renderTwoColumn(
-      // 置信仪表以百分比展示，宽度与右栏直方图对齐
-      renderGauge({ title: "Forecast confidence", value: forecast.confidence }),
-      renderHistogram({ title: "Daily cost variance", values: dailyValues(report.daily, "cost") }),
-    ),
+    ...section("Usage shape"),
+    ...renderPercentStack({ columns: [{ label: "tokens", parts: [{ label: "input", value: report.total.tokens.input }, { label: "output", value: report.total.tokens.output + report.total.tokens.reasoning }, { label: "cache read", value: report.total.tokens.cache.read }, { label: "cache write", value: report.total.tokens.cache.write }] }] }),
+    ...(inputTotal > 0 ? wrapVisible(components.map(([label, value]) => `${label} ${percent(value, inputTotal)}`).join(" · ")) : []),
+    `efficiency ${report.total.cost > 0 ? `${money(efficiency(report).costPerMillionTokens)}/M tok · ${formatNumber(efficiency(report).tokensPerDollar)} tok/$` : "cost/M — · tok/$ —"} · ${percent(report.total.tokens.cache.read, report.total.tokens.total)} cache read · ${safeDivide(report.total.assistantCalls, report.total.requests).toFixed(1)} calls/request`,
+    ...section("Attribution"),
+    ...renderComparisonTable([["dimension", "leader", "token share", "cost", "recent cost change", "owner fail"], ...attribution]),
+    `Status leader excludes unattributed usage; ${formatNumber(unattributed?.tokens.total ?? 0)} tokens without request outcome are reported separately.`,
+    ...section("Variability & outliers"),
+    ...(report.total.cost > 0 ? [
+      `Daily cost avg ${money(average(costs))} · p95 ${money(percentile(costs, 95))} · peak ${money(Math.max(0, ...costs))} · coefficient of variation ${(safeDivide(stddev(costs), average(costs)) * 100).toFixed(0)}% · active ${costs.filter((value) => value > 0).length}/${costs.length} days`,
+      sessionCosts.length > 0 ? `Session cost p50 ${money(percentile(sessionCosts, 50))} · p95 ${money(p95)} · max ${money(top?.cost ?? 0)} · max/p95 ${safeDivide(top?.cost ?? 0, p95).toFixed(1)}x` : "Session cost unavailable · no positive Session cost recorded in this range.",
+    ] : ["Daily cost unavailable · no positive cost recorded in this range.", `Session token distribution · p50 ${formatNumber(percentile(report.sessions.map((session) => session.tokens.total), 50))} · p95 ${formatNumber(percentile(report.sessions.map((session) => session.tokens.total), 95))}`]),
+    `Session tokens mean ${formatNumber(report.tokensPerSession)} · median ${formatNumber(report.medianTokensPerSession)} · mean/median ${safeDivide(report.tokensPerSession, report.medianTokensPerSession).toFixed(1)}x · top 2 share ${percent(sum(report.sessions.toSorted((a, b) => b.tokens.total - a.tokens.total).slice(0, 2).map((session) => session.tokens.total)), report.total.tokens.total)}`,
+    ...(top ? [`Top session: ${terminalText(top.title || top.id)}`] : []),
+    ...section("Actions"),
+    ...(actions.length ? actions.map((action) => `! ${action}`) : ["No material threshold crossings in this range."]),
   ]
-  // 统一经 renderPanel 包装：边框/内边距/主题由 charts 层单点控制；join 与其他视图的 string 返回合同一致
-  return renderPanel("opencode stats insights", lines).join("\n")
+  // 仅显式请求预测时调用同一个Forecast入口，不在默认路径生成隐藏预测。
+  return [...renderPanel("opencode stats insights", lines.flatMap((line) => line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line))), ...(options.forecast ? [renderForecast(report, options)] : [])].join("\n")
 }
 
 // forecast 面板：观测线+投影带双图对照，附 run-rate 台账与斜率表
 export function renderForecast(report: StatsReport, options: { color?: ColorMode } = {}) {
+  // 没有正费用观测就不生成预测线或伪造稳定置信度。
+  if (report.total.cost <= 0) return renderPanel("Forecast", ["Forecast unavailable: no positive cost recorded in the selected range."]).join("\n")
   const forecast = buildForecast(report)
   const costs = dailyPointValues(report.daily, "cost")
   const lines = [
@@ -548,9 +588,10 @@ export function renderForecast(report: StatsReport, options: { color?: ColorMode
     "",
     ...renderComparisonTable([
       ["metric", "value"],
-      ["daily average", money(forecast.dailyAverage)],
+      ["daily average (active days)", money(forecast.dailyAverage)],
       ["weekly run-rate", money(forecast.weeklyRunRate)],
-      ["monthly run-rate", money(forecast.monthlyRunRate)],
+      // #483：30-day 固定窗口口径取代自然月天数——跨月比较采样点数量一致
+      ["30-day run-rate", money(forecast.thirtyDayRunRate)],
       ["projected month-end", money(forecast.projectedMonthEnd)],
       ["confidence", `${(forecast.confidence * 100).toFixed(0)}%`],
     ]),
@@ -558,12 +599,15 @@ export function renderForecast(report: StatsReport, options: { color?: ColorMode
     // 目标 slope API 接受单序列：改用对照表承载首末三段趋势，能力等价
     ...renderComparisonTable([
       ["provider", "first third", "last third"],
-      ...report.providers.slice(0, 8).map((provider) => {
-        const series = report.providerSeries.find((item) => item.id === provider.id)
-        const item = trend(series?.points.map((point) => point.cost) ?? [])
-        return [provider.label, money(item.first), money(item.last)]
+      ...report.providerSeries.toSorted((a, b) => b.cost - a.cost).slice(0, 4).map((series) => {
+        const item = trend(series.points.map((point) => point.cost))
+        return [series.label, money(item.first), money(item.last)]
       }),
     ]),
   ]
-  return renderPanel("opencode stats forecast", lines).join("\n")
+  // driver按费用排序，置信带与方法保留在同一个公开预测页面。
+  const endpoint = forecast.points.at(-1)
+  lines.splice(lines.findIndex((line) => line.includes("provider")), 0, "Forecast drivers")
+  lines.push(`endpoint confidence band ${endpoint ? `${money(endpoint.lower)}-${money(endpoint.upper)}` : "—"}`, "Projection uses only the selected window and observed active-day frequency; month-end uses the latest date's local month.")
+  return renderPanel("opencode stats forecast", lines.flatMap((line) => line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line))).join("\n")
 }
