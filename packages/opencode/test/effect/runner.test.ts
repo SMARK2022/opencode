@@ -540,4 +540,38 @@ describe("Runner", () => {
       expect(runner.busy).toBe(false)
     }),
   )
+
+  // #482：reservation 临界区——maintenance 已取得所有权但 shell 状态未发布的窗口内，
+  // 并发 work 必须排队而非反客为主；释放后必须完成且无遗留锁或孤立 fiber
+  it.live(
+    "startShell reservation queues a concurrent run before shell state is published",
+    Effect.gen(function* () {
+      const scope = yield* Scope.Scope
+      const runner = Runner.make<string>(scope)
+      // 两个 Deferred 分别暴露 reservation 已进入与允许发布 Shell，不依赖任意时钟延迟
+      const reserved = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const ran = yield* Ref.make(false)
+
+      const shell = yield* runner
+        .startShell(
+          Effect.succeed("maintenance"),
+          undefined,
+          Deferred.succeed(reserved, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        )
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(reserved)
+
+      const queued = yield* runner
+        .ensureRunning(Ref.set(ran, true).pipe(Effect.as("queued")))
+        .pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(yield* Ref.get(ran)).toBe(false)
+      yield* Deferred.succeed(release, undefined)
+      expect(yield* Fiber.join(shell)).toBe("maintenance")
+      expect(yield* Fiber.join(queued)).toBe("queued")
+      expect(yield* Ref.get(ran)).toBe(true)
+      expect(runner.state._tag).toBe("Idle")
+    }),
+  )
 })

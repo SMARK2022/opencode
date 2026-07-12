@@ -62,7 +62,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
-import { reply, TestLLMServer } from "../lib/llm-server"
+import { httpError, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -4430,6 +4430,426 @@ it.instance(
   { git: true },
   30_000,
 )
+// #482：手动压缩标题行为的端到端验证——summary 持有 Run state 期间提交的 queued user
+// 必须经 ShellThenRun 无 Idle 空窗地移交到下一次 Agent run，而不是被旧 revert 边界隐藏
+it.instance(
+  "manual compact hands a prompt submitted during summary to the next agent run",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const gate = yield* Deferred.make<void>()
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const run = yield* SessionRunState.Service
+      const sessionStatus = yield* SessionStatus.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      const history = yield* user(chat.id, "history to compact")
+      // active revert 必须先由 compact 的 exclusive cleanup 消费，queued user 不能被旧边界再次隐藏；
+      // 这同时验证 HTTP 层移除重复 cleanup 后，领域边界仍完整承担 revert 清理职责
+      yield* sessions.setRevert({
+        sessionID: chat.id,
+        revert: { messageID: history.id },
+        summary: { additions: 0, deletions: 0, files: 0 },
+      })
+
+      // summary 保持流式未完成，确保后续 prompt 确实在 manual compact 持有 Run state 时提交
+      yield* llm.hold("summary", deferredAsPromise(gate))
+      yield* llm.text("queued reply")
+      const compact = yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+      // exclusive maintenance 必须阻止 explicit revert 并发修改同一 Session，但普通 prompt 仍可排队；
+      // 这一不对称正是 exclusive 语义的核心：维护拒绝写入者，不拒绝排队者
+      const revertExit = yield* run.beginRevert(chat.id).pipe(Effect.exit)
+      if (Exit.isSuccess(revertExit)) yield* run.endRevert(chat.id)
+      expect(Exit.isFailure(revertExit)).toBe(true)
+
+      // 固定 queuedID 后再 fork prompt：最终 assistant 必须显式绑定该 ID 而不是 compaction marker
+      const queuedID = MessageID.ascending()
+      const queued = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: queuedID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "answer this after compact" }],
+        })
+        .pipe(Effect.forkChild)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((messages) => (messages.some((message) => message.info.id === queuedID) ? true : undefined)),
+          ),
+        "queued prompt was not persisted during manual compact",
+      )
+
+      // summary 完成会结束 maintenance caller，但 ShellThenRun 必须无 Idle 空窗地接管 queued caller；
+      // 分别等待两个 fiber 可以证明它们没有误共享 summary 结果
+      yield* Deferred.succeed(gate, undefined)
+      const [compactExit, queuedExit] = yield* Effect.all([Fiber.await(compact), Fiber.await(queued)])
+
+      expect(Exit.isSuccess(compactExit)).toBe(true)
+      expect(Exit.isSuccess(queuedExit)).toBe(true)
+      if (Exit.isSuccess(compactExit) && compactExit.value.info.role === "assistant") {
+        // summary 标记证明 compact caller 拿到的是维护结果而非被误共享的普通回复
+        expect(compactExit.value.info.summary).toBe(true)
+      }
+      if (Exit.isSuccess(queuedExit) && queuedExit.value.info.role === "assistant") {
+        expect(queuedExit.value.info.summary).not.toBe(true)
+        expect(queuedExit.value.info.parentID).toBe(queuedID)
+        expect(queuedExit.value.parts.some((part) => part.type === "text" && part.text === "queued reply")).toBe(true)
+      }
+      // 可见消息断言保护 active revert 场景：陈旧 cleanup 不得把 handoff 后的 user 重新隐藏；
+      // 两次 Provider 调用与最终 Idle 共同证明续跑只发生一次且 Run state 已完整释放
+      const visible = yield* sessions.messages({ sessionID: chat.id })
+      expect(visible.some((message) => message.info.id === queuedID)).toBe(true)
+      // llm.calls 是 handoff 次数的下界审计：重试/重复移交都会推高它
+      expect(yield* llm.calls).toBe(2)
+      // Idle 是 Run state 完整释放的外部可观测事实：悬挂 finalizer 会让状态停在 busy
+      expect((yield* sessionStatus.get(chat.id)).type).toBe("idle")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+// #482：summary assistant 只回答自己的 parent——持久化关系是归属的结构事实，
+// 消息创建顺序不能替代；merged 请求不得被 summary 伪完成
+it.instance(
+  "summary assistant does not complete a newer user with a different parent",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const compaction = yield* SessionCompaction.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* user(chat.id, "history")
+
+      // create 只建立真实 compaction marker；后续手工插入顺序用于确定性覆盖极窄竞态，
+      // 不依赖 wall-clock 延迟，慢 CI 上也能稳定复现旧 ID 判断缺陷
+      const marker = yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+      // real user 在 marker 后、summary 前落库；单看 ID 会误以为后创建的 summary 已回答它
+      // queued user 在 marker 后落库：ID 更大但 parent 不同——这正是旧 ID 判断的盲区
+      const queued = yield* user(chat.id, "still needs an answer")
+      const summaryID = MessageID.ascending()
+      // finished summary 模拟 Compaction 成功边界；parent 固定为 marker 保留真实持久化关系
+      yield* sessions.updateMessage({
+        id: summaryID,
+        role: "assistant",
+        parentID: marker.id,
+        sessionID: chat.id,
+        mode: "compaction",
+        agent: "compaction",
+        summary: true,
+        path: { cwd: "/tmp", root: "/tmp" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now(), completed: Date.now() },
+        finish: "stop",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: summaryID,
+        sessionID: chat.id,
+        type: "text",
+        text: "summary",
+      })
+      // summary 文本只证明维护结果存在，不能被当作 queued user 的业务回答
+      yield* llm.text("handled after summary")
+
+      // 公共 loop 应读取持久化关系并产生普通 assistant，而不是直接返回 ID 更大的 summary；
+      // Provider 调用次数为 1，排除测试构造意外触发第二次 Compaction 的可能
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      // parentID 是归属的结构事实：summary marker 的 ID 更大也不构成回答关系
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.parentID).toBe(queued.id)
+      expect(result.parts.some((part) => part.type === "text" && part.text === "handled after summary")).toBe(true)
+      expect(yield* llm.calls).toBe(1)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+// #482：summary Provider 失败不改变移交语义——Runner finalizer 仍须无 Idle 空窗地启动 queued run；
+// compact caller 保留原始错误 summary，queued 请求的 RequestUsage 必须以 completed 正常闭合
+it.instance(
+  "manual compact provider error still hands a queued prompt to the next agent run",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const gate = yield* Deferred.make<void>()
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const usage = yield* SessionRequestUsage.Service
+      const sessionStatus = yield* SessionStatus.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* user(chat.id, "history whose summary will fail")
+
+      // 先记录 Provider 命中再延迟失败响应，使 queued prompt 确定落在失败中的 maintenance 边界内
+      yield* llm.push(httpError(400, { error: { message: "summary rejected" } }, deferredAsPromise(gate)))
+      yield* llm.text("reply after failed summary")
+      const compact = yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      // 固定 ID 同时建立 assistant 归属与 RequestUsage 主键，避免只凭返回文本判断 handoff
+      const queuedID = MessageID.ascending()
+      const queued = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: queuedID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "continue despite summary failure" }],
+        })
+        .pipe(Effect.forkChild)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((messages) => (messages.some((message) => message.info.id === queuedID) ? true : undefined)),
+          ),
+        "queued prompt was not persisted before the summary error",
+      )
+
+      // Provider 错误只结束 summary 请求；queued caller 不能误共享错误或永久停留 running
+      yield* Deferred.succeed(gate, undefined)
+      const [compactExit, queuedExit] = yield* Effect.all([Fiber.await(compact), Fiber.await(queued)])
+      const request = yield* usage.get({ sessionID: chat.id, requestID: queuedID })
+
+      expect(Exit.isSuccess(compactExit)).toBe(true)
+      if (Exit.isSuccess(compactExit) && compactExit.value.info.role === "assistant") {
+        expect(compactExit.value.info.summary).toBe(true)
+        expect(compactExit.value.info.error).toBeDefined()
+      }
+      expect(Exit.isSuccess(queuedExit)).toBe(true)
+      if (Exit.isSuccess(queuedExit) && queuedExit.value.info.role === "assistant") {
+        expect(queuedExit.value.info.parentID).toBe(queuedID)
+        expect(queuedExit.value.info.summary).not.toBe(true)
+        expect(queuedExit.value.parts.some((part) => part.type === "text" && part.text === "reply after failed summary")).toBe(
+          true,
+        )
+      }
+      expect(request?.status).toBe("completed")
+      // RequestUsage 主键断言防止“queued run 实际失败但测试只看返回文本”的隐藏成功
+      expect(request?.assistantCount).toBe(1)
+      // 两次 Provider 调用且最终 Idle：排除错误重试、重复 handoff 与悬挂 Runner 三类回归
+      expect(yield* llm.calls).toBe(2)
+      expect((yield* sessionStatus.get(chat.id)).type).toBe("idle")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+// #482：合并归属——更早的 queued request 已进入同一次模型输入，但只有最新 user
+// 成为最终 assistant 的 parent；middle 必须零计费终态化而不是重复计费
+it.instance(
+  "coalesced queued prompt reaches a zero-cost terminal usage state",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const gate = yield* Deferred.make<void>()
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const usage = yield* SessionRequestUsage.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      // 第一条 Provider 回复保持未完成，使后续两个 prompt 都落在同一个活跃 Run state 内；
+      // 第二条回复只服务最大 MessageID 对应的 user，验证既有 coalescing 语义；
+      // hold 与 text 的顺序构成“进行中任务 + 待处理队列”的最小复现
+      yield* llm.hold("first reply", deferredAsPromise(gate))
+      yield* llm.text("latest reply")
+
+      const first = yield* prompt
+        .prompt({ sessionID: chat.id, agent: "build", model: ref, parts: [{ type: "text", text: "first" }] })
+        .pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      // 固定两个 MessageID 可独立证明 middle 早于 latest，不依赖 fiber 调度先后
+      const middleID = MessageID.ascending()
+      const latestID = MessageID.ascending()
+      const middle = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: middleID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "middle queued intent" }],
+        })
+        .pipe(Effect.forkChild)
+      const latest = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: latestID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "latest queued intent" }],
+        })
+        .pipe(Effect.forkChild)
+      // 释放首轮前先确认两条消息都已落库，避免把调度偶然性误当成 queue 行为
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((messages) =>
+              messages.some((message) => message.info.id === middleID) && messages.some((message) => message.info.id === latestID)
+                ? true
+                : undefined,
+            ),
+          ),
+        "queued prompts were not both persisted",
+      )
+
+      yield* Deferred.succeed(gate, undefined)
+      const [, middleExit, latestExit] = yield* Effect.all([Fiber.await(first), Fiber.await(middle), Fiber.await(latest)])
+      const middleUsage = yield* usage.get({ sessionID: chat.id, requestID: middleID })
+      const latestUsage = yield* usage.get({ sessionID: chat.id, requestID: latestID })
+
+      // 较早 queued request 已进入模型输入但没有独立 assistant：零计费终态化；
+      // 这三条断言共同排除“合并后仍计费”与“合并后残留 running”两类回归
+      expect(middleUsage?.status).toBe("completed")
+      expect(middleUsage?.assistantCount).toBe(0)
+      expect(middleUsage?.tokens.total).toBe(0)
+      // 最新 user 是唯一 parent；两个 caller 共享这次真实回复，不重复记录 assistant 费用
+      expect(Exit.isSuccess(middleExit)).toBe(true)
+      expect(Exit.isSuccess(latestExit)).toBe(true)
+      if (Exit.isSuccess(middleExit) && middleExit.value.info.role === "assistant") {
+        expect(middleExit.value.info.parentID).toBe(latestID)
+      }
+      if (Exit.isSuccess(latestExit) && latestExit.value.info.role === "assistant") {
+        // middleExit 也指向 latestID：两个 caller 消费同一个 runLoop 的同一份输出
+        expect(latestExit.value.info.parentID).toBe(latestID)
+      }
+      expect(latestUsage?.status).toBe("completed")
+      expect(latestUsage?.assistantCount).toBe(1)
+      expect(yield* llm.calls).toBe(2)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+// #482：与 S1 的反向检查组合——revert 先取得所有权时 compact 必须原子失败，
+// 且 Busy 拒绝不能留下 scratch compaction（否则普通 loop 可能重放无主维护命令）
+it.instance(
+  "manual compact rejects while explicit revert owns the session",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const run = yield* SessionRunState.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* user(chat.id, "history")
+
+      // beginRevert 模拟已取得文件/消息修改权；compact 必须在任何 marker 副作用前失败
+      const exit = yield* Effect.acquireUseRelease(
+        run.beginRevert(chat.id),
+        () => prompt.compact({ sessionID: chat.id, agent: "build", model: ref }).pipe(Effect.exit),
+        () => run.endRevert(chat.id),
+      )
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      // BusyError 类型断言确保失败来自互斥而非其它意外错误
+      if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
+      // 无 scratch compaction：被拒的 compact 不得留下可被后续 loop 重放的维护命令
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(false)
+    }),
+  { git: true },
+)
+
+// #482：cancel 是明确终止边界——不启动第二次 LLM，不留下可见 scratch compaction；
+// queued 请求终态化为 aborted（保留用户主动终止语义）且零 assistant 计费
+it.instance(
+  "cancel aborts a prompt queued behind manual compact",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const gate = yield* Deferred.make<void>()
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const usage = yield* SessionRequestUsage.Service
+      const sessionStatus = yield* SessionStatus.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* user(chat.id, "history to compact")
+      // 未释放 gate 让 summary 持续 streaming；不预置第二条回复，可直接证明 cancel 没有错误启动 pending run；
+      // cancel 的前提是 maintenance 与 pending 同时存在，只测一半无法暴露 Deferred 泄漏
+      yield* llm.hold("unfinished summary", deferredAsPromise(gate))
+
+      const compact = yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref }).pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      // queued prompt 先完成持久化与 RequestUsage.begin，随后才等待 ShellThenRun 的 Deferred
+      const queuedID = MessageID.ascending()
+      const queued = yield* prompt
+        .prompt({
+          sessionID: chat.id,
+          messageID: queuedID,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "do not run after cancel" }],
+        })
+        .pipe(Effect.forkChild)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: chat.id })
+          .pipe(
+            Effect.map((messages) => (messages.some((message) => message.info.id === queuedID) ? true : undefined)),
+          ),
+        "queued prompt was not persisted before cancel",
+      )
+      // 让 queued caller 进入 Run state；取消必须同时终止 maintenance 与尚未启动的 pending run
+      yield* Effect.yieldNow
+      yield* prompt.cancel(chat.id)
+
+      // 两个 caller 都必须在超时边界内终止；任一悬挂都表示 Deferred 未被完整结算
+      yield* Effect.all([
+        awaitWithTimeout(Fiber.await(compact), "manual compact did not stop after cancel"),
+        awaitWithTimeout(Fiber.await(queued), "queued prompt did not stop after cancel"),
+      ])
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const request = yield* usage.get({ sessionID: chat.id, requestID: queuedID })
+
+      expect(yield* llm.calls).toBe(1)
+      // 无 scratch compaction + 无 summary assistant：cancel 同时回收了两种维护产物
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(false)
+      expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(false)
+      // aborted 而非 completed：保留用户主动终止的语义
+      expect(request?.status).toBe("aborted")
+      expect((yield* sessionStatus.get(chat.id)).type).toBe("idle")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+// #482：manual compact 仍是维护终点——没有 queued loop 时不能恢复 retained tail 或 Goal；
+// summary 返回值与 Idle 状态锁定旧调用合同，避免 handoff 修复改变普通 compact 体验
+it.instance(
+  "manual compact without a queued prompt stops after the summary",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const sessionStatus = yield* SessionStatus.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      yield* user(chat.id, "history only")
+      // 只准备一条 summary 响应；若实现无条件续跑，测试服务器会暴露额外 Provider 调用
+      yield* llm.text("summary only")
+
+      const result = yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.summary).toBe(true)
+      expect(result.parts.some((part) => part.type === "text" && part.text === "summary only")).toBe(true)
+      // calls=1 锁定“无排队不续跑”：无条件续跑会让测试服务器暴露额外 Provider 调用
+      expect(yield* llm.calls).toBe(1)
+      expect((yield* sessionStatus.get(chat.id)).type).toBe("idle")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
 
 it.instance(
   "late technical Message cannot rewind blocked continuity past a newer real user",

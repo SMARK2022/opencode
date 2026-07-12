@@ -5,10 +5,11 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import fs from "fs/promises"
 import path from "path"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
 import { Session } from "@/session/session"
 
 import { SessionRevert } from "../../src/session/revert"
+import { SessionRunState } from "../../src/session/run-state"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Snapshot } from "../../src/snapshot"
@@ -20,7 +21,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(
   LayerNode.compile(
-    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node, MessageV2.node, SessionRequestUsage.node]),
+    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node, MessageV2.node, SessionRequestUsage.node, SessionRunState.node]),
   ),
 )
 
@@ -544,6 +545,133 @@ describe("revert + compact workflow", () => {
           expect(hidden.info.hidden!.reason).toBe("undo")
         }),
       { git: true },
+    ),
+  )
+
+  // #482：并发 cleanup single-flight——双方共同消费同一次 revert 边界，
+  // 第二路重放 owner 的 Exit；边界消费后 revert 无残留且 fresh 消息正常可见
+  it.live(
+    "concurrent cleanup joins a single revert boundary consumption",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "hello")
+          const a1 = yield* assistant(sid, u1.id, dir)
+          yield* text(sid, a1.id, "hi back")
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u1.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+          const state = yield* session.get(sid)
+
+          // 并发两路 cleanup：single-flight 让双方共同消费同一次边界
+          // （cleanup 返回 void，边界成功与否由下方 revert 残留与 fresh 可见性断言）
+          yield* Effect.all([revert.cleanup(state), revert.cleanup(state)], { concurrency: 2 })
+          // 边界只消费一次：revert 状态已清，后续请求不受残留影响
+          expect((yield* session.get(sid)).revert).toBeUndefined()
+          const fresh = yield* user(sid)
+          const visible = yield* session.messages({ sessionID: sid })
+          expect(visible.map((m) => m.info.id)).toContain(fresh.id)
+        }),
+      { git: true },
+    ),
+  )
+
+  // #482：陈旧快照不得重新解释边界——cleanup 完成后再次以旧快照调用，
+  // fresh 消息必须存活且 revert 不复活（锁定 sessions.get 重读语义）
+  it.live(
+    "cleanup ignores a stale revert snapshot after the boundary was cleared",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+          const u1 = yield* user(sid)
+          yield* text(sid, u1.id, "hello")
+          const a1 = yield* assistant(sid, u1.id, dir)
+          yield* text(sid, a1.id, "hi back")
+
+          yield* session.setRevert({
+            sessionID: sid,
+            revert: { messageID: u1.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+          // 陈旧快照在此刻固定：后续 user/fresh 的创建使快照与新状态天然脱节
+          const stale = yield* session.get(sid)
+
+          // 第一次 cleanup 消费边界；第二次以陈旧快照调用必须为 no-op——
+          // cleanupCurrent 的 sessions.get 重读保证边界清除后旧快照不再触发隐藏
+          yield* revert.cleanup(stale)
+          // fresh 创建在边界清除后：二次 stale cleanup 若重新解释快照，fresh 必然被误隐藏
+          const fresh = yield* user(sid)
+          yield* revert.cleanup(stale)
+
+          const visible = yield* session.messages({ sessionID: sid })
+          // fresh 存活是核心断言：信任入参快照的实现会把 fresh 也隐藏
+          expect(visible.map((m) => m.info.id)).toContain(fresh.id)
+          expect((yield* session.get(sid)).revert).toBeUndefined()
+        }),
+      { git: true },
+    ),
+  )
+
+  // #482：exclusive 租约互斥——compaction 等维护工作占用期间，
+  // prompt 的 Busy 检查、二次 exclusive 与 beginRevert 全部被拒；释放后恢复
+  it.live(
+    "startExclusive rejects concurrent busy checks and revert while owning the session",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const runState = yield* SessionRunState.Service
+
+          const info = yield* session.create({})
+          const sid = info.id
+
+          const fakeResult = { info: { id: "", role: "assistant", parentID: "", path: {}, sessionID: sid, providerID: "", modelID: "", mode: "", agent: "", cost: 0, tokens: {}, time: { created: 0 } }, parts: [] } as never
+          const release = yield* Deferred.make<SessionV1.WithParts>()
+          const owner = yield* runState
+            .startExclusive(
+              sid,
+              // 中断目标：compact 无既有 assistant 可恢复，成功值不参与断言
+              Effect.succeed(fakeResult),
+              // work 挂起在 deferred 上：租约持有期由我们控制，释放后完成
+              Effect.as(Deferred.await(release), fakeResult),
+            )
+            .pipe(Effect.forkChild)
+
+          // 等 owner 拿到租约：BusyError 轮询转成功即登记完成
+          let leased = false
+          for (let i = 0; i < 100 && !leased; i++) {
+            const probe = yield* runState.assertNotBusy(sid).pipe(Effect.exit)
+            leased = Exit.isSuccess(probe) === false
+            if (!leased) yield* Effect.yieldNow
+          }
+          expect(leased).toBe(true)
+
+          expect(Exit.isFailure(yield* runState.assertNotBusy(sid).pipe(Effect.exit))).toBe(true)
+          expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.exit))).toBe(true)
+          expect(Exit.isFailure(yield* runState.beginRevert(sid).pipe(Effect.exit))).toBe(true)
+
+          // 手动终结 deferred 以释放租约——fakeResult 经 never 泛化后可满足 WithParts 成功通道
+          yield* (Deferred.succeed(release, fakeResult as never) as Effect.Effect<boolean>)
+          const exit = yield* Effect.exit(Fiber.join(owner))
+          expect(Exit.isSuccess(exit)).toBe(true)
+          // 释放后 Busy 检查恢复通过
+          yield* runState.assertNotBusy(sid)
+        }),
+      {},
     ),
   )
 

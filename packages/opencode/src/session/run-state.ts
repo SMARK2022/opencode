@@ -24,6 +24,11 @@ export interface Interface {
     onInterrupt: Effect.Effect<SessionV1.WithParts>,
     work: Effect.Effect<SessionV1.WithParts>,
   ) => Effect.Effect<SessionV1.WithParts>
+  readonly startExclusive: (
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<SessionV1.WithParts>,
+    work: Effect.Effect<SessionV1.WithParts>,
+  ) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly startShell: (
     sessionID: SessionID,
     onInterrupt: Effect.Effect<SessionV1.WithParts>,
@@ -47,6 +52,9 @@ const layer = Layer.effect(
         // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
         // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
         const reverting = new Set<SessionID>()
+        const exclusive = new Map<SessionID, symbol>()
+        // #482：独占租约表——compaction 等维护性工作经 startExclusive 登记后，
+        // assertNotBusy/beginRevert 视为 Busy，防止 prompt、shell 与维护工作并发冲突
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
             yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
@@ -55,9 +63,10 @@ const layer = Layer.effect(
             })
             runners.clear()
             reverting.clear()
+            exclusive.clear()
           }),
         )
-        return { runners, scope, reverting }
+        return { runners, scope, reverting, exclusive }
       }),
     )
 
@@ -86,6 +95,8 @@ const layer = Layer.effect(
       if (existing?.busy) yield* busyError(sessionID)
       // revert 进行中也视为 busy——阻止 compact/deleteMessage 等操作与 revert 并发
       if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+      // #482：Busy 判定扩展到独占租约——compaction 期间外部 prompt/shell 同样被拒
+      if (data.exclusive.has(sessionID)) yield* busyError(sessionID)
     })
 
     // 只检查 revert 进行中，不检查 runner.busy——保留 prompt 执行中发新消息的排队语义
@@ -98,7 +109,8 @@ const layer = Layer.effect(
     // Effect 协作式调度不会在同步代码块中切让 fiber，保证只一个 revert 能进入。
     const beginRevert = Effect.fn("SessionRunState.beginRevert")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
-      if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+      // #482：beginRevert 双向互斥——revert 与独占维护工作不能同时持有 Session
+      if (data.reverting.has(sessionID) || data.exclusive.has(sessionID)) yield* busyError(sessionID)
       data.reverting.add(sessionID)
     })
 
@@ -138,6 +150,45 @@ const layer = Layer.effect(
       return yield* current.ensureRunning(tracked)
     })
 
+    // #482：compaction/cleanup 的独占执行入口——复用 shell runner 的并发控制，
+    // 但以专属 lease 注册到 exclusive 表，与 prompt/shell/revert 三方互斥。
+    const startExclusive = Effect.fn("SessionRunState.startExclusive")(function* (
+      sessionID: SessionID,
+      onInterrupt: Effect.Effect<SessionV1.WithParts>,
+      work: Effect.Effect<SessionV1.WithParts>,
+    ) {
+      const data = yield* InstanceState.get(state)
+      // lease 用唯一 symbol 防止陈旧 finalizer 误删新请求的登记
+      const lease = Symbol()
+      return yield* Effect.acquireUseRelease(
+        Effect.void,
+        () =>
+          Effect.gen(function* () {
+            const tracked = Effect.acquireUseRelease(
+              Effect.sync(() => SessionActivity.begin(`maintenance:${sessionID}`)),
+              () => work,
+              (end) => Effect.sync(end),
+            )
+            return yield* (yield* runner(sessionID, onInterrupt))
+              .startShell(
+                tracked,
+                undefined,
+                Effect.gen(function* () {
+                  // 在 runner 持锁的临界区内 check-and-set，保证与 prompt/revert 的原子互斥
+                  if (data.reverting.has(sessionID) || data.exclusive.has(sessionID)) yield* new Runner.Busy()
+                  data.exclusive.set(sessionID, lease)
+                }),
+              )
+              .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+          }),
+        () =>
+          Effect.sync(() => {
+            // release 阶段：只允许持有者自己清除，join 者的 finalizer 不能提前释放他人租约
+            if (data.exclusive.get(sessionID) === lease) data.exclusive.delete(sessionID)
+          }),
+      )
+    })
+
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
       sessionID: SessionID,
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
@@ -151,7 +202,7 @@ const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startShell })
+    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startExclusive, startShell })
   }),
 )
 
