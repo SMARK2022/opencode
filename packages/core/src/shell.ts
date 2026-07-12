@@ -212,6 +212,195 @@ export function cmd(file: string, command: string, platform: string = process.pl
   }
 }
 
+// 只修Windows PowerShell高置信inline Python的native引号，不替换解释器、环境或stdin。
+
+export const INLINE_PYTHON_TAG = "powershell-inline-python-quoting-v1" as const
+// EncodedCommand 的 Base64 参数长度上限：Windows 命令行 32,767 字符减去 shell
+// path、固定 flags 和 terminating NUL 的余量。历史最大 normalized 长度为 31,024。
+const INLINE_PYTHON_MAX_ENCODED = 31_500
+// 捕获 executable basename，使 bare 名称、conda 和绝对路径共用 py launcher 判断。
+const INLINE_PYTHON_EXECUTABLE = /^(python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?=$|[ \t])/i
+// 路径只接受 `&` 调用的静态绝对值；三种引用形式均保留原解释器且拒绝动态语法。
+const INLINE_PYTHON_PATH = /^(?:"(?=(?:[A-Za-z]:[\\/]|\\\\))[^"`$\r\n]*[\\/](python(?:3(?:\.\d+)?)?|py)(?:\.exe)?"|'(?=(?:[A-Za-z]:[\\/]|\\\\))[^'`$\r\n]*[\\/](python(?:3(?:\.\d+)?)?|py)(?:\.exe)?'|(?=(?:[A-Za-z]:[\\/]|\\\\))[^\s"'`$@;&|<>(){}]*[\\/](python(?:3(?:\.\d+)?)?|py)(?:\.exe)?)(?=$|[ \t])/i
+// 允许的 Python 无值 boolean flags（不含 -i 交互模式、--% stop-parsing）
+// -b/-bb/-d/-x 不消费后续 token，可沿用现有静态 flag 边界。
+const INLINE_PYTHON_BOOL_FLAGS = new Set(["-B", "-E", "-I", "-O", "-OO", "-P", "-b", "-bb", "-d", "-q", "-s", "-S", "-u", "-v", "-x"])
+// 允许的 Python 有值 flags（-W value / -X value）
+const INLINE_PYTHON_VALUE_FLAGS = new Set(["-W", "-X"])
+// py launcher 版本选择器，只允许紧随 executable、位于其他 flags 之前
+const INLINE_PYTHON_VERSION_SELECTOR = /^(?:-3(?:\.\d+)?(?:-32|-64)?|-32|-64)$/
+// conda run 仅识别不会改变后续 token 边界的显式选项；未知结构原样 fallback。
+const INLINE_PYTHON_CONDA_BOOL_FLAGS = new Set(["--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream"])
+const INLINE_PYTHON_CONDA_VALUE_FLAGS = new Set(["-n", "--name", "-p", "--prefix", "--cwd"])
+
+type InlinePythonNormalization = {
+  command: string
+  source: string
+  audit: string
+}
+
+// conda 与 Python value flags 共用同一静态 token 边界。任何 PowerShell
+// operator、动态表达式或引用语法都意味着 prefix 可能包含另一条命令，必须 fallback。
+function inlinePythonStaticValue(value: string) {
+  return value.length > 0 && !/[\s"'`$@;&|<>(){}]/.test(value)
+}
+
+export function normalizePowerShellInlinePython(command: string, shell: string, platform: string = process.platform): InlinePythonNormalization | undefined {
+  if (platform !== "win32" || !ps(shell)) return undefined
+  let pos = 0
+  let callOperator = false
+  // 跳过前导空白
+  while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+  // 跳过可选的 PowerShell call operator &
+  if (command[pos] === "&") {
+    callOperator = true
+    pos++
+    while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+  }
+
+  // 直接 Python 与 `conda run ... python` 共用后续 -c parser。conda 前缀原样
+  // 保留，因此 environment name、PATH 和 launcher 选择不会被 harness 猜测或替换。
+  let exeMatch = command.slice(pos).match(INLINE_PYTHON_EXECUTABLE)
+  if (!exeMatch && callOperator) exeMatch = command.slice(pos).match(INLINE_PYTHON_PATH)
+  if (!exeMatch) {
+    const conda = command.slice(pos).match(/^conda(?:\.exe)?(?=$|[ \t])/i)
+    if (!conda) return undefined
+    pos += conda[0].length
+    while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+    const run = command.slice(pos).match(/^run(?=$|[ \t])/i)
+    if (!run) return undefined
+    pos += run[0].length
+
+    while (pos < command.length) {
+      while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+      exeMatch = command.slice(pos).match(INLINE_PYTHON_EXECUTABLE)
+      if (exeMatch) break
+
+      const option = command.slice(pos).match(/^\S+/)?.[0]
+      if (!option) return undefined
+      pos += option.length
+      if (INLINE_PYTHON_CONDA_BOOL_FLAGS.has(option) || /^-v{1,3}$/.test(option)) continue
+      const inlineValue = option.match(/^--(?:name|prefix|cwd)=(.+)$/)?.[1]
+      if (inlineValue) {
+        // 等号形式与分离形式使用同一静态值边界；动态环境变量、命令替换、
+        // 引号或 backtick 均原样 fallback，不能改变 conda environment 选择。
+        if (!inlinePythonStaticValue(inlineValue)) return undefined
+        continue
+      }
+      if (!INLINE_PYTHON_CONDA_VALUE_FLAGS.has(option)) return undefined
+
+      // name/prefix/cwd 的值必须是单一 bare token；引号化或动态表达式保持原样。
+      while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+      const value = command.slice(pos).match(/^[^-\s][^\s]*/)?.[0]
+      if (!value || !inlinePythonStaticValue(value)) return undefined
+      pos += value.length
+    }
+  }
+  if (!exeMatch) return undefined
+  const exeEnd = pos + exeMatch[0].length
+  const isPy = exeMatch.slice(1).some((value) => /^py$/i.test(value))
+
+  pos = exeEnd
+  // 解析 flags 直到找到 -c
+  let foundC = false
+  let sawNonVersionFlag = false
+  while (pos < command.length) {
+    // 跳过空白
+    while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+    if (pos >= command.length) break
+
+    if (command[pos] !== "-") break
+
+    // 读取 flag token（到下一个空白为止）
+    const flagStart = pos
+    while (pos < command.length && command[pos] !== " " && command[pos] !== "\t") pos++
+    const flag = command.slice(flagStart, pos)
+
+    if (flag === "-c") {
+      foundC = true
+      break
+    }
+
+    // py launcher 版本选择器只允许在非版本 flag 之前
+    if (isPy && !sawNonVersionFlag && INLINE_PYTHON_VERSION_SELECTOR.test(flag)) continue
+    sawNonVersionFlag = true
+
+    // 无值 boolean flags
+    if (INLINE_PYTHON_BOOL_FLAGS.has(flag)) continue
+    // Python 同时支持 `-W value`/`-X value` 与 attached `-Wvalue`/`-Xvalue`。
+    if (/^-(?:W|X).+/.test(flag)) {
+      if (!inlinePythonStaticValue(flag.slice(2))) return undefined
+      continue
+    }
+    // 有值 flags：下一个 token 是值
+    if (INLINE_PYTHON_VALUE_FLAGS.has(flag)) {
+      while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+      if (pos >= command.length || command[pos] === "-") return undefined
+      const valueStart = pos
+      while (pos < command.length && command[pos] !== " " && command[pos] !== "\t") pos++
+      if (!inlinePythonStaticValue(command.slice(valueStart, pos))) return undefined
+      continue
+    }
+    // 未知 flag → 不命中
+    return undefined
+  }
+
+  if (!foundC) return undefined
+
+  // -c 后必须有空白和一个双引号开头的源码
+  while (pos < command.length && (command[pos] === " " || command[pos] === "\t")) pos++
+  if (pos >= command.length || command[pos] !== '"') return undefined
+
+  const openingQuote = pos
+  // 从左到右找 closing quote。Bash 风格的 \" 属于源码；首个后缀完整匹配的
+  // 非转义 quote 才是边界。若更早 quote 后出现 shell operator 或额外 argv，
+  // 说明它是实际外层闭引号，必须原样 fallback，不能吸收到 Python source。
+  const validSuffix = /^(?:[ \t]*(?:2>&1)?(?:[ \t]*\|[ \t]*(?:Select-Object[ \t]+-(?:First|Last|Skip)[ \t]+\d+|Out-String[ \t]+-Stream))?[ \t]*)?$/
+  let closingQuote = -1
+  for (let i = openingQuote + 1; i < command.length; i++) {
+    if (command[i] !== '"') continue
+    let slashes = 0
+    for (let j = i - 1; j > openingQuote && command[j] === "\\"; j--) slashes++
+    if (slashes % 2 === 1) continue
+
+    const tail = command.slice(i + 1)
+    if (validSuffix.test(tail)) {
+      closingQuote = i
+      break
+    }
+    if (/^[ \t]*(?:;|&&|\|\||\|)|^[ \t]*[\r\n]|^[ \t]+\S/.test(tail)) return undefined
+  }
+  if (closingQuote === -1) return undefined
+
+  const source = command.slice(openingQuote + 1, closingQuote)
+  const suffix = command.slice(closingQuote + 1)
+  const prefix = command.slice(0, openingQuote)
+
+  // 排除空源码、NUL、尾随反斜杠（legacy binder closing-quote 歧义）
+  if (!source || source.includes("\0") || source.includes("`") || source.endsWith("\\")) return undefined
+
+  // 保守 quote normalization：只处理双引号前的奇数反斜杠 run
+  const normalizedSource = source.replace(/\\+"/g, (value) => {
+    const count = value.length - 1
+    if (count % 2 === 0) return value
+    return "\\".repeat((count - 1) / 2) + '"'
+  })
+
+  // Windows native argv 编码：双引号前的反斜杠双写后加保护反斜杠
+  const encoded = normalizedSource.replace(/(\\*)"/g, (_, slashes: string) => slashes + slashes + '\\"')
+  // PowerShell 单引号 literal：内部单引号写成 ''
+  const argument = `'${encoded.replaceAll("'", "''")}'`
+  const audit = prefix + argument + suffix
+  // 在子作用域中设置 Legacy native argument passing，兼容 PS 5.1 和 PS 7
+  const normalizedCommand = `$PSNativeCommandArgumentPassing = 'Legacy'; ${audit}`
+
+  // 使用真实transport连同固定flags计长度，不能复建已经移除的第二编码器。
+  if (cmd(shell, normalizedCommand, platform).args.join(" ").length > INLINE_PYTHON_MAX_ENCODED) return undefined
+
+  return { command: normalizedCommand, source: normalizedSource, audit }
+}
+
+
 export function args(file: string, command: string, cwd: string) {
   const n = name(file)
   if (n === "nu" || n === "fish") return ["-c", command]

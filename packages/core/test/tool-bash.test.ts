@@ -394,6 +394,31 @@ describe("BashTool", () => {
                   // 原命令观察不代替spawn契约；PowerShell必须实际使用非交互的编码argv。
                   if (!cmd) expect(runs[0]?.args?.slice(0, 6)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand"])
                 }
+                if (!cmd) {
+                  reset()
+                  const command = String.raw`python -c "print('{\"native\":1}')"`
+                  const input = { command, workdir: path.dirname(tmp.path) }
+                  // 真实leaf/registry配已有process替身，验证双门、执行串和typed输出而不运行Python。
+                  const settled = yield* settleTool(registry, call(input))
+                  expect(settled.result.type).toBe("content")
+                  expect(settled.output?.structured).toMatchObject({ commandAdaptation: "powershell-inline-python-quoting-v1" })
+                  expect(assertions.map((request) => request.action)).toEqual(["external_directory", "bash"])
+                  for (const request of assertions) expect(request.metadata).toMatchObject({ command, inline_scripts: [`print('{"native":1}')`] })
+                  expect(assertions[1]?.resources).toEqual([command])
+                  expect(assertions[1]?.save).toEqual([command])
+                  expect(runs).toHaveLength(1)
+                  const encoded = runs[0]?.args?.at(-1)
+                  if (!encoded) throw new Error("expected captured transport")
+                  const script = Buffer.from(encoded, "base64").toString("utf16le")
+                  expect(script).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
+                  expect(script).not.toContain(command)
+                  for (const action of ["external_directory", "bash"]) {
+                    reset()
+                    denyAction = action
+                    expect((yield* settleTool(registry, call(input))).result.type).toBe("error")
+                    expect(runs).toEqual([])
+                  }
+                }
               }), appProcess, shell)
             }
             // 配置 Git Bash 仍执行原 Unix 命令，不能把 Windows OS 当成 Windows shell。

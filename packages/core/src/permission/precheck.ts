@@ -237,7 +237,8 @@ function bashEffect(input: {
   const patternCommand = input.patterns.join(" && ")
   if (!command) return evaluateShell(patternCommand, 0)
 
-  const raw = evaluateShell(command, 0)
+  // 原始命令、canonical与最终inline源码取最高风险，附加证据不能降低既有判断。
+  const raw = shellEvidenceRisk(command, input.metadata)
   if (!patternCommand.trim() || patternCommand === command) return raw
   // #285：canonical 与原始命令相同时无需二次评估，避免重复解析
 
@@ -245,6 +246,20 @@ function bashEffect(input: {
   // auto precheck 必须同时考虑两个视角并保留更高风险，防止原始危险载荷被削弱，
   // 也不能让 env 赋值将 git push --force 从 cautious 降为 general。
   return maxRisk(raw, evaluateShell(patternCommand, 0))
+}
+
+// 附加证据是没有python -c前缀的源码；补单文件删除分类，畸形项不降低原风险。
+// 复用既有classifier和maxRisk，不建立另一套Python执行或审批路径。
+function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>): Decision {
+  const scripts = Array.isArray(metadata.inline_scripts)
+    ? metadata.inline_scripts.filter((item): item is string => typeof item === "string")
+    : []
+  return scripts.reduce((risk, script) => {
+    const scriptRisk = RE_C_PYTHON_FILE_REMOVE_CALL.test(script)
+      ? maxRisk(evaluateShell(script, 0), { level: "cautious", reason: "Python file deletion requires explicit approval" })
+      : evaluateShell(script, 0)
+    return maxRisk(risk, scriptRisk)
+  }, evaluateShell(command, 0))
 }
 
 function maxRisk(left: Decision, right: Decision) {
@@ -264,9 +279,11 @@ function externalDirectoryEffect(input: {
   if (input.permission !== "external_directory") return
 
   if (input.metadata.action_kind === "shell") {
-    const shell = evaluateShell(
+    // [local-smark] external_directory 第一道门禁：与 bashEffect 同一
+    // shellEvidenceRisk，dangerous inline source 在此即 deterministic deny
+    const shell = shellEvidenceRisk(
       typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-      0,
+      input.metadata,
     )
     // #232：已经确定性的危险 shell 载荷必须在 external_directory 门禁保持 deny——
     // #232：否则 rm -rf / 仅因同时跨越外部路径边界就会变成 reviewer 可审批。

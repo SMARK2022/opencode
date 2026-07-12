@@ -72,6 +72,8 @@ const StructuredOutput = Schema.Struct({
     compressionSecretsRedacted: Schema.Number,
   }).pipe(Schema.optional),
   durationMs: Schema.Number.pipe(Schema.optional),
+  // typed输出与投影共同保留适配标记，不能只写一个会被Schema丢弃的临时属性。
+  commandAdaptation: Schema.String.pipe(Schema.optional),
   diagnosticErrorLikeLines: Schema.Number.pipe(Schema.optional),
   diagnosticWarningLikeLines: Schema.Number.pipe(Schema.optional),
   diagnosticDiscardedChars: Schema.Number.pipe(Schema.optional),
@@ -182,6 +184,7 @@ const layer = Layer.effectDiscard(
             ...(output.diagnosticErrorLikeLines === undefined ? {} : { diagnosticErrorLikeLines: output.diagnosticErrorLikeLines }),
             ...(output.diagnosticWarningLikeLines === undefined ? {} : { diagnosticWarningLikeLines: output.diagnosticWarningLikeLines }),
             ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
+            ...(output.commandAdaptation === undefined ? {} : { commandAdaptation: output.commandAdaptation }),
             ...(output.hasErrors === undefined ? {} : { hasErrors: output.hasErrors }),
           }),
           toModelOutput: ({ output }) => [
@@ -193,6 +196,9 @@ const layer = Layer.effectDiscard(
               // 配置只采样一次，兼容检查和最终 spawn 必须使用同一个实际 shell。
               const entries = yield* config.entries()
               const shell = selectedShell(entries)
+              const normalization = Shell.normalizePowerShellInlinePython(input.command, shell)
+              // 两道权限门共享最终源码；原始command仍是授权与保存资源，audit只用于拒绝。
+              const evidence = normalization ? { inline_scripts: [normalization.source] } : {}
               const remote = ShellRemote.ranges(input.command, Shell.name(shell))
               // Windows PowerShell 递归检查命令节点；解析失败不能退回浅层扫描，Tree 在检查后释放。
               const scan = Shell.name(shell) === "cmd" ? { patterns: [], raw: [], heads: [] } : yield* Effect.gen(function* () {
@@ -248,7 +254,7 @@ const layer = Layer.effectDiscard(
                   ...LocationMutation.externalDirectoryPermission(external),
                   sessionID: context.sessionID,
                   agent: context.agent,
-                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
+                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
                   source,
                 })
               // 路径提示只看宿主片段；掩去客体载荷时保持偏移和后续本地命令。
@@ -265,9 +271,11 @@ const layer = Layer.effectDiscard(
                 agent: context.agent,
                 metadata: {
                   action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent,
+                  ...evidence,
                   // 只有leaf产生的AST证据参与规则匹配；原资源与save继续表示整条原始调用。
                   ...(scan.patterns.length && (scan.patterns.length !== 1 || scan.patterns[0] !== input.command) ? { canonical_patterns: scan.patterns } : {}),
-                  ...(scan.raw.length ? { raw_patterns: scan.raw } : {}),
+                  // 规范化audit补充同一AST的拒绝证据，不能覆盖env等原始差异。
+                  ...(scan.raw.length || normalization ? { raw_patterns: [...scan.raw, ...(normalization ? [normalization.audit] : [])] } : {}),
                 },
                 source,
               })
@@ -322,7 +330,7 @@ const layer = Layer.effectDiscard(
               const limits = yield* outputStore.limits()
               // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
               // 共用无profile的UTF-8 argv，原始命令仍是授权资源，执行与capture各只有一次。
-              const invocation = Shell.cmd(shell, input.command)
+              const invocation = Shell.cmd(shell, normalization?.command ?? input.command)
               const command = ChildProcess.make(invocation.command, invocation.args, {
                 cwd: target.canonical,
                 shell: invocation.shell,
@@ -386,6 +394,7 @@ const layer = Layer.effectDiscard(
                 truncated,
                 compression: bashCompressionMetadata(compressed.stats),
                 durationMs,
+                ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
                 diagnosticErrorLikeLines: diagnostic.errorLikeLines,
                 diagnosticWarningLikeLines: diagnostic.warningLikeLines,
                 diagnosticDiscardedChars: diagnostic.discardedChars,
