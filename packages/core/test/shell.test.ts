@@ -55,6 +55,28 @@ describe("shell", () => {
     expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
   })
 
+  test("normalizes only bounded Windows PowerShell inline Python through the real transport", () => {
+    const command = String.raw`python -c "print('{\"key\":1}')"`
+    const normalized = Shell.normalizePowerShellInlinePython(command, "pwsh", "win32")
+    if (!normalized) throw new Error("expected static Python adaptation")
+    expect(normalized.source).toBe(`print('{"key":1}')`)
+    expect(normalized.command).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
+    const encoded = Shell.cmd("pwsh", normalized.command, "win32").args.at(-1)
+    if (!encoded) throw new Error("expected EncodedCommand")
+    expect(Buffer.from(encoded, "base64").toString("utf16le")).toContain(normalized.command)
+    // 显式平台输入沿用Shell.cmd风格，不伪造全局platform，也不启动任何解释器。
+    for (const platform of ["linux", "darwin"]) expect(Shell.normalizePowerShellInlinePython(command, "pwsh", platform)).toBeUndefined()
+    expect(Shell.normalizePowerShellInlinePython(command, "cmd.exe", "win32")).toBeUndefined()
+    for (const prefix of ["python3.12 -B -Wdefault -Xutf8", "py -3.12 -B", '& "C:\\Python312\\python3.12.exe"', "conda run --name=agent --live-stream python"]) {
+      expect(Shell.normalizePowerShellInlinePython(`${prefix} -c "print(1)"`, "pwsh", "win32")?.source).toBe("print(1)")
+    }
+    for (const value of [
+      'python -i -c "print(1)"', 'python -c "print(1)" extra', 'python -c "print(1)"; Write-Output done',
+      'python -c "print(1)" > output.txt', 'conda run --name=$env:ENV python -c "print(1)"',
+    ]) expect(Shell.normalizePowerShellInlinePython(value, "pwsh", "win32")).toBeUndefined()
+    expect(Shell.normalizePowerShellInlinePython(`python -c "${"x".repeat(20_000)}"`, "pwsh", "win32")).toBeUndefined()
+  })
+
   test("normalizes shell names", () => {
     expect(Shell.name("/bin/bash")).toBe("bash")
     if (process.platform === "win32") {

@@ -293,7 +293,10 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
   return yield* Effect.promise(() => Shell.parse(command, ps))
 })
 
-const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string }) {
+const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string; inline_scripts?: string[] }) {
+  // [local-smark] shared evidence：两个 permission request 必须从同一对象展开，
+  // 确保 inline_scripts 附加证据同时到达 external_directory 和 bash gate
+  const sharedEvidence = input.inline_scripts ? { inline_scripts: input.inline_scripts } : {}
   if (scan.dirs.size > 0) {
     const directories = Array.from(scan.dirs)
     const globs = directories.map((dir) => {
@@ -315,6 +318,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
         agent: ctx.agent,
         directories,
         patterns: globs,
+        ...sharedEvidence,
       },
     })
   }
@@ -334,6 +338,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
       cwd: input.cwd,
       shell: input.shell,
       agent: ctx.agent,
+      ...sharedEvidence,
     },
   })
 })
@@ -498,6 +503,10 @@ export const ShellTool = Tool.define(
       input: {
         shell: string
         command: string
+        // [local-smark] PowerShell inline Python 规范化后的实际执行命令
+        executeCommand?: string
+        // 规范化 tag，进 result metadata 便于数据库度量
+        adaptation?: string
         cwd: string
         env: NodeJS.ProcessEnv
         timeout: number
@@ -563,7 +572,7 @@ export const ShellTool = Tool.define(
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
-          const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
+          const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
 
           // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
@@ -771,6 +780,8 @@ export const ShellTool = Tool.define(
           output: displayed ? preview(display.value()) : preview(output),
           exit: code,
           truncated: cut,
+          // [local-smark] 规范化生效时记录 adaptation tag，便于数据库度量和后续诊断
+          ...(input.adaptation ? { commandAdaptation: input.adaptation } : {}),
           ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
           // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
           ...bashCompressionMetadata(compressed.stats),
@@ -818,6 +829,8 @@ export const ShellTool = Tool.define(
               }
               const timeout = params.timeout ?? defaultTimeoutMs
               const ps = Shell.ps(shell)
+              // 只在共享owner确认Windows PowerShell静态边界后适配，原命令仍用于分析和授权。
+              const normalization = Shell.normalizePowerShellInlinePython(params.command, shell)
               // 全局 false 优先于单次 true；精确排版可由单次 false 独立关闭。
               const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
               yield* Effect.scoped(
@@ -830,7 +843,12 @@ export const ShellTool = Tool.define(
                   if (compatibility) throw new Error(compatibility)
                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
-                  yield* ask(ctx, scan, { command: params.command, cwd, shell: name })
+                  // 原始command继续授权；audit只补充拒绝证据，不生成allow/always键。
+                  if (normalization) scan.raw.add(normalization.audit)
+                  yield* ask(ctx, scan, {
+                    command: params.command, cwd, shell: name,
+                    ...(normalization ? { inline_scripts: [normalization.source] } : {}),
+                  })
                 }),
               )
 
@@ -840,11 +858,16 @@ export const ShellTool = Tool.define(
                 {
                   shell,
                   command: params.command,
+                  // [local-smark] 规范化后的实际执行命令；原始 params.command 继续用于
+                  // UI、压缩、分类、日志和 ToolPart input
+                  ...(normalization ? { executeCommand: normalization.command } : {}),
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
                   compressOutput,
                   encoding,
+                  // 规范化生效时在 result metadata 中记录 adaptation tag，便于数据库度量
+                  ...(normalization ? { adaptation: Shell.INLINE_PYTHON_TAG } : {}),
                 },
                 ctx,
               )
