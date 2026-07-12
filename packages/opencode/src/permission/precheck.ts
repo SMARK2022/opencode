@@ -333,7 +333,10 @@ function bashEffect(input: {
   const patternCommand = input.patterns.join(" && ")
   if (!command) return evaluateShell(patternCommand, 0)
 
-  const raw = evaluateShell(command, 0)
+  // 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据风险取 max。
+  // inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的源码证据，
+  // 只能提高风险，不能降低：dangerous source 在任何 gate 都被 deterministic deny。
+  const raw = shellEvidenceRisk(command, input.metadata)
   if (!patternCommand.trim() || patternCommand === command) return raw
 
   // Shell metadata is the raw audit/reviewer evidence, while permission patterns
@@ -342,6 +345,23 @@ function bashEffect(input: {
   // dangerous payloads cannot be weakened, and env assignments cannot downgrade a
   // canonical `git push --force` pattern from cautious to general.
   return maxRisk(raw, evaluateShell(patternCommand, 0))
+}
+
+// inline_scripts 附加证据风险计算：在原命令风险之上单调叠加每个字符串 source
+// 的 evaluateShell 结果。非数组或非字符串元素被忽略，不会降低原命令风险。
+// inline_scripts 包含 Python 源码而非 shell 命令，因此除了 evaluateShell 的常规
+// 危险模式外，还需检查 RE_C_PYTHON_FILE_REMOVE_CALL：该模式在正常 token 级检查
+// 中需要 python -c 前缀才能命中，但 inline_scripts 的源码没有该前缀。
+function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>): Decision {
+  const scripts = Array.isArray(metadata.inline_scripts)
+    ? metadata.inline_scripts.filter((item): item is string => typeof item === "string")
+    : []
+  return scripts.reduce((risk, script) => {
+    const scriptRisk = RE_C_PYTHON_FILE_REMOVE_CALL.test(script)
+      ? maxRisk(evaluateShell(script, 0), { level: "cautious", reason: "Python file deletion requires explicit approval" })
+      : evaluateShell(script, 0)
+    return maxRisk(risk, scriptRisk)
+  }, evaluateShell(command, 0))
 }
 
 function maxRisk(left: Decision, right: Decision) {
@@ -356,9 +376,11 @@ function externalDirectoryEffect(input: {
   if (input.permission !== "external_directory") return
 
   if (input.metadata.action_kind === "shell") {
-    const shell = evaluateShell(
+    // external_directory 是第一道权限门禁；使用与 bashEffect 相同的 shellEvidenceRisk，
+    // 确保 dangerous inline source 在此就被 deterministic deny，而非等到后续 bash gate。
+    const shell = shellEvidenceRisk(
       typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-      0,
+      input.metadata,
     )
     // external_directory access is normally reviewable, but an already-critical
     // shell payload must remain deterministic deny. Otherwise a command like

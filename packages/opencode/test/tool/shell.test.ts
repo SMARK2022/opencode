@@ -2274,6 +2274,385 @@ describe("tool.shell truncation", () => {
   })
 })
 
+// [local-smark] PowerShell inline Python 命令规范化：PowerShell 对 python -c "..."
+// 内双引号源码做二次解析，导致 Bash 风格的 \" 转义被剥离、$() 被展开。
+// 规范化把源码移入 PowerShell 单引号 literal，使 Python 收到原始源码。
+// 仅在 Windows PowerShell 下生效；非 Windows 或无 PowerShell 时跳过。
+describe("tool.shell inline python normalization", () => {
+  // 最小复现：Bash 风格 \" 在 PowerShell 双引号内被剥离，导致 Python SyntaxError
+  for (const item of ps) {
+    it.live(`preserves escaped quotes in python -c [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `python -c "print('{\"key\":1}')"`,
+              description: "Print JSON with escaped quotes",
+            })
+            expect(result.metadata.exit).toBe(0)
+            // Python 应输出 {"key":1}，而非 SyntaxError: unterminated string literal
+            expect(result.output).toContain('{"key":1}')
+            // 规范化生效时 metadata 记录 adaptation tag
+            expect(result.metadata).toHaveProperty("commandAdaptation")
+
+            // 静态绝对路径必须保留模型选择的解释器，只修复同一个 -c 参数。
+            const interpreter = Bun.which("python")!
+            const pathResult = yield* run({
+              command: `& "${interpreter}" -c "import sys; print(sys.executable); print('{\"path\":1}')"`,
+              description: "Print JSON with an explicit Python path",
+            })
+            expect(pathResult.metadata.exit).toBe(0)
+            expect(pathResult.output).toContain('{"path":1}')
+            // 输出实际解释器路径，防止规范化悄悄退回 PATH 中的 bare python。
+            expect(pathResult.output.toLowerCase().replaceAll("\\", "/")).toContain(interpreter.toLowerCase().replaceAll("\\", "/"))
+            expect(pathResult.metadata).toHaveProperty("commandAdaptation")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`preserves valid Python semicolon statements [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `python -c "print('{\"key\":1}'); print(2)"`,
+              description: "Print two Python statements",
+            })
+            expect(result.metadata.exit).toBe(0)
+            expect(result.output).toContain('{"key":1}')
+            expect(result.output).toContain("2")
+            expect(result.metadata).toHaveProperty("commandAdaptation")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // $() 和 $env: 在 PowerShell 双引号内会被展开；规范化后应保持字面量
+  for (const item of ps) {
+    it.live(`prevents PowerShell variable expansion in python source [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `python -c "s='$(Write-Output EXPANDED)'; print(s)"`,
+              description: "Print literal dollar-paren",
+            })
+            expect(result.metadata.exit).toBe(0)
+            // 源码中的 $(...) 应原样到达 Python，不被 PowerShell 求值
+            expect(result.output).toContain("$(Write-Output EXPANDED)")
+            expect(result.output).not.toContain("EXPANDED\n")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // Unicode 和各种引号组合应逐字符到达 Python
+  for (const item of ps) {
+    it.live(`preserves unicode and quote combinations [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            // 混合单双引号和 Unicode 在 -c 源码内，验证规范化后逐字符一致
+            const result = yield* run({
+              command: `python -c "print('{\"k\":\"v\"} 汉字')"`,
+              description: "Print unicode with escaped quotes",
+            })
+            expect(result.metadata.exit).toBe(0)
+            // Python 应输出原始源码中的 JSON 和 Unicode
+            expect(result.output).toContain('{"k":"v"} 汉字')
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // 尾部 Select-Object -First/-Last 应保持行为
+  for (const item of ps) {
+    it.live(`preserves Select-Object -First suffix [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `python -c "for i in range(10): print(i)" | Select-Object -First 3`,
+              description: "Print first 3 lines",
+            })
+            expect(result.metadata.exit).toBe(0)
+            const lines = result.output.trim().split("\n")
+            expect(lines.length).toBeLessThanOrEqual(3)
+            expect(lines[0]).toContain("0")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // 不支持的命令结构应原样执行，不产生 adaptation metadata
+  for (const item of ps) {
+    it.live(`does not normalize compound commands [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `python -c "print(1)"; Write-Output "done"`,
+              description: "Compound command",
+            })
+            // 复合命令不命中规范化，原样执行
+            expect(result.metadata).not.toHaveProperty("commandAdaptation")
+            expect(result.output).toContain("1")
+            expect(result.output).toContain("done")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // conda run 前缀必须保留原环境选择，只规范化嵌套 Python 的 -c 源码。
+  // 在 bash permission 处中断，验证 parser 而不实际启动 conda 或历史载荷。
+  for (const item of ps) {
+    it.live(`normalizes conda run inline Python without execution [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+            const stop = new Error("stop before conda execution")
+            expect(
+              yield* fail(
+                {
+                  command: `conda run -n agent python -c "print('{\"key\":1}')"`,
+                  description: "Conda run command",
+                },
+                capture(requests, stop),
+              ),
+            ).toMatchObject({ message: stop.message })
+            expect(requests.find((request) => request.permission === "bash")?.metadata).toMatchObject({
+              inline_scripts: [`print('{"key":1}')`],
+            })
+            const raw = requests.find((request) => request.permission === "bash")?.metadata.raw_patterns
+            expect(Array.isArray(raw) && raw.some((pattern) =>
+              typeof pattern === "string" && pattern.startsWith("conda run -n agent python -c '")
+            )).toBe(true)
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`handles bounded conda options and rejects dynamic forms [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const cases = [
+              { option: "--name=agent", normalized: true },
+              { option: "--prefix=C:\\envs\\agent", normalized: true },
+              { option: "--cwd=H:\\work", normalized: true },
+              { option: "--name=$env:ENV", normalized: false },
+              { option: "--prefix=$(Get-Location)", normalized: false },
+              { option: '--cwd="somewhere"', normalized: false },
+              { option: "--name=agent;Write-Output", normalized: false },
+              { option: "--prefix=C:\\envs\\agent|Write-Output", normalized: false },
+              { option: "-n agent;Write-Output", normalized: false },
+              { option: "-p C:\\envs\\agent&&Write-Output", normalized: false },
+              { option: "-n @environmentArgs", normalized: false },
+              { option: "--prefix @prefixArgs", normalized: false },
+              { option: "--unknown value", normalized: false },
+            ]
+            for (const entry of cases) {
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              const stop = new Error(`stop before conda ${entry.option}`)
+              expect(
+                yield* fail(
+                  {
+                    command: `conda run ${entry.option} --live-stream python -c "print(1)"`,
+                    description: "Conda option boundary",
+                  },
+                  capture(requests, stop),
+                ),
+              ).toMatchObject({ message: stop.message })
+              expect(Boolean(requests.find((request) => request.permission === "bash")?.metadata.inline_scripts)).toBe(entry.normalized)
+            }
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`supports static Python launchers and flags without execution [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const cases = [
+              // 版本化名称和静态绝对路径仍保留调用方选择的原解释器。
+              // 动态路径反例保证 `$env:` 不会被误认成固定解释器。
+              { prefix: "python3.12", normalized: true },
+              { prefix: '& "C:\\Python312\\python3.12.exe"', normalized: true },
+              { prefix: "& 'C:\\Python312\\python3.12.exe'", normalized: true },
+              { prefix: "& C:\\Python312\\python3.12.exe", normalized: true },
+              { prefix: '& "C:\\$env:PYTHON\\python.exe"', normalized: false },
+              { prefix: "python3.$env:PY", normalized: false },
+              { prefix: "python -b -bb -d -x", normalized: true },
+              { prefix: "python -Wdefault -Xutf8", normalized: true },
+              { prefix: "py -32", normalized: true },
+              { prefix: "py -64", normalized: true },
+              { prefix: "py -3.12", normalized: true },
+              { prefix: "python -Wdefault;python", normalized: false },
+              { prefix: "python -W default;python", normalized: false },
+              { prefix: "python -Xutf8|python", normalized: false },
+              { prefix: "python -X utf8||python", normalized: false },
+              { prefix: "python -W@warningArgs", normalized: false },
+              { prefix: "python -X @xoptions", normalized: false },
+            ]
+            for (const entry of cases) {
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              const stop = new Error(`stop before ${entry.prefix}`)
+              expect(
+                yield* fail(
+                  { command: `${entry.prefix} -c "print(1)"`, description: "Python flag boundary" },
+                  capture(requests, stop),
+                ),
+              ).toMatchObject({ message: stop.message })
+              expect(Boolean(requests.find((request) => request.permission === "bash")?.metadata.inline_scripts)).toBe(entry.normalized)
+            }
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  for (const item of ps) {
+    it.live(`leaves backtick and extra argv commands unchanged [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            for (const command of [
+              'python -c "print(`"hello`")"',
+              'python -c "print(1)" "extra"',
+              'python -c "print(1)" > output.txt',
+              'python -c "print(1)"\nWrite-Output done',
+            ]) {
+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+              const stop = new Error("stop before unsupported boundary")
+              expect(yield* fail({ command, description: "Unsupported Python boundary" }, capture(requests, stop))).toMatchObject({
+                message: stop.message,
+              })
+              expect(requests.find((request) => request.permission === "bash")?.metadata).not.toHaveProperty("inline_scripts")
+            }
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // Python flags 应保留
+  for (const item of ps) {
+    it.live(`preserves Python flags [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            // -B 设置 dont_write_bytecode flag 为 1
+            const result = yield* run({
+              command: `python -B -c "import sys; print(sys.flags.dont_write_bytecode)"`,
+              description: "Print dont_write_bytecode flag",
+            })
+            expect(result.metadata.exit).toBe(0)
+            expect(result.output).toContain("1")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // 真正的 Python SyntaxError 应由原解释器直接输出，不增加 wrapper frame
+  for (const item of ps) {
+    it.live(`reports real SyntaxError without wrapper frame [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const result = yield* run({
+              command: `python -c "print("`,
+              description: "Syntax error command",
+            })
+            expect(result.metadata.exit).not.toBe(0)
+            // Python 语法错误应直接出现在输出中
+            expect(result.output).toMatch(/SyntaxError|Unexpected EOF|was never closed/)
+            // traceback 不应包含 bootstrap/wrapper frame
+            expect(result.output).not.toContain("__opencode")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+
+  // permission 请求应同时携带原始 command 和 inline_scripts 证据
+  for (const item of ps) {
+    it.live(`sends inline_scripts in both permission gates [${item.label}]`, () =>
+      withShell(
+        item,
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+            yield* run(
+              {
+                command: `python -c "print(1)"`,
+                description: "Permission evidence",
+              },
+              capture(requests),
+            )
+            const bashReq = requests.find((r) => r.permission === "bash")
+            expect(bashReq).toBeDefined()
+            // bash gate 必须携带 inline_scripts 附加证据
+            expect(bashReq!.metadata).toHaveProperty("inline_scripts")
+          }),
+        ),
+      ),
+      30_000,
+    )
+  }
+})
+
 // [local-smark] execution notice policy 纯函数测试：不依赖真实子进程，
 // 确定性验证 Bash outcome 优先级、elapsed_ms 和 120 秒阈值
 describe("tool.shell execution notice policy", () => {

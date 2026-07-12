@@ -455,7 +455,7 @@
 | P2-2 | model switch 时注入 "Model switched from X to Y. Prior turns followed X's conventions." | F-9 |
 | P2-3 | permission-reviewer context 限制为 sliding window（最近 N turns + action） | F-22 |
 | P2-4 | WSL 命令 output 强制 UTF-8 解码（不依赖 auto-detect） | F-44 |
-| P2-5 | 扩展 system prompt 禁止 bun -e/python -c/Select-String；bash 命令 bypass 检测 | F-45, F-46, F-49, F-59 |
+| P2-5 | 扩展 system prompt 软提示 PowerShell inline Python 引号风格；自适应规范化见 [powershell-inline-python-normalization-plan.md](powershell-inline-python-normalization-plan.md) | F-45, F-46, F-49, F-59 |
 | P2-6 | 检测 user correction 信号（"不是"/"不对"/"我说的是"），在 Evidence Handoff 增加 "### User Corrections" | F-28 |
 | P2-7 | 旧 reasoning（>5 turns）替换为 1-line stub "Reasoning from turn X (elided; N chars)" | F-37 |
 | P2-8 | read binary error 增加 type-specific suggestion（sqlite→bun:sqlite, gzip→gunzip, unknown→strings） | F-51 |
