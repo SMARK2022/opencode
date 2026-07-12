@@ -507,6 +507,40 @@ describe("revert + compact workflow", () => {
   )
 
   it.live(
+    "cleanup ignores a stale revert snapshot after the boundary was cleared",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const info = yield* session.create({})
+          const reverted = yield* user(info.id)
+          yield* text(info.id, reverted.id, "old boundary")
+          yield* session.setRevert({
+            sessionID: info.id,
+            revert: { messageID: reverted.id },
+            summary: { additions: 0, deletions: 0, files: 0 },
+          })
+
+          // 保留 cleanup 前的快照，模拟并发 caller 在维护操作完成后才恢复执行。
+          const stale = yield* session.get(info.id)
+          yield* revert.cleanup(stale)
+
+          // 新消息晚于已消费的 revert 边界，不能被陈旧快照再次解释成待隐藏尾部。
+          const fresh = yield* user(info.id)
+          yield* text(info.id, fresh.id, "new user intent")
+          yield* revert.cleanup(stale)
+
+          const messages = yield* session.messages({ sessionID: info.id })
+          // 通过 Session 可见消息验证行为，而不是依赖 cleanup 的内部锁或缓存形状。
+          expect(messages.map((message) => message.info.id)).toContain(fresh.id)
+          expect((yield* session.get(info.id)).revert).toBeUndefined()
+        }),
+      { git: true },
+    ),
+  )
+
+  it.live(
     "restore messages in sequential order",
     provideTmpdirInstance(
       (dir) =>

@@ -451,14 +451,53 @@ Show token usage and cost statistics for your OpenCode sessions.
 opencode stats
 ```
 
+Stats use the latest 60 calendar days by default. Pass `--days 0` for today or
+`--all-time` for the complete history. In interactive mode, `r` and `R` move
+forward and backward through 60 days, 30 days, 7 days, today, and all time;
+each range is loaded only when first opened.
+
+The default dashboard summarizes activity, token components, health, models,
+providers, and sessions. Detailed views keep separate responsibilities:
+
+```bash
+opencode stats timeline [--metric tokens|cost]
+opencode stats breakdown [model|provider|agent|source|project|tool|status]
+opencode stats sessions
+opencode stats insights [--forecast]
+```
+
+Timeline uses a full-width total trend and independently normalized token
+component trends. Compare component magnitude using the printed total, share,
+and peak values rather than sparkline height. Breakdown pages show complete
+entity names instead of numbered matrix keys. Project rows use the stored
+project name and worktree when available.
+
+Tool calls, input/output character counts, errors, and duration come from the
+stored ToolPart. "Estimated context tokens" is a separate estimate of how much
+earlier tool content appears in later assistant input; it is not tool cost or
+billed token usage. If a selected range has no positive recorded cost, stats
+continue to show token and health data and mark cost-derived analysis as
+unavailable. Colors use the terminal's ANSI palette and do not paint a custom
+background, so light and dark terminal themes remain authoritative.
+
+The Sessions view shows population percentiles, full-width token and positive-
+cost distribution bars, and a per-Session token-share bar with Project, Model,
+Provider, request, call, message, Tool, cache, failure, and latency details.
+
 #### Flags
 
 | Flag                                    | Description                                                                 |
 | --------------------------------------- | --------------------------------------------------------------------------- |
-| <nobr><code>{"--days"}</code></nobr>    | Show stats for the last N days (all time)                                   |
+| <nobr><code>{"--days"}</code></nobr>    | Show the last N calendar days (60 by default; 0 means today)                |
+| <nobr><code>{"--all-time"}</code></nobr> | Include all recorded usage instead of the default 60 days                  |
+| <nobr><code>{"--interactive"}</code></nobr> | Browse views and date ranges interactively                                |
 | <nobr><code>{"--tools"}</code></nobr>   | Number of tools to show (all)                                               |
 | <nobr><code>{"--models"}</code></nobr>  | Show model usage breakdown (hidden by default). Pass a number to show top N |
 | <nobr><code>{"--project"}</code></nobr> | Filter by project (all projects, empty string: current project)             |
+
+`--interactive`, `--tools`, and `--models` are root Dashboard shortcuts. Breakdown
+and Sessions expose their own `-n` / `--limit`; other detailed views reject that flag
+instead of silently ignoring it.
 
 ---
 

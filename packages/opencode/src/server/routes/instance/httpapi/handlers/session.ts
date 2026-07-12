@@ -267,18 +267,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof SummarizePayload.Type
     }) {
-      // Reject busy sessions before revert cleanup or model selection so a
-      // manual compact cannot mutate session state and then no-op behind an
-      // already-running prompt.
-      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-      yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
+      yield* requireSession(ctx.params.sessionID)
       const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
       const defaultAgent = yield* agentSvc.defaultAgent()
       const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
 
-      // Summarize executes compaction directly through SessionPrompt so the
-      // runner owns cancellation and no pending compact command is left in
-      // history for a later request to replay.
+      // Busy acquisition 与 revert cleanup 由 SessionPrompt 的 exclusive 边界统一负责，HTTP 层只做传输映射。
       yield* SessionError.mapBusy(
         promptSvc.compact({
           sessionID: ctx.params.sessionID,

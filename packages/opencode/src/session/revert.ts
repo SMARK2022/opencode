@@ -1,4 +1,4 @@
-import { Effect, Layer, Context, Schema, Option } from "effect"
+import { Effect, Layer, Context, Schema, Option, Deferred, Exit } from "effect"
 import path from "path"
 import { Bus } from "../bus"
 import { Snapshot } from "../snapshot"
@@ -40,6 +40,8 @@ export const layer = Layer.effect(
     const summary = yield* SessionSummary.Service
     const state = yield* SessionRunState.Service
     const sync = yield* SyncEvent.Service
+    // 同一 Session 的 cleanup 必须是 single-flight：并发 prompt/compact 只能共同消费一次 revert 边界。
+    const cleanupOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
 
     const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
       yield* state.assertNotBusy(input.sessionID)
@@ -152,11 +154,14 @@ export const layer = Layer.effect(
       )
     })
 
-    const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
+    const cleanupCurrent = Effect.fn("SessionRevert.cleanupCurrent")(function* (sessionID: SessionID) {
+      // 调用方可能持有 cleanup 前的 Session 快照；必须重读当前值，防止旧边界隐藏后来创建的消息。
+      const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
       if (!session.revert) return
-      const sessionID = session.id
+      // 本次 owner 固定使用同一个边界，后续异步写入不能改变这次 cleanup 的解释范围。
+      const boundary = session.revert
       const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
-      const messageID = session.revert.messageID
+      const messageID = boundary.messageID
       const remove = [] as MessageV2.WithParts[]
       let target: MessageV2.WithParts | undefined
       for (const msg of msgs) {
@@ -165,7 +170,7 @@ export const layer = Layer.effect(
           remove.push(msg)
           continue
         }
-        if (session.revert.partID) {
+        if (boundary.partID) {
           target = msg
           continue
         }
@@ -186,8 +191,8 @@ export const layer = Layer.effect(
           if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next })
         }
       }
-      if (session.revert.partID && target) {
-        const partID = session.revert.partID
+      if (boundary.partID && target) {
+        const partID = boundary.partID
         const idx = target.parts.findIndex((part) => part.id === partID)
         if (idx >= 0) {
           const removeParts = target.parts.slice(idx)
@@ -201,6 +206,32 @@ export const layer = Layer.effect(
         }
       }
       yield* sessions.clearRevert(sessionID)
+    })
+
+    const cleanup = Effect.fn("SessionRevert.cleanup")(function* (session: Session.Info) {
+      const existing = cleanupOps.get(session.id)
+      if (existing) {
+        // joiner 重放 owner 的完整 Exit，不能把 cleanup failure 静默降级成成功。
+        const exit = yield* Deferred.await(existing)
+        if (Exit.isFailure(exit)) yield* Effect.failCause(exit.cause)
+        return
+      }
+
+      // Deferred 分配与 Map 登记之间没有异步 I/O，保持与 SessionPrompt.cancel 相同的原子登记约束。
+      const deferred = yield* Deferred.make<Exit.Exit<void>>()
+      cleanupOps.set(session.id, deferred)
+      yield* cleanupCurrent(session.id).pipe(
+        Effect.onExit((exit) =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              // 以值保存 Exit，让后续 caller 得到与 owner 完全一致的 success/failure/interrupt。
+              // 先完成Deferred再删登记，交叠caller只能join完成值而不能另起cleanup owner。
+              yield* Deferred.succeed(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
+              cleanupOps.delete(session.id)
+            }),
+          ),
+        ),
+      )
     })
 
     return Service.of({ revert, unrevert, cleanup })

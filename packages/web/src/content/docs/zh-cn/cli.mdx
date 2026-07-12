@@ -417,14 +417,49 @@ opencode session list
 opencode stats
 ```
 
+Stats 默认统计最近 60 个自然日。传入 `--days 0` 可仅查看今天，传入
+`--all-time` 可查看完整历史。在交互模式中，使用 `r` 和 `R` 可在最近
+60 天、30 天、7 天、今天和完整历史之间双向切换；各范围仅在首次打开时加载。
+
+默认 Dashboard 汇总活跃度、Token 组成、健康状态、模型、Provider 和会话。
+详细页面各自承担独立职责：
+
+```bash
+opencode stats timeline [--metric tokens|cost]
+opencode stats breakdown [model|provider|agent|source|project|tool|status]
+opencode stats sessions
+opencode stats insights [--forecast]
+```
+
+Timeline 使用全宽总量趋势，并为各 Token 组成提供独立归一化趋势。比较组成量级时，
+应读取同一行的总量、占比和峰值，而不是比较 sparkline 高度。Breakdown 直接显示
+完整实体名称，不再要求通过编号矩阵反查；Project 优先显示已保存的项目名称和
+worktree 路径。
+
+工具调用数、输入/输出字符数、错误数和耗时来自已保存的 ToolPart；“估算上下文
+Token”单独估算早先工具内容有多少进入后续 Assistant 输入，它不是工具费用或计费
+Token。所选范围没有正费用记录时，Stats 仍显示 Token 和健康数据，并把费用派生
+分析标记为不可用。颜色复用终端 ANSI 调色板且不绘制自定义背景，因此浅色和深色
+终端主题始终拥有最终控制权。
+
+Sessions 页面展示总体分位数、全宽 Token/正费用分布横条，并为每个 Session 绘制
+Token 占比条，同时保留 Project、Model、Provider、请求、调用、Message、Tool、
+缓存、失败和延迟明细。
+
 #### 标志
 
 | 标志                                    | 描述                                                   |
 | --------------------------------------- | ------------------------------------------------------ |
-| <nobr><code>{"--days"}</code></nobr>    | 显示最近 N 天的统计信息（默认为所有时间）              |
+| <nobr><code>{"--days"}</code></nobr>    | 显示最近 N 个自然日（默认 60 天，0 表示今天）           |
+| <nobr><code>{"--all-time"}</code></nobr> | 查看完整历史，而不是默认的最近 60 天                     |
+| <nobr><code>{"--interactive"}</code></nobr> | 以交互方式浏览页面和日期范围                           |
 | <nobr><code>{"--tools"}</code></nobr>   | 显示的工具数量（默认为全部）                           |
 | <nobr><code>{"--models"}</code></nobr>  | 显示模型用量明细（默认隐藏）。传入数字可显示前 N 个    |
 | <nobr><code>{"--project"}</code></nobr> | 按项目筛选（默认为所有项目，传入空字符串表示当前项目） |
+
+`--interactive`、`--tools` 和 `--models` 只属于根 Dashboard 快捷入口。
+Breakdown 与 Sessions 各自提供 `-n` / `--limit`；其他详细页面会拒绝该参数，
+不会接收后静默忽略。
 
 ---
 

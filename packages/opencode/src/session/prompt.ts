@@ -432,24 +432,43 @@ export const layer = Layer.effect(
       // 不受 scope 关闭或 fiber 中断影响。
       yield* Effect.gen(function* () {
         yield* elog.info("cancel", { sessionID })
-        // 快照当前 pending assistant ID，防止 cancel 后新建的消息（用户输入的新命令）
-        // 被 abortPendingAssistants 误杀。MessageV2.stream 是同步生成器，快照原子。
-        const pendingIds = new Set(
-          Array.from(MessageV2.stream(sessionID))
-            .filter((m) => m.info.role === "assistant" && !m.info.time.completed)
-            .map((m) => m.info.id),
+        // 所有 cancel 归属都从同一同步快照推导，避免多次扫描把 replacement prompt 混入旧边界。
+        const messages = Array.from(MessageV2.stream(sessionID))
+        const parentIDs = new Set(
+          messages.flatMap((message) => (message.info.role === "assistant" ? [message.info.parentID] : [])),
         )
+        const pendingIds = new Set(
+          messages.filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
+        )
+        const orphanIDs = messages.flatMap((message) =>
+          message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [],
+        )
+        // orphan集合在cancel前冻结，后续replacement prompt不会被旧取消操作误标为aborted。
         yield* state.cancel(sessionID)
         yield* abortPendingAssistants(sessionID, pendingIds)
+        const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+        if (usage) {
+          yield* Effect.forEach(
+            orphanIDs,
+            Effect.fnUntraced(function* (requestID) {
+              const request = yield* usage.get({ sessionID, requestID })
+              // 历史 noReply 也可能没有 assistant；running guard 只终止本次仍待处理的 queued request。
+              if (request?.status !== "running") return
+              yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
+            }),
+            { discard: true },
+          )
+        }
       }).pipe(
         Effect.onExit((exit) =>
           Effect.uninterruptible(
             Effect.gen(function* () {
-              cancelOps.delete(sessionID)
               // 用 succeed 而非 done：Deferred 的成功类型就是 Exit<void>，
               // exit 本身是 Effect.onExit 回调收到的 Exit<void, never>，
               // 作为值存入 Deferred 供 joiner 重放。
+              // 完成Deferred必须早于删登记，防止极窄窗口内的新cancel误伤replacement run。
               yield* Deferred.succeed(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
+              cancelOps.delete(sessionID)
             }),
           ),
         ),
@@ -2084,7 +2103,35 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           })
         return message
       }
-      return yield* loop({ sessionID: input.sessionID })
+      const result = yield* loop({ sessionID: input.sessionID })
+      if (
+        result.info.role === "assistant" &&
+        !result.info.summary &&
+        // own < parent 表示本请求已被更新 user 合并；反向关系代表尚未回答，不能伪完成。
+        message.info.id < result.info.parentID
+      ) {
+        const requestUsageCoalesced = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+        if (requestUsageCoalesced) {
+          // 先读持久化终态，避免Goal续跑等已记账请求被最终共享结果二次覆盖。
+          const request = yield* requestUsageCoalesced.get({
+            sessionID: input.sessionID,
+            requestID: message.info.id,
+          })
+          if (request?.status !== "running") return result
+          // 不复制 assistant 记录，确保合并请求保持零 token/零 cost，真实费用只归最新 parent。
+          yield* requestUsageCoalesced.complete({
+            sessionID: input.sessionID,
+            requestID: message.info.id,
+            status: MessageV2.AbortedError.isInstance(result.info.error)
+              ? "aborted"
+              : result.info.error
+                ? "error"
+                : "completed",
+            timeCompleted: result.info.time.completed,
+          })
+        }
+      }
+      return result
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -2096,21 +2143,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
 
     const compact: Interface["compact"] = Effect.fn("SessionPrompt.compact")(function* (input) {
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      // Runner.ensureRunning joins an existing prompt instead of queueing new
-      // work. Compact must reject busy sessions explicitly so the caller sees a
-      // real busy response rather than a successful no-op, while still avoiding
-      // the old persisted pending-marker queue.
-      yield* state.assertNotBusy(input.sessionID)
-      yield* revert.cleanup(session)
-      return yield* state.ensureRunning(
+      return yield* state.startExclusive(
         input.sessionID,
         lastAssistant(input.sessionID),
         Effect.gen(function* () {
-          // Manual compact uses the same runner/cancel boundary as normal prompts,
-          // but it invokes the producer directly. The persisted compaction marker
-          // is therefore a completed boundary only, never a queued command that a
-          // future loop can pick up from stale history.
+          // cleanup 与 compaction 都必须在 exclusive ownership 内执行，避免 Busy 竞态先修改 Session。
+          yield* revert.cleanup(yield* sessions.get(input.sessionID).pipe(Effect.orDie))
           yield* compaction.run({
             sessionID: input.sessionID,
             agent: input.agent,
@@ -2118,6 +2156,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             auto: input.auto ?? false,
             overflow: input.overflow,
           })
+          // 在 maintenance work 内固定 summary；finalizer 随后才能启动排队的普通 runLoop。
           return yield* lastAssistant(input.sessionID)
         }),
       )
@@ -2220,7 +2259,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             !lastAssistant.error &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            // ID 只证明创建顺序；parentID 才能证明 latest user 已被这条 assistant 回答。
+            lastAssistant.parentID === lastUser.id
 
           // [local-smark] 错误续跑路径：marker 证明来源是 eligible terminal error，
           // 且 latest assistant 仍是对应的 errored message。
@@ -2229,6 +2269,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             terminalError !== undefined &&
             lastAssistant?.error !== undefined &&
             lastAssistant.id === terminalError.assistantID &&
+            // 旧 user 的 terminal error 不能越过后来排队的新 user 触发退出或 Goal continuation。
+            lastAssistant.parentID === lastUser.id &&
             (MessageV2.APIError.isInstance(lastAssistant.error) ||
               NamedError.Unknown.isInstance(lastAssistant.error))
 

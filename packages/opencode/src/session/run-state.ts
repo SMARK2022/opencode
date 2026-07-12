@@ -23,6 +23,11 @@ export interface Interface {
     onInterrupt: Effect.Effect<MessageV2.WithParts>,
     work: Effect.Effect<MessageV2.WithParts>,
   ) => Effect.Effect<MessageV2.WithParts>
+  readonly startExclusive: (
+    sessionID: SessionID,
+    onInterrupt: Effect.Effect<MessageV2.WithParts>,
+    work: Effect.Effect<MessageV2.WithParts>,
+  ) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
   readonly startShell: (
     sessionID: SessionID,
     onInterrupt: Effect.Effect<MessageV2.WithParts>,
@@ -46,6 +51,8 @@ export const layer = Layer.effect(
         // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
         // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
         const reverting = new Set<SessionID>()
+        // lease区分并发maintenance owner，失败调用的finalizer不能误删另一个调用的所有权。
+        const exclusive = new Map<SessionID, symbol>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
             yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
@@ -54,9 +61,10 @@ export const layer = Layer.effect(
             })
             runners.clear()
             reverting.clear()
+            exclusive.clear()
           }),
         )
-        return { runners, scope, reverting }
+        return { runners, scope, reverting, exclusive }
       }),
     )
 
@@ -85,6 +93,8 @@ export const layer = Layer.effect(
       if (existing?.busy) yield* busyError(sessionID)
       // revert 进行中也视为 busy——阻止 compact/deleteMessage 等操作与 revert 并发
       if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+      // exclusive 在Runner正式进入Shell前也生效，覆盖maintenance acquisition的短暂过渡窗。
+      if (data.exclusive.has(sessionID)) yield* busyError(sessionID)
     })
 
     // 只检查 revert 进行中，不检查 runner.busy——保留 prompt 执行中发新消息的排队语义
@@ -97,7 +107,8 @@ export const layer = Layer.effect(
     // Effect 协作式调度不会在同步代码块中切让 fiber，保证只一个 revert 能进入。
     const beginRevert = Effect.fn("SessionRunState.beginRevert")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
-      if (data.reverting.has(sessionID)) yield* busyError(sessionID)
+      // explicit revert 与 exclusive maintenance 必须双向互斥，不能只依赖调用前的非原子检查。
+      if (data.reverting.has(sessionID) || data.exclusive.has(sessionID)) yield* busyError(sessionID)
       data.reverting.add(sessionID)
     })
 
@@ -139,6 +150,48 @@ export const layer = Layer.effect(
       return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(tracked)
     })
 
+    const startExclusive = Effect.fn("SessionRunState.startExclusive")(function* (
+      sessionID: SessionID,
+      onInterrupt: Effect.Effect<MessageV2.WithParts>,
+      work: Effect.Effect<MessageV2.WithParts>,
+    ) {
+      const data = yield* InstanceState.get(state)
+      // 每次调用使用唯一token，release据此判断自己是否真正取得了maintenance所有权。
+      const lease = Symbol()
+      return yield* Effect.acquireUseRelease(
+        // finalizer先安装再尝试Runner reservation，覆盖reservation后的任意failure或defect。
+        Effect.void,
+        () =>
+          Effect.gen(function* () {
+            // maintenance 使用独立 key，避免与紧邻启动的 session run 在 Set 中互相提前释放。
+            const tracked = Effect.acquireUseRelease(
+              Effect.sync(() => SessionActivity.begin(`maintenance:${sessionID}`)),
+              () => work,
+              (end) => Effect.sync(end),
+            )
+            // startShell的ref锁是prompt与maintenance竞争Idle的唯一线性化点。
+            return yield* (yield* runner(sessionID, onInterrupt))
+              .startShell(
+                tracked,
+                undefined,
+                Effect.gen(function* () {
+                  // acquisition在Runner的Idle锁内完成；之后到达的prompt只能进入ShellThenRun。
+                  if (data.reverting.has(sessionID) || data.exclusive.has(sessionID)) yield* new Runner.Busy()
+                  data.exclusive.set(sessionID, lease)
+                }),
+              )
+              .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+          }),
+        // startShell 的 Busy、work defect 与 cancel 都必须释放内存标记，保证后续操作可重试。
+        // release晚于shell finalizer，确保handoff前不会让explicit revert插入维护边界。
+        () =>
+          Effect.sync(() => {
+            // 未取得reservation的Busy调用不能删除当前owner留下的lease。
+            if (data.exclusive.get(sessionID) === lease) data.exclusive.delete(sessionID)
+          }),
+      )
+    })
+
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
       sessionID: SessionID,
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
@@ -156,7 +209,16 @@ export const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startShell })
+    return Service.of({
+      assertNotBusy,
+      assertNotReverting,
+      beginRevert,
+      endRevert,
+      cancel,
+      ensureRunning,
+      startExclusive,
+      startShell,
+    })
   }),
 )
 

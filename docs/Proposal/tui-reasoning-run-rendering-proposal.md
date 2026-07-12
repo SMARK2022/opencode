@@ -2,9 +2,15 @@
 
 Date: 2026-07-11
 
-Status: proposed
+Status: implemented
 
 Scope: `packages/opencode` 的主 TUI Session Message 区域。本文只设计渲染阶段行为，不修改 Message、Part、事件、SDK、数据库或 Provider 协议。
+
+## 当前实施状态
+
+当前生产实现使用稳定 `ReasoningRun`、单正文树、共享五行视觉预算和 Markdown `---` source 分隔。
+历史 `thinking_visibility` 只控制整个 Thinking 是否可见；run-local `expanded=false` 只控制真实 overflow 正文的 disclosure。
+短 run 自然全文且无 toggle；post-conceal 文本经 OpenTUI native word-wrap 测量守住五行上限；`thinking_mode` 只留给独立 v2 debug route。第 1-20 节保留原始调研和方案演进，当前规范以本节及第 21-22 节为准。
 
 ## 1. 结论摘要
 
@@ -897,27 +903,27 @@ v2 reasoning 结构只有 `type`、Provider reasoning `id` 和 `text`，见 `pac
 1. 同一 Message 中 10 个相邻短 reasoning Part 在默认折叠状态下不会线性占满屏幕。
 2. 一个 Reasoning Run 的折叠正文最多使用固定 5 个 visual rows，成员数不会倍增预算，通常连同 header/footer 不超过 7 行。
 3. 展开后所有原始 reasoning 文本完整、保序可见。
-4. 多 source run 使用单一 Thinking 主标题和紧凑 `[seg N/M]` source ordinal；不显示重复的 `Segment N/M` 标题。
+4. 多 source run 使用单一 Thinking 主标题和 Markdown `---` 水平分隔线；不显示重复的 `Segment N/M` 标题。
 5. 一个 Part 内多个 Markdown section 不会被误标成多个 source segment。
 6. 非 reasoning 原始 Part 永远切断 run，即使它不显示。
 7. 每个成员仍保留原始 Part ID、metadata、time 和独立 Markdown renderer。
 8. 流式 delta、最终 snapshot、乱序前插、相邻追加、hard boundary 插入/删除和 reasoning member 删除都不丢内容、不重复内容、不错误重置左侧组状态。
 9. Message 外边框、Part 间距、Tool 显示和 selection 行为没有回归。
 10. 数据库、Message schema、SDK、事件和 SyncProvider 不发生变化。
-11. transcript 和 export 仍基于原始 Part，屏幕折叠不会隐式过滤内容。
-12. `/thinking` 的文案和实际主 Session 行为一致。
-13. 任意一帧出现 `[seg N/M]` 时，其后的对应成员已经有 post-conceal 可见 glyph；完全 conceal 的成员没有孤立 marker。
-14. preview 的实际 `CodeRenderable.width` 经 layout test 证明等于 allocator 使用的 `ctx.width`。
+11. transcript 和 export 仍基于原始 Part，local expand/collapse 不会截断或过滤内容。
+12. `/thinking` 的 Show/Hide 文案和整个 Thinking visibility 行为一致。
+13. 短 run 无 toggle；长 run 在新 Session 中默认收缩；visibility hide/show 不重置同一 run 的局部 disclosure。
+14. preview 的实际 `CodeRenderable.width` 经 layout test 证明等于 overflow measurement 使用的 `ctx.width`。
 15. 不新增文件，生产代码只修改 `session/index.tsx`，总代码与测试净改动小于 1000 行。
 
 ## 22. 最终建议
 
-采用 `ReasoningRun` 显示聚合，并把它作为生产 TUI `session/index.tsx` 内部的私有渲染抽象。它接收原始有序 Part，隐藏最大连续 run、硬边界、稳定 key、共享 preview、compact source marker 和流式状态保持；不新增文件或公开接口。
+采用 `ReasoningRun` 显示聚合，并把它作为生产 TUI `session/index.tsx` 内部的私有渲染抽象。它接收原始有序 Part，隐藏最大连续 run、硬边界、稳定 key、共享五行预算和流式状态保持；不新增文件或公开接口。
 
 最关键的三个决策是：
 
 1. 在 `AssistantMessage` 的渲染 seam 聚合，不在 processor、数据库或 SyncProvider 聚合。
-2. 共用折叠外壳但不拼接成员 Markdown，使用紧凑 `[seg N/M]` 明确 source Part 边界，同时让 Thinking 保持唯一视觉主体。
-3. 对整个 run 应用一个 5 行硬视觉预算，使用经实测的正文宽度，并让所有 marker 受预算和 post-conceal readiness 约束。
+2. 共用折叠外壳但不拼接成员 Markdown，非首 source 在自己的 renderer 中使用 Markdown `---`，同时让 Thinking 保持唯一视觉主体。
+3. 对整个 run 应用一个 5 行硬视觉预算，以 post-conceal 文本的 OpenTUI native word-wrap 行数判断 overflow，并让 visibility 与 local disclosure 保持正交。
 
 这三个决策一起解决占屏问题、语义歧义和流式鲁棒性；只做其中任意一个都不完整。

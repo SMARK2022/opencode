@@ -4,7 +4,12 @@ export interface Runner<A, E = never> {
   readonly state: State<A, E>
   readonly busy: boolean
   readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
-  readonly startShell: (work: Effect.Effect<A, E>, ready?: Latch.Latch) => Effect.Effect<A, E | Busy>
+  readonly startShell: (
+    work: Effect.Effect<A, E>,
+    ready?: Latch.Latch,
+    // reserve在state锁内线性化外部所有权与Shell发布，不能在调用方提前执行。
+    reserve?: Effect.Effect<void, Busy>,
+  ) => Effect.Effect<A, E | Busy>
   readonly cancel: Effect.Effect<void>
 }
 
@@ -137,7 +142,11 @@ export const make = <A, E = never>(
       }),
     ).pipe(Effect.flatten)
 
-  const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch): Effect.Effect<A, E | Busy> =>
+  const startShell = (
+    work: Effect.Effect<A, E>,
+    ready?: Latch.Latch,
+    reserve?: Effect.Effect<void, Busy>,
+  ): Effect.Effect<A, E | Busy> =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
@@ -145,6 +154,9 @@ export const make = <A, E = never>(
           const reject: Effect.Effect<A, E | Busy> = Effect.fail(new Busy())
           return [reject, st] as const
         }
+        // reservation与Shell状态共用同一把ref锁，避免并发run在两者之间抢占Idle。
+        if (reserve) yield* reserve
+        // reservation失败时modifyEffect不会提交Shell，work也不能被意外fork。
         yield* onBusy
         const id = next()
         const cancelled = yield* Deferred.make<void>()

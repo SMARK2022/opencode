@@ -46,6 +46,8 @@ type HttpError = {
   type: "http-error"
   status: number
   body: unknown
+  // wait仅用于把外部HTTP失败同步到确定的并发边界，不改变默认即时错误行为。
+  wait?: PromiseLike<unknown>
 }
 
 export type Item = Sse | HttpError
@@ -557,11 +559,13 @@ export function reply() {
   return new Reply()
 }
 
-export function httpError(status: number, body: unknown): Item {
+export function httpError(status: number, body: unknown, wait?: PromiseLike<unknown>): Item {
+  // 可选门闩沿用SSE reply的PromiseLike约定，测试无需引入第二套计时器。
   return {
     type: "http-error",
     status,
     body,
+    wait,
   }
 }
 
@@ -682,7 +686,12 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         }
         hits = [...hits, current]
         yield* notify()
-        if (next.type !== "sse") return fail(next)
+        if (next.type !== "sse") {
+          // 延迟HTTP错误响应，让并发测试能在请求已到达后稳定建立待交接工作。
+          const wait = next.wait
+          if (wait) yield* Effect.promise(() => wait)
+          return fail(next)
+        }
         if (mode === "responses") return send(responses(next, modelFrom(body)))
         if (next.reset) {
           yield* reset(next)
