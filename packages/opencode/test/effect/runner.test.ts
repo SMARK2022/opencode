@@ -411,6 +411,41 @@ describe("Runner", () => {
   )
 
   it.live(
+    "startShell reservation queues a concurrent run before shell state is published",
+    Effect.gen(function* () {
+      const scope = yield* Scope.Scope
+      const runner = Runner.make<string>(scope)
+      // 两个Deferred分别暴露reservation已进入与允许发布Shell，不依赖任意时钟延迟。
+      const reserved = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const ran = yield* Ref.make(false)
+
+      // reservation故意停在Runner同步修改内部，复现maintenance已取得所有权但Shell尚未发布的窗口。
+      const shell = yield* runner
+        .startShell(
+          Effect.succeed("maintenance"),
+          undefined,
+          Deferred.succeed(reserved, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        )
+        .pipe(Effect.forkChild)
+      yield* Deferred.await(reserved)
+
+      const queued = yield* runner
+        .ensureRunning(Ref.set(ran, true).pipe(Effect.as("queued")))
+        .pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      // queued work不能在reservation期间反客为主；释放后它必须走ShellThenRun并只执行一次。
+      expect(yield* Ref.get(ran)).toBe(false)
+      yield* Deferred.succeed(release, undefined)
+      // join两个caller并检查Idle，证明handoff完成且没有遗留锁或孤立fiber。
+      expect(yield* Fiber.join(shell)).toBe("maintenance")
+      expect(yield* Fiber.join(queued)).toBe("queued")
+      expect(yield* Ref.get(ran)).toBe(true)
+      expect(runner.state._tag).toBe("Idle")
+    }),
+  )
+
+  it.live(
     "cancel during shell_then_run cancels both",
     Effect.gen(function* () {
       const s = yield* Scope.Scope
