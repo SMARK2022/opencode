@@ -546,7 +546,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           -- SQLite group_concat 不保证 GROUP BY 内顺序，需子查询喂入有序行
           FROM (SELECT * FROM preview_parts ORDER BY part_id)
           GROUP BY session_id, msg_rn
-          ORDER BY session_id, msg_rn
+          -- msg_rn 由窗口函数 ORDER BY time_created DESC 赋值：1=最新，2=次新。
+          -- 此处 DESC 使次新先返回、最新后返回，JS push 随之产出正序（旧→新）数组
+          ORDER BY session_id, msg_rn DESC
         `),
       ) as { session_id: string; msg_rn: number; joined_text: string | null }[]
 
