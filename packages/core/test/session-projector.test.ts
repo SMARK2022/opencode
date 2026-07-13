@@ -95,12 +95,12 @@ describe("SessionProjector", () => {
       expect((yield* SessionInput.find(db, pending.id))?.promotedSeq).toBeUndefined()
       expect(yield* SessionPreview.load(db, { sessionIDs: [] })).toEqual({})
       expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] })).toEqual({
-        [a]: ["latest user", "middle"], [b]: ["b latest", "b first"],
+        [a]: ["middle", "latest user"], [b]: ["b first", "b latest"],
       })
       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 })).toEqual({ [a]: ["latest user"] })
       // 全量窗口证明压缩前正文仍可取，hidden/synthetic/inbox都不能占名额。
       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 10 })).toEqual({
-        [a]: ["latest user", "middle", "false marker", "old before compaction"],
+        [a]: ["old before compaction", "false marker", "middle", "latest user"],
       })
       const v1 = (text: string | undefined, options: { hidden?: boolean; synthetic?: boolean; ignored?: boolean; partHidden?: boolean } = {}) => Effect.gen(function* () {
         const id = SessionV1.MessageID.ascending()
@@ -124,10 +124,10 @@ describe("SessionProjector", () => {
       yield* v1("ignored", { ignored: true })
       yield* v1("part hidden", { partHidden: true })
       yield* v1(undefined)
-      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] }, "v1")).toEqual({ [a]: ["second", "part1 part2"] })
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] }, "v1")).toEqual({ [a]: ["part1 part2", "second"] })
       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 }, "v1")).toEqual({ [a]: ["second"] })
       // 同一Session内的两代表不能互相补查，Native结果不受V1新行影响。
-      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["latest user", "middle"] })
+      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["middle", "latest user"] })
       expect(yield* SessionPreview.load(db, { sessionIDs: [] }, "v1")).toEqual({})
     }),
   )

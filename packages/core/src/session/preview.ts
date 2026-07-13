@@ -52,7 +52,8 @@ export const load = Effect.fn("SessionPreview.load")(function* (
       -- 多part先按ID排序再聚合；无可见text的消息不占窗口名额。
       FROM (SELECT * FROM preview_parts ORDER BY part_id)
       GROUP BY session_id, msg_rn
-      ORDER BY session_id, msg_rn
+      -- 排名1是最新消息；选最近N条后反转排名，返回旧到新而不改变part顺序。
+      ORDER BY session_id, msg_rn DESC
     ` : sql`
       WITH ranked_messages AS (
         SELECT ${SessionMessageTable.session_id} as session_id,
@@ -79,7 +80,8 @@ export const load = Effect.fn("SessionPreview.load")(function* (
       -- 不经SessionHistory的压缩边界：最近用户正文来自完整durable历史。
       SELECT session_id, joined_text FROM ranked_messages
       WHERE msg_rn <= ${limit}
-      ORDER BY session_id, msg_rn
+      -- Native按seq倒序选窗，再按排名倒序输出，保持与V1相同的对话时间方向。
+      ORDER BY session_id, msg_rn DESC
     `,
   ).pipe(Effect.orDie)
   // 沿用源端点的截断后空白归一化；空白消息可能少展示一行，不另加扫描fallback。
