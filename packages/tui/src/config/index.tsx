@@ -134,7 +134,9 @@ export function resolve(input: Info, options: ResolveOptions): Resolved {
       enabled: input.attention?.enabled ?? true,
       notifications: input.attention?.notifications ?? true,
       sound: input.attention?.sound ?? true,
-      volume: input.attention?.volume ?? 0.4,
+      // [local-smark] 默认音量 0.5：经 BS.1770 响度分析，内嵌 done 音效在此增益下
+    // 0.4 偏轻（约 -29.7 LUFS），0.6+ 会比多数系统提示音更突出
+    volume: input.attention?.volume ?? 0.5,
       sound_pack: input.attention?.sound_pack ?? "opencode.default",
       sounds: input.attention?.sounds ?? {},
     },
