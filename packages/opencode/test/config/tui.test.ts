@@ -153,7 +153,8 @@ it.instance("resolves attention config defaults and overrides", () =>
         enabled: true,
         notifications: true,
         sound: true,
-        volume: 0.4,
+        // [local-smark] 源 0421：默认音量 0.4 → 0.5（BS.1770 响度校准）
+        volume: 0.5,
         sound_pack: "opencode.default",
         sounds: {},
       })

@@ -34,7 +34,7 @@ Example:
     "enabled": true,
     "notifications": true,
     "sound": true,
-    "volume": 0.4,
+    "volume": 0.5,
     "sound_pack": "opencode.default",
     "sounds": {
       "error": "/Users/me/sounds/error.mp3"

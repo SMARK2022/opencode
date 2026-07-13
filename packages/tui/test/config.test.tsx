@@ -56,7 +56,7 @@ test("resolves host-neutral defaults", () => {
     enabled: true,
     notifications: true,
     sound: true,
-    volume: 0.4,
+    volume: 0.5,
     sound_pack: "opencode.default",
     sounds: {},
   })
