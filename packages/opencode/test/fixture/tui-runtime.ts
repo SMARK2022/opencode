@@ -27,7 +27,7 @@ export function createTuiResolvedConfig(input: ResolvedInput = {}): TuiConfig.Re
       enabled: false,
       notifications: true,
       sound: true,
-      volume: 0.4,
+      volume: 0.5,
       sound_pack: "opencode.default",
       sounds: {},
       ...input.attention,

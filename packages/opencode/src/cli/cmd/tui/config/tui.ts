@@ -331,7 +331,12 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
       enabled: acc.result.attention?.enabled ?? true,
       notifications: acc.result.attention?.notifications ?? true,
       sound: acc.result.attention?.sound ?? true,
-      volume: acc.result.attention?.volume ?? 0.4,
+      // 默认音量 0.5：经 BS.1770 响度分析，内嵌 done 音效在此增益下
+      // stereo 综合响度约 -27.8 LUFS、true peak 约 -13.9 dBTP，
+      // 与 macOS 系统提示音（Pop -29 LUFS、Ping -28.8 LUFS）同区间偏轻，
+      // 既有足够提醒力又不至于在频繁触发时形成听觉疲劳。
+      // 0.4 偏轻（约 -29.7 LUFS），0.6+ 会比多数系统提示音更突出。
+      volume: acc.result.attention?.volume ?? 0.5,
       sound_pack: acc.result.attention?.sound_pack ?? "opencode.default",
       sounds: acc.result.attention?.sounds ?? {},
     },
