@@ -119,10 +119,67 @@ const appBindingCommands = [
   "app.toggle.session_directory_filter",
 ] as const
 
+// 某些终端/IDE/触摸屏在鼠标坐标不可用时发送畸形 SGR mouse 报告，例如
+// ESC[<64;NaN;NaNM。OpenTUI StdinParser 的 csi_sgr_mouse 状态机在遇到大写 N
+// （ASCII 0x4E，落在 CSI final byte 范围 0x40–0x7E）时错误结束 CSI，剩余字节
+// aN;NaNM 逐字符变成普通 key event，被 TextareaRenderable.insertText() 插入
+// prompt buffer。此 handler 在 dispatchSequenceHandlers 中拦截这些碎片。
+//
+// 不变量：仅消费已被 ESC[<…N 前缀确认属于畸形 mouse 报告的后续字符；
+// 不扫描用户文本内容、不以 /NaN/ 过滤输入、不影响 paste/focus/capability reply。
+const MALFORMED_SGR_MOUSE_PREFIX = /\x1b\[<[;\d]*N$/
+// recovery 中仅接受 SGR mouse report 合法字符 + "NaN" 的组成字符
+const MALFORMED_SGR_MOUSE_TAIL = /^[aN;0-9Mm]$/
+// 安全上限：单个 SGR mouse 报告最多 3 字段 × ~10 位 + 2 分号 + 1 终止符 ≈ 40 字符
+const MALFORMED_SGR_MOUSE_MAX_CONSUME = 50
+
+export function createMalformedSgrMouseGuard(): (sequence: string) => boolean {
+  let recovering = false
+  let consumed = 0
+
+  return (sequence: string) => {
+    if (!recovering) {
+      // 检测 OpenTUI parser 从畸形 SGR mouse 报告拆出的第一个 key event
+      // 特征：ESC[< 开头、后跟零或多个数字和分号、以大写 N 结尾
+      if (MALFORMED_SGR_MOUSE_PREFIX.test(sequence)) {
+        recovering = true
+        consumed = 0
+        return true
+      }
+      return false
+    }
+
+    // recovery 中：逐字符消费畸形报告的剩余碎片
+    // 多字符序列（如方向键 ESC[A）出现在 recovery 中时立即退出并放行
+    if (sequence.length !== 1 || !MALFORMED_SGR_MOUSE_TAIL.test(sequence)) {
+      recovering = false
+      return false
+    }
+
+    consumed++
+
+    // 遇到终止符 M/m：recovery 完成，消费此字符
+    if (sequence === "M" || sequence === "m") {
+      recovering = false
+      return true
+    }
+
+    // 超过安全上限：退出 recovery，放行当前字符
+    if (consumed >= MALFORMED_SGR_MOUSE_MAX_CONSUME) {
+      recovering = false
+      return false
+    }
+
+    return true
+  }
+}
+
 function rendererConfig(_config: TuiConfig.Resolved): CliRendererConfig {
   const mouseEnabled = !Flag.OPENCODE_DISABLE_MOUSE && (_config.mouse ?? true)
 
   return {
+    // 拦截畸形 SGR mouse 报告碎片，防止它们被当作普通键盘输入插入 prompt
+    prependInputHandlers: [createMalformedSgrMouseGuard()],
     externalOutputMode: "passthrough",
     targetFps: 60,
     gatherStats: false,
