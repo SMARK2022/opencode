@@ -207,10 +207,11 @@ export function createTuiAttention(input: {
         const notification = shouldNotify
           ? (() => {
               try {
-                return input.renderer.triggerNotification(
-                  message,
-                  normalizeText(request.title, DEFAULT_TITLE, TITLE_LIMIT),
-                )
+                // 不传默认 title：OpenTUI OSC 99 在 title 非空时发送 title + body 两个 payload，
+                // 某些终端（如 VS Code）将它们渲染成两个通知横幅。
+                // 传 undefined 让 OpenTUI 只发送一个 body payload。
+                const title = normalizeText(request.title, "", TITLE_LIMIT)
+                return input.renderer.triggerNotification(message, title || undefined)
               } catch (error) {
                 log.debug("failed to trigger attention notification", { error })
                 return false

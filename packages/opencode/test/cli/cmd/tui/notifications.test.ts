@@ -1,10 +1,36 @@
 import { describe, expect, test } from "bun:test"
 import Notifications from "@/cli/cmd/tui/feature-plugins/system/notifications"
-import type { Event, PermissionRequest, QuestionRequest, Session } from "@opencode-ai/sdk/v2"
+import type { Event, PermissionRequest, QuestionRequest, Session, AssistantMessage, Message } from "@opencode-ai/sdk/v2"
 import type { TuiAttentionNotifyInput } from "@opencode-ai/plugin/tui"
 import { createTuiPluginApi } from "../../../fixture/tui-plugin"
 
-async function setup() {
+// 构造已完成的 assistant message，用于模拟正常完成路径
+function completedAssistant(sessionID: string): AssistantMessage {
+  return {
+    id: "a1",
+    sessionID,
+    role: "assistant",
+    time: { created: 1, completed: 2 },
+    parentID: "u1",
+    modelID: "m",
+    providerID: "p",
+    mode: "build",
+    agent: "build",
+    path: { cwd: "/", root: "/" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+}
+
+// 构造未完成的 assistant message，用于模拟 abort 路径
+function pendingAssistant(sessionID: string): AssistantMessage {
+  return {
+    ...completedAssistant(sessionID),
+    time: { created: 1 },
+  }
+}
+
+async function setup(messages?: (sessionID: string) => Message[]) {
   const notifications: TuiAttentionNotifyInput[] = []
   const handlers = new Map<Event["type"], ((event: Event) => void)[]>()
   const session = (id: string, title: string, parentID?: string): Session => ({
@@ -23,6 +49,12 @@ async function setup() {
     abort: session("abort", "Abort session"),
     timeout: session("timeout", "Timeout session"),
   }
+
+  // 默认返回 user + 已完成的 assistant，模拟正常完成路径
+  const defaultMessages = (sessionID: string) => [
+    { id: "u1", sessionID, role: "user" as const, time: { created: 0 }, agent: "build", model: { providerID: "p", modelID: "m" }, tools: {}, parts: [] },
+    completedAssistant(sessionID),
+  ]
 
   await Notifications.tui(
     createTuiPluginApi({
@@ -49,6 +81,7 @@ async function setup() {
       state: {
         session: {
           get: (sessionID: string) => sessions[sessionID],
+          messages: messages ?? defaultMessages,
         },
       },
     }),
@@ -83,28 +116,28 @@ function permission(id: string, sessionID = "session"): PermissionRequest {
   }
 }
 
-const questionNotification: TuiAttentionNotifyInput = {
-  title: "Demo session",
-  message: "Question needs input",
-  notification: { when: "blurred" },
-  sound: { name: "question", when: "always" },
-}
-
-const permissionNotification: TuiAttentionNotifyInput = {
-  title: "Demo session",
-  message: "Permission needs input",
-  notification: { when: "blurred" },
-  sound: { name: "permission", when: "always" },
-}
-
 describe("internal notifications TUI plugin", () => {
-  test("notifies for question and permission requests with blurred notifications and always-on sounds", async () => {
+  test("question and permission are visual-only without sound", async () => {
     const harness = await setup()
 
     harness.emit({ id: "event-1", type: "question.asked", properties: question("question-1") })
     harness.emit({ id: "event-2", type: "permission.asked", properties: permission("permission-1") })
 
-    expect(harness.notifications).toEqual([questionNotification, permissionNotification])
+    // question/permission 保留视觉通知但静音，避免频繁触发时太吵
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Question needs input",
+        notification: { when: "blurred" },
+        sound: false,
+      },
+      {
+        title: "Demo session",
+        message: "Permission needs input",
+        notification: { when: "blurred" },
+        sound: false,
+      },
+    ])
   })
 
   test("dedupes pending questions and permissions until they are resolved", async () => {
@@ -128,29 +161,21 @@ describe("internal notifications TUI plugin", () => {
     })
     harness.emit({ id: "event-8", type: "permission.asked", properties: permission("permission-1") })
 
-    expect(harness.notifications).toEqual([
-      questionNotification,
-      questionNotification,
-      permissionNotification,
-      permissionNotification,
-    ])
+    expect(harness.notifications).toHaveLength(4)
+    // 所有 question/permission 通知都应该是 sound: false
+    expect(harness.notifications.every((n) => n.sound === false)).toBe(true)
   })
 
-  test("notifies when an active session becomes idle and suppresses no-op idle", async () => {
+  test("notifies done when an active session completes with a finished assistant", async () => {
     const harness = await setup()
 
     harness.emit({
       id: "event-1",
       type: "session.status",
-      properties: { sessionID: "session", status: { type: "idle" } },
-    })
-    harness.emit({
-      id: "event-2",
-      type: "session.status",
       properties: { sessionID: "session", status: { type: "busy" } },
     })
     harness.emit({
-      id: "event-3",
+      id: "event-2",
       type: "session.status",
       properties: { sessionID: "session", status: { type: "idle" } },
     })
@@ -165,38 +190,80 @@ describe("internal notifications TUI plugin", () => {
     ])
   })
 
-  test("uses sound-only notifications and subagent_done sound for subagent sessions", async () => {
+  test("suppresses no-op idle without a preceding busy", async () => {
     const harness = await setup()
 
-    harness.emit({ id: "event-1", type: "question.asked", properties: question("question-1", "subagent") })
     harness.emit({
-      id: "event-2",
+      id: "event-1",
+      type: "session.status",
+      properties: { sessionID: "session", status: { type: "idle" } },
+    })
+
+    expect(harness.notifications).toEqual([])
+  })
+
+  test("subagent completion is silent", async () => {
+    const harness = await setup()
+
+    harness.emit({
+      id: "event-1",
       type: "session.status",
       properties: { sessionID: "subagent", status: { type: "busy" } },
     })
     harness.emit({
-      id: "event-3",
+      id: "event-2",
       type: "session.status",
       properties: { sessionID: "subagent", status: { type: "idle" } },
     })
 
+    // subagent 完成不触发通知和音效
+    expect(harness.notifications).toEqual([])
+  })
+
+  test("abort plays error not done: idle arrives before error due to Runner cancel ordering", async () => {
+    // 模拟真实 abort 事件顺序：
+    // Runner.cancel 先发 idle（assistant 尚未终态化），再 Fiber.interrupt 触发 halt 发 error
+    const harness = await setup(() => [
+      { id: "u1", sessionID: "abort", role: "user" as const, time: { created: 0 }, agent: "build", model: { providerID: "p", modelID: "m" }, tools: {}, parts: [] },
+      pendingAssistant("abort"),
+    ])
+
+    harness.emit({
+      id: "event-1",
+      type: "session.status",
+      properties: { sessionID: "abort", status: { type: "busy" } },
+    })
+    // 第一个 idle：assistant 未 completed → 不消费 active，不播放 done
+    harness.emit({
+      id: "event-2",
+      type: "session.status",
+      properties: { sessionID: "abort", status: { type: "idle" } },
+    })
+    // session.error 到达：消费 active，播放 error
+    harness.emit({
+      id: "event-3",
+      type: "session.error",
+      properties: { sessionID: "abort", error: { name: "MessageAbortedError", data: { message: "Aborted" } } },
+    })
+    // 第二个 idle（halt 产生）：active 已被消费，忽略
+    harness.emit({
+      id: "event-4",
+      type: "session.status",
+      properties: { sessionID: "abort", status: { type: "idle" } },
+    })
+
+    // abort 完全静音：用户主动取消，不播放任何声音
     expect(harness.notifications).toEqual([
       {
-        title: "Subagent session",
-        message: "Question needs input",
-        notification: false,
-        sound: { name: "question", when: "always" },
-      },
-      {
-        title: "Subagent session",
-        message: "Session done",
-        notification: false,
-        sound: { name: "subagent_done", when: "always" },
+        title: "Abort session",
+        message: "Session aborted",
+        notification: { when: "blurred" },
+        sound: false,
       },
     ])
   })
 
-  test("notifies session errors once and suppresses the following idle done notification", async () => {
+  test("model error before idle plays error and suppresses done", async () => {
     const harness = await setup()
 
     harness.emit({
@@ -249,12 +316,13 @@ describe("internal notifications TUI plugin", () => {
       properties: { sessionID: "timeout", error: { name: "UnknownError", data: { message: "SSE read timed out" } } },
     })
 
+    // abort 静音，timeout 仍播放 error
     expect(harness.notifications).toEqual([
       {
         title: "Abort session",
         message: "Session aborted",
         notification: { when: "blurred" },
-        sound: { name: "error", when: "always" },
+        sound: false,
       },
       {
         title: "Timeout session",
@@ -263,5 +331,28 @@ describe("internal notifications TUI plugin", () => {
         sound: { name: "error", when: "always" },
       },
     ])
+  })
+
+  test("duplicate session.error does not produce duplicate notifications", async () => {
+    const harness = await setup()
+
+    harness.emit({
+      id: "event-1",
+      type: "session.status",
+      properties: { sessionID: "session", status: { type: "busy" } },
+    })
+    harness.emit({
+      id: "event-2",
+      type: "session.error",
+      properties: { sessionID: "session", error: { name: "UnknownError", data: { message: "boom" } } },
+    })
+    // 第二个 error：active 已被消费，不重复播放
+    harness.emit({
+      id: "event-3",
+      type: "session.error",
+      properties: { sessionID: "session", error: { name: "UnknownError", data: { message: "boom again" } } },
+    })
+
+    expect(harness.notifications).toHaveLength(1)
   })
 })
