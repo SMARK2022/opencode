@@ -147,8 +147,10 @@ it.instance("resolves attention config defaults and overrides", () =>
       const fs = yield* FSUtil.Service
       const test = yield* TestInstance
 
+      // [local-smark] 源 0420 默认翻转：attention.enabled 缺省即 true
+      // （specs 语义经由 src/config/tui.ts 复用的同一 resolve() 落地）
       expect((yield* getTuiConfig(test.directory)).attention).toEqual({
-        enabled: false,
+        enabled: true,
         notifications: true,
         sound: true,
         volume: 0.4,

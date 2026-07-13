@@ -43,6 +43,18 @@ class FakeRenderer {
 }
 
 class FakeAudioEngine {
+  loadKeys: string[] = []
+  loadedBytes: Uint8Array | null = null
+  // keyed loader 与文件桩共享失败和计数契约，测试不创建真实音频设备。
+  async loadSound(key: string, bytes: () => Uint8Array | Promise<Uint8Array>) {
+    this.loadCalls += 1
+    // 记录实际加载的数据，校验内嵌资产而不触发播放。
+    this.loadKeys.push(key)
+    this.loadedBytes = await Promise.resolve(bytes())
+    if (this.rejectLoad) throw new Error("decode failed")
+    return this.loadResult
+  }
+
   loadResult: AudioSound | null = 1
   playResult: number | null = 1
   loadCalls = 0
@@ -161,6 +173,8 @@ describe("createTuiAttention", () => {
       notification: true,
       sound: false,
     })
+// [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+    // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
     expect(renderer.notifications).toEqual([{ title: "opencode", message: "focused" }])
   })
 
@@ -176,6 +190,8 @@ describe("createTuiAttention", () => {
       sound: true,
     })
     expect(audio.playCalls).toBe(1)
+// [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+    // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
     expect(renderer.notifications).toEqual([{ title: "opencode", message: "hello" }])
   })
 
@@ -238,6 +254,8 @@ describe("createTuiAttention", () => {
       notification: true,
       sound: true,
     })
+// [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+    // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
     expect(renderer.notifications).toEqual([{ title: "opencode", message: "hello again" }])
   })
 
@@ -456,6 +474,59 @@ describe("createTuiAttention", () => {
     })
 
     expect(renderer.notifications).toEqual([{ title: "danger title", message: "hello world" }])
+  })
+
+  // done 槽位必须加载内嵌 WAV，检查容器及长度而不额外计算校验码。
+  test("plays embedded done sound with bundled ChatGPT WAV bytes", async () => {
+    const renderer = new FakeRenderer()
+    const audio = new FakeAudioEngine()
+    const attention = createTuiAttention({ renderer, config: config(), audio })
+    renderer.emit("blur")
+
+    await attention.notify({ message: "done", sound: { name: "done" } })
+
+    expect(audio.loadedBytes).toBeInstanceOf(Uint8Array)
+    expect(audio.loadedBytes!.length).toBe(56_140)
+    expect(new TextDecoder().decode(audio.loadedBytes!.subarray(8, 12))).toBe("WAVE")
+    const header = new DataView(audio.loadedBytes!.buffer, audio.loadedBytes!.byteOffset, audio.loadedBytes!.byteLength)
+    expect(header.getUint32(4, true)).toBe(audio.loadedBytes!.length - 8)
+    expect(Array.from(audio.loadedBytes!.subarray(0, 4))).toEqual([0x52, 0x49, 0x46, 0x46])
+  })
+
+  // [local-smark] KV 总开关 gate 全部音效：默认播放、关闭不播、恢复再播——
+  // 与 config.enabled 正交，给用户运行时开关而不必改配置文件
+  test("KV sound toggle gates all attention sounds", async () => {
+    const kv = new FakeKV()
+    const renderer = new FakeRenderer()
+    const audio = new FakeAudioEngine()
+    const attention = createTuiAttention({ renderer, config: config(), kv, audio })
+    renderer.emit("blur")
+
+    await attention.notify({ message: "hello", sound: true })
+    expect(audio.playCalls).toBe(1)
+
+    kv.set("attention_sound_enabled", false)
+    await attention.notify({ message: "hello", sound: true })
+    expect(audio.playCalls).toBe(1)
+
+    kv.set("attention_sound_enabled", true)
+    await attention.notify({ message: "hello", sound: true })
+    expect(audio.playCalls).toBe(2)
+  })
+
+  // [local-smark] 声音开关只 gate 音效：通知投递不受影响——两个通道独立降级
+  test("KV sound toggle does not affect notifications", async () => {
+    const kv = new FakeKV()
+    const renderer = new FakeRenderer()
+    const audio = new FakeAudioEngine()
+    const attention = createTuiAttention({ renderer, config: config(), kv, audio })
+    renderer.emit("blur")
+
+    kv.set("attention_sound_enabled", false)
+    await attention.notify({ message: "hello", sound: true })
+
+    expect(renderer.notifications).toHaveLength(1)
+    expect(audio.playCalls).toBe(0)
   })
 
   test("disposes renderer listeners", async () => {

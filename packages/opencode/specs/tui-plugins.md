@@ -55,7 +55,7 @@ Example:
 - Internal plugins can declare `enabled: false` to be registered but inactive by default; `plugin_enabled` and runtime KV can still enable them by id.
 - `plugin_enabled` is merged across config layers.
 - Runtime enable/disable state is also stored in KV under `plugin_enabled`; that KV state overrides config on startup.
-- `attention.enabled` defaults to `false`; when `false`, it disables all `api.attention.notify(...)` delivery.
+- `attention.enabled` defaults to `true`; when `false`, it disables all `api.attention.notify(...)` delivery.
 - `attention.notifications` and `attention.sound` independently control terminal-mediated desktop notifications and built-in sounds.
 - `attention.volume` sets the default built-in sound volume from `0` to `1`.
 - `attention.sound_pack` selects the initial semantic sound pack. Persisted runtime selection in KV can override it.

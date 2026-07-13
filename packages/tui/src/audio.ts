@@ -21,17 +21,24 @@ function getAudio() {
 }
 
 export function loadSoundFile(file: string) {
+  // [local-smark] 保留旧签名作文件路径入口；新 keyed 入口供内嵌 bytes 复用缓存
+  return loadSound(file, () => readFile(file))
+}
+
+// [local-smark] 直接从 bytes 加载并缓存，避免落临时文件；key 必须稳定且唯一。
+// 先查 cache 再调用 bytes factory，防止每次 completion 都重复 Base64 decode
+export function loadSound(key: string, bytes: () => Uint8Array | Promise<Uint8Array>) {
   const current = getAudio()
   if (!current) return Promise.resolve(null)
-  const cached = sounds.get(file)
+  const cached = sounds.get(key)
   if (cached) return cached
-  const task = readFile(file)
-    .then((bytes) => current.loadSound(bytes))
+  const task = Promise.resolve(bytes())
+    .then((value) => current.loadSound(value))
     .catch((error) => {
-      console.debug("failed to load tui sound", { file, error })
+      console.debug("failed to load tui sound bytes", { key, error })
       return null
     })
-  sounds.set(file, task)
+  sounds.set(key, task)
   return task
 }
 
