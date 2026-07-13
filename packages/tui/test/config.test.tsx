@@ -52,7 +52,8 @@ test("resolves host-neutral defaults", () => {
   const config = resolve({}, { terminalSuspend: true })
 
   expect(config.attention).toEqual({
-    enabled: false,
+    // [local-smark] 源 0420 默认翻转：attention.enabled 缺省即 true
+    enabled: true,
     notifications: true,
     sound: true,
     volume: 0.4,

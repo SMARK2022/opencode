@@ -129,7 +129,9 @@ export function resolve(input: Info, options: ResolveOptions): Resolved {
   return {
     ...input,
     attention: {
-      enabled: input.attention?.enabled ?? false,
+      // [local-smark] 源 0420 specs 翻转默认（tui-plugins.md :58）：attention 默认
+      // 启用；notifications/sound 子开关独立控制投递面
+      enabled: input.attention?.enabled ?? true,
       notifications: input.attention?.notifications ?? true,
       sound: input.attention?.sound ?? true,
       volume: input.attention?.volume ?? 0.4,
