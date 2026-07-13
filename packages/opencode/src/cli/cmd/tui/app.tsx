@@ -808,6 +808,16 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           dialog.clear()
         },
       },
+      // 总音效开关，持久化到 KV；默认启用，与 animations toggle 同一模式
+      {
+        name: "app.toggle.sound_effects",
+        title: kv.get("attention_sound_enabled", true) ? "Disable sound effects" : "Enable sound effects",
+        category: "System",
+        run: () => {
+          kv.set("attention_sound_enabled", !kv.get("attention_sound_enabled", true))
+          dialog.clear()
+        },
+      },
       {
         name: "app.toggle.file_context",
         title: kv.get("file_context_enabled", true) ? "Disable file context" : "Enable file context",

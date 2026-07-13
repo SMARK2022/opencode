@@ -328,7 +328,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   const result: Resolved = {
     ...acc.result,
     attention: {
-      enabled: acc.result.attention?.enabled ?? false,
+      enabled: acc.result.attention?.enabled ?? true,
       notifications: acc.result.attention?.notifications ?? true,
       sound: acc.result.attention?.sound ?? true,
       volume: acc.result.attention?.volume ?? 0.4,

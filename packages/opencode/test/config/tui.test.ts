@@ -136,8 +136,9 @@ it.instance("resolves attention config defaults and overrides", () =>
       const fs = yield* AppFileSystem.Service
       const test = yield* TestInstance
 
+      // 默认启用 attention，落实 specs/v2/notifications.md 的 v2 target
       expect((yield* getTuiConfig(test.directory)).attention).toEqual({
-        enabled: false,
+        enabled: true,
         notifications: true,
         sound: true,
         volume: 0.4,

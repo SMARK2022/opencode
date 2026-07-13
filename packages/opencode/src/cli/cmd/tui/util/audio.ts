@@ -23,18 +23,23 @@ function getAudio() {
 }
 
 export function loadSoundFile(file: string) {
+  return loadSound(file, () => Bun.file(file).bytes())
+}
+
+// 直接从 bytes 加载并缓存，避免落临时文件；key 必须稳定且唯一
+// 先查 cache 再调用 bytes factory，防止每次 completion 都重复 Base64 decode
+export function loadSound(key: string, bytes: () => Uint8Array | Promise<Uint8Array>) {
   const current = getAudio()
   if (!current) return Promise.resolve(null)
-  const cached = sounds.get(file)
+  const cached = sounds.get(key)
   if (cached) return cached
-  const task = Bun.file(file)
-    .bytes()
-    .then((bytes) => current.loadSound(bytes))
+  const task = Promise.resolve(bytes())
+    .then((value) => current.loadSound(value))
     .catch((error) => {
-      log.debug("failed to load tui sound", { file, error })
+      log.debug("failed to load tui sound bytes", { key, error })
       return null
     })
-  sounds.set(file, task)
+  sounds.set(key, task)
   return task
 }
 

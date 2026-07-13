@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import type { AudioPlayOptions, AudioSound } from "@opentui/core"
 import { createTuiAttention } from "@/cli/cmd/tui/attention"
 import type { TuiConfig } from "@/cli/cmd/tui/config/tui"
@@ -49,6 +50,8 @@ class FakeAudioEngine {
   playCalls = 0
   volumes: (number | undefined)[] = []
   loadPaths: string[] = []
+  loadKeys: string[] = []
+  loadedBytes: Uint8Array | null = null
   rejectLoad = false
   rejectPaths = new Set<string>()
 
@@ -56,6 +59,15 @@ class FakeAudioEngine {
     this.loadCalls += 1
     this.loadPaths.push(path)
     if (this.rejectLoad || this.rejectPaths.has(path)) throw new Error("decode failed")
+    return this.loadResult
+  }
+
+  // 支持 keyed bytes loader，与真实 TuiAudio.loadSound 对应
+  async loadSound(key: string, bytes: () => Uint8Array | Promise<Uint8Array>) {
+    this.loadCalls += 1
+    this.loadKeys.push(key)
+    this.loadedBytes = await Promise.resolve(bytes())
+    if (this.rejectLoad) throw new Error("decode failed")
     return this.loadResult
   }
 
@@ -456,6 +468,60 @@ describe("createTuiAttention", () => {
     })
 
     expect(renderer.notifications).toEqual([{ title: "danger title", message: "hello world" }])
+  })
+
+  test("plays embedded done sound with exact ChatGPT WAV bytes", async () => {
+    const renderer = new FakeRenderer()
+    const audio = new FakeAudioEngine()
+    const attention = createTuiAttention({ renderer, config: config(), audio })
+    renderer.emit("blur")
+
+    await attention.notify({ message: "done", sound: { name: "done" } })
+
+    // 内嵌完成提示音的 exact asset identity：SHA-256 与 verified WAV 一致
+    expect(audio.loadedBytes).toBeInstanceOf(Uint8Array)
+    expect(audio.loadedBytes!.length).toBe(56_140)
+    const hash = createHash("sha256").update(audio.loadedBytes!).digest("hex")
+    expect(hash).toBe("02fbf5d8967068622673c475ed367dabfc2eeae4e4b1991c3c443e3881b42e01")
+    // RIFF/WAVE header 验证，确认是合法 PCM WAV
+    expect(Array.from(audio.loadedBytes!.subarray(0, 4))).toEqual([0x52, 0x49, 0x46, 0x46])
+  })
+
+  test("KV sound toggle gates all attention sounds", async () => {
+    const kv = new FakeKV()
+    const renderer = new FakeRenderer()
+    const audio = new FakeAudioEngine()
+    const attention = createTuiAttention({ renderer, config: config(), kv, audio })
+    renderer.emit("blur")
+
+    // 默认无 KV 值 -> 播放
+    await attention.notify({ message: "hello", sound: true })
+    expect(audio.playCalls).toBe(1)
+
+    // KV 关闭 -> 不播放
+    kv.set("attention_sound_enabled", false)
+    await attention.notify({ message: "hello", sound: true })
+    expect(audio.playCalls).toBe(1)
+
+    // KV 恢复 -> 播放
+    kv.set("attention_sound_enabled", true)
+    await attention.notify({ message: "hello", sound: true })
+    expect(audio.playCalls).toBe(2)
+  })
+
+  test("KV sound toggle does not affect notifications", async () => {
+    const kv = new FakeKV()
+    const renderer = new FakeRenderer()
+    const audio = new FakeAudioEngine()
+    const attention = createTuiAttention({ renderer, config: config(), kv, audio })
+    renderer.emit("blur")
+
+    // 声音关闭时通知仍正常投递
+    kv.set("attention_sound_enabled", false)
+    await attention.notify({ message: "hello", sound: true })
+
+    expect(renderer.notifications).toHaveLength(1)
+    expect(audio.playCalls).toBe(0)
   })
 
   test("disposes renderer listeners", async () => {
