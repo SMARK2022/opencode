@@ -150,10 +150,10 @@ describe("session preview endpoint", () => {
         })
 
         expect(status).toBe(200)
-        // sessionA 应返回 2 条预览，最新在前（ROW_NUMBER 按 time_created DESC）
+        // [local-smark] sessionA 应返回 2 条预览，正序（旧→新）
         expect(json[sessionA.id]).toHaveLength(2)
-        expect(json[sessionA.id][0]).toBe("second message")
-        expect(json[sessionA.id][1]).toBe("hello world")
+        expect(json[sessionA.id][0]).toBe("hello world")
+        expect(json[sessionA.id][1]).toBe("second message")
         // sessionB 应返回 1 条预览
         expect(json[sessionB.id]).toHaveLength(1)
         expect(json[sessionB.id][0]).toBe("b message")
@@ -328,10 +328,10 @@ describe("session preview endpoint", () => {
         })
 
         expect(status).toBe(200)
-        // 无 text part 的消息被跳过，返回最近 2 条有文本的消息
+        // 无 text part 的消息被跳过；正序返回最近 2 条有文本的消息
         expect(json[session.id]).toHaveLength(2)
-        expect(json[session.id][0]).toBe("also has text")
-        expect(json[session.id][1]).toBe("has text")
+        expect(json[session.id][0]).toBe("has text")
+        expect(json[session.id][1]).toBe("also has text")
       }),
     ),
     { git: true },
@@ -420,8 +420,9 @@ describe("session preview endpoint", () => {
 
         expect(status).toBe(200)
         expect(json[session.id]).toHaveLength(2)
-        expect(json[session.id][0]).toBe("third")
-        expect(json[session.id][1]).toBe("second")
+        // [local-smark] 正序：旧→新
+        expect(json[session.id][0]).toBe("second")
+        expect(json[session.id][1]).toBe("third")
       }),
     ),
     { git: true },
