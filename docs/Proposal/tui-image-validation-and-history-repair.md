@@ -1,473 +1,404 @@
-# TUI Sharp 打包链恢复与历史图片无损迁移方案
+# Canonical Implementation Plan: TUI 历史图片自动规范化
 
-Status: approved after independent audit; user selected a distributable repository migration script and authorized implementation
+> Status: verified
+>
+> Revision: R7
+>
+> Approved revision: R7
+>
+> Audit mode: full-scope
+>
+> Requirement source: 本文第1节逐字用户要求与设计批准
+>
+> Implementation allowed: no further material changes without revision or rework
+>
+> Last updated: 2026-07-15
 
-Date: 2026-07-14
+本文是当前follow-up的唯一实现规范。R2-R6均已被后续用户要求或审计修订取代，不再具有实现权限。
 
-## 0. 推荐方案摘要
+## 1. Verbatim Requirement
 
-本次只做两件事：
+> “我要能apply的，你说现在的有截断处理不了，请注意脚本的意义就是处理这个的”
 
-1. **生产端 A**：继续使用现有 Sharp 0.34.5，不引入 Bun.Image 或第二图片后端。修复 Bun compiled executable 对 Sharp native addon/libvips 的打包、释放和加载链，并删除三处会在 Sharp 不可用时发送原图的 fallback。
-2. **存储端 C**：在 TUI 再次消费目标 Session 前，事务化地把唯一损坏的 Tool attachment 替换为从已确认完整原件经过现有 Sharp 管线生成的有效附件。迁移前由SQLite生成包含已提交WAL页面的一致数据库快照，不删除任何不可恢复数据。
+> “我要的是自动处理的F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\script\migrate-image-attachment.ts，也就是我就会执行这个，没别的”
 
-**消费端 B 不修改。** C 完成迁移后，现有数据库读取和 `MessageV2.toModelMessagesEffect()` 自然只会读到修复后的有效附件。
+> “同时实在获取不到的图片，那么就把对应消息改成图片不可用或者其他一些当前链路允许的消息即可（也就是允许弃用图片并返回不可用的消息等方式）”
 
-不修改图片格式支持、metadata fast path、GIF行为、base64规则、MIME策略、Provider转换、plugin、compaction、Assistant生命周期、数据库schema或通用日志。
+> “也就是命令只需要提供： \"C:\Users\Lenovo\.local\share\opencode\opencode.db\" 不需要其他任何额外信息”
 
-最终 Git 修改 **10个文件（包含本文）以内**，预计代码增删 **低于800行**；当前实现为9个任务文件，新增Processor定向回归测试后为10个。
+> “只处理那些比较不妥的需要处理的，基本上大小正常的不需要二次处理或者压缩”
 
-## 1. 已重新阅读和确认的文件
+> “主要是规范化、统一化（不要不同路径来源的，不同来源的都要规整同意），同时过大的也需要处理，压缩是其次”
 
-### 1.1 Sharp生产与调用链
+> “也就是我希望最终是可以自处理解决这种截断问题的”
 
-| 文件 | 为什么相关 |
+> “不要很臃肿，不要假设不存在或者未出现的情况”
+
+仍然有效的同一follow-up原始要求：
+
+> “同时检查一下运行之后能节省多少空间（我不需要保留原始值）”
+
+用户随后选择“路径只做预览”，并批准以下设计：路径参数默认只读预览；同一路径加`--apply`写库；统一默认Sharp策略；坏completed Tool图片弃用并标记不可用。
+
+仍适用：workspace `sharp@0.34.5`是唯一图片实现；当前follow-up不超过8文件、800有效代码行；真实数据库由用户执行，本实现阶段不得写入。
+
+## 2. Explicit Non-Goals
+
+- 不再要求`--part`、`--source`、old/source/new SHA、backup目录或plan SHA。
+- 不扫描目录、不猜外部原件、不调用第二图片后端。
+- 不按Prompt/Read/Tool来源选择不同预算；迁移只有一个统一策略。
+- 不加载各Project图片配置；历史配置未持久化，用户要求统一而非按来源分叉。
+- 不处理真实数据库中未观察到的MIME/data URL不一致、参数化URL或损坏顶层FilePart分支。
+- 不修改生产端A、消费端B、schema、DataMigration、Desktop、Provider或Compaction。
+- 不自动backup、VACUUM、checkpoint或承诺物理数据库立即缩小。
+- 不在本会话对真实`opencode.db`运行`--apply`。
+
+## 3. Repository Context
+
+| Source | Constraint |
 | --- | --- |
-| `packages/opencode/src/image/image.ts` | 当前唯一图片处理实现，动态加载Sharp，执行metadata、resize和encode |
-| `packages/opencode/src/tool/read.ts` | 本次坏附件的首个生产入口；Sharp不可用时返回原始bytes |
-| `packages/opencode/src/session/processor.ts` | Tool result附件入库前再次normalize；Sharp不可用时再次返回原附件 |
-| `packages/opencode/src/session/prompt.ts` | 用户图片入库前normalize；Sharp不可用时返回原Part |
-| `packages/opencode/test/image/image.test.ts` | 已覆盖现有Sharp正常图片、尺寸、预算和SizeError行为 |
-| `packages/opencode/test/tool/read.test.ts` | 明确把“resizer不可用时返回原图”锁成现有测试契约，必须反转 |
-| `packages/opencode/test/session/prompt.test.ts` | 现有真实Prompt/Processor/LLM测试层可覆盖另外两处fallback的持久化行为 |
-| `packages/opencode/test/session/processor-effect.test.ts` | 真实Tool result链验证Sharp不可用时保留工具文本并省略图片 |
+| `CONTEXT.md` | Session由Message和Part组成；Tool输出及附件存入completed ToolPart |
+| `AGENTS.md` | 最小修改、不得新增单次helper、测试/typecheck从package运行 |
+| `packages/opencode/test/AGENTS.md` | 测试真实CLI行为和临时SQLite，不复制算法 |
+| `.opencode/policy/first-principles-engineering.md` | 单一Sharp主路径；用户明确授权的坏图弃用必须精确定义 |
 
-### 1.2 Bun编译与发布链
+当前任务基线是用户完成既有Sharp修复commit后的HEAD `d75c026a5a68`。R7只修改现有文档、迁移脚本和`read.test.ts`。
 
-| 文件 | 为什么相关 |
-| --- | --- |
-| `packages/opencode/script/build.ts` | Bun executable构建、目标矩阵、虚拟资源、PvRecorder native嵌入先例和当前仅`--version` smoke |
-| `packages/opencode/script/install-target.ts` | build目标OS/CPU安装规则 |
-| `packages/opencode/package.json` | `sharp@0.34.5`已是optionalDependency |
-| `package.json` | 固定Bun 1.3.14；现有patchedDependencies和workspace安装边界 |
-| `bun.lock` | 已包含Sharp及各平台`@img/sharp-*`、`@img/sharp-libvips-*`包 |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts` | 已有“原生文件嵌入exe、释放到cache、校验、绝对路径require”的同仓库先例 |
-| `.github/workflows/build-opencode.yml` | macOS/Linux/Windows发布构建和打包方式 |
-| `packages/opencode/script/postinstall.mjs` | npm平台包只复制最终binary的行为 |
-| `install` | curl安装器只安装最终binary的行为 |
-| `packages/opencode/Dockerfile` | 镜像只复制最终binary的行为 |
+## 4. Files and Evidence Read
 
-### 1.3 B/C和迁移边界
+| Evidence | Relevance | Class |
+| --- | --- | --- |
+| `src/image/image.ts` | 默认统一边界：2000x2000、5MB base64；正常图片metadata fast-path原样返回 | contracted |
+| `src/session/processor.ts:561-585` | 当前链路允许失败Tool图片省略并在output追加说明 | contracted |
+| `src/session/message-v2.ts` | completed ToolPart的`output`和`attachments`持久化形态 | contracted |
+| `src/session/session.sql.ts` | `part.data`是唯一更新字段 | contracted |
+| `script/migrate-image-attachment.ts` HEAD | 旧工具要求single source/hash/backup，不能自动全库处理 | observed |
+| `test/tool/read.test.ts` | 现有CLI子进程和临时SQLite测试缝 | reachable |
+| 真实DB只读扫描 | 441张均为规范`image/png|jpeg` base64 data URL；119顶层、322 completed Read Tool | observed |
+| 真实DB Sharp默认扫描 | 48张需规范化、392张不变、1张Tool PNG DecodeError | observed |
+| 坏Part | `prt_f5af04c69001KEtWbmwrZrOjt3`，7,340,032 bytes，completed Read Tool attachment[0] | observed |
 
-| 文件 | 为什么相关 |
-| --- | --- |
-| `packages/opencode/src/session/message-v2.ts` | Part hydration与Tool attachment转ModelMessage的现有消费链 |
-| `packages/opencode/src/session/session.ts` | `Session.updatePart()`写回边界；本方案不在运行期调用 |
-| `packages/opencode/src/session/session.sql.ts` | `part.data`是ToolPart JSON的真实持久化位置 |
-| `packages/opencode/src/data-migration.ts` | 现有通用后台迁移框架；经确认不适合本次用户特定文件恢复 |
-| `packages/opencode/src/effect/app-runtime.ts` | DataMigration异步启动，无法保证在B首次消费前完成 |
-
-### 1.4 Git历史
-
-已确认：
-
-- `981e00971a`：原Photon WASM打包修复，使用嵌入资源和运行时路径。
-- `edae95237e`：将Image.Service从Photon改成Sharp，并引入三处ResizerUnavailable原图fallback。
-- `1efc5c8a2a`：把Sharp 0.34.5加入optionalDependencies。
-
-Sharp业务实现已经存在；缺失的是compiled TUI的native dependency packaging，而不是图片后端能力。
-
-## 2. 通过搜索和实验确认的调用点
-
-### 2.1 A：图片生产
-
-1. `Image.Service.normalize()`：`packages/opencode/src/image/image.ts:68-158`
-2. Read构造图片并调用normalize：`packages/opencode/src/tool/read.ts:615-641`
-3. Processor处理Tool attachments：`packages/opencode/src/session/processor.ts:561-591`
-4. Prompt处理用户图片并随后入库：`packages/opencode/src/session/prompt.ts:1914-1962`
-
-三处原图fallback：
-
-- `read.ts:635-641`
-- `processor.ts:574-578`
-- `prompt.ts:1928-1933`
-
-### 2.2 B：历史消费
-
-1. 数据库Part hydration：`packages/opencode/src/session/message-v2.ts:734-769`
-2. 模型消息转换入口：`message-v2.ts:787-1092`
-3. Tool attachment成为media output：`message-v2.ts:815-842`、`955-984`
-4. 主请求调用转换：`packages/opencode/src/session/prompt.ts:2479-2480`
-
-B没有产生、截断或修改图片；它只是忠实消费C中的坏附件。本方案不在B增加校验、迁移、删除、重试或fallback。
-
-### 2.3 C：实际存储
-
-目标记录：
-
-| 字段 | 值 |
-| --- | --- |
-| Session | `ses_0c4482da0ffeHCysC6mhb0iR2d` |
-| Part | `prt_f5af04c69001KEtWbmwrZrOjt3` |
-| Message | `msg_f5aeda089001kbKBOGJGRw7PP3` |
-| Tool | `read` |
-| 状态 | completed |
-| 附件位置 | `part.data.state.attachments[0]` |
-| MIME | `image/png` |
-| 损坏bytes | 7,340,032 |
-| 损坏SHA-256 | `f4b050a0e963768712ce7bc5b241bc03faac0ad9ad8da3e654f945cdfe4dfe98` |
-
-数据库自身状态：
-
-- `PRAGMA integrity_check = ok`
-- `PRAGMA quick_check = ok`
-- `PRAGMA foreign_key_check`无违规
-- 全库441个图片附件中只有该附件无法完整解码
-
-所以C的问题是单条业务payload损坏，不是SQLite/WAL损坏。
-
-## 3. 根因已经如何确认
-
-### 3.1 图片不是被数据库或base64截断
-
-Tool输入路径为：
+## 5. Current Behavior
 
 ```text
-E:\个人资料\本科荣誉证明\03_竞赛获奖\2024年_第十一届全国泰迪杯数据分析技能挑战赛_本科组_国家级三等奖.png
+旧CLI -> 必须指定part/source/hashes -> 只修一张 -> apply还需要backup/new hash
 ```
 
-该磁盘文件当前也是7,340,032 bytes，与数据库附件SHA-256完全相同。Sharp metadata能读到3496x2355，但完整PNG decode返回：
-
-```text
-pngload_buffer: libspng read error
-```
-
-因此ReadTool完整读取了当时的磁盘文件；数据库和base64没有二次截断。
-
-### 3.2 完整原件仍存在，可以无损恢复
-
-完整副本：
-
-```text
-E:\个人资料\本科\03_学科竞赛与科研成果\03_泰迪杯数据挖掘\【“泰迪杯”数据挖掘挑战赛组委会】第十一届“泰迪杯”数据挖掘挑战赛本科组 国家三等奖.png
-```
-
-验证结果：
-
-| 项目 | 值 |
-| --- | --- |
-| 完整bytes | 7,835,144 |
-| 完整SHA-256 | `3777c34cb8bf42900875843715c05114693602e38863a48a80f9ddac1ed08202` |
-| 与坏文件关系 | 前7,340,032 bytes完全一致 |
-| 缺失尾部 | 495,112 bytes |
-| Sharp完整decode | 成功 |
-
-使用当前未改动的`Image.Service.normalize(..., { tokenBudget: 1600 })`处理完整原件，得到：
-
-| 项目 | 值 |
-| --- | --- |
-| 输出MIME | `image/jpeg` |
-| 输出尺寸 | 2000x1347 |
-| 输出bytes | 455,913 |
-| base64字符数 | 607,884 |
-| 输出SHA-256 | `91484e537ba88954efc9c7ebb95767e368c1a800b810420ade5b52fd76633d43` |
-
-这正是Sharp链正常时ReadTool本应生成的附件。
-
-### 3.3 Sharp compiled dependency chain确实断裂
-
-Sharp 0.34.5的JS loader在`node_modules/sharp/lib/sharp.js:13-30`动态require：
-
-```text
-@img/sharp-<runtime>/sharp.node
-```
-
-Windows x64真实运行文件为：
-
-```text
-@img/sharp-win32-x64/lib/sharp-win32-x64.node
-@img/sharp-win32-x64/lib/libvips-42.dll
-@img/sharp-win32-x64/lib/libvips-cpp-8.17.3.dll
-```
-
-Linux/macOS还需要对应`@img/sharp-libvips-<runtime>/lib/**`。
-
-当前`build.ts`没有显式导入这些动态native文件，所以Bun compile只打入Sharp JS，运行时找不到addon/libvips。
-
-### 3.4 三种打包假设的独立实验
-
-1. 默认bundle：compiled exe找不到Sharp native addon，失败。
-2. `--external sharp` + 邻近`node_modules`：Bun 1.3.14 compiled resolver仍无法稳定解析external package，失败；不采用sidecar发布方案。
-3. Sharp JS继续bundle，目标`@img`原生文件使用`with { type: "file" }`嵌入exe，运行时释放到真实目录，并让Sharp loader优先require该绝对`.node`路径：成功运行Sharp 0.34.5 metadata、resize和PNG encode。
-
-第三种方案保持单文件发布，不需要修改npm/curl/Homebrew/AUR/Docker安装方式。
-
-## 4. 必须保持的既有行为
-
-- Image.Service继续使用Sharp 0.34.5。
-- 现有metadata fast path保持，不增加“所有小图完整decode”。
-- PNG/JPEG/WebP/GIF及其他现有Sharp格式行为不变。
-- 现有resize尺寸、quality、alpha、tokenBudget和配置行为不变。
-- Processor仍保留“单个失败附件省略、Tool文本继续”的既有语义。
-- Prompt图片处理失败时不保存半条用户消息。
-- MessageV2、ProviderTransform、plugin、compaction和远程URL行为不变。
-- 发布产物仍是单个`opencode`/`opencode.exe`文件。
-- C迁移保留Tool input/title/output/metadata/time和所有其他Part字段。
-
-## 5. 推荐的最小实现
-
-### 5.1 `build.ts`完整嵌入目标Sharp native资源
-
-增加两个build-private函数：
-
-1. `sharpRuntimeTarget(item)`：把现有target映射为Sharp命名，例如`win32-x64`、`darwin-arm64`、`linux-x64`、`linuxmusl-x64`。
-2. `createSharpNativeFileMap(item)`：
-   - Windows嵌入`@img/sharp-<target>/lib/**`；
-   - macOS/Linux嵌入addon包和`@img/sharp-libvips-<target>/lib/**`；
-   - key保留`@img/.../lib/...`相对布局；
-   - 目标包缺失、没有`.node`或没有必要shared library时立即使build失败。
-
-每个target生成`opencode-sharp.gen.ts`虚拟模块，通过`with { type: "file" }`把16-20 MB目标native资源嵌入当前exe。该模块必须同时加入当前target的`files`和`entrypoints`；现有PvRecorder注释已经证明只有`files`不足以让compiled dynamic import可达。只嵌入当前target，不把全部平台资源塞入每个binary。
-
-增加一个build plugin，只在bundle Sharp 0.34.5的`lib/sharp.js`时完成两处精确替换：
-
-1. 把`globalThis.__OPENCODE_SHARP_NATIVE_PATH`加入候选路径首位；
-2. 把Linux x64官方`path.startsWith('@img/sharp-linux-x64')` CPU guard改为`runtimePlatform === 'linux-x64'`，避免绝对cache路径绕过`_isUsingX64V2()`检查。
-
-两处都必须各命中一次，否则build失败。Linux x64-v1旧CPU由Sharp官方guard明确fail closed；Bun baseline只表示不要求AVX2，不等于取消Sharp上游x86-64-v2最低边界。其余Sharp源码保持原样。
-
-### 5.2 `image.ts`负责compiled资源释放和Sharp加载
-
-只调整现有`loadSharp`前置步骤：
-
-1. 非compiled/dev路径仍直接`import("sharp")`。
-2. compiled路径导入`opencode-sharp.gen.ts`。
-3. 将资源按原相对布局释放到`Global.Path.cache/native/sharp/0.34.5/<target>/`。
-4. 已有文件只有在大小和SHA-256都等于嵌入资源时才复用。
-5. 写入使用同目录唯一temp + rename；`finally`始终清理自己的temp。
-6. rename遇到`EEXIST`、`EPERM`或Windows sharing violation时，重新校验winner目标；大小和SHA-256一致则复用，否则失败。所有资源校验完成后才能加载addon。
-7. 把释放后的`.node`绝对路径写入build plugin约定的global，再执行现有`import("sharp")`。
-8. 任一步失败仍返回现有`ResizerUnavailableError`，不增加第二后端。
-
-不修改metadata、resize、encode或错误类型。
-
-### 5.3 删除三处原图fallback
-
-- Read：Sharp不可用时Tool失败，不返回原始attachment。
-- Processor：删除ResizerUnavailable到原attachment的转换；后续现有`Effect.exit`会按既有附件省略语义处理。
-- Prompt：Sharp不可用时prompt失败，Part不会入库。
-
-这样未来即使Sharp打包再次回归，也只会暴露明确错误，不会把未经处理的原图写入C。
-
-### 5.4 C通过仓库内可分发脚本执行离线、可回滚、无损事务迁移
-
-C迁移不进入Prompt、MessageV2或后台通用DataMigration代码。新增`packages/opencode/script/migrate-image-attachment.ts`作为显式调用的离线维护工具，使其他用户可以对自己的`db + part + 完整source`执行同一修复，而不把用户路径/Part硬编码进运行时。
-
-脚本默认dry-run；`--apply`必须同时提供DB、Part、完整源、旧attachment SHA、源SHA、dry-run得到的新SHA和备份目录。步骤固定为：
-
-1. 解析显式参数并定位精确Part，只接受`completed ToolPart`中的`image/*` File attachment；不扫描数据库或目录。
-2. 验证旧attachment SHA和完整原件SHA，使用仓库真实`Image.Service`和Sharp生成新附件，再次由Sharp完整decode并验证dry-run得到的新SHA。
-3. 仅在`--apply`全部内容前置条件通过后检查备份盘空间，避免错误参数和幂等重跑制造2GB级无用副本。
-4. 对live连接执行SQLite原生`VACUUM INTO`，让SQLite在一个一致读快照中把主库及已提交WAL页面合并为单一master数据库，避免手工依次复制DB/WAL/SHM形成跨时间点备份。
-5. 记录master SHA-256；只复制master生成disposable validation clone，在clone上验证integrity和foreign keys，删除clone后再次验证master manifest。唯一master不被SQLite打开。
-6. 开启SQLite transaction，以`id + 原始data完整值`作为CAS条件，只替换目标attachment的`mime/url`。
-7. `changes`必须严格等于1；同一transaction内重读完整Part JSON并执行foreign-key/integrity检查，任一失败由SQLite自动rollback。
-8. 保留一致master、损坏磁盘副本和完整原件，不覆盖或删除任何外部文件。
-
-幂等规则：当前attachment等于预期新SHA时返回`already migrated`；等于旧SHA时才允许迁移；两者都不等时立即停止。脚本不扫描、不猜测、不按文件名寻找替代源。
-
-Master一致快照只作为灾难恢复源，不承诺跨D:到C:做不存在的原子覆盖恢复。若事务失败，live行由SQLite回滚；若后续需要灾难恢复，停止TUI后由用户从已验证master执行明确恢复，不由脚本自动覆盖2.14 GB live DB。
-
-UPDATE前失败是零写入，事务内失败是rollback。全程没有删除附件、占位文本、模糊文件搜索或自动猜测替代文件，master备份始终不可变。
-
-## 6. 为什么不修改B
-
-C事务在重新启动TUI前完成。之后：
-
-```text
-PartTable正确JSON -> MessageV2 hydrate -> 现有toModelMessagesEffect -> Provider
-```
-
-B看到的从一开始就是正确数据。给B增加图片校验或读时迁移会：
-
-- 混淆消费与存储职责；
-- 重复处理每次请求；
-- 影响compaction/title/summary/测试fixture；
-- 无法凭空恢复缺失的495,112 bytes；
-- 扩大本次不需要的行为面。
-
-因此B相关生产文件修改数为0。
-
-### 6.1 单一normalize链复核
-
-实现阶段再次搜索确认：生产代码只有Read、Processor、Prompt三处`image.normalize()`调用，全部进入同一个Sharp-backed `Image.Service`；三处`ResizerUnavailableError -> 原对象`分支均已删除。`src`中不存在Photon、`processImageWithTokenBudget`或第二resize backend。Processor的`Effect.exit`只保留既有“失败附件省略”语义，不调用替代处理器也不返回原图。Photon仅在`image.test.ts`中生成测试fixture，未进入生产bundle或normalize链，因此不作为生产fallback删除。
-
-## 7. 预计修改文件
-
-| # | 文件 | 修改 |
-| ---: | --- | --- |
-| 1 | `docs/proposal/tui-image-validation-and-history-repair.md` | 本方案与独立审计记录 |
-| 2 | `packages/opencode/script/build.ts` | target Sharp资源表、虚拟模块、Sharp loader build plugin和build-time完整性断言 |
-| 3 | `packages/opencode/src/image/image.ts` | compiled native资源释放、校验和现有Sharp加载 |
-| 4 | `packages/opencode/src/tool/read.ts` | 删除ResizerUnavailable原图fallback |
-| 5 | `packages/opencode/src/session/processor.ts` | 删除ResizerUnavailable原附件fallback |
-| 6 | `packages/opencode/src/session/prompt.ts` | 删除ResizerUnavailable原Part fallback |
-| 7 | `packages/opencode/test/tool/read.test.ts` | 把原图fallback测试改成fail-closed行为测试 |
-| 8 | `packages/opencode/script/migrate-image-attachment.ts` | 可分发的dry-run/apply、一致快照、Sharp重建、CAS和验证工具 |
-| 9 | `packages/opencode/test/session/prompt.test.ts` | 验证Prompt在Sharp不可用时不持久化用户图片请求 |
-| 10 | `packages/opencode/test/session/processor-effect.test.ts` | 验证Processor保留工具文本并省略无法normalize的图片 |
-
-不修改：
-
-- `package.json`、`packages/opencode/package.json`、`bun.lock`，因为Sharp 0.34.5及平台包已经存在；
-- `.github/workflows/build-opencode.yml`、`install`、`postinstall.mjs`、Dockerfile，因为native资源嵌入单exe；
-- MessageV2、LLM、ProviderTransform、plugin、compaction；
-- Drizzle schema/migration/snapshot、DataMigration；
-- SDK/generated文件；
-- Desktop。
-
-## 8. 正常、错误、并发、退出和安全边界
-
-### 正常路径
-
-- Dev/source：继续从node_modules加载Sharp。
-- Compiled TUI：释放当前target资源，Sharp从绝对`.node`路径加载，现有normalize逻辑不变。
-- 第二次使用：hash一致则复用cache，不重复写20 MB文件。
-- C迁移：完整原件经过同一Image.Service生成有效attachment，再事务替换。
-
-### 错误路径
-
-- 构建缺目标`@img`包/shared library：build立即失败。
-- Sharp loader源码升级导致plugin不再精确命中：build立即失败。
-- native释放/校验/import失败：现有ResizerUnavailableError向上传播，三处调用方不再发送原图。
-- C前置空间、backup/clone hash、decode、CAS或row count不匹配：零写入或rollback。
-- C收到非图片Part、未知hash或变化后的完整源：明确拒绝，不创建无用备份、不修改live行。
-- 完整原件不存在/变化：不迁移，不删除旧附件。
-
-### 并发与退出
-
-- Image.Service现有`Effect.cached`继续保证单进程只执行一次Sharp加载。
-- temp + rename及rename冲突后的winner复验保证多进程不会加载半写native文件，也不会把另一个进程的成功误报为ResizerUnavailable。
-- SQLite快照保证备份跨WAL一致，完整旧JSON CAS保证并发修改目标Part时拒绝覆盖；实际迁移仍应关闭TUI以减少无意义竞争。
-- C transaction只更新一行，不跨Sharp处理持有SQLite锁。
-
-### 数据安全
-
-- native cache只接受exe内嵌资源，复用前校验SHA-256。
-- C修改前生成包含已提交WAL页面的单文件一致master并记录SHA-256。
-- C只打开disposable clone验证，不打开或修改master，不删除坏attachment对应磁盘副本，也不覆盖两个磁盘文件。
-- 不把图片payload加入日志、commit或proposal。
-
-## 9. 行为级TDD与验证计划
-
-### Red 1：禁止原图fallback
-
-先修改`read.test.ts`现有`noResizer`测试：
-
-- 当前实现返回原图，测试先红；
-- 目标断言Read失败且没有attachment；
-- 再删除Read fallback。
-
-Processor和Prompt分别由现有真实链路测试覆盖：Prompt验证失败发生在持久化前，Processor验证工具文本保留且失败图片被省略。为满足行为级回归要求，新增测试仍控制在用户授权的10文件上限内。
-
-### Red 2：compiled Sharp依赖链
-
-使用`D:\Temp\opencode`临时harness，必须先复现：
-
-```text
-Could not load the "sharp" module using the win32-x64 runtime
-```
-
-随后由`build.ts`生成临时smoke entry，导入仓库真实`Image.Service`并复用同一个Sharp plugin、`opencode-sharp.gen.ts`和compiled define；在没有邻近node_modules的目录执行：
-
-- 用必定进入resize/encode分支的fixture调用真实`normalize()`；
-- 输出MIME、尺寸、payload budget和Sharp完整decode正确；
-- 首次释放后再次运行验证cache复用；
-- 两个进程对全新临时cache并发启动，验证rename loser复验winner后也成功；
-- 临时产物不进入Git。
-
-当前独立原型已经在Bun 1.3.14 Windows x64通过Sharp加载；正式实现的green标准必须升级为上述真实Image.Service链。当前CI宿主能运行的Windows/Linux/macOS target执行动态smoke；交叉架构target只做包名、恰好一个`.node`、shared library和相对布局静态断言，不伪称已执行。
-
-### C迁移dry-run和post-check
-
-迁移前dry-run必须打印且校验上述旧hash、完整源hash、预期新hash，但不写DB。正式事务后再验证：
-
-- 目标attachment MIME/bytes/hash正确；
-- Sharp完整decode成功；
-- 目标Part其他字段深相等；
-- DB integrity/foreign keys仍通过；
-- 目标Session下一次请求不再包含旧hash并不再出现invalid-image 400。
-
-`read.test.ts`中的CLI集成fixture验证dry-run零写入、真实Sharp迁移、master快照、already-migrated幂等和非图片拒绝；实现阶段还用临时SQLite独立验证错误旧hash拒绝。完整旧JSON CAS位于同一SQLite transaction，目标行在读取后发生变化时`changes !== 1`并rollback，不增加测试专用生产钩子。
-
-### 回归命令
-
-从`packages/opencode`执行：
+这无法仅凭数据库路径处理全库，也无法自处理数据库中已经缺失尾部bytes的图片。
+
+真实441张图片不存在审计者假设的MIME/data URL异常。使用默认`Image.Service`时，正常大小图片原样返回；48张超出统一尺寸/大小边界需要Sharp规范化；唯一坏图在完整decode时返回`ImageDecodeError`。
+
+## 6. Supported Input Domain and Reachability
+
+| Input | Producer/evidence | R7 outcome |
+| --- | --- | --- |
+| 顶层`image/*` FilePart，合法base64 data URL | 真实DB 119张 | 默认Image.Service；不变或规范化；失败则整批回滚 |
+| completed ToolPart中的`image/*` attachment，合法base64 data URL | 真实DB 322张 | 默认Image.Service；不变或规范化 |
+| completed Tool图片返回`ImageDecodeError` | 真实DB唯一坏Part | 删除该attachment，并在原Tool output追加图片不可用说明 |
+| `ImageResizerUnavailableError` | workspace Sharp装载失败 | 整批失败并回滚，绝不弃用全部图片 |
+| 非图片附件、非completed Tool状态 | schema与真实DB | 原样忽略 |
+
+只有以上观察或现有契约证明的输入进入实现。顶层坏图、MIME错配、目录替代源、去重和历史Project配置均不得新增分支。
+
+## 7. Required Invariants
+
+| ID | Invariant | Evidence | Test |
+| --- | --- | --- | --- |
+| INV-01 | CLI只需位置参数DB；默认preview，`--apply`写入 | 用户选择 | CLI参数测试 |
+| INV-02 | 所有图片统一调用workspace Image.Service默认策略，不传token budget | 用户统一化要求 | 同一fixture跨两种存储位置输出一致 |
+| INV-03 | metadata fast-path返回同一MIME/URL时不写库 | 用户“正常大小不二次处理” | 小图不变 |
+| INV-04 | 超过默认尺寸/5MB边界的可解码图由Sharp规范化 | 用户要求过大图片处理 | large fixture变小且可decode |
+| INV-05 | observed completed Tool DecodeError删除坏附件并只追加一次“图片不可用”说明 | 用户明确授权 | 坏Tool图preview/apply/幂等 |
+| INV-06 | Sharp不可用或顶层图片失败不得转成成功，整批rollback | 单一主链安全边界 | 代码审计；无生产test hook |
+| INV-07 | preview使用readonly+query_only且零写入 | 用户选择 | 完整行前后相等 |
+| INV-08 | apply在首条查询前`BEGIN IMMEDIATE`，所有更新同一事务，错误rollback | SQLite并发 | 后行trigger回滚前行 |
+| INV-09 | 只改mime/url、Tool attachments/output，其他未知字段不变 | Part持久化契约 | 深比较 |
+| INV-10 | 报告不变/规范化/弃用数量及payload/Part JSON逻辑空间差值，并说明无VACUUM物理文件不缩小 | 用户空间要求 | 独立已知值 |
+| INV-11 | 第二次preview显示0个待修改，且不可用说明不重复 | 幂等 | apply后重跑 |
+
+## 8. First Divergence and Root Cause
+
+| Invariant | First divergence | Owner | Proof |
+| --- | --- | --- | --- |
+| INV-01 | 参数解析把part/source/hash设为必填 | migration CLI | 路径-only命令exit 1 |
+| INV-02-04 | 旧CLI只处理外部source，未扫描数据库现有图片 | migration CLI | HEAD源码 |
+| INV-05 | 旧CLI遇到数据库坏bytes只能要求外部source | migration CLI | 已知坏PNG不可完整decode |
+| INV-10 | 旧CLI只报告单张new bytes | migration CLI | HEAD report |
+
+Red命令：
 
 ```powershell
-bun test test/tool/read.test.ts
-bun test test/session/prompt.test.ts
-bun test test/image/image.test.ts
-bun typecheck
-bun run script/build.ts --single --skip-install --skip-embed-web-ui
-& ".\dist\opencode-windows-x64\bin\opencode.exe" --version
+# cwd packages/opencode
+bun test test/tool/read.test.ts --test-name-pattern "image attachment migration" --timeout 120000
 ```
 
-再运行临时compiled Sharp harness和数据库只读验证。相关检查通过后才允许执行C写事务。
+当前路径-only与自动坏图弃用断言在HEAD上失败。
 
-## 10. Git规模与注释
+## 9. Responsibility and Seam
 
-| 区域 | 预计增删行 |
+| Concern | Owner | Reason |
+| --- | --- | --- |
+| 默认图片规范化 | Image.Service/Sharp | 唯一现有算法，不复制resize逻辑 |
+| 全库扫描、preview和事务更新 | 离线migration CLI | 用户直接执行的持久化维护边界 |
+| 已丢失Tool图片的语义降级 | migration CLI按用户显式rollback授权 | 数据库无法恢复bytes；completed Tool output允许文本说明 |
+| Provider消费 | 现有MessageV2 | 更新后自然读取正确附件/不可用文本，不加B端repair |
+
+## 10. Single Approved Primary-Path Design
+
+```text
+db path [+ --apply]
+ -> 严格参数解析
+ -> preview: readonly + query_only
+ -> apply: BEGIN IMMEDIATE before SELECT
+ -> 按Part ID扫描顶层FilePart和completed Tool attachments
+ -> 每张声明image/*的规范data URL调用同一Image.Service默认策略
+ -> unchanged: 不生成更新
+ -> normalized: 仅替换mime/url
+ -> completed Tool DecodeError: 移除该attachment，Tool output追加一次“Image unavailable: stored image data could not be decoded.”
+ -> 其他Image错误: 命令失败；apply rollback
+ -> 计算完整新Part JSON和逻辑空间差值
+ -> preview打印计划后关闭只读连接
+ -> apply逐行完整旧JSON CAS；任一changes != 1 rollback；commit
+ -> 打印结果；不backup、不VACUUM
+```
+
+统一策略固定为空图片配置下的Image.Service默认值；不读取来源、token budget或Project图片配置。这样正常图片走现有metadata fast-path，只有越界图片编码，所有存储来源行为一致。
+
+### Explicit User-Requested Rollback
+
+- 用户原话：“实在获取不到的图片……允许弃用图片并返回不可用的消息”。
+- 目标：仅对`completed ToolPart`中Sharp返回`ImageDecodeError`的attachment执行。
+- 语义差异：旧坏base64被移除，Tool文本保留并追加固定不可用说明。
+- 可观察性：preview和apply报告`unavailable`数量、Part ID和index，不输出payload。
+- 测试：唯一坏图fixture确认附件删除、文本保留、说明只出现一次。
+- Owner：离线存储迁移CLI；生产Processor已有省略失败Tool图片的同类语义。
+- 不扩展：ResizerUnavailable、顶层FilePart失败或未观察格式不触发该rollback。
+- 重新评估/移除条件：`ImageDecodeError`语义、`ToolStateCompleted.attachments/output` schema或Processor“失败Tool图片省略并保留文本”契约任一发生变化时，必须停止沿用该弃用路径并重新审计；在这些契约不变时，脚本需保持可分发给同类历史数据用户。
+
+## 11. Secondary and Replacement Path Inventory
+
+| Path | Classification | Success | Disposition |
+| --- | --- | --- | --- |
+| 默认Image.Service unchanged/normalized | primary-contract branches | yes | preserve |
+| completed Tool DecodeError弃用 | explicit user-requested rollback | yes | implement exactly |
+| ResizerUnavailable/顶层失败 | error path | no | rollback |
+| 外部source、第二后端、目录猜测、原图fallback | forbidden fallback | yes | delete/reject |
+
+新alternate success path只有用户逐字授权的Tool坏图弃用。`unchanged/normalized`报告和preview/apply汇总属于主契约可观察性，坏图Part/index属于rollback必需可观察性，均不属于诊断路径。唯一真正诊断分支是“非授权Image错误导致非成功退出”，按新增约12个可执行决策计为`1/12 = 8.3%`，低于10%；不为比例新增任何分支。
+
+## 12. Workaround Deletion and Replacement
+
+| Existing logic | Disposition |
+| --- | --- |
+| single Options和part/source/SHA参数 | 删除，替换为位置DB + `--apply` |
+| backup/VACUUM INTO/manifest/validation clone | 删除；用户不要保留旧值，bulk事务负责原子性 |
+| expected plan/new hash双运行协议 | 删除；preview与apply都从当前DB自动计算 |
+| 按来源token budget和Project Config方案 | 删除；采用统一默认Image.Service |
+
+## 13. Forward Traceability
+
+| Invariant | Script change | Test |
+| --- | --- | --- |
+| INV-01/07 | positional db + optional apply；readonly preview | preview零写入 |
+| INV-02-04 | 全部来源调用默认Image.Service | 小图不变、大图两位置统一输出 |
+| INV-05/06 | 仅Tool DecodeError rollback；其他错误失败 | 坏Tool图弃用；代码审计Sharp unavailable |
+| INV-08/09 | BEGIN IMMEDIATE + full JSON CAS | second-row trigger全回滚；字段保留 |
+| INV-10 | 聚合bytes/JSON差值 | fixture独立literal |
+| INV-11 | 只在无固定说明时追加 | 二次preview 0 changes |
+
+## 14. Reverse Traceability
+
+| Concept | Requirement | Why existing code insufficient |
+| --- | --- | --- |
+| positional DB/preview/apply | INV-01 | 旧CLI需要7类外部信息 |
+| 全库图片遍历 | INV-02-04 | 旧CLI只查一个Part |
+| Tool DecodeError弃用 | INV-05 | 缺失bytes无法由Sharp或DB恢复 |
+| BEGIN IMMEDIATE + CAS | INV-08/09 | 多行写入必须原子且不覆盖并发值 |
+| 空间聚合 | INV-10 | 单张new bytes不能回答全库收益 |
+
+## 15. File-Level Change Plan
+
+| File | Change | Budget |
+| --- | --- | ---: |
+| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7规范和审计记录 | docs |
+| `packages/opencode/script/migrate-image-attachment.ts` | 删除single复杂协议，改为精简preview/apply全库处理 | 约220-300行最终文件 |
+| `packages/opencode/test/tool/read.test.ts` | 替换旧single测试为两个bulk CLI行为测试 | +100至160 |
+
+3文件、预计有效代码低于450行，低于8文件/800行限制。无生成文件、schema或依赖变化。
+
+## 16. TDD Behavior Slices
+
+| Order | Red | Green |
+| ---: | --- | --- |
+| 1 | 路径-only当前报缺`--db/part/source` | preview扫描临时DB且零写入 |
+| 2 | 小图和大图无法全库分类 | 小图unchanged，大图normalized，两种存储位置使用同一输出 |
+| 3 | 截断Tool图只能外部source修复 | preview标记unavailable；apply删除附件并追加说明 |
+| 4 | 多行apply无全库原子测试 | second-row trigger使所有行rollback |
+| 5 | apply后可能重复说明/编码 | 二次preview changed=0、unavailable=0 |
+| 6 | 空间报告无独立口径 | 断言已知payload/JSON前后差值 |
+
+测试缝是用户实际CLI子进程和临时SQLite。不得检查private helper或源码字符串。
+
+## 17. Chinese Comment Budget
+
+| Metric | Estimate |
 | --- | ---: |
-| `build.ts` | 150-220 |
-| `image.ts` | 100-150 |
-| 三处fallback | 15-25 |
-| `read.test.ts` | 90-110 |
-| `migrate-image-attachment.ts` | 250-290 |
-| 合计 | 610-680 |
+| Effective code `E` | 250-400 |
+| Required Chinese comments `C` | 38-60 |
 
-最终核算以Git有效代码行为计数，当前任务代码仍低于800行；任务Git文件数为 **10以内**（包含本文和两个定向回归测试文件）。
+注释仅解释统一默认策略、DecodeError rollback授权、Sharp unavailable全回滚、readonly/apply事务边界、完整JSON CAS、逻辑空间口径和测试行为意图。
 
-中文注释至少占有效修改行15%，只解释：
+## 18. Verification
 
-- 为什么Sharp动态native依赖必须显式嵌入；
-- target到`@img`包名的映射；
-- 为什么shared libraries必须保持相对布局；
-- 为什么虚拟模块必须同时进入`files`和`entrypoints`；
-- 为什么绝对路径不能绕过Sharp官方Linux x64 CPU guard；
-- 为什么cache复用前校验hash；
-- 为什么rename失败后必须复验并复用并发winner；
-- 为什么三处不得再回退原图；
-- 为什么C必须使用SQLite一致快照、不可打开的master、validation clone和完整旧JSON CAS。
+| Command | CWD | Proof |
+| --- | --- | --- |
+| `bun test test/tool/read.test.ts --test-name-pattern "image attachment migration" --timeout 120000` | `packages/opencode` | 新CLI全部行为 |
+| `bun test test/tool/read.test.ts --timeout 30000` | `packages/opencode` | 完整Read回归 |
+| `bun test test/image/image.test.ts --timeout 30000` | `packages/opencode` | 默认Image.Service边界 |
+| `bun typecheck` | `packages/opencode` | 类型检查 |
+| `bun script/migrate-image-attachment.ts "C:\Users\Lenovo\.local\share\opencode\opencode.db"` | `packages/opencode` | 真实DB只读preview；本会话唯一允许的真实DB命令 |
+| `git diff --check` | repo root | diff检查 |
 
-不通过格式性注释凑比例。
+真实`--apply`只由用户在review结果后执行。
 
-## 11. 真实风险与开放问题
+## 19. Diff Budget
 
-### 已确认风险
+| Metric | Estimate |
+| --- | ---: |
+| Modified files | 3 |
+| Added/deleted files | 0 |
+| Final migration script | 220-300 lines |
+| Net test change | +100至160 |
+| Effective code | <450 |
 
-1. 每个binary增加约16-20 MB未压缩native资源。这是完整携带Sharp/libvips依赖的必要成本，不通过第二图片后端规避。
-2. Build plugin依赖Sharp 0.34.5 loader中的两个精确锚点。构建时分别强制单次命中，把升级风险转成显式build失败。
-3. Sharp Linux x64预编译包要求x86-64-v2；不满足的旧CPU由官方guard明确fail closed，不以Bun baseline名义绕过。
-4. native资源首次使用需要释放到cache。原子写、hash验证和并发winner复验防止半文件/错误复用。
-5. 当前损坏磁盘副本本身仍不可解码。本方案不擅自覆盖用户文件；C从已确认完整副本恢复数据库附件。
+## 20. Real Risks and Open Decisions
 
-### 无需用户决策的结论
+### Confirmed Risks
 
-- 不使用Bun.Image。
-- 不删除损坏attachment。
-- 不在B做迁移。
-- 不新增schema、配置、公共API或通用迁移框架。
-- 不修改图片格式和解码策略。
+1. Apply持有`BEGIN IMMEDIATE`期间会阻止TUI写入；用户运行前应关闭TUI。
+2. 不执行VACUUM时文件尺寸不会立即下降；报告是decoded payload和Part JSON逻辑差值。
+3. 坏Tool图片被明确弃用且原bytes不保留，这是用户授权的数据语义变化。
+4. Sharp模块不可用必须整批失败，防止把环境故障误判成441张坏图。
 
-## 12. 独立审计状态
+### Open Decisions
 
-前4轮围绕Bun.Image和消费端repair的方案均已作废，不构成放行依据。
+无。用户已明确批准preview/apply、统一默认策略和坏Tool图弃用。
 
-第5轮两位独立subagent对Sharp方向本身无异议，但提出5类阻塞项：virtual module entrypoint遗漏、真实Image.Service smoke不足、Processor/Prompt红测缺失、Windows rename竞态、C备份/commit后恢复顺序，以及一位审计者补充的Linux x64 CPU guard绕过。本文已全部按原范围修正，第5轮不能作为放行结果。
+### Rejected Speculation
 
-第6轮必须重新完整审计：
+- MIME/data URL错配、参数化URL、顶层坏图：真实441张不存在。
+- 历史/当前Project图片配置：用户要求不同来源统一，不按来源分叉。
+- 图片去重、目录源搜索、自动VACUUM、消费端repair：未要求。
 
-- Sharp addon/libvips每个现有target是否完整；
-- Bun virtual file、cache释放、loader plugin和单文件发布是否闭环；
-- 三处fallback删除后是否仍存在原图通路；
-- C是否真正无损、可回滚、在B消费前完成；
-- 是否误改任何图片行为或B边界；
-- 10文件、800行上限和15%中文注释是否可信。
+## 21. Audit Contract
 
-第6轮结果发生分歧：
+审计完整检查路径-only preview、`--apply`事务、统一默认Sharp、正常图不重编码、过大图规范化、唯一Tool DecodeError弃用、Sharp unavailable回滚、幂等、空间口径、3文件/800行和15%中文注释。用户明确允许primary在认为纯文本比例等非行为意见不构成问题时继续，但行为回归、数据丢失超出授权、fallback或事务错误仍必须阻塞。
 
-- 早期独立subagent给出明确`NO BLOCKING FINDINGS`，确认Sharp target资源、loader CPU guard、entrypoint、并发释放、真实Image.Service smoke、B不变、C的CAS闭环；后续实现审计按用户授权扩大至10文件并补齐Prompt/Processor定向测试。
-- 另一位独立subagent仅对C提出2个阻塞意见：唯一物理备份不能被SQLite打开验证；D:到C:无法对2.14 GB DB/WAL/SHM承诺跨盘三文件原子恢复。Sharp/A/B及代码预算没有其他阻塞。
+## 22. Plan Audit Record
 
-方案阶段最终将C收敛为immutable master + disposable validation clone，并删除“跨盘原子物理恢复”承诺。实现阶段第一轮独立复核进一步指出逐文件复制DB/WAL/SHM仍可能跨时间点；实现遂改用SQLite原生`VACUUM INTO`一致快照，删除不必要的commit后反向CAS，补充非图片硬拒绝和CLI集成测试。该变化减少分支并强化数据一致性，不改变Sharp/A/B/C职责边界。
+| Round | Revision | Scope | Findings | Result | Reference |
+| --- | --- | --- | --- | --- | --- |
+| 1 | R2 | full | 4 blocking | BLOCK | `ses_09f6e2b0affeWvgSLYD4Yy0GIt` |
+| 2 | R3 | full | 3 blocking | BLOCK | `ses_09f28334affeMaj37F62quZ2Ew` |
+| 3 | R4 | full | 3 blocking；用户否定纯文本比例阻塞并重新定义坏图处理 | superseded by user requirement | `ses_09f17ef82ffeY9CvJn1yCl73TV` |
+| 4 | R5 | full | B-01 rollback缺少重新评估条件；B-02审计输入漏掉既有空间要求 | BLOCK | `ses_09e52eb71ffejvPpuTIDlX93je` |
+| 5 | R6 | full | B-01诊断决策面缺少数值；用户已明确该纯文本比例不应阻塞 | BLOCK，按用户指示仅补分类文本 | `ses_09e4ed3fdffeN0xMFYwLYOrBK4` |
+| 6 | R7 | full | `No blocking findings.` | APPROVE — canonical plan revision R7 only. | `ses_09e4b1cc1ffeUV8WQi7fQjzZRA` |
+
+## 23. Implementation Evidence
+
+### 23.1 Actual Change Surface
+
+| File | Actual change | Necessity |
+| --- | --- | --- |
+| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7唯一规范、验证证据和审计记录 | 为批准实施和独立放行提供可审计事实 |
+| `packages/opencode/script/migrate-image-attachment.ts` | 删除single/source/hash/backup/plan协议，收敛为229行preview/apply全库CLI | 唯一生产修改，直接修复无法自动处理全库和截断Tool图片的问题 |
+| `packages/opencode/test/tool/read.test.ts` | 用两个真实CLI+临时SQLite行为测试替换旧single协议测试 | 覆盖统一Sharp、只读、apply、弃用、空间、幂等和事务回滚 |
+
+没有新增文件、依赖、schema、migration、生成文件、配置项或公共API。无关`thirdparty/chatgpt-browser-agent`修改未触碰。
+
+### 23.2 Red-Green Evidence
+
+1. Red：先替换行为测试，再运行`bun test test/tool/read.test.ts --test-name-pattern "image attachment migration" --timeout 120000`。旧脚本结果为`1 pass / 1 fail`，路径-only preview返回exit code 1，断言要求0；缺口是旧CLI仍要求外部协议，而非fixture或Sharp故障。
+2. Green：删除旧协议并实现R7唯一流程后，同一命令为`2 pass / 0 fail / 24 assertions`。
+3. 回归：`bun test test/tool/read.test.ts --timeout 30000`为`65 pass / 0 fail / 212 assertions`。
+4. 图片层：`bun test test/image/image.test.ts --timeout 30000`为`6 pass / 0 fail / 19 assertions`。
+5. 类型：在`packages/opencode`运行`bun typecheck`，`tsgo --noEmit`通过。
+6. Diff：仓库根运行`git diff --check`通过，仅有Windows LF/CRLF提示，无whitespace error。
+
+### 23.3 Original Feedback Loop
+
+仅运行真实数据库只读命令：
+
+```text
+bun script/migrate-image-attachment.ts "C:\Users\Lenovo\.local\share\opencode\opencode.db"
+```
+
+结果：
+
+| Metric | Value |
+| --- | ---: |
+| status | preview |
+| image attachments | 441 |
+| unchanged | 392 |
+| normalized | 48 |
+| unavailable | 1 |
+| changed parts | 49 |
+| old payload bytes | 256,706,749 |
+| new payload bytes | 195,263,239 |
+| saved payload bytes | 61,443,510 |
+| old Part JSON bytes | 342,576,969 |
+| new Part JSON bytes | 260,652,145 |
+| logical Part JSON bytes saved | 81,924,824 |
+
+唯一unavailable仍是`prt_f5af04c69001KEtWbmwrZrOjt3`的Tool attachment index 0。命令前后数据库主文件长度和`LastWriteTimeUtc`均相等，确认preview未写库。本会话未运行真实`--apply`。
+
+### 23.4 Actual Semantic Paths
+
+```text
+primary:
+DB path -> readonly preview / BEGIN IMMEDIATE apply
+-> 两种已证图片形态 -> 同一个默认 Image.Service
+-> unchanged或Sharp normalized -> 完整Part JSON CAS -> COMMIT
+
+explicit user-requested rollback:
+completed Tool attachment + typed ImageDecodeError
+-> 删除该attachment -> 保留原Tool output -> 追加固定不可用说明
+```
+
+Alternate-success path为0。没有Bun.Image、第二decoder/resizer、来源预算、外部源搜索、原图fallback、catch-and-default、backup、checkpoint或VACUUM。`ImageResizerUnavailableError`、顶层失败和其他错误均失败；apply中任何失败回滚整批。
+
+### 23.5 Chinese Comment Gate
+
+按`git diff HEAD`对生产和测试新增行使用审计者的保守口径：
+
+| Metric | Value |
+| --- | ---: |
+| Effective code `E` | 253 |
+| Qualifying Chinese explanatory comments `C` | 38 |
+| Required `ceil(E * 0.15)` | 38 |
+| Ratio | 15.02% |
+
+注释分布在位置参数契约、preview/apply事务边界、统一Sharp策略、typed DecodeError授权、附件索引稳定、未知字段保留、完整JSON CAS、空间统计和对应行为断言附近；没有集中注释或表面复述。
+
+### 23.6 Remaining Unverifiable Items
+
+- 真实数据库`--apply`未由实现者运行；这是用户保留的最终操作，而非遗漏验证。
+- CLI fixture未单独注入`ImageResizerUnavailableError`、顶层坏图、非completed Tool和同一Tool多个好坏混合附件；独立审计确认这些直接分支当前无可达行为缺陷，属于非阻塞回归测试余量。
+
+## 24. Implementation Audit Record
+
+| Round | Revision | Full scope | Finding classification | Release verdict | Reference |
+| --- | --- | --- | --- | --- | --- |
+| 1 | pre-R2 | yes | blocking | BLOCK | `ses_09fddb7fcffen8zj58b5BQbEL5` |
+| 2 | R7 | yes | `No blocking findings.`；`Non-blocking findings: 无。未发现需要发布前整改的纯风格、冗余抽象或兼容性问题。` | `APPROVE — 仅适用于当前 R7 canonical plan 与本次实际实现 diff。` | `ses_09e3b9935ffery6EmVZ4cm5DL0` |
+
+审计确认：primary-path通过；alternate-success budget为0；唯一非主语义是用户逐字授权的completed Tool typed `ImageDecodeError` rollback，不属于未授权fallback。
+
+审计保留的非阻塞测试风险原文分类：
+
+1. 迁移CLI没有专门注入`ImageResizerUnavailableError`；结论依赖`Image.Service` typed error契约、已有Image/Read测试和脚本直接分支审计。
+2. 没有单独构造“顶层坏图”“非图片附件”“非completed ToolPart”或“同一ToolPart多个好坏混合附件”的CLI fixture；当前逻辑可直接追踪且未发现错误，但未来改动可能缺少同等敏感的回归信号。
+3. 审计者未重跑真实数据库preview；实现者已按用户授权只读运行并记录主文件长度和mtime不变，该结果不作为审计者独立放行依据。
+
+以上均未显示当前实现存在可达行为缺陷，不构成阻塞。R7实现已完成并verified；任何后续material behavior change必须新建revision并重新全范围审计。
