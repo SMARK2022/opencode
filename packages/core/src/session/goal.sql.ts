@@ -35,9 +35,9 @@ export const SessionGoalTable = sqliteTable(
     generation: integer().notNull().default(1),
     // 当前 terminal 状态的理由（complete/blocked 时非空）；active/paused 时为 null
     reason: text(),
-    // 待确认的 blocked 理由：模型提出 blocked 但尚未达到三轮阈值时暂存（不公开为 API 字段）
+    // 待确认的 blocked 理由：模型提出 blocked 但尚未达到两轮阈值时暂存（不公开为 API 字段）
     blocked_reason: text(),
-    // 连续 eligible turns 中相同 trimmed reason 的有效 blocked 次数；达到 3 才写 blocked
+    // 连续 eligible turns 中相同 trimmed reason 的有效 blocked 次数；两轮确认才写 blocked
     blocked_streak: integer().notNull().default(0),
     // 最近一次有效 blocked attempt 的 eligible user MessageID（防同 turn 伪造）
     blocked_last_turn_id: text(),

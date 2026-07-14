@@ -72,7 +72,7 @@ export interface ModelTransitionInput {
 // - updated: 状态已变更；- blocked-pending: blocked 尚未达到三轮，goal 仍 active
 export type ModelTransitionResult =
   | { type: "updated"; goal: Goal }
-  | { type: "blocked-pending"; goal: Goal; attempt: number; required: 3 }
+  | { type: "blocked-pending"; goal: Goal; attempt: number; required: 2 }
 
 export interface Interface {
   readonly get: (sessionID: SessionID) => Effect.Effect<Option.Option<Goal>>
@@ -152,7 +152,6 @@ const layer = Layer.effect(
     // 无 objective → 仅更新 status/budget（要求已有 goal）。
     // 更新已有 goal 时保留 usage、goal_id、created_at，仅改 objective/status/budget
     const set = Effect.fn("SessionGoal.set")(function* (sessionID: SessionID, input: SetInput) {
-      const now = Date.now()
       // objective 校验：仅在传入时触发，空字符串和超长均拒绝
       if (input.objective !== undefined) {
         const trimmed = input.objective.trim()
@@ -173,17 +172,17 @@ const layer = Layer.effect(
       if (input.status === "complete" || input.status === "blocked") {
         const trimmedReason = input.reason?.trim() ?? ""
         if (trimmedReason === "") {
-          return yield* new GoalError({ message: `goal ${input.status} requires a non-empty reason` })
+          return yield* new GoalError({ message: `Marking the goal as ${input.status} requires a non-empty reason.` })
         }
         if (trimmedReason.length > MAX_REASON_CHARS) {
-          return yield* new GoalError({
-            message: `goal reason must be at most ${MAX_REASON_CHARS} characters`,
-          })
+          return yield* new GoalError({ message: `The reason must be at most ${MAX_REASON_CHARS} characters.` })
         }
       }
 
       // generation与objective必须在同一写锁内更新，否则并发编辑会复用代际并穿透读快照。
       const result = yield* db.transaction((db) => Effect.gen(function* () {
+      // 时间戳在获锁后取值，避免等待提交的writer记录更早的更新时间。
+      const now = Date.now()
       const existing = yield* db
         .select()
         .from(SessionGoalTable)
@@ -335,15 +334,27 @@ const layer = Layer.effect(
 
       const row = yield* load()
       if (!row)
-        return { type: "error" as const, message: "no goal exists for session" }
+        return { type: "error" as const, message:
+            "No goal exists for this session. Create a goal first before attempting to change its status.", }
 
       // [local-smark] CAS 校验：snapshot 必须匹配当前 row，防止 stale write
       if (row.id !== input.snapshot.goalID)
-        return { type: "error" as const, message: "stale goal: goal ID mismatch" }
+        return { type: "error" as const, message:
+            "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call get again to read the current goal.", }
       if (row.generation !== input.snapshot.generation)
-        return { type: "error" as const, message: "stale goal: objective changed since read" }
+        return { type: "error" as const, message:
+            "The objective has been edited since you last read the goal, so your read snapshot is stale. Call get again to read the updated goal before marking its status.", }
       if (row.status !== input.snapshot.status)
-        return { type: "error" as const, message: "stale goal: status changed since read" }
+        return { type: "error" as const, message:
+            "The goal status has changed since you last read it. Call get again to read the current goal before marking its status.", }
+      // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
+      // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
+      if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
+        return {
+          type: "error" as const,
+          message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use mark active only in a later real user turn after reading it again.`,
+        }
+      }
 
       const now = Date.now()
 
@@ -351,9 +362,11 @@ const layer = Layer.effect(
         // complete 需要 reason
         const trimmedReason = input.reason?.trim() ?? ""
         if (trimmedReason === "")
-          return { type: "error" as const, message: "goal complete requires a non-empty reason" }
+          return { type: "error" as const, message:
+            "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with mark complete.", }
         if (trimmedReason.length > MAX_REASON_CHARS)
-          return { type: "error" as const, message: `goal reason must be at most ${MAX_REASON_CHARS} characters` }
+          return { type: "error" as const, message:
+            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark complete.`, }
 
         yield* txdb
           .update(SessionGoalTable)
@@ -378,14 +391,16 @@ const layer = Layer.effect(
       if (input.status === "blocked") {
         const trimmedReason = input.reason?.trim() ?? ""
         if (trimmedReason === "")
-          return { type: "error" as const, message: "goal blocked requires a non-empty reason" }
+          return { type: "error" as const, message:
+            "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with mark blocked.", }
         if (trimmedReason.length > MAX_REASON_CHARS)
-          return { type: "error" as const, message: `goal reason must be at most ${MAX_REASON_CHARS} characters` }
+          return { type: "error" as const, message:
+            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark blocked.`, }
 
         // [local-smark] 同一 turn 重复 blocked：幂等返回当前 pending，不增加 streak
-        if (row.blocked_last_turn_id === input.turnID) {
+        if (row.blocked_last_turn_id === input.turnID && row.blocked_reason === trimmedReason) {
           const goal = fromRow(row)
-          return { type: "blocked-pending" as const, goal, attempt: row.blocked_streak, required: 3 as const }
+          return { type: "blocked-pending" as const, goal, attempt: row.blocked_streak, required: 2 as const }
         }
 
         // [local-smark] 连续性校验：前一个 eligible turn 必须有相同 reason 的 attempt，
@@ -397,8 +412,10 @@ const layer = Layer.effect(
 
         const newStreak = isConsecutive ? row.blocked_streak + 1 : 1
 
-        if (newStreak < 3) {
-          // 尚未达到三轮阈值：记录 pending attempt，status 保持不变
+        // [local-smark] 两轮阈值要求两个不同 eligible turns 共同确认同一 blocker；
+        // 单个 turn 内的工具重试只能更新 pending，不能自证 terminal 状态。
+        if (newStreak < 2) {
+          // pending 必须保持 active 且 reason=null，避免首次自报 blocked 就结束 session loop。
           yield* txdb
             .update(SessionGoalTable)
             .set({
@@ -412,10 +429,10 @@ const layer = Layer.effect(
             .pipe(Effect.orDie)
           const pending = yield* load()
           const goal = fromRow(pending!)
-          return { type: "blocked-pending" as const, goal, attempt: newStreak, required: 3 as const }
+          return { type: "blocked-pending" as const, goal, attempt: newStreak, required: 2 as const }
         }
 
-        // [local-smark] 达到三轮：写入 blocked terminal
+        // 第二个连续 turn 才把 pending reason 提升为 terminal reason，并清空 audit 防止恢复后继承。
         yield* txdb
           .update(SessionGoalTable)
           .set({
@@ -439,19 +456,24 @@ const layer = Layer.effect(
       if (input.status === "active") {
         // paused 由用户控制，模型不能恢复
         if (row.status === "paused")
-          return { type: "error" as const, message: "model cannot resume a paused goal" }
+          return { type: "error" as const, message:
+            "This goal was paused by the user. Only the user can resume a paused goal — you cannot use the goal tool to unpause it.", }
         // 非终态不需要恢复
         if (row.status === "active")
-          return { type: "error" as const, message: "goal is already active" }
+          return { type: "error" as const, message:
+            "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling mark active again.", }
         // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
         if (!row.terminal_turn_id)
-          return { type: "error" as const, message: "model cannot resume a user-produced terminal goal" }
+          return { type: "error" as const, message:
+            "This goal was marked as complete or blocked by the user, not by you. You can only resume goals that you yourself marked as complete or blocked. The user must resume this goal themselves.", }
         // 必须在后续新真实用户 turn 恢复，不能在同一 turn
         if (row.terminal_turn_id === input.turnID)
-          return { type: "error" as const, message: "model cannot resume terminal in the same turn" }
+          return { type: "error" as const, message:
+            "You cannot resume a goal in the same turn that you marked it as complete or blocked. Wait for a new user message before attempting to resume.", }
         // 必须是真实用户 turn，不能是 Goal continuation
         if (!input.userInitiated)
-          return { type: "error" as const, message: "model cannot resume terminal from a continuation turn" }
+          return { type: "error" as const, message:
+            "You cannot resume a terminal goal from a continuation turn. Resuming a terminal goal requires a new user-initiated turn.", }
 
         yield* txdb
           .update(SessionGoalTable)
@@ -584,16 +606,17 @@ export function continuationPrompt(goal: Goal): string {
     "- Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.",
     "- The audit must prove completion, not merely fail to find obvious remaining work.",
     "",
-    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with status "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
+    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with mark "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
     "",
     // #364：受阻审计——同一阻塞条件连续三轮才允许标记 blocked
     "Blocked audit:",
-    '- Do not call the goal tool with status "blocked" the first time a blocker appears.',
-    '- Only use status "blocked" when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic goal continuations.',
-    '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, call the goal tool with status "blocked" again.',
-    '- Use status "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
-    '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with status "blocked".',
-    '- Never use status "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
+    '- Call the goal tool with mark "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
+    '- Before calling it again, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints.',
+    '- If the same condition still prevents progress after that exploration, call the goal tool with mark "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
+    '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh audit with the same two-turn and exact-reason requirements.',
+    '- Use mark "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
+    '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with mark "blocked".',
+    '- Never use mark "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
     "",
     "Do not call the goal tool unless the goal is complete or the strict blocked audit above is satisfied. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.",
     "</session-goal-continuation>",

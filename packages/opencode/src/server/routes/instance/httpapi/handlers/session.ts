@@ -554,11 +554,33 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       ),
     )
     // active写入后在持久Session目录内恢复执行；busy仍由原RunState去重。
+    // [local-smark] active mutation 只在已有 user Message 时恢复现有 loop；
+    // empty Session 保留 active Goal，等待第一条真实 prompt 自然启动执行。
     if (goal.status === "active") {
-      yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID })).pipe(
-        Effect.catchDefect(() => Effect.void),
-        Effect.forkIn(scope),
-      )
+      // 此处只判断 loop 是否有可消费的 user history，不重复 Goal-turn classifier；
+      // canonical/technical 身份仍由 SessionPrompt 在唯一执行路径中权威判定。
+      const user = yield* session
+        .findMessage(ctx.params.sessionID, (message) => message.info.role === "user")
+        .pipe(Effect.orDie)
+      if (Option.isSome(user)) {
+        // busy Session 继续由 RunState.ensureRunning 去重；后台 failure 必须沿用现有
+        // prompt_async observability，不能静默吞掉或伪造 mutation 成功后的执行结果。
+        // startImmediately 让 fork 在 handler scope 内开始，随后仍由 RunState 决定 start/join；
+        // HTTP 200 只承诺 mutation 已提交，不把后台执行成败混入 response contract。
+        yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("goal resume loop failed").pipe(
+                Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
+              )
+              yield* events.publish(Session.Event.Error, {
+                sessionID: ctx.params.sessionID,
+                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+              })
+            }),
+          ),
+        )).pipe(Effect.forkIn(scope, { startImmediately: true }))
+      }
     }
     return { goal }
   })

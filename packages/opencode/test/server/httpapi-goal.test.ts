@@ -1,6 +1,8 @@
 import { afterEach, describe, expect } from "bun:test"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { NodeHttpServer, NodeServices } from "@effect/platform-node"
-import { Config, Effect, Layer } from "effect"
+import { Config, Effect, Layer, Queue, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
 import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -13,8 +15,9 @@ import { Project } from "../../src/project/project"
 import { Workspace } from "../../src/control-plane/workspace"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
+import { EventPaths } from "../../src/server/routes/instance/httpapi/groups/event"
 import { Session } from "@/session/session"
-import { SessionID } from "@/session/schema"
+import { MessageID, PartID, SessionID } from "@/session/schema"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -201,7 +204,7 @@ describe("session goal HttpApi", () => {
         const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
         const rejected = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "complete" }) })
         expect(rejected.status).toBe(400)
-        expect(yield* responseJson(rejected)).toEqual({ name: "GoalError", data: { message: "goal complete requires a non-empty reason" } })
+        expect(yield* responseJson(rejected)).toEqual({ name: "GoalError", data: { message: "Marking the goal as complete requires a non-empty reason." } })
         const completed = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "complete", reason: " Verified end state " }) })
         expect(completed.status).toBe(200)
         expect(yield* responseJson(completed)).toMatchObject({ goal: { status: "complete", generation: 1, reason: "Verified end state" } })
@@ -214,6 +217,102 @@ describe("session goal HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
     // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
     // 默认 5s 在冷启动（首个用例）时可能超时
+    30000,
+  )
+
+  // 空 Session 没有可执行的 user Message；active Goal 必须等待首条真实 prompt，
+  // handler fork loop 只会制造 busy/defect 噪声。用 status endpoint 观察而非注入私有依赖。
+  it.instance(
+    "active goal on an empty Session does not start the prompt loop",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession()
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "wait for the first prompt" }),
+        })
+        expect(res.status).toBe(200)
+        // 等待一个调度窗口：若 loop 被错误启动，status 会进入 busy
+        yield* Effect.sleep(500)
+        const statusRes = yield* request(pathFor(SessionPaths.status, {}), {
+          headers: { "x-opencode-directory": test.directory },
+        })
+        expect(statusRes.status).toBe(200)
+        const statuses = (yield* responseJson(statusRes)) as Record<string, { type: string }>
+        expect(statuses[session.id]?.type).not.toBe("busy")
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30000,
+  )
+
+  // 有 user history 时 active mutation 启动后台 loop（missing provider 会在模型解析处失败）。
+  // mutation 已提交后 loop failure 走既有 Session error event，而不是 catch-and-ignore；
+  // busy 的出现证明 fork 真正启动，未被空守卫拦截。
+  it.instance(
+    "active goal with user history starts the loop and exposes background failure",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({})
+        const user = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("missing"), modelID: ModelV2.ID.make("missing") },
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "resume this Goal",
+        })
+
+        // [local-smark] 先订阅 SSE 事件流：后台 loop failure 必须以 session error event 可观测，
+        // 不得 catch-and-ignore（busy 只证明 fork 启动；error event 证明失败未被吞掉）
+        const eventRes = yield* request(pathFor(EventPaths.event, {}), {
+          headers: { "x-opencode-directory": test.directory },
+        })
+        expect(eventRes.status).toBe(200)
+        const eventQueue = yield* Queue.unbounded<Uint8Array>()
+        yield* eventRes.stream.pipe(
+          Stream.runForEach((value) => Queue.offer(eventQueue, value)),
+          Effect.forkScoped,
+        )
+        const decoder = new TextDecoder()
+        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+          method: "POST",
+          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+          body: JSON.stringify({ objective: "resume with observability" }),
+        })
+        expect(res.status).toBe(200)
+
+        let sawBusy = false
+        for (let i = 0; i < 20 && !sawBusy; i++) {
+          const statusRes = yield* request(pathFor(SessionPaths.status, {}), {
+            headers: { "x-opencode-directory": test.directory },
+          })
+          const statuses = (yield* responseJson(statusRes)) as Record<string, { type: string }>
+          sawBusy = statuses[session.id]?.type === "busy"
+          if (!sawBusy) yield* Effect.sleep(100)
+        }
+        expect(sawBusy).toBe(true)
+        // [local-smark] 从 SSE 流读取后台 loop 的 session error event（source 合同）
+        let sawErrorEvent = false
+        for (let i = 0; i < 100 && !sawErrorEvent; i++) {
+          const chunk = yield* Queue.take(eventQueue).pipe(Effect.timeoutOption("20 seconds"))
+          if (chunk._tag === "None") break
+          const text = decoder.decode(chunk.value)
+          if (text.includes("session.error") || text.includes("\"type\":\"error\"")) sawErrorEvent = true
+        }
+        expect(sawErrorEvent).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
     30000,
   )
 
