@@ -1102,6 +1102,9 @@ function classifyGit(tokens: string[]): Decision | undefined {
     return { level: "cautious", reason: "destructive git clean requires explicit approval" }
   if (sub === "push" && tokens.some((item) => item === "--force" || item === "-f"))
     return { level: "cautious", reason: "force push requires explicit approval" }
+  // bundle create 会写出归档文件；仅提升 create，避免把 verify/list-heads 等读取模式扩大为 cautious。
+  if (sub === "bundle" && tokens[i + 1] === "create")
+    return { level: "cautious", reason: "git bundle creation requires explicit approval" }
   // #220: 通用状态变更命令
   // #222：git rm 也加入 cautious——删除跟踪文件，改变仓库状态
   // #365：补充 checkout/switch/restore/apply/am/filter-branch/update-ref/
